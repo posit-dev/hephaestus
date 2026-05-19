@@ -1,0 +1,38 @@
+[package]
+name = "hephaestus"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.88"
+description = "Backend-agnostic 2D scene renderer for data visualization."
+license = "MIT"
+repository = "https://github.com/thomasp85/hephaestus"
+publish = false
+
+[features]
+default = ["vello", "png"]
+vello = ["dep:vello", "dep:wgpu", "dep:pollster", "dep:futures-intrusive"]
+png = ["dep:png"]
+# Placeholders for future backends — wired through cargo but not implemented yet.
+blend2d = []
+svg = []
+pdf = []
+
+[dependencies]
+kurbo = "0.13"
+peniko = "0.6"
+thiserror = "2"
+bytemuck = "1"
+
+vello = { version = "0.9", optional = true }
+wgpu = { version = "29", optional = true }
+pollster = { version = "0.4", optional = true }
+futures-intrusive = { version = "0.5", optional = true }
+png = { version = "0.18", optional = true }
+
+[[example]]
+name = "hello"
+required-features = ["vello", "png"]
+
+[[test]]
+name = "smoke"
+required-features = ["vello"]

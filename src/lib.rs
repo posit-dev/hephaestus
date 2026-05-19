@@ -1,0 +1,33 @@
+//! `hephaestus` — backend-agnostic 2D scene renderer for data visualization.
+//!
+//! The public API is the [`SceneBuilder`](scene::SceneBuilder) trait (what plot
+//! code calls) plus the [`Renderer`](backend::Renderer) trait (what produces
+//! pixels). Backends slot in behind cargo features; the initial backend is
+//! Vello (GPU compute via wgpu).
+//!
+//! The intersection of Vello and Blend2D capabilities defines the public
+//! surface: no conic Beziers, no stroke alignment, no exotic blend modes, no
+//! filter effects. Backend-specific extensions are not exposed.
+
+pub mod backend;
+pub mod blend;
+pub mod brush;
+pub mod color;
+pub mod geometry;
+pub mod path;
+pub mod scene;
+pub mod stroke;
+
+#[cfg(feature = "png")]
+pub mod png;
+
+// Curated re-exports of the most commonly used types.
+pub use blend::{BlendMode, Compose, Mix};
+pub use brush::{Brush, Sampling};
+pub use color::Color;
+pub use geometry::{Affine, Point, Rect, Size, Vec2};
+pub use path::{FillRule, Path};
+pub use scene::SceneBuilder;
+pub use stroke::Stroke;
+
+pub use backend::{BackendError, Renderer};
