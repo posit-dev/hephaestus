@@ -53,8 +53,13 @@ impl SceneBuilder for VelloScene {
         brush_transform: Option<Affine>,
         path: &Path,
     ) {
-        self.inner
-            .fill(convert::fill_rule(rule), transform, brush, brush_transform, path);
+        self.inner.fill(
+            convert::fill_rule(rule),
+            transform,
+            brush,
+            brush_transform,
+            path,
+        );
     }
 
     fn stroke(

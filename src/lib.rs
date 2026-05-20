@@ -14,6 +14,7 @@ pub mod blend;
 pub mod brush;
 pub mod color;
 pub mod geometry;
+pub mod layout;
 pub mod path;
 pub mod scene;
 pub mod stroke;
@@ -26,6 +27,9 @@ pub use blend::{BlendMode, Compose, Mix};
 pub use brush::{Brush, Sampling};
 pub use color::Color;
 pub use geometry::{Affine, Point, Rect, Size, Vec2};
+pub use layout::{
+    Cell, CellId, Grid, Inset, Layout, Length, Measure, Node, Placement, Track, WidthHint,
+};
 pub use path::{FillRule, Path};
 pub use scene::SceneBuilder;
 pub use stroke::Stroke;

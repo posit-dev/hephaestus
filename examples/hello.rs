@@ -28,23 +28,16 @@ fn main() {
         poly.line_to(Point::new(140.0, 360.0));
         poly.line_to(Point::new(200.0, 280.0));
         poly.line_to(Point::new(260.0, 380.0));
-        let stroke = Stroke::new(8.0).with_caps(Cap::Round).with_join(Join::Round);
+        let stroke = Stroke::new(8.0)
+            .with_caps(Cap::Round)
+            .with_join(Join::Round);
         let line_brush: Brush = rgb8(220, 220, 220).into();
         scene.stroke(&stroke, Affine::IDENTITY, &line_brush, None, &poly);
 
         // 3. Gradient-filled circle
         let circle = kurbo::Circle::new(Point::new(380.0, 150.0), 90.0).to_path(0.1);
-        let gradient = Gradient::new_linear(
-            Point::new(290.0, 60.0),
-            Point::new(470.0, 240.0),
-        )
-        .with_stops(
-            [
-                rgb(0.95, 0.55, 0.15),
-                rgb(0.15, 0.05, 0.45),
-            ]
-            .as_slice(),
-        );
+        let gradient = Gradient::new_linear(Point::new(290.0, 60.0), Point::new(470.0, 240.0))
+            .with_stops([rgb(0.95, 0.55, 0.15), rgb(0.15, 0.05, 0.45)].as_slice());
         let grad_brush: Brush = gradient.into();
         scene.fill(
             FillRule::NonZero,

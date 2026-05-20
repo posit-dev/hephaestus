@@ -19,9 +19,12 @@ cargo test                                               # all tests
 cargo test --test smoke                                  # the GPU smoke test (requires a working wgpu adapter)
 
 cargo clippy --all-features --all-targets -- -D warnings # treat warnings as errors
+cargo fmt                                                # rustfmt; always run before declaring a task done
 
 cargo run --example hello                                # renders examples/hello.png — visual sanity check
 ```
+
+**Always run `cargo fmt` after completing a coding task.** It's the last step before reporting the work done, even when the diff looks cosmetically fine — rustfmt catches subtle layout drift (over-long lines, brace style, import ordering) that otherwise piles up across changes.
 
 ## Architecture
 
@@ -72,6 +75,27 @@ Geometry (`Affine`, `Point`, `Rect`, `BezPath`) comes from kurbo. Brushes, gradi
 
 Where the intersection is narrower than peniko's full surface, we define our own enum (see "intersection rule" above). Otherwise re-export directly — reimplementing affine math or gradient interpolation is not in scope.
 
+### Layout
+
+`src/layout/` is a small grid-only, no-dependency layout solver. The public API (`Grid`, `Cell`, `Node`, `Placement`, `Inset`, `Length`, `Track`, `CellId`, `Layout`, `Measure`, `WidthHint`) covers: n×m grids, content leaves with an intrinsic-size protocol, recursive nesting with row/column placement and spans, per-edge insets in physical or relative units, the `respect` flag (R grid's `grid.layout(respect = TRUE)`) for cross-axis fr coupling, and opt-in iteration for content whose width depends on its height.
+
+- `src/layout/mod.rs` — public types, the `GridNode` data tree, `Grid::solve(size, dpi) -> Layout`. The internal `Node` enum wraps either a `GridNode` or a `Cell`; `Grid::place` accepts `impl Into<Node>` so callers pass either kind transparently. `Grid::cell()` is a shorthand for `Cell::empty()` — an empty leaf, not a degenerate grid.
+- `src/layout/solver.rs` — **width-major two-pass** solver. Pass 1 walks the tree resolving every column track (auto cols use child `min_width` recursively, with `WidthHint::Min` / `seeds[path]` for leaves). Pass 2 walks again with all widths known, resolving rows — auto rows query each child with `height_at(child_width)`. Both passes record per-grid (col_sizes, row range; x range, y range) in side tables keyed by `Vec<usize>` tree path. After the passes a separate `emit_rects` walk produces the flat `HashMap<CellId, Rect>`.
+
+Conventions and semantics:
+- **Inset reference frame** is always the parent grid cell area (the union of tracks the child spans). "1cm left + 25% right" means "1cm from the cell's left, 75% of the cell width."
+- **`respect()`** implements R grid's `allocateRespected`: per-fr-w and per-fr-h are clamped to the smaller. Width-pass uses a *provisional* per-fr-h that treats auto rows as 0 (their content-driven contribution isn't known yet); pass 2 re-clamps using the actual per-fr-h. With no Auto rows the provisional matches the actual exactly. With Auto rows that grow from content (`respect_with_content_growth` test), the grid is allowed to **exceed** respect's prediction in height — content height wins; respect becomes a best-effort coupling, not an inviolable invariant.
+- **`Track::Auto`** sizes to content. Cols and rows use the same protocol but at different points in the solve: col Autos resolve in pass 1 from `min_width` queries (cells use `WidthHint::Min { seed }`; grids recurse); row Autos resolve in pass 2 from `height_at(known_width)` queries. Pass 1 skips multi-span children entirely (the v1 deliberate simplification); **pass 2 does not** — because widths are known when row Autos resolve, a multi-span child contributes to its (single) Auto row using `height_at(sum_of_spanned_widths)`.
+- **`Measure` trait** is the leaf protocol: `width_hint(dpi) -> WidthHint`, `height_at(width, dpi) -> f64`, and an optional `width_at(height, dpi) -> f64` for iteration. `Cell::empty()` is a zero-measure leaf; `Cell::measured(impl Measure + 'static)` carries arbitrary content (text shaper, chart, image, etc.).
+- **Iteration** kicks in when any cell returns `WidthHint::NeedsHeight { seed }`. The solver loops the width + height passes up to `MAX_ITER = 5` times, querying each iterative cell's `width_at(resolved_height)` between iterations and damping with factor `0.5` (`new = 0.5·proposed + 0.5·prev`) to kill 2-cycle oscillation. Convergence (`|new - old| < EPSILON = 0.5px` per path) breaks the loop early. The cap is a **safety valve, not a correctness guarantee** — rotated wrapped text genuinely oscillates and the solver just accepts the last damped state. Iteration scope is the whole tree (re-solve from root); parent-scoped iteration is a follow-up if needed.
+- **No external dependencies.** No taffy, no other layout engine. Cross-axis `respect` and the iteration loop don't fit CSS Grid's independent-axis fr distribution; once fr resolution is hand-rolled, the rest is small enough that adding a dep costs more than it saves.
+- **Layout is unconditional** — built into every cargo profile, no feature flag.
+- **Grid-only public API.** Don't add flex/flow/float concepts — same intersection-rule that governs the scene API.
+
+`Length` is an enum: `Sum { px, inches, percent }` for the common linear combination, plus `Min(Box, Box)` / `Max(Box, Box)` for deferred pointwise resolution. Constructors `px`/`mm`/`cm`/`inch`/`pt`/`percent` produce a `Sum`. Arithmetic operators (`+`, `-`, unary `-`, `*f64`, `/f64`) reduce field-wise on `Sum + Sum`; addition **distributes** through `Min`/`Max` exactly (`min(a, b) + c = min(a+c, b+c)`); negation and negative-scalar multiplication flip `Min` ↔ `Max`. Resolution: `length_to_px(&Length, dpi, axis)` walks the tree; `length_to_px_abs(&Length, dpi)` treats the percent term as 0 (used for intrinsic-min computation). **`Length`, `Track`, and `Inset` are `Clone` but not `Copy`** because of the `Box`es in `Min`/`Max` — the solver pattern-matches by reference and uses `Option::as_ref()` on `Inset` fields.
+
+The placement reference frame is 1-indexed (row 1 / col 1 are the top-left); out-of-range placements clamp to a zero-area rect rather than panicking.
+
 ### Vello backend specifics
 
 `VelloRenderer` (in `src/backend/vello/mod.rs`):
@@ -102,4 +126,4 @@ The Linebender crates move fast and broke surface between recent versions. Notab
 
 ## Out of scope (do not add)
 
-Chart primitives, axes, scales, marks, text shaping/layout, font selection or loading, layout solving, surface presentation (no winit), interaction, animation, hit testing in the trait, filter effects. These belong in higher layers or other crates.
+Chart primitives, axes, scales, marks, text shaping/layout, font selection or loading, surface presentation (no winit), interaction, animation, hit testing in the trait, filter effects. These belong in higher layers or other crates.

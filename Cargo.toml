@@ -33,6 +33,10 @@ png = { version = "0.18", optional = true }
 name = "hello"
 required-features = ["vello", "png"]
 
+[[example]]
+name = "layout_demo"
+required-features = ["vello", "png"]
+
 [[test]]
 name = "smoke"
 required-features = ["vello"]
