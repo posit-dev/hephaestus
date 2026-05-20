@@ -40,3 +40,7 @@ required-features = ["vello", "png"]
 [[test]]
 name = "smoke"
 required-features = ["vello"]
+
+[[test]]
+name = "picking"
+required-features = ["vello"]

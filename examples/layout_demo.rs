@@ -9,7 +9,7 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::layout::{CellId, Grid, Inset, Length, Placement, Track};
 use hephaestus::stroke::Stroke;
-use hephaestus::{Affine, Brush, FillRule, Path, Renderer, SceneBuilder};
+use hephaestus::{Affine, Brush, FillRule, Path, PickId, Renderer, SceneBuilder};
 use kurbo::Shape;
 
 fn main() {
@@ -69,7 +69,14 @@ fn main() {
         for id in 1..=15u64 {
             if let Some(rect) = layout.rect(CellId(id)) {
                 let path: Path = rect.to_path(0.1);
-                scene.stroke(&outer_stroke, Affine::IDENTITY, &outer_brush, None, &path);
+                scene.stroke(
+                    &outer_stroke,
+                    Affine::IDENTITY,
+                    &outer_brush,
+                    None,
+                    &path,
+                    PickId::Skip,
+                );
             }
         }
 
@@ -84,8 +91,16 @@ fn main() {
                     &Brush::Solid(rgb8(245, 220, 160)),
                     None,
                     &path,
+                    PickId::Skip,
                 );
-                scene.stroke(&inner_stroke, Affine::IDENTITY, &inner_brush, None, &path);
+                scene.stroke(
+                    &inner_stroke,
+                    Affine::IDENTITY,
+                    &inner_brush,
+                    None,
+                    &path,
+                    PickId::Skip,
+                );
             }
         }
 
@@ -98,6 +113,7 @@ fn main() {
                 &aspect_brush,
                 None,
                 &path,
+                PickId::Skip,
             );
         }
     }

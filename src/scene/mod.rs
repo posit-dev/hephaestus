@@ -8,6 +8,7 @@ use crate::blend::BlendMode;
 use crate::brush::{Brush, Image, Sampling};
 use crate::geometry::Affine;
 use crate::path::{FillRule, Path};
+use crate::pick::PickId;
 
 pub mod recording;
 
@@ -18,6 +19,10 @@ pub mod recording;
 pub trait SceneBuilder {
     /// Fill `path` with `brush`. `transform` applies to the path; `brush_transform`
     /// optionally transforms the brush coordinates (e.g. to rotate a gradient).
+    ///
+    /// `pick_id` controls how (or whether) this primitive appears in the
+    /// hitmap when picking is enabled on the backend. Pass [`PickId::Skip`]
+    /// for purely decorative content.
     fn fill(
         &mut self,
         rule: FillRule,
@@ -25,9 +30,10 @@ pub trait SceneBuilder {
         brush: &Brush,
         brush_transform: Option<Affine>,
         path: &Path,
+        pick_id: PickId,
     );
 
-    /// Stroke `path` with `brush`.
+    /// Stroke `path` with `brush`. See [`Self::fill`] for `pick_id` semantics.
     fn stroke(
         &mut self,
         stroke: &crate::stroke::Stroke,
@@ -35,15 +41,24 @@ pub trait SceneBuilder {
         brush: &Brush,
         brush_transform: Option<Affine>,
         path: &Path,
+        pick_id: PickId,
     );
 
     /// Blit an image with the given transform. `alpha` is multiplied with the
-    /// image's own alpha (0..=1).
-    fn draw_image(&mut self, image: &Image, transform: Affine, sampling: Sampling, alpha: f32);
+    /// image's own alpha (0..=1). See [`Self::fill`] for `pick_id` semantics.
+    fn draw_image(
+        &mut self,
+        image: &Image,
+        transform: Affine,
+        sampling: Sampling,
+        alpha: f32,
+        pick_id: PickId,
+    );
 
     /// Draw a run of positioned glyphs. Shaping/layout is the caller's
     /// responsibility — this crate consumes already-placed glyphs.
-    fn draw_glyphs(&mut self, run: &GlyphRun<'_>);
+    /// See [`Self::fill`] for `pick_id` semantics.
+    fn draw_glyphs(&mut self, run: &GlyphRun<'_>, pick_id: PickId);
 
     /// Push a layer. Subsequent draws are clipped to `clip` (transformed by
     /// `transform`) and composited into the parent layer using `blend` and

@@ -16,6 +16,7 @@ pub mod color;
 pub mod geometry;
 pub mod layout;
 pub mod path;
+pub mod pick;
 pub mod scene;
 pub mod stroke;
 
@@ -31,6 +32,7 @@ pub use layout::{
     Cell, CellId, Grid, Inset, Layout, Length, Measure, Node, Placement, Track, WidthHint,
 };
 pub use path::{FillRule, Path};
+pub use pick::PickId;
 pub use scene::SceneBuilder;
 pub use stroke::Stroke;
 

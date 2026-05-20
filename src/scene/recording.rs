@@ -9,6 +9,7 @@ use crate::blend::BlendMode;
 use crate::brush::{Brush, Image, Sampling};
 use crate::geometry::Affine;
 use crate::path::{FillRule, Path};
+use crate::pick::PickId;
 use crate::stroke::Stroke;
 
 /// One captured draw operation.
@@ -20,6 +21,7 @@ pub enum Op {
         brush: Brush,
         brush_transform: Option<Affine>,
         path: Path,
+        pick_id: PickId,
     },
     Stroke {
         stroke: Stroke,
@@ -27,12 +29,14 @@ pub enum Op {
         brush: Brush,
         brush_transform: Option<Affine>,
         path: Path,
+        pick_id: PickId,
     },
     DrawImage {
         image: Image,
         transform: Affine,
         sampling: Sampling,
         alpha: f32,
+        pick_id: PickId,
     },
     DrawGlyphs(OwnedGlyphRun),
     PushLayer {
@@ -55,6 +59,7 @@ pub struct OwnedGlyphRun {
     pub brush_alpha: f32,
     pub hint: bool,
     pub glyphs: Vec<Glyph>,
+    pub pick_id: PickId,
 }
 
 /// Recording scene: appends every call to an op list.
@@ -81,6 +86,7 @@ impl SceneBuilder for RecordingScene {
         brush: &Brush,
         brush_transform: Option<Affine>,
         path: &Path,
+        pick_id: PickId,
     ) {
         self.ops.push(Op::Fill {
             rule,
@@ -88,6 +94,7 @@ impl SceneBuilder for RecordingScene {
             brush: brush.clone(),
             brush_transform,
             path: path.clone(),
+            pick_id,
         });
     }
 
@@ -98,6 +105,7 @@ impl SceneBuilder for RecordingScene {
         brush: &Brush,
         brush_transform: Option<Affine>,
         path: &Path,
+        pick_id: PickId,
     ) {
         self.ops.push(Op::Stroke {
             stroke: stroke.clone(),
@@ -105,19 +113,28 @@ impl SceneBuilder for RecordingScene {
             brush: brush.clone(),
             brush_transform,
             path: path.clone(),
+            pick_id,
         });
     }
 
-    fn draw_image(&mut self, image: &Image, transform: Affine, sampling: Sampling, alpha: f32) {
+    fn draw_image(
+        &mut self,
+        image: &Image,
+        transform: Affine,
+        sampling: Sampling,
+        alpha: f32,
+        pick_id: PickId,
+    ) {
         self.ops.push(Op::DrawImage {
             image: image.clone(),
             transform,
             sampling,
             alpha,
+            pick_id,
         });
     }
 
-    fn draw_glyphs(&mut self, run: &GlyphRun<'_>) {
+    fn draw_glyphs(&mut self, run: &GlyphRun<'_>, pick_id: PickId) {
         self.ops.push(Op::DrawGlyphs(OwnedGlyphRun {
             font: run.font.clone(),
             font_size: run.font_size,
@@ -127,6 +144,7 @@ impl SceneBuilder for RecordingScene {
             brush_alpha: run.brush_alpha,
             hint: run.hint,
             glyphs: run.glyphs.to_vec(),
+            pick_id,
         }));
     }
 

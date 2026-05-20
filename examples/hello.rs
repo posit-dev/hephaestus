@@ -6,7 +6,8 @@ use hephaestus::brush::Gradient;
 use hephaestus::color::{rgb, rgb8, rgba, Color};
 use hephaestus::stroke::{Cap, Join, Stroke};
 use hephaestus::{
-    Affine, BlendMode, Brush, Compose, FillRule, Mix, Path, Point, Rect, Renderer, SceneBuilder,
+    Affine, BlendMode, Brush, Compose, FillRule, Mix, Path, PickId, Point, Rect, Renderer,
+    SceneBuilder,
 };
 use kurbo::Shape;
 
@@ -20,7 +21,14 @@ fn main() {
         // 1. Filled rectangle (solid brush)
         let rect = Rect::new(40.0, 40.0, 240.0, 200.0).to_path(0.1);
         let solid: Brush = rgb8(60, 120, 200).into();
-        scene.fill(FillRule::NonZero, Affine::IDENTITY, &solid, None, &rect);
+        scene.fill(
+            FillRule::NonZero,
+            Affine::IDENTITY,
+            &solid,
+            None,
+            &rect,
+            PickId::Skip,
+        );
 
         // 2. Stroked open polyline with round caps/joins
         let mut poly = Path::new();
@@ -32,7 +40,14 @@ fn main() {
             .with_caps(Cap::Round)
             .with_join(Join::Round);
         let line_brush: Brush = rgb8(220, 220, 220).into();
-        scene.stroke(&stroke, Affine::IDENTITY, &line_brush, None, &poly);
+        scene.stroke(
+            &stroke,
+            Affine::IDENTITY,
+            &line_brush,
+            None,
+            &poly,
+            PickId::Skip,
+        );
 
         // 3. Gradient-filled circle
         let circle = kurbo::Circle::new(Point::new(380.0, 150.0), 90.0).to_path(0.1);
@@ -45,6 +60,7 @@ fn main() {
             &grad_brush,
             None,
             &circle,
+            PickId::Skip,
         );
 
         // 4. Multiply layer with a translucent square overlapping the rect
@@ -63,6 +79,7 @@ fn main() {
             &overlap_brush,
             None,
             &overlap,
+            PickId::Skip,
         );
         scene.pop_layer();
     }
