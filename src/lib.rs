@@ -13,6 +13,7 @@ pub mod backend;
 pub mod blend;
 pub mod brush;
 pub mod color;
+pub mod composition;
 pub mod geometry;
 pub mod layout;
 pub mod path;
