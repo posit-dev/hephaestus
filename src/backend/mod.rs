@@ -29,9 +29,6 @@ pub trait Renderer {
         background: Color,
         out: &mut [u8],
     ) -> Result<(), BackendError>;
-
-    /// Clear the scene so the next frame can be authored.
-    fn reset(&mut self);
 }
 
 #[derive(Debug, thiserror::Error)]

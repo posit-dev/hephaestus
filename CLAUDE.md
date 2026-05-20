@@ -8,6 +8,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The crate is at scaffolding stage (~1000 LOC). Chart primitives, text shaping, and layout solving are explicitly **not** part of this crate.
 
+## API levels (intent)
+
+`hephaestus` is planned to expose **two API levels** layered in the same crate:
+
+- **Low level** — what exists today: direct `SceneBuilder` calls drawing primitives one at a time, hand-built `Grid` layouts, raw access to brushes/transforms/blend modes. The plot author is responsible for batching, layout, and styling decisions.
+- **High level** — not yet designed: predefined plot layouts (e.g. a "standard plot" with title/axes/panel/legend slots wired up), vectorised primitives (draw N circles / N line segments from columnar inputs in one call), and other conveniences that target the common case directly.
+
+The high-level API will be built **on top of** the low-level surface — same crate, no new traits, no leakage downward. The low-level surface should stay independently usable: anything the high level needs that doesn't exist at the low level should either be added at the low level (if generally useful) or live entirely inside the high-level module (if plot-specific).
+
+Until the high-level API is sketched out, **keep new code at the low level** and resist letting plot/chart concepts (axes, scales, marks, legends, "panels") creep into the current surface. The dichotomy is declared now to guard the low level; the structural split (module names, re-exports, possible `low`/`high` prelude) is deferred until one or two high-level shapes exist to pull against.
+
 ## Commands
 
 ```sh
@@ -48,7 +59,6 @@ Concretely:
 - No conic Beziers (kurbo's `BezPath` already excludes them).
 - No stroke inside/outside alignment.
 - No filter effects (blur, drop shadow, etc.).
-- No hit testing on the trait — do it CPU-side in scene/plot code regardless of backend.
 
 `src/backend/vello/convert.rs` is where this restriction is enforced: it maps our restricted enums to peniko's wider set. When adding a new backend, the analogous `convert.rs` is the only place the mapping lives.
 
@@ -68,6 +78,25 @@ When tempted to add a feature only one backend supports: don't. If it's genuinel
 2. Will be consumed by future SVG and PDF emitters (`fn write_svg(scene: &RecordingScene, w: &mut impl Write)` etc.).
 
 If you add a method to `SceneBuilder`, you must add a corresponding `Op` variant. The recording backend should be exhaustive over the trait surface.
+
+### Hit testing (picking)
+
+Picking is **opt-in per renderer**, not a CPU-side post-pass: `VelloRenderer::with_picking()` enables it, `VelloRenderer::new()` allocates nothing in the pick path. When enabled, the renderer rasterises a parallel "pick scene" into a second `HeadlessTarget`, reads it back to CPU once per render, and answers point queries via `pick_at(x, y) -> Option<u32>`.
+
+Every drawing primitive on `SceneBuilder` (`fill`, `stroke`, `draw_image`, `draw_glyphs`) carries a `PickId` parameter. Authoring code picks one of three:
+- `PickId::Skip` — don't record into the hitmap. Items beneath remain hittable through this primitive. Default for decorative chrome (gridlines, axis ticks, background fills).
+- `PickId::Block` — record with id 0. Occludes whatever is beneath in the hitmap but is itself reported as "no hit". Use for opaque panels that should block picks without being interactive.
+- `PickId::Id(n)` — record with the given id. `n` is a 24-bit caller-managed value (typically a row/item index). Ids above `0xFF_FFFF` are truncated; `Id(0)` is treated identically to `Block`.
+
+Encoding lives in `src/pick.rs` (authoritative): ids pack into the RGB channels of an `Rgba8Unorm` pick texture with alpha forced to 255, which round-trips cleanly through default SrcOver compositing without per-draw blend-mode plumbing.
+
+`push_layer` / `pop_layer` do **not** take a `PickId`. The pick scene mirrors the layer's clip and transform but normalises blend to `NORMAL` and alpha to `1.0` so ids inside the layer don't fade toward the no-hit sentinel. (See "Vello backend specifics" below.)
+
+Backend semantics:
+- **Recording backend (`RecordingScene`)** stores `PickId` in each `Op` faithfully. Future SVG/PDF emitters may surface it (e.g. as `data-pick-id="…"` on grouped elements) or ignore it — both are valid. The recording backend's job is to preserve information, not interpret it.
+- **Non-rasterising backends** (or backends without a parallel-scene capability) are free to ignore `pick_id` entirely. The trait parameter is unconditional; its effect is backend-defined.
+
+**v1 limitation: alpha-insensitive picking.** Picking ignores display alpha. A semi-transparent layer or image fully occludes picks of content beneath it, even though that content remains visible in the rasterised image. This keeps encoded ids intact under SrcOver and avoids decoding ambiguity, at the cost of a known mismatch between visual appearance and hit behaviour for translucent overlays. Documented on `crate::pick` and `VelloRenderer::pick_at`.
 
 ### Core types — wrapping kurbo + peniko
 
@@ -104,6 +133,7 @@ The placement reference frame is 1-indexed (row 1 / col 1 are the top-left); out
 - Headless texture is `Rgba8Unorm` with `STORAGE_BINDING | COPY_SRC` — Vello requires storage texture, not sRGB.
 - Readback honors wgpu's 256-byte row alignment (`COPY_BYTES_PER_ROW_ALIGNMENT`): the buffer has padded rows; the copy-out strips padding into the caller's tight RGBA8 buffer.
 - After `queue.submit`, drains the GPU with `device.poll(PollType::wait_indefinitely())` then awaits `map_async` via a `futures_intrusive` oneshot. This pattern is non-obvious — preserve it.
+- Pick scene (when enabled) is rasterised with `AaConfig::Area` AA on, `base_color` transparent, and — inside `push_layer` — blend normalised to `NORMAL` and `alpha = 1.0` so ids don't fade toward the no-hit sentinel. Both display and pick texture-→-buffer copies share a single command buffer / submit / poll round-trip.
 
 ### Dependency version quirks
 
@@ -126,4 +156,4 @@ The Linebender crates move fast and broke surface between recent versions. Notab
 
 ## Out of scope (do not add)
 
-Chart primitives, axes, scales, marks, text shaping/layout, font selection or loading, surface presentation (no winit), interaction, animation, hit testing in the trait, filter effects. These belong in higher layers or other crates.
+Chart primitives, axes, scales, marks, text shaping/layout, font selection or loading, surface presentation (no winit), interaction, animation, filter effects. These belong in higher layers or other crates.

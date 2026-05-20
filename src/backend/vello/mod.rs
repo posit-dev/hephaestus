@@ -384,6 +384,9 @@ impl VelloRenderer {
     /// Returns `None` if picking is disabled, no render has been performed
     /// yet, the coordinates are out of range, or the pixel is the "no hit"
     /// sentinel (uncovered or [`PickId::Block`]).
+    ///
+    /// Note: picking does not respect display alpha; see the [`crate::pick`]
+    /// module docs for the v1 limitation.
     pub fn pick_at(&self, x: u32, y: u32) -> Option<u32> {
         let (w, h) = self.hitmap_dims?;
         if x >= w || y >= h {
@@ -593,9 +596,5 @@ impl Renderer for VelloRenderer {
         }
 
         Ok(())
-    }
-
-    fn reset(&mut self) {
-        self.scene.clear();
     }
 }

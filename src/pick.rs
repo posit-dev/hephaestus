@@ -11,6 +11,14 @@
 //! index or item index). The encoding packs the id into the RGB channels of an
 //! `Rgba8Unorm` texture with alpha forced to 255, which round-trips cleanly
 //! through default SrcOver compositing without any per-draw blend-mode plumbing.
+//!
+//! # v1 limitation: alpha-insensitive picking
+//!
+//! Picking ignores display alpha. A semi-transparent layer or image fully
+//! occludes picks of content beneath it, even though the same content remains
+//! visible in the rasterised image. This keeps the encoded id intact under
+//! SrcOver and avoids decoding ambiguity, at the cost of a known mismatch
+//! between visual appearance and hit behaviour for translucent overlays.
 
 #[cfg(feature = "vello")]
 use crate::color::Color;
