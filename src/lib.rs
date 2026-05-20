@@ -24,6 +24,9 @@ pub mod stroke;
 #[cfg(feature = "png")]
 pub mod png;
 
+#[cfg(feature = "text")]
+pub mod text;
+
 // Curated re-exports of the most commonly used types.
 pub use blend::{BlendMode, Compose, Mix};
 pub use brush::{Brush, Sampling};

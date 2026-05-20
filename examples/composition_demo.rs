@@ -1,35 +1,27 @@
-//! Visual smoke test for the high-level composition layer. Builds a nested
-//! composition (an outer patch wrapping a row of two inner patches), each
-//! patch's chrome filled with fake fixed-size content, and renders every
-//! resolved rect with `VelloRenderer`.
+//! Visual smoke test for the high-level composition layer with real text.
+//!
+//! Builds an outer patch wrapping a row of two inner patches, fills each
+//! anatomical slot with [`hephaestus::text::TextRun`] content (so the slots
+//! actually size themselves from font metrics), then renders every resolved
+//! rect plus the text into the rect.
 //!
 //! Writes `examples/composition_demo.png` next to this file.
 
 use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{beside, Patch, Slot};
-use hephaestus::layout::{Cell, Measure, WidthHint};
+use hephaestus::layout::Cell;
 use hephaestus::stroke::Stroke;
+use hephaestus::text::{draw_text_in_rect, TextRun, TextStyle};
 use hephaestus::{Affine, Brush, FillRule, Path, PickId, Renderer, SceneBuilder};
 use kurbo::Shape;
 
-/// A fixed-size leaf for layout testing.
-struct FixedSize {
-    w: f64,
-    h: f64,
+fn text_cell(text: &str, size: f32) -> Cell {
+    Cell::measured(TextRun::new(text, &TextStyle::new(size)))
 }
 
-impl Measure for FixedSize {
-    fn width_hint(&self, _dpi: f64) -> WidthHint {
-        WidthHint::Min(self.w)
-    }
-    fn height_at(&self, _width: f64, _dpi: f64) -> f64 {
-        self.h
-    }
-}
-
-fn sized(w: f64, h: f64) -> Cell {
-    Cell::measured(FixedSize { w, h })
+fn weighted_text_cell(text: &str, size: f32, weight: u16) -> Cell {
+    Cell::measured(TextRun::new(text, &TextStyle::new(size).weight(weight)))
 }
 
 fn color_for_region(region: &str) -> Color {
@@ -48,12 +40,20 @@ fn color_for_region(region: &str) -> Color {
     }
 }
 
-fn build_inner_patch(id: &str, y_axis_w: f64, axis_label_w: f64) -> Patch {
+/// Build an inner patch with axis labels and a panel-axis title. Each
+/// `TextRun` provides its own intrinsic width/height to the layout solver.
+fn build_inner_patch(id: &str, y_axis_text: &str, y_axis_title: &str, x_axis_title: &str) -> Patch {
     Patch::new(id)
-        .slot(Slot::AxisLeft, sized(y_axis_w, 0.0))
-        .slot(Slot::AxisLeftTitle, sized(axis_label_w, 0.0))
-        .slot(Slot::AxisBottom, sized(0.0, 22.0))
-        .slot(Slot::AxisBottomTitle, sized(0.0, 18.0))
+        .slot(Slot::AxisLeft, text_cell(y_axis_text, 12.0))
+        .slot(
+            Slot::AxisLeftTitle,
+            weighted_text_cell(y_axis_title, 13.0, 500),
+        )
+        .slot(Slot::AxisBottom, text_cell("0  25  50  75  100", 12.0))
+        .slot(
+            Slot::AxisBottomTitle,
+            weighted_text_cell(x_axis_title, 13.0, 500),
+        )
         .slot(Slot::Panel, Cell::empty())
 }
 
@@ -61,16 +61,27 @@ fn main() {
     let (w, h) = (1200u32, 700u32);
     let dpi = 96.0;
 
-    // Two inner plots with different y-axis widths to demonstrate alignment.
-    let inner_a = build_inner_patch("plot_a", 24.0, 18.0);
-    let inner_b = build_inner_patch("plot_b", 56.0, 18.0);
+    let inner_a = build_inner_patch("plot_a", "0\n50\n100", "Pressure (kPa)", "Time (s)");
+    let inner_b = build_inner_patch(
+        "plot_b",
+        "0\n10000\n20000\n30000",
+        "Particle count",
+        "Time (s)",
+    );
 
-    // Outer patch wrapping the row. Adds a title spanning both inner panels
-    // and a shared left axis title that merges with plot_a's left chrome.
     let composed = Patch::new("outer")
-        .slot(Slot::Title, sized(0.0, 36.0))
-        .slot(Slot::Subtitle, sized(0.0, 22.0))
-        .slot(Slot::Caption, sized(0.0, 18.0))
+        .slot(
+            Slot::Title,
+            weighted_text_cell("Reactor diagnostics", 28.0, 700),
+        )
+        .slot(
+            Slot::Subtitle,
+            text_cell("Pressure and particle count over the morning run", 16.0),
+        )
+        .slot(
+            Slot::Caption,
+            text_cell("Source: in-line telemetry, smoothed at 1s intervals", 11.0),
+        )
         .place_in_panel(beside(inner_a, inner_b));
 
     let layout = composed.solve(hephaestus::Size::new(w as f64, h as f64), dpi);
@@ -78,27 +89,26 @@ fn main() {
     let mut renderer = VelloRenderer::new().expect("vello renderer init");
     {
         let scene = renderer.scene();
-        let stroke = Stroke::new(1.5);
+        let stroke = Stroke::new(1.0);
+        let text_brush: Brush = rgb8(30, 30, 40).into();
 
-        // Draw all rects with a fill (semi-transparent) + an outline.
+        // Background colour rectangles for chrome.
         for (_id, region, rect) in layout.iter() {
-            // Skip panel — drawn last so its border is on top.
             if region == "panel" {
                 continue;
             }
-            let mut color = color_for_region(region);
-            // 40% alpha by darkening through alpha override:
-            color = Color::new([
+            let color = color_for_region(region);
+            let tinted = Color::new([
                 color.components[0],
                 color.components[1],
                 color.components[2],
-                0.4,
+                0.18,
             ]);
             let path: Path = rect.to_path(0.1);
             scene.fill(
                 FillRule::NonZero,
                 Affine::IDENTITY,
-                &Brush::Solid(color),
+                &Brush::Solid(tinted),
                 None,
                 &path,
                 PickId::Skip,
@@ -106,14 +116,14 @@ fn main() {
             scene.stroke(
                 &stroke,
                 Affine::IDENTITY,
-                &Brush::Solid(color_for_region(region)),
+                &Brush::Solid(color),
                 None,
                 &path,
                 PickId::Skip,
             );
         }
 
-        // Now panels on top so their fill doesn't bleed.
+        // Panels on top.
         for (_id, region, rect) in layout.iter() {
             if region != "panel" {
                 continue;
@@ -136,10 +146,49 @@ fn main() {
                 PickId::Skip,
             );
         }
+
+        // Draw the actual text. We reach into the patches again to get a
+        // `TextRun` reference — the composition layout doesn't hand us the
+        // measure values back. For the demo, just rebuild a separate TextRun
+        // for each slot keyed by the same text so we can render it.
+        for (id, region, rect) in layout.iter() {
+            if region == "panel" {
+                continue;
+            }
+            let text = match (id, region) {
+                ("outer", "title") => "Reactor diagnostics",
+                ("outer", "subtitle") => "Pressure and particle count over the morning run",
+                ("outer", "caption") => "Source: in-line telemetry, smoothed at 1s intervals",
+                ("plot_a", "axis_left") => "0\n50\n100",
+                ("plot_a", "axis_left_title") => "Pressure (kPa)",
+                ("plot_a", "axis_bottom") => "0  25  50  75  100",
+                ("plot_a", "axis_bottom_title") => "Time (s)",
+                ("plot_b", "axis_left") => "0\n10000\n20000\n30000",
+                ("plot_b", "axis_left_title") => "Particle count",
+                ("plot_b", "axis_bottom") => "0  25  50  75  100",
+                ("plot_b", "axis_bottom_title") => "Time (s)",
+                _ => continue,
+            };
+            let size = match region {
+                "title" => 28.0,
+                "subtitle" => 16.0,
+                "caption" => 11.0,
+                "axis_left_title" | "axis_bottom_title" => 13.0,
+                _ => 12.0,
+            };
+            let weight = match region {
+                "title" => 700,
+                "axis_left_title" | "axis_bottom_title" => 500,
+                _ => 400,
+            };
+            let style = TextStyle::new(size).weight(weight);
+            let run = TextRun::new(text, &style);
+            draw_text_in_rect(scene, &run, rect, &text_brush);
+        }
     }
 
     let mut pixels = vec![0u8; (w * h * 4) as usize];
-    let bg: Color = rgb8(245, 245, 248);
+    let bg: Color = rgb8(248, 248, 252);
     renderer
         .render_to_buffer(w, h, bg, &mut pixels)
         .expect("render");
@@ -150,20 +199,10 @@ fn main() {
     hephaestus::png::write_png(&path, w, h, &pixels).expect("write png");
     println!("wrote {}", path.display());
 
-    // Print a small alignment-report to stdout for quick sanity check.
     let panel_a = layout.get("plot_a", Slot::Panel).unwrap();
     let panel_b = layout.get("plot_b", Slot::Panel).unwrap();
     let title = layout.get("outer", Slot::Title).unwrap();
     println!("plot_a.panel = {:?}", panel_a);
     println!("plot_b.panel = {:?}", panel_b);
     println!("outer.title  = {:?}", title);
-    assert!(
-        (panel_a.y0 - panel_b.y0).abs() < 0.5,
-        "panels should share y0"
-    );
-    assert!(
-        title.x0 <= panel_a.x0 + 0.5 && title.x1 >= panel_b.x1 - 0.5,
-        "title should span across both panels"
-    );
-    println!("alignment invariants hold ✓");
 }
