@@ -18,6 +18,7 @@ pub mod geometry;
 pub mod layout;
 pub mod path;
 pub mod pick;
+pub mod primitives;
 pub mod scene;
 pub mod shape;
 pub mod stroke;
@@ -38,6 +39,11 @@ pub use layout::{
 };
 pub use path::{FillRule, Path};
 pub use pick::PickId;
+pub use primitives::{
+    annular_wedge, arc, circle, clip_polyline, ellipse, offset_polygon, path_to_rings, polygon,
+    polyline, rect, regular_polygon, regular_polygon_vertices, round_corners, round_path_corners,
+    rounded_rect, segment, wedge, CornerRounding, EndClip, PolygonOptions, PolylineOptions,
+};
 pub use scene::SceneBuilder;
 pub use shape::{Shape, ShapeRegistry, ShapeStyle};
 pub use stroke::Stroke;

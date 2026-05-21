@@ -113,6 +113,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
+name = "clipper2-rust"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "119b9306cc17492f50224736a2b2595543665c3095ba40c04c5c5181d53678bc"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "codespan-reporting"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -439,6 +448,7 @@ name = "hephaestus"
 version = "0.0.1"
 dependencies = [
  "bytemuck",
+ "clipper2-rust",
  "futures-intrusive",
  "kurbo",
  "parley",
