@@ -19,6 +19,7 @@ pub mod layout;
 pub mod path;
 pub mod pick;
 pub mod scene;
+pub mod shape;
 pub mod stroke;
 
 #[cfg(feature = "png")]
@@ -38,6 +39,7 @@ pub use layout::{
 pub use path::{FillRule, Path};
 pub use pick::PickId;
 pub use scene::SceneBuilder;
+pub use shape::{Shape, ShapeRegistry, ShapeStyle};
 pub use stroke::Stroke;
 
 pub use backend::{BackendError, Renderer};

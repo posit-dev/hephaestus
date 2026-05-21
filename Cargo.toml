@@ -45,6 +45,10 @@ required-features = ["vello", "png"]
 name = "composition_demo"
 required-features = ["vello", "png", "text"]
 
+[[example]]
+name = "shapes_demo"
+required-features = ["vello", "png"]
+
 [[test]]
 name = "smoke"
 required-features = ["vello"]
