@@ -18,6 +18,7 @@ pub mod geometry;
 pub mod layout;
 pub mod path;
 pub mod pick;
+pub mod plot;
 pub mod primitives;
 pub mod scene;
 pub mod shape;
