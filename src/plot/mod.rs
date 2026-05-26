@@ -12,7 +12,9 @@
 //! Phase 1 ships the value and scale primitives only. Subsequent phases
 //! layer scales, diff, geoms, and the orchestrator on top.
 
+pub mod diff;
 pub mod scale;
 pub mod value;
 
+pub use diff::{diff_columns, diff_positional, KeyIndex};
 pub use value::{DataColumn, Date, DateTime, Duration, Time, Value};
