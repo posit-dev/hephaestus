@@ -206,6 +206,20 @@ struct PickRange {
     end: u32,
 }
 
+// ─── Always-available chrome helpers ─────────────────────────────────────────
+
+impl Plot {
+    /// Add just the `Slot::Panel` cell to `patch`. Always available —
+    /// does not require the `text` feature. The full
+    /// [`Self::wire`] (text-feature only) calls this internally; the
+    /// orchestrator's render flow calls this when chrome is unavailable
+    /// (`text` feature off) so the panel rect still appears in the
+    /// solved layout for [`Self::draw_panel_into`] to find.
+    pub fn wire_panel(&self, patch: crate::composition::Patch) -> crate::composition::Patch {
+        patch.slot(Slot::Panel, crate::layout::Cell::empty())
+    }
+}
+
 /// Pick-id-as-ticket lookup table. Each render fills it with contiguous
 /// ranges per (plot, geom) and resolves raw `PickId::Id(n)` values into
 /// `PickEntry { plot_id, geom_id, row }` via the ticket index.
@@ -664,9 +678,7 @@ impl Plot {
         }
 
         // Panel is always present (the geom panel lives here).
-        patch = patch.slot(Slot::Panel, Cell::empty());
-
-        patch
+        self.wire_panel(patch)
     }
 
     /// Render axes + text blocks into the resolved chrome slots from

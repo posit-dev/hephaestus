@@ -283,6 +283,38 @@ impl Composition {
             .any(|p| element_contains_patch_id(&p.element, id))
     }
 
+    /// Number of composition columns.
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    /// Number of composition rows.
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Per-column tracks (panel column sizing). Length always equals
+    /// [`Self::cols`]. Default `Fr(1.0)` per column unless the user set
+    /// [`Self::widths`].
+    pub fn widths_slice(&self) -> &[Track] {
+        &self.widths
+    }
+
+    /// Per-row tracks (panel row sizing). Length always equals
+    /// [`Self::rows`].
+    pub fn heights_slice(&self) -> &[Track] {
+        &self.heights
+    }
+
+    /// Iterate `(row, col, span, &Element)` tuples for each placement.
+    /// Used by orchestrators (e.g. plot's `PlotComposition`) that walk
+    /// the composition tree to build a clone-friendly description.
+    pub fn placements(&self) -> impl Iterator<Item = (u16, u16, Span, &Element)> + '_ {
+        self.placements
+            .iter()
+            .map(|p| (p.row, p.col, p.span, &p.element))
+    }
+
     /// Append a new column with `other` placed in the single row at position
     /// `(1, cols + 1)`. Requires `self.rows == 1`. For multi-row appends use
     /// [`Self::empty`] + [`Self::place`].

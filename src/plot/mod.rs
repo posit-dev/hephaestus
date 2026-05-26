@@ -12,6 +12,7 @@
 //! Phase 1 ships the value and scale primitives only. Subsequent phases
 //! layer scales, diff, geoms, and the orchestrator on top.
 
+pub mod composition;
 pub mod diff;
 pub mod geom;
 #[allow(clippy::module_inception)]
@@ -19,6 +20,7 @@ pub mod plot;
 pub mod scale;
 pub mod value;
 
+pub use composition::{PlotComposition, ValidationIssue};
 pub use diff::{diff_columns, diff_positional, KeyIndex};
 pub use geom::{
     BuildableGeom, Channel, ChannelDecl, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys,
