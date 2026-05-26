@@ -109,7 +109,12 @@ impl CompositionTemplate {
 
     /// Rebuild a `Composition` from this template, wiring each known
     /// patch's chrome via the attached plots.
-    fn rebuild(&self, plots: &HashMap<String, Plot>, registry: &ScaleRegistry, dpi: f64) -> Composition {
+    fn rebuild(
+        &self,
+        plots: &HashMap<String, Plot>,
+        registry: &ScaleRegistry,
+        dpi: f64,
+    ) -> Composition {
         let mut c = Composition::empty(self.rows, self.cols);
         if !self.widths.is_empty() {
             c = c.widths(self.widths.clone());
@@ -132,7 +137,9 @@ impl ElementTemplate {
                 Some(id) => ElementTemplate::NamedPatch(id.to_string()),
                 None => ElementTemplate::Spacer,
             },
-            Element::Composition(c) => ElementTemplate::Composition(CompositionTemplate::capture(c)),
+            Element::Composition(c) => {
+                ElementTemplate::Composition(CompositionTemplate::capture(c))
+            }
         }
     }
 
@@ -594,8 +601,8 @@ mod tests {
 
     #[test]
     fn update_plot_flips_dirty() {
-        let mut view = PlotComposition::new(comp_two())
-            .with_plot(crate::plot::Plot::new(&comp_two(), "a"));
+        let mut view =
+            PlotComposition::new(comp_two()).with_plot(crate::plot::Plot::new(&comp_two(), "a"));
         view.layout_dirty = false;
         view.plot_dirty.clear();
         view.update_plot("a", |p| p.set_title("hello"));
@@ -606,8 +613,8 @@ mod tests {
 
     #[test]
     fn render_resolves_cached_layout() {
-        let mut view = PlotComposition::new(comp_two())
-            .with_plot(crate::plot::Plot::new(&comp_two(), "a"));
+        let mut view =
+            PlotComposition::new(comp_two()).with_plot(crate::plot::Plot::new(&comp_two(), "a"));
         let mut scene = crate::scene::recording::RecordingScene::default();
         view.render(&mut scene, Size::new(400.0, 300.0), 96.0);
         assert!(!view.layout_dirty);
@@ -627,8 +634,8 @@ mod tests {
     #[test]
     fn render_with_size_change_re_solves() {
         use crate::composition::Slot;
-        let mut view = PlotComposition::new(comp_two())
-            .with_plot(crate::plot::Plot::new(&comp_two(), "a"));
+        let mut view =
+            PlotComposition::new(comp_two()).with_plot(crate::plot::Plot::new(&comp_two(), "a"));
         let mut scene = crate::scene::recording::RecordingScene::default();
 
         view.render(&mut scene, Size::new(400.0, 300.0), 96.0);
@@ -674,8 +681,8 @@ mod tests {
     #[test]
     fn unattached_patch_renders_silently() {
         // Only "a" has a plot; "b" is bare. render() should not panic.
-        let mut view = PlotComposition::new(comp_two())
-            .with_plot(crate::plot::Plot::new(&comp_two(), "a"));
+        let mut view =
+            PlotComposition::new(comp_two()).with_plot(crate::plot::Plot::new(&comp_two(), "a"));
         let mut scene = crate::scene::recording::RecordingScene::default();
         view.render(&mut scene, Size::new(400.0, 300.0), 96.0);
         // pick_table empty: "a" has no geoms.

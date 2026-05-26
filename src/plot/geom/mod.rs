@@ -276,10 +276,7 @@ impl<'a> GeomContext<'a> {
             Err(_) => return crate::pick::PickId::Skip,
         };
         // ticket = base + row + 1; saturate-and-skip on overflow.
-        let ticket = match base
-            .checked_add(row_u32)
-            .and_then(|t| t.checked_add(1))
-        {
+        let ticket = match base.checked_add(row_u32).and_then(|t| t.checked_add(1)) {
             Some(t) if t <= MAX_TICKET => t,
             _ => return crate::pick::PickId::Skip,
         };
@@ -411,10 +408,7 @@ impl<G: BuildableGeom> GeomBuilder<G> {
     /// Construct from existing parts — used by [`PointGeom::update`] to
     /// pre-populate the builder with the current state before running
     /// the user's closure.
-    pub(crate) fn from_parts(
-        keys: Option<DataColumn>,
-        channels: HashMap<String, Channel>,
-    ) -> Self {
+    pub(crate) fn from_parts(keys: Option<DataColumn>, channels: HashMap<String, Channel>) -> Self {
         Self {
             keys,
             channels,

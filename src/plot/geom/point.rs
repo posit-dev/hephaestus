@@ -331,14 +331,7 @@ fn declared_channels(channels: &HashMap<String, Channel>) -> Vec<ChannelDecl> {
         };
         let data_bound = ch.is_data();
         let expected_output = match static_name {
-            "x"
-            | "y"
-            | "x_offset"
-            | "y_offset"
-            | "x_band"
-            | "y_band"
-            | "size"
-            | "fill_opacity"
+            "x" | "y" | "x_offset" | "y_offset" | "x_band" | "y_band" | "size" | "fill_opacity"
             | "stroke_opacity" => ExpectedOutput::Numbers,
             "fill" | "stroke" => ExpectedOutput::Colors,
             "shape" => ExpectedOutput::Strings,
@@ -526,27 +519,13 @@ impl Geom for PointGeom {
                         }
                         if let Some(sc) = stroke_color {
                             let st = Stroke::new(pt_to_px(DEFAULT_STROKE_WIDTH_PT, ctx.dpi));
-                            scene.stroke(
-                                &st,
-                                xform,
-                                &Brush::Solid(sc),
-                                None,
-                                sub,
-                                pick,
-                            );
+                            scene.stroke(&st, xform, &Brush::Solid(sc), None, sub, pick);
                         }
                     }
                     ShapeStyle::Stroke => {
                         if let Some(sc) = stroke_color {
                             let st = Stroke::new(pt_to_px(DEFAULT_STROKE_WIDTH_PT, ctx.dpi));
-                            scene.stroke(
-                                &st,
-                                xform,
-                                &Brush::Solid(sc),
-                                None,
-                                sub,
-                                pick,
-                            );
+                            scene.stroke(&st, xform, &Brush::Solid(sc), None, sub, pick);
                         }
                     }
                 }

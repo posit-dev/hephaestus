@@ -813,13 +813,38 @@ mod tests {
         //   bin 1 centre = 3.5 → 3.5 / 10 = 0.35
         //   bin 2 centre = 7.5 → 7.5 / 10 = 0.75
         let s = binned(0.0..=10.0, vec![0.0, 2.0, 5.0, 10.0]);
-        approx(s.map(&Value::Number(1.0)).as_number().unwrap(), 0.1, 1e-12, "bin 0");
-        approx(s.map(&Value::Number(3.0)).as_number().unwrap(), 0.35, 1e-12, "bin 1");
-        approx(s.map(&Value::Number(8.0)).as_number().unwrap(), 0.75, 1e-12, "bin 2");
+        approx(
+            s.map(&Value::Number(1.0)).as_number().unwrap(),
+            0.1,
+            1e-12,
+            "bin 0",
+        );
+        approx(
+            s.map(&Value::Number(3.0)).as_number().unwrap(),
+            0.35,
+            1e-12,
+            "bin 1",
+        );
+        approx(
+            s.map(&Value::Number(8.0)).as_number().unwrap(),
+            0.75,
+            1e-12,
+            "bin 2",
+        );
         // Boundary: 2.0 → bin 1 centre = 0.35.
-        approx(s.map(&Value::Number(2.0)).as_number().unwrap(), 0.35, 1e-12, "boundary");
+        approx(
+            s.map(&Value::Number(2.0)).as_number().unwrap(),
+            0.35,
+            1e-12,
+            "boundary",
+        );
         // Top edge: 10.0 → bin 2 centre = 0.75 (right-closed).
-        approx(s.map(&Value::Number(10.0)).as_number().unwrap(), 0.75, 1e-12, "top");
+        approx(
+            s.map(&Value::Number(10.0)).as_number().unwrap(),
+            0.75,
+            1e-12,
+            "top",
+        );
     }
 
     #[test]
@@ -852,7 +877,9 @@ mod tests {
         // Offset +0.5 → 0.35 + 0.5 * 0.3 = 0.5 (right edge of bin 1).
         let s = binned(0.0..=10.0, vec![0.0, 2.0, 5.0, 10.0]);
         approx(
-            s.map_with_offset(&Value::Number(3.0), 0.5).as_number().unwrap(),
+            s.map_with_offset(&Value::Number(3.0), 0.5)
+                .as_number()
+                .unwrap(),
             0.5,
             1e-12,
             "bin 1 right edge",
@@ -860,7 +887,9 @@ mod tests {
         // Bin 2 [5, 10] has centre 7.5 (frac 0.75) and width 5 (frac 0.5).
         // Offset -0.5 → 0.75 + (-0.5) * 0.5 = 0.5 (left edge of bin 2).
         approx(
-            s.map_with_offset(&Value::Number(8.0), -0.5).as_number().unwrap(),
+            s.map_with_offset(&Value::Number(8.0), -0.5)
+                .as_number()
+                .unwrap(),
             0.5,
             1e-12,
             "bin 2 left edge",

@@ -54,6 +54,14 @@ required-features = ["vello", "png"]
 name = "primitives_demo"
 required-features = ["vello", "png"]
 
+[[example]]
+name = "point"
+required-features = ["vello", "png"]
+
+[[example]]
+name = "faceted"
+required-features = ["vello", "png"]
+
 [[test]]
 name = "smoke"
 required-features = ["vello"]

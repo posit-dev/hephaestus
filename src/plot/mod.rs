@@ -4,13 +4,23 @@
 //! shaped so other geoms / scales / projections drop in additively.
 //!
 //! The canonical user-facing surface is
-//! [`PlotComposition`](composition::PlotComposition) (added in a later
-//! phase). It owns a `Composition` template, a named [`ScaleRegistry`], and
-//! a `HashMap<String, Plot>` of attached plots; `view.render(...)` is the
-//! single entry point for rendering.
+//! [`PlotComposition`](composition::PlotComposition). It owns a
+//! [`Composition`](crate::composition::Composition) template, a named
+//! [`ScaleRegistry`], and a `HashMap<String, Plot>` of attached plots;
+//! `view.render(scene, size, dpi)` is the single entry point for
+//! rendering. Mutations flow through closures
+//! (`view.update_scale("time", |s| …)`, `view.update_plot("price",
+//! |p| …)`) so the orchestrator can keep dirty-tracking accurate.
 //!
-//! Phase 1 ships the value and scale primitives only. Subsequent phases
-//! layer scales, diff, geoms, and the orchestrator on top.
+//! Two plots that bind the same scale name share a single mutation site —
+//! `view.update_scale("time", |s| s.set_domain_continuous(0.0, 50.0))`
+//! updates every plot whose `"x"` (or any other channel) is bound to
+//! `"time"`.
+//!
+//! Power users that want to drive the solve/draw cycle by hand can use
+//! the lower-level [`Plot`] primitives directly with an explicit
+//! [`ScaleRegistry`]. See `Plot::wire` / `Plot::draw_chrome_into` /
+//! `Plot::draw_panel_into`.
 
 pub mod composition;
 pub mod diff;
@@ -27,5 +37,8 @@ pub use geom::{
     PointGeom, ScaleResolver,
 };
 pub use plot::{GeomId, PickEntry, PickTable, PickTextSlot, Plot};
-pub use scale::ScaleRegistry;
+pub use scale::{
+    AxisSide, InputRange, LegendSide, OutputRange, Scale, ScaleRegistry, ScaleType, ScaleTypeKind,
+    Transform, TransformKind,
+};
 pub use value::{DataColumn, Date, DateTime, Duration, Time, Value};

@@ -29,11 +29,11 @@ use super::geom::{Geom, GeomContext, ScaleResolver};
 use super::scale::{Scale, ScaleRegistry};
 
 #[cfg(feature = "text")]
+use super::scale::AxisSide;
+#[cfg(feature = "text")]
 use crate::composition::Patch;
 #[cfg(feature = "text")]
 use crate::layout::Cell;
-#[cfg(feature = "text")]
-use super::scale::AxisSide;
 
 // ─── Identifiers ─────────────────────────────────────────────────────────────
 
@@ -156,7 +156,10 @@ enum FixedTemplate {
     /// Reserved for v1.5 chrome picking (`reserve_panel_background`).
     #[allow(dead_code)]
     PanelBackground,
-    Custom { kind: Arc<str>, data: u64 },
+    Custom {
+        kind: Arc<str>,
+        data: u64,
+    },
 }
 
 impl PickTemplate {
@@ -255,24 +258,14 @@ impl PickTable {
     /// Overflow of the 24-bit pick budget is recorded as a no-op (no
     /// range pushed) and `u32::MAX` is returned so the geom's
     /// `pick_id_for_row` will emit `Skip` for that range.
-    pub fn reserve_geom_rows(
-        &mut self,
-        plot_id: Arc<str>,
-        geom_id: GeomId,
-        n: usize,
-    ) -> u32 {
+    pub fn reserve_geom_rows(&mut self, plot_id: Arc<str>, geom_id: GeomId, n: usize) -> u32 {
         self.reserve_with_template(plot_id, n, PickTemplate::GeomRows { geom_id })
     }
 
     /// Reserve a single ticket that resolves to `PickEntry::Custom`
     /// with the given `kind` and `data`. Useful for ad-hoc pickable
     /// regions (brush handles, custom geoms, etc.).
-    pub fn reserve_custom(
-        &mut self,
-        plot_id: Arc<str>,
-        kind: Arc<str>,
-        data: u64,
-    ) -> u32 {
+    pub fn reserve_custom(&mut self, plot_id: Arc<str>, kind: Arc<str>, data: u64) -> u32 {
         self.reserve_with_template(
             plot_id,
             1,
@@ -376,9 +369,7 @@ impl Plot {
     pub fn new(composition: &Composition, patch_id: impl Into<String>) -> Self {
         let patch_id: String = patch_id.into();
         if !composition.contains_patch_id(&patch_id) {
-            panic!(
-                "Plot::new: no patch with id {patch_id:?} in the composition"
-            );
+            panic!("Plot::new: no patch with id {patch_id:?} in the composition");
         }
         Self {
             patch_id: Arc::from(patch_id),
@@ -479,9 +470,7 @@ impl Plot {
     }
 
     pub fn bindings(&self) -> impl Iterator<Item = (&str, &str)> + '_ {
-        self.bindings
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
+        self.bindings.iter().map(|(k, v)| (k.as_str(), v.as_str()))
     }
 
     pub fn binding(&self, channel: &str) -> Option<&str> {
@@ -522,7 +511,6 @@ impl Plot {
     pub fn geom_ids(&self) -> impl Iterator<Item = GeomId> + '_ {
         self.geoms.iter().map(|(id, _)| *id)
     }
-
 }
 
 // ─── ScaleResolver bridge ────────────────────────────────────────────────────
@@ -744,11 +732,7 @@ impl Plot {
         }
     }
 
-    fn resolved_scale<'r>(
-        &self,
-        channel: &str,
-        registry: &'r ScaleRegistry,
-    ) -> Option<&'r Scale> {
+    fn resolved_scale<'r>(&self, channel: &str, registry: &'r ScaleRegistry) -> Option<&'r Scale> {
         let name = self.bindings.get(channel)?;
         registry.get(name)
     }
@@ -987,7 +971,11 @@ mod tests {
         assert_eq!(base, 0);
         let entry = table.resolve(1).expect("ticket 1");
         match entry {
-            PickEntry::Custom { plot_id, kind: k, data } => {
+            PickEntry::Custom {
+                plot_id,
+                kind: k,
+                data,
+            } => {
                 assert_eq!(&*plot_id, "p");
                 assert_eq!(&*k, "brush_handle");
                 assert_eq!(data, 42);
@@ -1138,8 +1126,7 @@ mod tests {
             // Two plots sharing the same scale name → both get
             // AxisBottom chrome cells that report the same dimensions.
             let c = beside(CompPatch::new("a"), CompPatch::new("b"));
-            let registry =
-                ScaleRegistry::new().with("time", scale::continuous(0.0..=100.0));
+            let registry = ScaleRegistry::new().with("time", scale::continuous(0.0..=100.0));
             let plot_a = Plot::new(&c, "a").bind("x", "time");
             let plot_b = Plot::new(&c, "b").bind("x", "time");
             let comp = beside(
