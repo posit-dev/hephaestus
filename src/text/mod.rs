@@ -176,7 +176,13 @@ impl Measure for TextRun {
 /// been called at least once with the desired wrap width; otherwise the
 /// layout is laid out unconstrained (one line per paragraph break in the
 /// source text).
-pub fn draw_text<S: SceneBuilder>(scene: &mut S, run: &TextRun, x: f64, y: f64, brush: &Brush) {
+pub fn draw_text<S: SceneBuilder + ?Sized>(
+    scene: &mut S,
+    run: &TextRun,
+    x: f64,
+    y: f64,
+    brush: &Brush,
+) {
     let layout = run.layout.borrow();
     for line in layout.lines() {
         for item in line.items() {
@@ -213,7 +219,12 @@ pub fn draw_text<S: SceneBuilder>(scene: &mut S, run: &TextRun, x: f64, y: f64, 
 
 /// Convenience: draw `run` aligned to the top-left of `rect`. The run's
 /// lines are re-broken at `rect`'s width before drawing.
-pub fn draw_text_in_rect<S: SceneBuilder>(scene: &mut S, run: &TextRun, rect: Rect, brush: &Brush) {
+pub fn draw_text_in_rect<S: SceneBuilder + ?Sized>(
+    scene: &mut S,
+    run: &TextRun,
+    rect: Rect,
+    brush: &Brush,
+) {
     run.set_max_width((rect.x1 - rect.x0) as f32);
     draw_text(scene, run, rect.x0, rect.y0, brush);
 }

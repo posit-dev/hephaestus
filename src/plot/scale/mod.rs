@@ -23,12 +23,19 @@
 //! a size scale is `ordinal(domain).range_numbers(...)`, etc.
 
 pub mod breaks;
+pub mod chrome;
 pub mod input;
 pub mod output;
 pub mod scale_type;
 pub mod transform;
 
+#[cfg(feature = "text")]
+pub mod axis;
+#[cfg(feature = "text")]
+pub mod legend;
+
 pub use breaks::{extended_breaks, linear_breaks, DEFAULT_BREAK_COUNT};
+pub use chrome::{AxisSide, LegendSide};
 pub use input::InputRange;
 pub use output::OutputRange;
 pub use scale_type::{ScaleType, ScaleTypeKind, ScaleTypeTrait};
