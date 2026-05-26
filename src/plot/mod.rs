@@ -14,6 +14,8 @@
 
 pub mod diff;
 pub mod geom;
+#[allow(clippy::module_inception)]
+pub mod plot;
 pub mod scale;
 pub mod value;
 
@@ -22,4 +24,6 @@ pub use geom::{
     BuildableGeom, Channel, ChannelDecl, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys,
     PointGeom, ScaleResolver,
 };
+pub use plot::{GeomId, PickEntry, PickTable, PickTextSlot, Plot};
+pub use scale::ScaleRegistry;
 pub use value::{DataColumn, Date, DateTime, Duration, Time, Value};

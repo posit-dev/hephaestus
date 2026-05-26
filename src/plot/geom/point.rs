@@ -42,7 +42,6 @@ use crate::brush::Brush;
 use crate::color::Color;
 use crate::geometry::{Affine, Point};
 use crate::path::FillRule;
-use crate::pick::PickId;
 use crate::plot::diff::{diff_columns, diff_positional, KeyIndex};
 use crate::plot::value::Value;
 use crate::scene::SceneBuilder;
@@ -363,6 +362,14 @@ impl Geom for PointGeom {
         &self.declared
     }
 
+    fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn rebuild_diff_against_previous(&mut self) {
         if !self.dirty {
             return;
@@ -503,6 +510,7 @@ impl Geom for PointGeom {
             // bound — we honour that by stroking the fill subpaths too
             // when both colors resolve. For Stroke-style shapes the fill
             // is meaningless.
+            let pick = ctx.pick_id_for_row(i);
             for sub in shape.paths() {
                 match shape.style() {
                     ShapeStyle::Fill => {
@@ -513,7 +521,7 @@ impl Geom for PointGeom {
                                 &Brush::Solid(fc),
                                 None,
                                 sub,
-                                PickId::Skip,
+                                pick,
                             );
                         }
                         if let Some(sc) = stroke_color {
@@ -524,7 +532,7 @@ impl Geom for PointGeom {
                                 &Brush::Solid(sc),
                                 None,
                                 sub,
-                                PickId::Skip,
+                                pick,
                             );
                         }
                     }
@@ -537,7 +545,7 @@ impl Geom for PointGeom {
                                 &Brush::Solid(sc),
                                 None,
                                 sub,
-                                PickId::Skip,
+                                pick,
                             );
                         }
                     }

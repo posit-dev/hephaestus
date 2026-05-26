@@ -63,6 +63,11 @@ impl Patch {
         }
     }
 
+    /// The patch's id, or `None` for anonymous spacers.
+    pub fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     /// Create an anonymous patch — used internally by [`spacer`]. Not
     /// addressable in [`CompositionLayout::get`].
     fn anonymous() -> Self {
@@ -269,6 +274,15 @@ impl Composition {
         self
     }
 
+    /// `true` if any patch reachable from this composition (including
+    /// patches nested inside other patches' panels) has the given id.
+    /// Walks the element tree; anonymous patches are skipped.
+    pub fn contains_patch_id(&self, id: &str) -> bool {
+        self.placements
+            .iter()
+            .any(|p| element_contains_patch_id(&p.element, id))
+    }
+
     /// Append a new column with `other` placed in the single row at position
     /// `(1, cols + 1)`. Requires `self.rows == 1`. For multi-row appends use
     /// [`Self::empty`] + [`Self::place`].
@@ -433,6 +447,27 @@ impl RootBody {
                 flatten_composition_cells(state, placements)
             }
         }
+    }
+}
+
+/// Recursively walk an [`Element`] tree, returning `true` if any
+/// non-anonymous patch carries `id`. Used by
+/// [`Composition::contains_patch_id`].
+fn element_contains_patch_id(e: &Element, id: &str) -> bool {
+    match e {
+        Element::Patch(p) => {
+            if p.id() == Some(id) {
+                return true;
+            }
+            // Nested inner (via Patch::place_in_panel).
+            if let Some(inner) = &p.inner {
+                if element_contains_patch_id(inner, id) {
+                    return true;
+                }
+            }
+            false
+        }
+        Element::Composition(c) => c.contains_patch_id(id),
     }
 }
 

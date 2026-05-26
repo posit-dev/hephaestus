@@ -352,6 +352,81 @@ fn split_time_micros(us: i64) -> (u8, u8, u8, u32) {
     (h, mi, s, micros_of_sec)
 }
 
+// ─── ScaleRegistry ───────────────────────────────────────────────────────────
+
+use std::collections::HashMap;
+
+/// Named registry of scales — the single source of truth for scale state
+/// in a [`PlotComposition`](crate::plot) orchestrator. Plots reference
+/// scales by name through their channel bindings; the registry owns the
+/// `Scale` instances.
+///
+/// In v1 this is a thin `HashMap` wrapper; v1.5 will add per-scale
+/// generation-tracking helpers for cache invalidation. The orchestrator
+/// (Phase 7) owns the registry and exposes mutators that flip dirty
+/// flags; v1 callers building one by hand (e.g. for tests or
+/// orchestrator-free renders) can use the [`Self::insert`] /
+/// [`Self::remove`] surface directly.
+#[derive(Default, Clone, Debug)]
+pub struct ScaleRegistry {
+    scales: HashMap<String, Scale>,
+}
+
+impl ScaleRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert a scale under `name`, replacing any previous entry.
+    pub fn insert(&mut self, name: impl Into<String>, scale: Scale) {
+        self.scales.insert(name.into(), scale);
+    }
+
+    /// Chainable variant of [`Self::insert`].
+    pub fn with(mut self, name: impl Into<String>, scale: Scale) -> Self {
+        self.insert(name, scale);
+        self
+    }
+
+    /// Remove a scale by name. Returns the removed scale if present.
+    pub fn remove(&mut self, name: &str) -> Option<Scale> {
+        self.scales.remove(name)
+    }
+
+    /// Read a scale by name.
+    pub fn get(&self, name: &str) -> Option<&Scale> {
+        self.scales.get(name)
+    }
+
+    /// Mutable read by name — used by the orchestrator's `update_scale`.
+    #[allow(dead_code)] // wired through PlotComposition in Phase 7
+    pub(crate) fn get_mut(&mut self, name: &str) -> Option<&mut Scale> {
+        self.scales.get_mut(name)
+    }
+
+    /// Iterate `(name, scale)` pairs. Order is unspecified.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Scale)> + '_ {
+        self.scales.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// Iterate just the registered names. Order is unspecified.
+    pub fn names(&self) -> impl Iterator<Item = &str> + '_ {
+        self.scales.keys().map(|s| s.as_str())
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.scales.contains_key(name)
+    }
+
+    pub fn len(&self) -> usize {
+        self.scales.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.scales.is_empty()
+    }
+}
+
 // ─── Free-function constructors (re-exported as `plot::scale::*`) ────────────
 
 /// Continuous scale over a closed domain. `T` is anything that converts
