@@ -171,6 +171,40 @@ impl Scale {
         self.scale_type.map(input, self)
     }
 
+    /// Like [`Self::map`] but additionally applies a band-fraction offset
+    /// in the scale's band space. The offset is multiplied by the band
+    /// width of the bin containing `input` (see
+    /// [`ScaleTypeTrait::band_width_at`]) before being added to the
+    /// nominal mapped fraction.
+    ///
+    /// - `band_offset` units: fraction of the input's own band width.
+    ///   `0.0` is the band centre; `±0.5` reaches the band's left/right
+    ///   edge. The offset isn't clamped — values outside `[-0.5, 0.5]`
+    ///   extend past the band into neighbouring slots.
+    /// - Continuous scales return `0.0` from `band_width_at`, so the
+    ///   offset is a no-op there.
+    /// - Non-numeric `map()` outputs (e.g. Color) ignore the offset and
+    ///   pass through unchanged.
+    ///
+    /// This is the canonical entry point for geoms consuming `*_band`
+    /// channels — moving the combining into `Scale` keeps the output
+    /// resize-invariant (it's a panel fraction, not pixels) and lets
+    /// scales with non-uniform bands (e.g. [`ScaleTypeKind::Binned`]
+    /// with unequal-width bins) compute the correct width per row.
+    pub fn map_with_offset(&self, input: &Value, band_offset: f64) -> Value {
+        let base = self.scale_type.map(input, self);
+        if band_offset == 0.0 {
+            return base;
+        }
+        match base {
+            Value::Number(f) => {
+                let bw = self.scale_type.band_width_at(self, input);
+                Value::Number(f + band_offset * bw)
+            }
+            other => other,
+        }
+    }
+
     /// Tick / category positions in **input** space. `n` is a target for
     /// continuous scales; discrete / ordinal ignore it and return every
     /// domain entry.
@@ -697,42 +731,64 @@ mod tests {
 
     #[test]
     fn binned_map() {
-        // domain [0, 10] with edges [0, 2, 5, 10] → three bins:
-        //   [0, 2) → 0
-        //   [2, 5) → 1
-        //   [5, 10] → 2
+        // Domain [0, 10] with edges [0, 2, 5, 10] → three bins of
+        // widths 2, 3, 5. Each value snaps to its bin's centre,
+        // projected proportionally onto the panel:
+        //   bin 0 centre = 1   → 1 / 10 = 0.1
+        //   bin 1 centre = 3.5 → 3.5 / 10 = 0.35
+        //   bin 2 centre = 7.5 → 7.5 / 10 = 0.75
+        let s = binned(0.0..=10.0, vec![0.0, 2.0, 5.0, 10.0]);
+        approx(s.map(&Value::Number(1.0)).as_number().unwrap(), 0.1, 1e-12, "bin 0");
+        approx(s.map(&Value::Number(3.0)).as_number().unwrap(), 0.35, 1e-12, "bin 1");
+        approx(s.map(&Value::Number(8.0)).as_number().unwrap(), 0.75, 1e-12, "bin 2");
+        // Boundary: 2.0 → bin 1 centre = 0.35.
+        approx(s.map(&Value::Number(2.0)).as_number().unwrap(), 0.35, 1e-12, "boundary");
+        // Top edge: 10.0 → bin 2 centre = 0.75 (right-closed).
+        approx(s.map(&Value::Number(10.0)).as_number().unwrap(), 0.75, 1e-12, "top");
+    }
+
+    #[test]
+    fn binned_band_width_at_per_bin() {
+        // Edges [0, 2, 5, 10] → bin widths 2, 3, 5 → fractions 0.2, 0.3, 0.5.
         let s = binned(0.0..=10.0, vec![0.0, 2.0, 5.0, 10.0]);
         approx(
-            s.map(&Value::Number(1.0)).as_number().unwrap(),
-            0.5 / 3.0,
+            s.scale_type().band_width_at(&s, &Value::Number(1.0)),
+            0.2,
             1e-12,
-            "bin 0",
+            "bin 0 width",
         );
         approx(
-            s.map(&Value::Number(3.0)).as_number().unwrap(),
-            1.5 / 3.0,
+            s.scale_type().band_width_at(&s, &Value::Number(3.0)),
+            0.3,
             1e-12,
-            "bin 1",
+            "bin 1 width",
         );
         approx(
-            s.map(&Value::Number(8.0)).as_number().unwrap(),
-            2.5 / 3.0,
+            s.scale_type().band_width_at(&s, &Value::Number(8.0)),
+            0.5,
             1e-12,
-            "bin 2",
+            "bin 2 width",
         );
-        // Boundary: 2.0 → bin 1.
+    }
+
+    #[test]
+    fn binned_map_with_offset_uses_per_bin_width() {
+        // Bin 1 [2, 5] has centre 3.5 (frac 0.35) and width 3 (frac 0.3).
+        // Offset +0.5 → 0.35 + 0.5 * 0.3 = 0.5 (right edge of bin 1).
+        let s = binned(0.0..=10.0, vec![0.0, 2.0, 5.0, 10.0]);
         approx(
-            s.map(&Value::Number(2.0)).as_number().unwrap(),
-            1.5 / 3.0,
+            s.map_with_offset(&Value::Number(3.0), 0.5).as_number().unwrap(),
+            0.5,
             1e-12,
-            "boundary",
+            "bin 1 right edge",
         );
-        // Top edge: 10.0 → bin 2 (right-closed).
+        // Bin 2 [5, 10] has centre 7.5 (frac 0.75) and width 5 (frac 0.5).
+        // Offset -0.5 → 0.75 + (-0.5) * 0.5 = 0.5 (left edge of bin 2).
         approx(
-            s.map(&Value::Number(10.0)).as_number().unwrap(),
-            2.5 / 3.0,
+            s.map_with_offset(&Value::Number(8.0), -0.5).as_number().unwrap(),
+            0.5,
             1e-12,
-            "top",
+            "bin 2 left edge",
         );
     }
 
@@ -813,6 +869,10 @@ mod tests {
     fn binned_accepts_temporal_domain() {
         use crate::plot::value::Date;
         // Bin year 2024 into quarters by day offset from the start.
+        // Quarters are NOT equal-width in days (90, 91, 92, 92 ish), so
+        // proportional Binned correctly puts each bin centre at the
+        // actual midpoint of its calendar range — not at 1/8, 3/8, 5/8,
+        // 7/8 of the year.
         let start = Date::from_ymd(2024, 1, 1);
         let end = Date::from_ymd(2024, 12, 31);
         let q1 = Date::from_ymd(2024, 4, 1).to_days() as f64;
@@ -822,10 +882,17 @@ mod tests {
             start..=end,
             vec![start.to_days() as f64, q1, q2, q3, end.to_days() as f64],
         );
-        // A January date lands in bin 0.
+        // A January date lands in bin 0 [start, Apr 1). Expected output:
+        // (bin 0 centre - start) / (end - start). The centre is the
+        // midpoint between start and q1.
+        let start_f = start.to_days() as f64;
+        let end_f = end.to_days() as f64;
+        let span = end_f - start_f;
+        let expected = ((start_f + q1) * 0.5 - start_f) / span;
+
         let jan = Date::from_ymd(2024, 1, 15).to_days() as f64;
         let frac = s.map(&Value::Date(jan as i32)).as_number().unwrap();
-        approx(frac, 0.5 / 4.0, 1e-12, "jan in bin 0 of 4");
+        approx(frac, expected, 1e-12, "jan in bin 0 (proportional)");
     }
 
     #[test]

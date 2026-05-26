@@ -83,12 +83,26 @@ pub trait ScaleTypeTrait: Debug + Send + Sync {
     /// these through `map` to land them on the panel.
     fn breaks(&self, scale: &Scale, n: usize) -> Vec<Value>;
 
-    /// Band width as a fraction of the panel (in `[0, 1]`). Continuous
-    /// scales return `0.0`; discrete / ordinal / binned scales return
-    /// `1.0 / n_bands`. Used by geoms consuming `*_band` offset companion
-    /// channels (violins, dodges, in-band placement).
+    /// Band width as a fraction of the panel (in `[0, 1]`), averaged
+    /// across all bands. Continuous scales return `0.0`; discrete /
+    /// ordinal scales return `1.0 / n_bands`. Binned scales with
+    /// unequal-width bins return their *average* (`1.0 / n_bins`).
+    ///
+    /// For per-band variation use [`Self::band_width_at`].
     fn band_width(&self, _scale: &Scale) -> f64 {
         0.0
+    }
+
+    /// Width (as panel fraction) of the band containing `input`. For
+    /// scales with uniform bands this matches [`Self::band_width`]
+    /// regardless of `input`. For [`Binned`] scales with non-uniform
+    /// bin widths this returns the width of the specific bin `input`
+    /// falls into. Used by [`Scale::map_with_offset`] to apply
+    /// `*_band` channel offsets correctly across non-uniform scales.
+    ///
+    /// Default delegates to [`Self::band_width`] (uniform).
+    fn band_width_at(&self, scale: &Scale, _input: &Value) -> f64 {
+        self.band_width(scale)
     }
 }
 
@@ -140,6 +154,10 @@ impl ScaleType {
 
     pub(crate) fn band_width(&self, scale: &Scale) -> f64 {
         self.0.band_width(scale)
+    }
+
+    pub(crate) fn band_width_at(&self, scale: &Scale, input: &Value) -> f64 {
+        self.0.band_width_at(scale, input)
     }
 }
 
@@ -417,15 +435,18 @@ impl ScaleTypeTrait for Binned {
         if !v.is_finite() || v < d_min || v > d_max {
             return Value::Null;
         }
-        // Pick the bin whose edges bracket `v`. There are `edges.len() - 1`
-        // bins; bin i is `[edges[i], edges[i + 1])` with the last bin
-        // closed on the right. Output is the bin centre as a fraction of
-        // the panel (matching Discrete's band-centre convention).
-        let n_bins = edges.len() - 1;
-        let bin = (0..n_bins)
-            .find(|&i| v >= edges[i] && (v < edges[i + 1] || i == n_bins - 1))
-            .unwrap_or(n_bins - 1);
-        Value::Number((bin as f64 + 0.5) / n_bins as f64)
+        // Pick the bin whose edges bracket `v`. Output is the bin's
+        // domain-space *centre* projected proportionally onto `[0, 1]`.
+        // For uneven-width bins this naturally produces wider panel
+        // slots for wider bins — matching histogram conventions and
+        // letting `band_width_at` describe each bin individually.
+        let span = d_max - d_min;
+        if span <= 0.0 {
+            return Value::Number(0.0);
+        }
+        let bin = find_bin(v, edges);
+        let centre = (edges[bin] + edges[bin + 1]) * 0.5;
+        Value::Number((centre - d_min) / span)
     }
 
     fn breaks(&self, scale: &Scale, _n: usize) -> Vec<Value> {
@@ -441,6 +462,39 @@ impl ScaleTypeTrait for Binned {
             _ => 0.0,
         }
     }
+
+    fn band_width_at(&self, scale: &Scale, input: &Value) -> f64 {
+        // Per-bin width — the proportional panel slot occupied by the
+        // bin containing `input`.
+        let v = match input.as_number() {
+            Some(n) => n,
+            None => return 0.0,
+        };
+        let (d_min, d_max) = match scale.input_range() {
+            Some(InputRange::Continuous { min, max }) => (*min, *max),
+            _ => return 0.0,
+        };
+        let edges = match scale.output_range() {
+            Some(OutputRange::Numbers(vs)) if vs.len() >= 2 => vs,
+            _ => return 0.0,
+        };
+        let span = d_max - d_min;
+        if span <= 0.0 {
+            return 0.0;
+        }
+        let bin = find_bin(v, edges);
+        (edges[bin + 1] - edges[bin]) / span
+    }
+}
+
+/// Find the bin index whose `[edges[i], edges[i+1])` bracket contains
+/// `v`. The last bin is closed on both sides so values at the upper
+/// boundary still land in the final bin rather than falling off.
+fn find_bin(v: f64, edges: &[f64]) -> usize {
+    let n_bins = edges.len() - 1;
+    (0..n_bins)
+        .find(|&i| v >= edges[i] && (v < edges[i + 1] || i == n_bins - 1))
+        .unwrap_or(n_bins - 1)
 }
 
 // ─── Identity ────────────────────────────────────────────────────────────────
