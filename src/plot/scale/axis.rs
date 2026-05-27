@@ -230,7 +230,7 @@ impl Scale {
                     // gap_px below the tick.
                     let label_x = x - label_w / 2.0;
                     let label_y = slot_rect.y0 + tick_px + gap_px;
-                    draw_text(scene, &run, label_x, label_y, &brush);
+                    draw_text(scene, &run, label_x, label_y, &brush, PickId::Skip);
                 }
                 AxisSide::Top => {
                     let x = panel_rect.x0 + frac * panel_w;
@@ -241,7 +241,7 @@ impl Scale {
                     // gap_px above the tick top (which is at y1 - tick).
                     let label_x = x - label_w / 2.0;
                     let label_y = slot_rect.y1 - tick_px - gap_px - label_h;
-                    draw_text(scene, &run, label_x, label_y, &brush);
+                    draw_text(scene, &run, label_x, label_y, &brush, PickId::Skip);
                 }
                 AxisSide::Left => {
                     // Y axes flip: frac=0 is at the bottom of the panel.
@@ -253,7 +253,7 @@ impl Scale {
                     // vertically centred on the tick.
                     let label_x = slot_rect.x1 - tick_px - gap_px - label_w;
                     let label_y = y - label_h / 2.0;
-                    draw_text(scene, &run, label_x, label_y, &brush);
+                    draw_text(scene, &run, label_x, label_y, &brush, PickId::Skip);
                 }
                 AxisSide::Right => {
                     let y = panel_rect.y1 - frac * panel_h;
@@ -262,7 +262,7 @@ impl Scale {
                     stroke_line(scene, &stroke, &brush, p0, p1);
                     let label_x = slot_rect.x0 + tick_px + gap_px;
                     let label_y = y - label_h / 2.0;
-                    draw_text(scene, &run, label_x, label_y, &brush);
+                    draw_text(scene, &run, label_x, label_y, &brush, PickId::Skip);
                 }
             }
         }

@@ -583,10 +583,12 @@ impl Plot {
             registry,
         };
         // Reserve a contiguous ticket range per geom, then draw each
-        // with its base in the context. `Geom::len()` returns the
-        // pickable row count (0 → emit Skip).
+        // with its base in the context. `Geom::mark_count()` returns the
+        // pickable mark count (= rows for PointGeom; = unique-key /
+        // group count for multi-row-per-mark geoms like LineGeom).
+        // 0 → emit Skip.
         for (gid, geom) in self.geoms.iter() {
-            let n = geom.len();
+            let n = geom.mark_count();
             let base = pick_table.reserve_geom_rows(self.patch_id.clone(), *gid, n);
             let mut ctx = GeomContext::new(panel, dpi, &self.shapes, &resolver);
             ctx.ticket_base = if n > 0 && base != u32::MAX {
@@ -727,7 +729,7 @@ impl Plot {
         for (slot, text, style_fn) in entries {
             if let (Some(text), Some(rect)) = (text, layout.get(&self.patch_id, slot)) {
                 let run = TextRun::new(text, &style_fn());
-                draw_text_in_rect(scene, &run, rect, &ink);
+                draw_text_in_rect(scene, &run, rect, &ink, crate::pick::PickId::Skip);
             }
         }
     }

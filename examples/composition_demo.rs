@@ -183,7 +183,7 @@ fn main() {
             };
             let style = TextStyle::new(size).weight(weight);
             let run = TextRun::new(text, &style);
-            draw_text_in_rect(scene, &run, rect, &text_brush);
+            draw_text_in_rect(scene, &run, rect, &text_brush, PickId::Skip);
         }
     }
 

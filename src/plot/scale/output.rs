@@ -26,6 +26,11 @@ pub enum OutputRange {
     Strings(Vec<Arc<str>>),
     /// Color outputs (fill/stroke palettes).
     Colors(Vec<Color>),
+    /// Dash-pattern outputs (linetype palettes). Each entry is an
+    /// even-length pt array; empty array = solid. `Arc<[f64]>` so
+    /// palette entries can be shared across rows when a column maps
+    /// repeatedly to the same pattern.
+    Linetypes(Vec<Arc<[f64]>>),
 }
 
 impl OutputRange {
@@ -35,6 +40,7 @@ impl OutputRange {
             OutputRange::Numbers(v) => v.len(),
             OutputRange::Strings(v) => v.len(),
             OutputRange::Colors(v) => v.len(),
+            OutputRange::Linetypes(v) => v.len(),
         }
     }
 

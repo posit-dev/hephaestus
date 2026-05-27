@@ -517,10 +517,11 @@ impl PlotComposition {
 fn expected_output_for_channel(channel: &str) -> Option<super::geom::ExpectedOutput> {
     use super::geom::ExpectedOutput::*;
     Some(match channel {
-        "x" | "y" | "size" | "fill_opacity" | "stroke_opacity" | "x_offset" | "y_offset"
-        | "x_band" | "y_band" => Numbers,
+        "x" | "y" | "size" | "linewidth" | "fill_opacity" | "stroke_opacity" | "x_offset"
+        | "y_offset" | "x_band" | "y_band" | "dash_offset" => Numbers,
         "fill" | "stroke" => Colors,
-        "shape" => Strings,
+        "shape" | "cap" | "join" => Strings,
+        "linetype" => Linetypes,
         _ => return None,
     })
 }
@@ -535,6 +536,7 @@ fn output_type_name(scale: &Scale) -> Option<&'static str> {
         OutputRange::Numbers(_) => "Numbers",
         OutputRange::Colors(_) => "Colors",
         OutputRange::Strings(_) => "Strings",
+        OutputRange::Linetypes(_) => "Linetypes",
     })
 }
 
@@ -544,6 +546,7 @@ fn matches_expected(expected: super::geom::ExpectedOutput, found: &'static str) 
         Numbers => found == "Numbers",
         Colors => found == "Colors",
         Strings => found == "Strings",
+        Linetypes => found == "Linetypes",
         Any => true,
     }
 }
@@ -727,6 +730,28 @@ mod tests {
                     if channel == "fill" && *found == "Numbers"
             )),
             "expected OutputTypeMismatch; got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn validate_flags_linetype_bound_to_non_linetype_scale() {
+        // "linetype" expects Linetypes; routing it to a Strings scale
+        // should be flagged.
+        let s = scale::ordinal(["a", "b"]).range_strings([
+            std::sync::Arc::from("solid"),
+            std::sync::Arc::from("dashed"),
+        ]);
+        let view = PlotComposition::new(comp_two())
+            .add_scale("dash_scale", s)
+            .with_plot(crate::plot::Plot::new(&comp_two(), "a").bind("linetype", "dash_scale"));
+        let issues = view.validate();
+        assert!(
+            issues.iter().any(|i| matches!(
+                i,
+                ValidationIssue::OutputTypeMismatch { channel, found, .. }
+                    if channel == "linetype" && *found == "Strings"
+            )),
+            "expected OutputTypeMismatch for linetype; got {issues:?}"
         );
     }
 

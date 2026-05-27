@@ -263,6 +263,11 @@ impl ScaleTypeTrait for Discrete {
                 .cloned()
                 .map(Value::String)
                 .unwrap_or(Value::Null),
+            Some(OutputRange::Linetypes(vs)) => vs
+                .get(idx)
+                .cloned()
+                .map(Value::Linetype)
+                .unwrap_or(Value::Null),
         }
     }
 
@@ -376,6 +381,18 @@ fn interpolate_range(t: f64, range: Option<&OutputRange>) -> Value {
         // Strings have no interpolation semantics — use Discrete for
         // string-output mappings.
         Some(OutputRange::Strings(_)) => Value::Null,
+        // Linetypes step rather than interpolate (arrays of mismatched
+        // length can't lerp cleanly). The nearest-stop index is picked
+        // by rounding t × (n - 1).
+        Some(OutputRange::Linetypes(vs)) => match vs.len() {
+            0 => Value::Null,
+            1 => Value::Linetype(vs[0].clone()),
+            n => {
+                let idx = (t * (n - 1) as f64).round() as isize;
+                let idx = idx.clamp(0, n as isize - 1) as usize;
+                Value::Linetype(vs[idx].clone())
+            }
+        },
     }
 }
 

@@ -191,6 +191,12 @@ pub enum Value {
     DateTime(i64),
     Time(i64),
     Duration(i64),
+
+    /// A dash-pattern as an even-length pt array of alternating dash/gap
+    /// lengths. Empty array = solid (no dashing). Carried by `Arc<[f64]>`
+    /// so cloning is cheap when the same pattern repeats across many
+    /// rows (the common case under categorical scaling).
+    Linetype(Arc<[f64]>),
 }
 
 impl Value {
@@ -260,8 +266,19 @@ impl Value {
         }
     }
 
+    /// Access the underlying dash pattern, if this value is a
+    /// `Value::Linetype`. Returns `None` for every other variant.
+    pub fn as_linetype(&self) -> Option<&[f64]> {
+        if let Value::Linetype(p) = self {
+            Some(p)
+        } else {
+            None
+        }
+    }
+
     /// Deterministic equality for diff/lookup keys. Two `Value::Number`
     /// NaNs compare equal; positive and negative zero compare equal.
+    /// `Value::Linetype` compares element-wise via [`canonical_f64_bits`].
     pub fn key_eq(&self, other: &Value) -> bool {
         use Value::*;
         match (self, other) {
@@ -274,6 +291,12 @@ impl Value {
             (DateTime(a), DateTime(b)) => a == b,
             (Time(a), Time(b)) => a == b,
             (Duration(a), Duration(b)) => a == b,
+            (Linetype(a), Linetype(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .zip(b.iter())
+                        .all(|(x, y)| canonical_f64_bits(*x) == canonical_f64_bits(*y))
+            }
             _ => false,
         }
     }
@@ -301,6 +324,12 @@ impl Value {
             Value::DateTime(us) => us.hash(state),
             Value::Time(us) => us.hash(state),
             Value::Duration(us) => us.hash(state),
+            Value::Linetype(p) => {
+                (p.len() as u64).hash(state);
+                for f in p.iter() {
+                    canonical_f64_bits(*f).hash(state);
+                }
+            }
         }
     }
 }
@@ -402,6 +431,13 @@ pub enum DataColumn {
     DateTime(Vec<i64>),
     Time(Vec<i64>),
     Duration(Vec<i64>),
+
+    /// Column of dash-pattern arrays — one `Arc<[f64]>` per row.
+    /// Even-length per row; empty array = solid. The `Arc` lets distinct
+    /// rows share a backing buffer when a column is constructed by
+    /// replicating a small set of patterns (the typical case under
+    /// categorical scaling).
+    Linetype(Vec<Arc<[f64]>>),
 }
 
 impl DataColumn {
@@ -419,6 +455,7 @@ impl DataColumn {
             DataColumn::DateTime(v) => v.len(),
             DataColumn::Time(v) => v.len(),
             DataColumn::Duration(v) => v.len(),
+            DataColumn::Linetype(v) => v.len(),
         }
     }
 
@@ -444,6 +481,7 @@ impl DataColumn {
             DataColumn::DateTime(v) => Value::DateTime(v[i]),
             DataColumn::Time(v) => Value::Time(v[i]),
             DataColumn::Duration(v) => Value::Duration(v[i]),
+            DataColumn::Linetype(v) => Value::Linetype(v[i].clone()),
         }
     }
 
@@ -489,6 +527,15 @@ impl DataColumn {
             (DateTime(a), DateTime(b)) => a[i] == b[j],
             (Time(a), Time(b)) => a[i] == b[j],
             (Duration(a), Duration(b)) => a[i] == b[j],
+            (Linetype(a), Linetype(b)) => {
+                let pa = &a[i];
+                let pb = &b[j];
+                pa.len() == pb.len()
+                    && pa
+                        .iter()
+                        .zip(pb.iter())
+                        .all(|(x, y)| canonical_f64_bits(*x) == canonical_f64_bits(*y))
+            }
             _ => false,
         }
     }
@@ -574,6 +621,17 @@ impl From<Vec<Duration>> for DataColumn {
 impl From<std::ops::Range<i64>> for DataColumn {
     fn from(r: std::ops::Range<i64>) -> Self {
         DataColumn::I64(r.collect())
+    }
+}
+
+// `Vec<Arc<[f64]>>` -> DataColumn::Linetype. There is intentionally no
+// `From<Vec<f64>>` for the Linetype variant — that would collide with
+// the existing numeric column conversion. Callers construct linetype
+// columns either via the named helpers in `crate::plot::geom::linetype`
+// or by passing pre-built `Arc<[f64]>` entries.
+impl From<Vec<Arc<[f64]>>> for DataColumn {
+    fn from(v: Vec<Arc<[f64]>>) -> Self {
+        DataColumn::Linetype(v)
     }
 }
 
@@ -915,6 +973,63 @@ mod tests {
         // Same numeric projection (1), but different variants — must not
         // compare equal as diff keys.
         assert!(!a.key_eq_at(0, &b, 0));
+    }
+
+    // ── Linetype value / column ──
+
+    #[test]
+    fn value_linetype_round_trip() {
+        let p: Arc<[f64]> = Arc::from(vec![8.0, 4.0]);
+        let v = Value::Linetype(p.clone());
+        assert_eq!(v.as_linetype(), Some(&[8.0, 4.0][..]));
+        assert!(v.as_number().is_none());
+        assert!(v.as_color().is_none());
+        assert!(v.as_str().is_none());
+        assert!(!v.is_finite());
+    }
+
+    #[test]
+    fn value_linetype_key_eq_element_wise() {
+        let a = Value::Linetype(Arc::from(vec![8.0, 4.0]));
+        let b = Value::Linetype(Arc::from(vec![8.0, 4.0]));
+        let c = Value::Linetype(Arc::from(vec![8.0, 4.0, 1.0, 2.0]));
+        let d = Value::Linetype(Arc::from(vec![6.0, 4.0]));
+        assert!(a.key_eq(&b));
+        assert!(!a.key_eq(&c));
+        assert!(!a.key_eq(&d));
+        assert_eq!(hash_of(&a), hash_of(&b));
+    }
+
+    #[test]
+    fn value_linetype_empty_is_solid() {
+        let solid = Value::Linetype(Arc::from(Vec::<f64>::new()));
+        assert_eq!(solid.as_linetype().map(|p| p.len()), Some(0));
+    }
+
+    #[test]
+    fn datacolumn_linetype_get() {
+        let col: DataColumn = vec![
+            Arc::<[f64]>::from(vec![8.0, 4.0]),
+            Arc::<[f64]>::from(Vec::<f64>::new()),
+        ]
+        .into();
+        assert!(matches!(col, DataColumn::Linetype(_)));
+        assert_eq!(col.len(), 2);
+        assert!(col
+            .get(0)
+            .key_eq(&Value::Linetype(Arc::from(vec![8.0, 4.0]))));
+        assert!(col
+            .get(1)
+            .key_eq(&Value::Linetype(Arc::from(Vec::<f64>::new()))));
+    }
+
+    #[test]
+    fn datacolumn_linetype_key_eq_at() {
+        let a: DataColumn = vec![Arc::<[f64]>::from(vec![8.0, 4.0])].into();
+        let b: DataColumn = vec![Arc::<[f64]>::from(vec![8.0, 4.0])].into();
+        let c: DataColumn = vec![Arc::<[f64]>::from(vec![2.0, 3.0])].into();
+        assert!(a.key_eq_at(0, &b, 0));
+        assert!(!a.key_eq_at(0, &c, 0));
     }
 
     #[test]

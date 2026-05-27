@@ -32,9 +32,12 @@ pub mod value;
 
 pub use composition::{PlotComposition, ValidationIssue};
 pub use diff::{diff_columns, diff_positional, KeyIndex};
+#[cfg(feature = "text")]
+pub use geom::TextGeom;
 pub use geom::{
-    BuildableGeom, Channel, ChannelDecl, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys,
-    PointGeom, ScaleResolver,
+    linetype, BuildableGeom, Channel, ChannelDecl, EllipseGeom, ExpectedOutput, Geom, GeomBuilder,
+    GeomContext, Keys, LineGeom, PointGeom, PolygonGeom, RectGeom, ScaleResolver, SegmentGeom,
+    WedgeGeom,
 };
 pub use plot::{GeomId, PickEntry, PickTable, PickTextSlot, Plot};
 pub use scale::{

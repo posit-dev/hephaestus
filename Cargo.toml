@@ -62,6 +62,34 @@ required-features = ["vello", "png"]
 name = "faceted"
 required-features = ["vello", "png"]
 
+[[example]]
+name = "line"
+required-features = ["vello", "png"]
+
+[[example]]
+name = "rect"
+required-features = ["vello", "png"]
+
+[[example]]
+name = "segment"
+required-features = ["vello", "png"]
+
+[[example]]
+name = "polygon"
+required-features = ["vello", "png"]
+
+[[example]]
+name = "ellipse"
+required-features = ["vello", "png"]
+
+[[example]]
+name = "wedge"
+required-features = ["vello", "png"]
+
+[[example]]
+name = "text_geom"
+required-features = ["vello", "png", "text"]
+
 [[test]]
 name = "smoke"
 required-features = ["vello"]

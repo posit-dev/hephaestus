@@ -98,6 +98,13 @@ impl Default for TextStyle {
 pub struct TextRun {
     layout: RefCell<parley::Layout<B>>,
     min_width: f32,
+    /// Natural unwrapped content width — the layout's width when broken
+    /// at no constraint. Used by label-style geoms (TextGeom) that want
+    /// to anchor against the text's intrinsic dimensions.
+    natural_width: f32,
+    /// Natural unwrapped content height — single-line height for a
+    /// single-line text.
+    natural_height: f32,
     /// Width passed to the last `break_all_lines` call — `None` means
     /// "haven't broken yet". `height_at` mutates this; `draw_text` reads it
     /// to know whether the layout is ready to render.
@@ -135,10 +142,15 @@ impl TextRun {
         layout.break_all_lines(None);
         layout.align(Alignment::Start, AlignmentOptions::default());
         let widths = layout.calculate_content_widths();
+        // The unconstrained natural height — typically the single-line
+        // height for one paragraph of text.
+        let natural_height = layout.height();
 
         Self {
             layout: RefCell::new(layout),
             min_width: widths.min,
+            natural_width: widths.max,
+            natural_height,
             last_break_width: RefCell::new(None),
         }
     }
@@ -152,6 +164,62 @@ impl TextRun {
         layout.align(Alignment::Start, AlignmentOptions::default());
         *self.last_break_width.borrow_mut() = Some(max_width);
         layout.height()
+    }
+
+    /// Natural unwrapped content width in pixels — the width the text
+    /// would occupy if laid out on a single line per paragraph break in
+    /// the source. Computed once at construction; stable regardless of
+    /// subsequent [`Self::set_max_width`] calls. Used by label-style
+    /// geoms to anchor the text against its intrinsic dimensions.
+    pub fn natural_width(&self) -> f64 {
+        self.natural_width as f64
+    }
+
+    /// Natural unwrapped content height in pixels. Stable across
+    /// [`Self::set_max_width`] calls.
+    pub fn natural_height(&self) -> f64 {
+        self.natural_height as f64
+    }
+
+    /// Current laid-out height in pixels — reflects the most recent
+    /// [`Self::set_max_width`] / [`Measure::height_at`] call. Equals
+    /// [`Self::natural_height`] when no wrap has been requested.
+    pub fn current_height(&self) -> f64 {
+        self.layout.borrow().height() as f64
+    }
+
+    /// Actual rendered content width in pixels — the widest line in
+    /// the current layout. Reflects the most recent line-break, so
+    /// when [`Self::set_max_width`] has been called the result is the
+    /// actual wrapped width (usually less than the constraint, since
+    /// parley breaks at word boundaries). When no wrap has been
+    /// requested the layout is single-line and this matches
+    /// [`Self::natural_width`].
+    pub fn content_width(&self) -> f64 {
+        let layout = self.layout.borrow();
+        let mut max_w = 0.0_f32;
+        for line in layout.lines() {
+            let w = line.metrics().advance;
+            if w > max_w {
+                max_w = w;
+            }
+        }
+        max_w as f64
+    }
+
+    /// Font descender of the last line in the current layout, in
+    /// pixels. Used by background-rect geoms to apply the
+    /// ggplot2 `geom_label`-style padding rebalance — bump top padding
+    /// up to at least the descender and reduce bottom padding by the
+    /// same — so visible glyphs centre vertically in the rect even
+    /// when the last line has no descenders ("men" vs "jay").
+    pub fn last_line_descender(&self) -> f64 {
+        let layout = self.layout.borrow();
+        layout
+            .lines()
+            .last()
+            .map(|line| line.metrics().descent as f64)
+            .unwrap_or(0.0)
     }
 }
 
@@ -170,18 +238,24 @@ impl Measure for TextRun {
 
 // ─── Drawing ────────────────────────────────────────────────────────────────
 
-/// Draw `run` at `(x, y)` (top-left of the layout box) into `scene`.
+/// Draw `run` at `(x, y)` (top-left of the layout box) into `scene`,
+/// tagging every emitted glyph with `pick_id`.
 ///
 /// Requires that [`TextRun::set_max_width`] or [`Measure::height_at`] has
 /// been called at least once with the desired wrap width; otherwise the
 /// layout is laid out unconstrained (one line per paragraph break in the
 /// source text).
+///
+/// Pass [`PickId::Skip`] for non-interactive chrome (titles, axis
+/// labels); pass `PickId::Id(ticket)` for picking-enabled labels (e.g.
+/// `TextGeom` rows).
 pub fn draw_text<S: SceneBuilder + ?Sized>(
     scene: &mut S,
     run: &TextRun,
     x: f64,
     y: f64,
     brush: &Brush,
+    pick_id: PickId,
 ) {
     let layout = run.layout.borrow();
     for line in layout.lines() {
@@ -212,21 +286,23 @@ pub fn draw_text<S: SceneBuilder + ?Sized>(
                 hint: false,
                 glyphs: &glyphs,
             };
-            scene.draw_glyphs(&glyph_run, PickId::Skip);
+            scene.draw_glyphs(&glyph_run, pick_id);
         }
     }
 }
 
 /// Convenience: draw `run` aligned to the top-left of `rect`. The run's
-/// lines are re-broken at `rect`'s width before drawing.
+/// lines are re-broken at `rect`'s width before drawing. All glyphs are
+/// tagged with `pick_id`.
 pub fn draw_text_in_rect<S: SceneBuilder + ?Sized>(
     scene: &mut S,
     run: &TextRun,
     rect: Rect,
     brush: &Brush,
+    pick_id: PickId,
 ) {
     run.set_max_width((rect.x1 - rect.x0) as f32);
-    draw_text(scene, run, rect.x0, rect.y0, brush);
+    draw_text(scene, run, rect.x0, rect.y0, brush, pick_id);
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -244,6 +320,36 @@ mod tests {
             "min width should be positive and finite (got {})",
             run.min_width
         );
+    }
+
+    /// Sanity check: a label with no descenders ("men") should reserve
+    /// the same vertical space as a label with descenders + tall
+    /// ascenders ("jay"). If this fails, `Layout::height()` is glyph-
+    /// ink-based and we need an explicit font-metric path.
+    #[test]
+    fn text_run_height_is_font_metric_not_ink() {
+        let style = TextStyle::new(16.0);
+        let men = TextRun::new("men", &style);
+        let jay = TextRun::new("jay", &style);
+        assert!(
+            (men.natural_height() - jay.natural_height()).abs() < 0.01,
+            "expected font-metric height (descender always reserved): \
+             men.h={}, jay.h={}",
+            men.natural_height(),
+            jay.natural_height()
+        );
+    }
+
+    #[test]
+    fn text_run_natural_width_is_positive() {
+        let style = TextStyle::new(16.0);
+        let run = TextRun::new("Hello", &style);
+        assert!(
+            run.natural_width() > 0.0 && run.natural_width().is_finite(),
+            "natural_width = {}",
+            run.natural_width()
+        );
+        assert!(run.natural_height() > 0.0);
     }
 
     #[test]

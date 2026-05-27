@@ -118,6 +118,15 @@ impl Scale {
         self
     }
 
+    /// Configure a linetype output range. Each entry is an even-length pt
+    /// array of alternating dash / gap lengths (empty = solid). Pairs
+    /// naturally with the named helpers in
+    /// [`crate::plot::geom::linetype`].
+    pub fn range_linetypes(mut self, vs: impl IntoIterator<Item = Arc<[f64]>>) -> Self {
+        self.output_range = Some(OutputRange::Linetypes(vs.into_iter().collect()));
+        self
+    }
+
     pub fn with_transform(mut self, t: TransformKind) -> Self {
         self.transform = Transform::of(t);
         self
@@ -152,6 +161,11 @@ impl Scale {
 
     pub fn set_range_strings(&mut self, vs: Vec<Arc<str>>) {
         self.output_range = Some(OutputRange::Strings(vs));
+        self.bump_generation();
+    }
+
+    pub fn set_range_linetypes(&mut self, vs: Vec<Arc<[f64]>>) {
+        self.output_range = Some(OutputRange::Linetypes(vs));
         self.bump_generation();
     }
 
@@ -325,6 +339,14 @@ fn format_value(v: &Value) -> String {
             } else {
                 let millis = micros / 1000;
                 format!("{sign}{seconds}.{millis:03}s")
+            }
+        }
+        Value::Linetype(p) => {
+            if p.is_empty() {
+                "solid".to_string()
+            } else {
+                let parts: Vec<String> = p.iter().map(|f| format!("{f}")).collect();
+                format!("[{}]", parts.join(", "))
             }
         }
     }
@@ -669,6 +691,62 @@ mod tests {
             .range_numbers([4.0, 8.0, 12.0]);
         assert_eq!(s.map(&Value::from("S")).as_number(), Some(4.0));
         assert_eq!(s.map(&Value::from("L")).as_number(), Some(12.0));
+    }
+
+    #[test]
+    fn discrete_with_linetype_range_steps_by_index() {
+        // Three categories, three patterns — one-to-one mapping.
+        let solid = Arc::<[f64]>::from(Vec::<f64>::new());
+        let dashed = Arc::<[f64]>::from(vec![8.0, 4.0]);
+        let dotted = Arc::<[f64]>::from(vec![2.0, 3.0]);
+        let s = discrete(["A", "B", "C"].into_iter().map(Into::into)).range_linetypes([
+            solid.clone(),
+            dashed.clone(),
+            dotted.clone(),
+        ]);
+        assert!(s
+            .map(&Value::from("A"))
+            .key_eq(&Value::Linetype(solid.clone())));
+        assert!(s
+            .map(&Value::from("B"))
+            .key_eq(&Value::Linetype(dashed.clone())));
+        assert!(s.map(&Value::from("C")).key_eq(&Value::Linetype(dotted)));
+        assert!(s.map(&Value::from("D")).is_null());
+    }
+
+    #[test]
+    fn ordinal_with_linetype_range_steps_by_nearest_index() {
+        // 4 categories, 2 patterns. t values: 0, 1/3, 2/3, 1.
+        // round(t * (n-1)) = round(t * 1) = 0, 0, 1, 1.
+        let solid = Arc::<[f64]>::from(Vec::<f64>::new());
+        let dashed = Arc::<[f64]>::from(vec![8.0, 4.0]);
+        let s = ordinal(["L1", "L2", "L3", "L4"]).range_linetypes([solid.clone(), dashed.clone()]);
+        assert!(s
+            .map(&Value::from("L1"))
+            .key_eq(&Value::Linetype(solid.clone())));
+        assert!(s.map(&Value::from("L2")).key_eq(&Value::Linetype(solid)));
+        assert!(s
+            .map(&Value::from("L3"))
+            .key_eq(&Value::Linetype(dashed.clone())));
+        assert!(s.map(&Value::from("L4")).key_eq(&Value::Linetype(dashed)));
+    }
+
+    #[test]
+    fn continuous_with_linetype_range_steps() {
+        // Continuous scales step rather than interpolate Linetypes.
+        let solid = Arc::<[f64]>::from(Vec::<f64>::new());
+        let dashed = Arc::<[f64]>::from(vec![8.0, 4.0]);
+        let dotted = Arc::<[f64]>::from(vec![2.0, 3.0]);
+        let s =
+            continuous(0.0..=10.0).range_linetypes([solid.clone(), dashed.clone(), dotted.clone()]);
+        // t = 0.0 → idx round(0 * 2) = 0
+        assert!(s
+            .map(&Value::Number(0.0))
+            .key_eq(&Value::Linetype(solid.clone())));
+        // t = 0.5 → idx round(0.5 * 2) = 1
+        assert!(s.map(&Value::Number(5.0)).key_eq(&Value::Linetype(dashed)));
+        // t = 1.0 → idx round(1.0 * 2) = 2
+        assert!(s.map(&Value::Number(10.0)).key_eq(&Value::Linetype(dotted)));
     }
 
     #[test]
