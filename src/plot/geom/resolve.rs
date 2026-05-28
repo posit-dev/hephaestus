@@ -14,11 +14,15 @@
 use std::sync::Arc;
 
 use crate::color::Color;
+use crate::pick::PickId;
 use crate::plot::scale::Scale;
 use crate::plot::value::Value;
 use crate::stroke::{Cap, Join};
 
 use super::Channel;
+
+/// Maximum valid pick id — the 24-bit `PickId` encoding budget.
+pub(crate) const MAX_PICK_ID: u32 = 0xFF_FFFF;
 
 /// Convert pt to px at the given dpi. The same convention is used for
 /// every absolute graphical size (point diameter, stroke linewidth,
@@ -180,6 +184,45 @@ pub(crate) fn band_width_at(scale: Option<&Scale>, raw: &Value) -> f64 {
     match scale {
         Some(s) => s.scale_type().band_width_at(s, raw),
         None => 0.0,
+    }
+}
+
+/// Resolve a `"pick_id"` channel to a [`PickId`] for row `i`.
+///
+/// - `channel == None` → `PickId::Skip` (picking opt-out — the channel is
+///   unset, so this geom doesn't participate in the hitmap).
+/// - The raw value (Constant or `Data[i]`, run through `scale` if any)
+///   must be a finite non-negative integer ≤ `MAX_PICK_ID`. Otherwise
+///   the row reports `PickId::Skip` — same convention as `is_finite`
+///   skips elsewhere. Non-integer values are also rejected at draw
+///   time (an ordinal scale producing a fractional output would be a
+///   bug; loudly skipping is more discoverable than silently
+///   truncating).
+/// - Value `0` → `PickId::Block` (occlude without reporting). Documented
+///   contract so callers whose row indices start at 0 shift to 1+ if
+///   they want their rows pickable.
+///
+/// Grouped geoms (LineGeom / PolygonGeom) call this with the mark's
+/// `first_row` index so each mark gets one pick id from its first
+/// row's value — matching the "first-row-of-mark" convention used for
+/// every other non-position channel on grouped geoms.
+pub(crate) fn resolve_pick_id(
+    channel: Option<&Channel>,
+    scale: Option<&Scale>,
+    i: usize,
+) -> PickId {
+    let n = match resolve_number_channel(channel, scale, i) {
+        Some(n) => n,
+        None => return PickId::Skip,
+    };
+    if !n.is_finite() || n < 0.0 || n > MAX_PICK_ID as f64 || n.trunc() != n {
+        return PickId::Skip;
+    }
+    let id = n as u32;
+    if id == 0 {
+        PickId::Block
+    } else {
+        PickId::Id(id)
     }
 }
 

@@ -43,172 +43,6 @@ use crate::layout::Cell;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GeomId(pub u32);
 
-// ─── Pick table ──────────────────────────────────────────────────────────────
-
-/// What was hit by a pick. Marked `#[non_exhaustive]` so v1.5 chrome
-/// picking (axes, legends, titles, panel-background drag) can add
-/// variants without breaking the public surface.
-///
-/// In v1, only [`PickEntry::Geom`] is populated by the standard draw
-/// paths — [`Plot::draw_panel_into`] reserves geom rows. The other
-/// variants are reserved on the type system for forward compatibility;
-/// chrome rendering paths (`Scale::draw_axis`, `Scale::draw_legend`,
-/// chrome text) will populate them when chrome picking is wired up.
-/// [`PickEntry::Custom`] is the escape hatch for callers (or future
-/// geoms) that want to register arbitrary pickable regions today.
-#[non_exhaustive]
-#[derive(Debug, Clone)]
-pub enum PickEntry {
-    /// A drawn geom primitive.
-    Geom {
-        plot_id: Arc<str>,
-        geom_id: GeomId,
-        row: usize,
-    },
-    /// A tick (mark or label) on an axis. Populated in v1.5.
-    AxisTick {
-        plot_id: Arc<str>,
-        side: super::scale::AxisSide,
-        tick_idx: usize,
-    },
-    /// An entry in a legend swatch. Populated in v1.5. `channel` names
-    /// the binding the legend was built for; `idx` is the entry index
-    /// (matches `scale.breaks()` order for ordinal legends).
-    LegendItem {
-        plot_id: Arc<str>,
-        channel: Arc<str>,
-        idx: usize,
-    },
-    /// A piece of chrome text — title, subtitle, axis-axis title, etc.
-    /// Populated in v1.5.
-    TextSlot {
-        plot_id: Arc<str>,
-        slot: PickTextSlot,
-    },
-    /// A pick that landed on bare panel (no geom, no chrome) — useful
-    /// for drag-to-pan, lasso-select, brushing. Populated when the
-    /// panel reserves a background ticket in v1.5.
-    PanelBackground { plot_id: Arc<str> },
-    /// User-defined pickable region. `kind` namespaces the entry (e.g.
-    /// `"brush"`, `"violin_handle"`); `data` is opaque per-kind payload
-    /// (typically a `usize` cast or a small enum discriminant).
-    Custom {
-        plot_id: Arc<str>,
-        kind: Arc<str>,
-        data: u64,
-    },
-}
-
-impl PickEntry {
-    /// Read accessor for the patch id present on every variant.
-    pub fn plot_id(&self) -> &str {
-        match self {
-            PickEntry::Geom { plot_id, .. }
-            | PickEntry::AxisTick { plot_id, .. }
-            | PickEntry::LegendItem { plot_id, .. }
-            | PickEntry::TextSlot { plot_id, .. }
-            | PickEntry::PanelBackground { plot_id }
-            | PickEntry::Custom { plot_id, .. } => plot_id,
-        }
-    }
-}
-
-/// Which chrome-text slot a [`PickEntry::TextSlot`] refers to.
-/// `#[non_exhaustive]` so additions (e.g. axis subtitles) don't break
-/// matches.
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PickTextSlot {
-    Title,
-    Subtitle,
-    Caption,
-    AxisLeftTitle,
-    AxisBottomTitle,
-    AxisRightTitle,
-    AxisTopTitle,
-}
-
-/// How a [`PickRange`] derives a [`PickEntry`] from a ticket offset.
-/// Stored compactly so a 1M-row geom reserves a single range, not a
-/// million `PickEntry` clones.
-#[derive(Debug, Clone)]
-enum PickTemplate {
-    /// Ticket offset `i` → `PickEntry::Geom { row: i }`.
-    GeomRows { geom_id: GeomId },
-    /// Ticket offset `i` → `PickEntry::AxisTick { tick_idx: i }`.
-    /// (Reserved for v1.5; the reserve method lands when chrome picking
-    /// is populated.)
-    #[allow(dead_code)]
-    AxisTicks { side: super::scale::AxisSide },
-    /// Ticket offset `i` → `PickEntry::LegendItem { idx: i }`.
-    #[allow(dead_code)]
-    LegendItems { channel: Arc<str> },
-    /// Every ticket in this range resolves to the same fixed element
-    /// — single-element ranges for chrome / custom regions.
-    Fixed(FixedTemplate),
-}
-
-#[derive(Debug, Clone)]
-enum FixedTemplate {
-    /// Reserved for v1.5 chrome picking (`reserve_text_slot`).
-    #[allow(dead_code)]
-    TextSlot(PickTextSlot),
-    /// Reserved for v1.5 chrome picking (`reserve_panel_background`).
-    #[allow(dead_code)]
-    PanelBackground,
-    Custom {
-        kind: Arc<str>,
-        data: u64,
-    },
-}
-
-impl PickTemplate {
-    fn at(&self, plot_id: Arc<str>, offset: usize) -> PickEntry {
-        match self {
-            PickTemplate::GeomRows { geom_id } => PickEntry::Geom {
-                plot_id,
-                geom_id: *geom_id,
-                row: offset,
-            },
-            PickTemplate::AxisTicks { side } => PickEntry::AxisTick {
-                plot_id,
-                side: *side,
-                tick_idx: offset,
-            },
-            PickTemplate::LegendItems { channel } => PickEntry::LegendItem {
-                plot_id,
-                channel: channel.clone(),
-                idx: offset,
-            },
-            PickTemplate::Fixed(f) => match f {
-                FixedTemplate::TextSlot(slot) => PickEntry::TextSlot {
-                    plot_id,
-                    slot: *slot,
-                },
-                FixedTemplate::PanelBackground => PickEntry::PanelBackground { plot_id },
-                FixedTemplate::Custom { kind, data } => PickEntry::Custom {
-                    plot_id,
-                    kind: kind.clone(),
-                    data: *data,
-                },
-            },
-        }
-    }
-}
-
-/// A range of contiguous tickets — one reservation. Resolution finds
-/// the range covering a ticket via binary search, then asks
-/// `template.at(offset)` to build the per-ticket `PickEntry`.
-#[derive(Debug, Clone)]
-struct PickRange {
-    plot_id: Arc<str>,
-    template: PickTemplate,
-    /// First ticket index in this range (0-based, exclusive of `+1` bias).
-    start: u32,
-    /// One past the last ticket in this range.
-    end: u32,
-}
-
 // ─── Always-available chrome helpers ─────────────────────────────────────────
 
 impl Plot {
@@ -222,116 +56,6 @@ impl Plot {
         patch.slot(Slot::Panel, crate::layout::Cell::empty())
     }
 }
-
-/// Pick-id-as-ticket lookup table. Each render fills it with contiguous
-/// ranges per (plot, geom) and resolves raw `PickId::Id(n)` values into
-/// `PickEntry { plot_id, geom_id, row }` via the ticket index.
-///
-/// The 24-bit `PickId` budget caps the table at ~16M tickets per render
-/// (rows summed across every visible geom across every plot). Reserve
-/// requests past that limit return a ticket base of `u32::MAX` so the
-/// geom's `pick_id_for_row` will fall back to `PickId::Skip` for the
-/// over-budget rows.
-#[derive(Debug, Default, Clone)]
-pub struct PickTable {
-    ranges: Vec<PickRange>,
-    total: u32,
-}
-
-impl PickTable {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Discard all reservations from a previous render. Call once per
-    /// render-pass before drawing the first plot.
-    pub fn clear(&mut self) {
-        self.ranges.clear();
-        self.total = 0;
-    }
-
-    /// Reserve `n` tickets for `geom_id` belonging to `plot_id`. Each
-    /// ticket resolves to `PickEntry::Geom { plot_id, geom_id, row: i }`
-    /// where `i` is the local offset. Returns the base ticket
-    /// (caller-side: `pick_id = base + row + 1`).
-    ///
-    /// Overflow of the 24-bit pick budget is recorded as a no-op (no
-    /// range pushed) and `u32::MAX` is returned so the geom's
-    /// `pick_id_for_row` will emit `Skip` for that range.
-    pub fn reserve_geom_rows(&mut self, plot_id: Arc<str>, geom_id: GeomId, n: usize) -> u32 {
-        self.reserve_with_template(plot_id, n, PickTemplate::GeomRows { geom_id })
-    }
-
-    /// Reserve a single ticket that resolves to `PickEntry::Custom`
-    /// with the given `kind` and `data`. Useful for ad-hoc pickable
-    /// regions (brush handles, custom geoms, etc.).
-    pub fn reserve_custom(&mut self, plot_id: Arc<str>, kind: Arc<str>, data: u64) -> u32 {
-        self.reserve_with_template(
-            plot_id,
-            1,
-            PickTemplate::Fixed(FixedTemplate::Custom { kind, data }),
-        )
-    }
-
-    fn reserve_with_template(
-        &mut self,
-        plot_id: Arc<str>,
-        n: usize,
-        template: PickTemplate,
-    ) -> u32 {
-        if n == 0 {
-            return self.total;
-        }
-        let new_total = match (n as u64).checked_add(self.total as u64) {
-            Some(t) if t <= MAX_TABLE_TOTAL as u64 => t as u32,
-            _ => return u32::MAX,
-        };
-        let base = self.total;
-        self.ranges.push(PickRange {
-            plot_id,
-            template,
-            start: base,
-            end: new_total,
-        });
-        self.total = new_total;
-        base
-    }
-
-    /// Resolve a raw `PickId::Id(n)` value. Returns `None` for `n = 0`
-    /// (reserved for `PickId::Block`) or when the ticket falls outside
-    /// any reserved range.
-    pub fn resolve(&self, raw: u32) -> Option<PickEntry> {
-        if raw == 0 {
-            return None;
-        }
-        let ticket = raw - 1;
-        // Ranges are pushed in ascending `start` order, so a partition_point
-        // gives us the first range with start > ticket; the candidate is
-        // its predecessor.
-        let idx = self
-            .ranges
-            .partition_point(|r| r.start <= ticket)
-            .checked_sub(1)?;
-        let r = &self.ranges[idx];
-        if ticket >= r.end {
-            return None;
-        }
-        let offset = (ticket - r.start) as usize;
-        Some(r.template.at(r.plot_id.clone(), offset))
-    }
-
-    /// Number of tickets currently reserved.
-    pub fn len(&self) -> usize {
-        self.total as usize
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.total == 0
-    }
-}
-
-/// 24-bit ticket cap — matches the `PickId` encoding budget.
-const MAX_TABLE_TOTAL: u32 = 0xFFFFFF;
 
 // ─── Plot ────────────────────────────────────────────────────────────────────
 
@@ -543,18 +267,16 @@ impl Plot {
     /// [`PlotScaleResolver`] over the plot's bindings and the given
     /// registry, and iterates the geom list.
     ///
-    /// For each geom, reserves `len()` contiguous tickets in
-    /// `pick_table` and passes the base via [`GeomContext::ticket_base`];
-    /// the geom emits `PickId::Id(base + row + 1)` per drawn primitive.
-    /// Stand-alone callers that don't care about picking pass a fresh
-    /// `PickTable::new()` and ignore it.
+    /// Picking is opt-in per geom via the `"pick_id"` channel. Geoms
+    /// without a `pick_id` channel set are non-pickable (they emit
+    /// `PickId::Skip` for every primitive); no ticket allocation
+    /// happens at this layer.
     pub fn draw_panel_into(
         &mut self,
         scene: &mut dyn SceneBuilder,
         layout: &crate::composition::CompositionLayout,
         registry: &ScaleRegistry,
         dpi: f64,
-        pick_table: &mut PickTable,
     ) {
         let panel = match layout.get(&self.patch_id, Slot::Panel) {
             Some(r) => r,
@@ -582,20 +304,8 @@ impl Plot {
             bindings: &self.bindings,
             registry,
         };
-        // Reserve a contiguous ticket range per geom, then draw each
-        // with its base in the context. `Geom::mark_count()` returns the
-        // pickable mark count (= rows for PointGeom; = unique-key /
-        // group count for multi-row-per-mark geoms like LineGeom).
-        // 0 → emit Skip.
-        for (gid, geom) in self.geoms.iter() {
-            let n = geom.mark_count();
-            let base = pick_table.reserve_geom_rows(self.patch_id.clone(), *gid, n);
-            let mut ctx = GeomContext::new(panel, dpi, &self.shapes, &resolver);
-            ctx.ticket_base = if n > 0 && base != u32::MAX {
-                Some(base)
-            } else {
-                None
-            };
+        let ctx = GeomContext::new(panel, dpi, &self.shapes, &resolver);
+        for (_, geom) in self.geoms.iter() {
             geom.draw(scene, &ctx);
         }
 
@@ -877,143 +587,10 @@ mod tests {
         assert!(p.geom_ids().any(|gid| gid == id));
     }
 
-    fn expect_geom(entry: &PickEntry) -> (&str, GeomId, usize) {
-        match entry {
-            PickEntry::Geom {
-                plot_id,
-                geom_id,
-                row,
-            } => (plot_id, *geom_id, *row),
-            other => panic!("expected PickEntry::Geom, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pick_table_round_trips_single_geom() {
-        let mut table = PickTable::new();
-        let gid = GeomId(7);
-        let plot_id: Arc<str> = Arc::from("plot_a");
-        let base = table.reserve_geom_rows(plot_id.clone(), gid, 100);
-        assert_eq!(base, 0);
-        // Ticket = base + row + 1 = 0 + 5 + 1 = 6.
-        let entry = table.resolve(6).expect("expected to resolve");
-        let (pid, g, r) = expect_geom(&entry);
-        assert_eq!(pid, "plot_a");
-        assert_eq!(g, gid);
-        assert_eq!(r, 5);
-    }
-
-    #[test]
-    fn pick_table_id_zero_is_none() {
-        let mut table = PickTable::new();
-        table.reserve_geom_rows(Arc::from("plot_a"), GeomId(0), 10);
-        assert!(table.resolve(0).is_none());
-    }
-
-    #[test]
-    fn pick_table_out_of_range_is_none() {
-        let mut table = PickTable::new();
-        // Reserve only 3 tickets (1, 2, 3).
-        table.reserve_geom_rows(Arc::from("plot_a"), GeomId(0), 3);
-        assert!(table.resolve(4).is_none());
-        assert!(table.resolve(1_000_000).is_none());
-    }
-
-    #[test]
-    fn pick_table_distinguishes_plots_and_geoms() {
-        let mut table = PickTable::new();
-        let plot_a: Arc<str> = Arc::from("plot_a");
-        let plot_b: Arc<str> = Arc::from("plot_b");
-        let _ = table.reserve_geom_rows(plot_a.clone(), GeomId(0), 3);
-        let _ = table.reserve_geom_rows(plot_a.clone(), GeomId(1), 2);
-        let _ = table.reserve_geom_rows(plot_b.clone(), GeomId(0), 3);
-
-        let e1 = table.resolve(2).unwrap();
-        assert_eq!(expect_geom(&e1), ("plot_a", GeomId(0), 1));
-        let e2 = table.resolve(5).unwrap();
-        assert_eq!(expect_geom(&e2), ("plot_a", GeomId(1), 1));
-        let e3 = table.resolve(7).unwrap();
-        assert_eq!(expect_geom(&e3), ("plot_b", GeomId(0), 1));
-    }
-
-    #[test]
-    fn pick_table_reserve_zero_is_noop() {
-        let mut table = PickTable::new();
-        let base = table.reserve_geom_rows(Arc::from("p"), GeomId(0), 0);
-        assert_eq!(base, 0);
-        assert_eq!(table.len(), 0);
-        assert!(table.is_empty());
-    }
-
-    #[test]
-    fn pick_table_clear_resets() {
-        let mut table = PickTable::new();
-        table.reserve_geom_rows(Arc::from("p"), GeomId(0), 10);
-        assert!(!table.is_empty());
-        table.clear();
-        assert!(table.is_empty());
-        assert!(table.resolve(5).is_none());
-    }
-
-    #[test]
-    fn pick_table_handles_24bit_cap() {
-        let mut table = PickTable::new();
-        let base_a = table.reserve_geom_rows(Arc::from("a"), GeomId(0), 0x800000);
-        assert_eq!(base_a, 0);
-        let base_b = table.reserve_geom_rows(Arc::from("b"), GeomId(0), 0x800000);
-        assert_eq!(base_b, u32::MAX);
-    }
-
-    #[test]
-    fn pick_table_custom_entry_round_trips() {
-        let mut table = PickTable::new();
-        let plot_id: Arc<str> = Arc::from("p");
-        let kind: Arc<str> = Arc::from("brush_handle");
-        let base = table.reserve_custom(plot_id.clone(), kind.clone(), 42);
-        assert_eq!(base, 0);
-        let entry = table.resolve(1).expect("ticket 1");
-        match entry {
-            PickEntry::Custom {
-                plot_id,
-                kind: k,
-                data,
-            } => {
-                assert_eq!(&*plot_id, "p");
-                assert_eq!(&*k, "brush_handle");
-                assert_eq!(data, 42);
-            }
-            other => panic!("expected Custom, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pick_entry_plot_id_accessor() {
-        // All variants expose plot_id via the accessor — even non-geom
-        // ones (forward-looking for v1.5 chrome picking).
-        let geom = PickEntry::Geom {
-            plot_id: Arc::from("a"),
-            geom_id: GeomId(0),
-            row: 0,
-        };
-        assert_eq!(geom.plot_id(), "a");
-
-        let panel = PickEntry::PanelBackground {
-            plot_id: Arc::from("b"),
-        };
-        assert_eq!(panel.plot_id(), "b");
-
-        let text = PickEntry::TextSlot {
-            plot_id: Arc::from("c"),
-            slot: PickTextSlot::Title,
-        };
-        assert_eq!(text.plot_id(), "c");
-    }
-
     #[test]
     fn draw_panel_into_skips_when_panel_missing() {
         // A composition where patch "a" exists but has no Panel slot in
-        // the solved layout (because we didn't wire one). draw_panel_into
-        // should silently no-op.
+        // the solved layout. draw_panel_into should silently no-op.
         let c = comp_with_two();
         let mut p = Plot::new(&c, "a");
         let g = PointGeom::builder()
@@ -1022,35 +599,29 @@ mod tests {
             .set("fill", crate::color::Color::new([1.0, 0.0, 0.0, 1.0]))
             .build();
         p.add_geom(g);
-        // Solve without wiring → no Panel slot for "a".
         let layout = c.solve(crate::geometry::Size::new(400.0, 300.0), 96.0);
         let mut scene = crate::scene::recording::RecordingScene::default();
         let registry = ScaleRegistry::new();
-        let mut pick = PickTable::new();
-        p.draw_panel_into(&mut scene, &layout, &registry, 96.0, &mut pick);
+        p.draw_panel_into(&mut scene, &layout, &registry, 96.0);
         // The composition itself emits no ops; only checking that we
         // didn't panic.
         let _ = scene.ops.len();
     }
 
     #[test]
-    fn draw_panel_into_populates_pick_table() {
-        // End-to-end: build a plot, wire+solve a composition that
-        // produces a Panel rect, draw, then verify the pick table
-        // resolves a known glyph back to the right (plot, geom, row).
+    fn draw_panel_into_emits_user_pick_ids() {
+        // End-to-end: a plot with a user-supplied pick_id channel emits
+        // those ids directly through the SceneBuilder. No table, no
+        // translation.
         let c = comp_with_two();
         let mut p = Plot::new(&c, "a");
         let g = PointGeom::builder()
             .set("x", vec![0.0_f64, 1.0, 2.0])
             .set("y", vec![0.0_f64, 1.0, 2.0])
             .set("fill", crate::color::Color::new([1.0, 0.0, 0.0, 1.0]))
+            .set("pick_id", vec![100_i64, 200, 300])
             .build();
-        let id = p.add_geom(g);
-        // Wire the plot's chrome (under text feature it adds axes; here
-        // we just need the Panel slot — Plot has a stand-alone path
-        // that's text-only. For non-text builds we'd manually attach a
-        // Panel cell; for the always-on test we just patch a Panel slot
-        // directly into the composition.
+        p.add_geom(g);
         use crate::composition::Patch as CompPatch;
         use crate::layout::Cell;
         let comp = beside(
@@ -1060,15 +631,19 @@ mod tests {
         let layout = comp.solve(crate::geometry::Size::new(400.0, 300.0), 96.0);
         let mut scene = crate::scene::recording::RecordingScene::default();
         let registry = ScaleRegistry::new();
-        let mut pick = PickTable::new();
-        p.draw_panel_into(&mut scene, &layout, &registry, 96.0, &mut pick);
-        // Three rows reserved → tickets 1, 2, 3.
-        assert_eq!(pick.len(), 3);
-        let entry = pick.resolve(2).expect("ticket 2");
-        let (pid, gid, row) = expect_geom(&entry);
-        assert_eq!(pid, "a");
-        assert_eq!(gid, id);
-        assert_eq!(row, 1);
+        p.draw_panel_into(&mut scene, &layout, &registry, 96.0);
+        let ids: Vec<u32> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                crate::scene::recording::Op::Fill {
+                    pick_id: crate::pick::PickId::Id(n),
+                    ..
+                } => Some(*n),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec![100, 200, 300]);
     }
 
     // Text-feature-only tests below.

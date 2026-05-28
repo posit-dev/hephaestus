@@ -39,7 +39,7 @@ pub use geom::{
     GeomContext, Keys, LineGeom, PointGeom, PolygonGeom, RectGeom, ScaleResolver, SegmentGeom,
     WedgeGeom,
 };
-pub use plot::{GeomId, PickEntry, PickTable, PickTextSlot, Plot};
+pub use plot::{GeomId, Plot};
 pub use scale::{
     AxisSide, InputRange, LegendSide, OutputRange, Scale, ScaleRegistry, ScaleType, ScaleTypeKind,
     Transform, TransformKind,

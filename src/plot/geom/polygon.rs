@@ -38,10 +38,12 @@ use crate::stroke::{Cap, Join, Stroke};
 
 use super::resolve::{
     override_alpha, pt_to_px, resolve_cap_channel, resolve_color_channel, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_position,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
+    resolve_position,
 };
 use super::state::{
-    filter_declared, require_data_column, validate_channel_lengths, GeomState, KeysStrategy,
+    filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
+    GeomState, KeysStrategy,
 };
 use super::{
     empty_datacolumn_like, BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext,
@@ -71,6 +73,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("dash_offset", ExpectedOutput::Numbers),
     ("cap", ExpectedOutput::Strings),
     ("join", ExpectedOutput::Strings),
+    ("pick_id", ExpectedOutput::Numbers),
 ];
 
 // ─── PolygonGeom ─────────────────────────────────────────────────────────────
@@ -236,6 +239,7 @@ impl BuildableGeom for PolygonGeom {
             panic!("PolygonGeom::build: \"y\" length {y_len} does not match \"x\" length {n}");
         }
         validate_channel_lengths(&channels, n, "PolygonGeom");
+        validate_pick_id_channel(&channels, "PolygonGeom");
 
         let declared = filter_declared(&channels, CHANNELS);
         let state = GeomState::from_builder(keys_opt, channels, n, KeysStrategy::OneMark, declared);
@@ -337,6 +341,7 @@ impl Geom for PolygonGeom {
         let dash_offset_scale = ctx.scale_for("dash_offset");
         let cap_scale = ctx.scale_for("cap");
         let join_scale = ctx.scale_for("join");
+        let pick_id_scale = ctx.scale_for("pick_id");
 
         let channels = &self.state.channels;
         let x_col = match channels.get("x") {
@@ -360,8 +365,9 @@ impl Geom for PolygonGeom {
         let dash_offset_ch = channels.get("dash_offset");
         let cap_ch = channels.get("cap");
         let join_ch = channels.get("join");
+        let pick_id_ch = channels.get("pick_id");
 
-        for (mark_idx, mark) in marks.iter().enumerate() {
+        for mark in marks.iter() {
             let i0 = mark.first_row;
 
             let fill_color = override_alpha(
@@ -413,7 +419,7 @@ impl Geom for PolygonGeom {
                 continue;
             }
 
-            let pick = ctx.pick_id_for_row(mark_idx);
+            let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
 
             if let Some(fc) = fill_color {
                 scene.fill(
@@ -501,9 +507,7 @@ mod tests {
         registry: &'a crate::shape::ShapeRegistry,
         scales: &'a DirectScaleResolver<'a>,
     ) -> GeomContext<'a> {
-        let mut c = GeomContext::new(panel, 96.0, registry, scales);
-        c.ticket_base = Some(0);
-        c
+        GeomContext::new(panel, 96.0, registry, scales)
     }
 
     fn red() -> Color {
@@ -834,12 +838,15 @@ mod tests {
     }
 
     #[test]
-    fn unique_pick_ids_per_mark() {
+    fn pick_id_per_mark_resolves_from_first_row() {
+        // Per-mark pick id: each mark gets the pick_id value from its
+        // first row. Within-mark variation is silently ignored.
         let mut g = PolygonGeom::builder()
             .keys(vec!["A", "A", "A", "B", "B", "B", "C", "C", "C"])
             .set("x", vec![0.0_f64, 0.2, 0.1, 0.4, 0.6, 0.5, 0.7, 0.9, 0.8])
             .set("y", vec![0.0_f64, 0.0, 0.2, 0.0, 0.0, 0.2, 0.0, 0.0, 0.2])
             .set("fill", red())
+            .set("pick_id", vec![1001_i64, 0, 0, 2002, 0, 0, 3003, 0, 0])
             .build();
         g.rebuild_diff_against_previous();
         let shapes = shapes();
@@ -860,7 +867,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(picks, vec![1, 2, 3]);
+        assert_eq!(picks, vec![1001, 2002, 3003]);
     }
 
     #[test]

@@ -38,10 +38,12 @@ use crate::stroke::{Cap, Join, Stroke};
 
 use super::resolve::{
     override_alpha, pt_to_px, resolve_cap_channel, resolve_color_channel, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_position,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
+    resolve_position,
 };
 use super::state::{
-    filter_declared, require_data_column, validate_channel_lengths, GeomState, KeysStrategy,
+    filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
+    GeomState, KeysStrategy,
 };
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
 
@@ -85,6 +87,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("dash_offset", ExpectedOutput::Numbers),
     ("cap", ExpectedOutput::Strings),
     ("join", ExpectedOutput::Strings),
+    ("pick_id", ExpectedOutput::Numbers),
 ];
 
 // ─── RectGeom ────────────────────────────────────────────────────────────────
@@ -110,6 +113,7 @@ impl BuildableGeom for RectGeom {
             }
         }
         validate_channel_lengths(&channels, n, "RectGeom");
+        validate_pick_id_channel(&channels, "RectGeom");
 
         let declared = filter_declared(&channels, CHANNELS);
         let state = GeomState::from_builder(keys_opt, channels, n, KeysStrategy::PerRow, declared);
@@ -166,6 +170,7 @@ impl Geom for RectGeom {
         let dash_offset_scale = ctx.scale_for("dash_offset");
         let cap_scale = ctx.scale_for("cap");
         let join_scale = ctx.scale_for("join");
+        let pick_id_scale = ctx.scale_for("pick_id");
 
         let channels = &self.state.channels;
         let x_col = match channels.get("x") {
@@ -203,6 +208,7 @@ impl Geom for RectGeom {
         let dash_offset_ch = channels.get("dash_offset");
         let cap_ch = channels.get("cap");
         let join_ch = channels.get("join");
+        let pick_id_ch = channels.get("pick_id");
 
         for i in 0..n {
             // ── Resolve the four corner positions. ──
@@ -275,7 +281,7 @@ impl Geom for RectGeom {
                 rect_path(r)
             };
 
-            let pick = ctx.pick_id_for_row(i);
+            let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
 
             if let Some(fc) = fill_color {
                 scene.fill(
@@ -354,9 +360,7 @@ mod tests {
         registry: &'a crate::shape::ShapeRegistry,
         scales: &'a DirectScaleResolver<'a>,
     ) -> GeomContext<'a> {
-        let mut c = GeomContext::new(panel, 96.0, registry, scales);
-        c.ticket_base = Some(0);
-        c
+        GeomContext::new(panel, 96.0, registry, scales)
     }
 
     fn red() -> Color {

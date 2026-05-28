@@ -204,6 +204,40 @@ pub fn validate_channel_lengths(channels: &HashMap<String, Channel>, n: usize, g
     }
 }
 
+/// Validate the `"pick_id"` channel if present. Constants and Data
+/// columns whose values are knowable at build time are checked to be
+/// finite non-negative integers ≤ `0xFF_FFFF` (the 24-bit pick budget).
+/// Scale-routed values are deferred to per-row draw resolution (the
+/// output depends on draw-time scale state and can't be checked here).
+///
+/// `0` is permitted — it maps to [`PickId::Block`](crate::pick::PickId)
+/// per the user-controlled pick-id contract.
+pub fn validate_pick_id_channel(channels: &HashMap<String, Channel>, geom_label: &str) {
+    let ch = match channels.get("pick_id") {
+        Some(c) => c,
+        None => return,
+    };
+    let check = |v: &Value, where_: &str| {
+        match v.as_number() {
+        Some(n) if n.is_finite() && n >= 0.0 && n <= 0xFF_FFFF as f64 && n.trunc() == n => {}
+        Some(n) => panic!(
+            "{geom_label}::build: \"pick_id\" {where_} must be a non-negative integer ≤ 0xFFFFFF, got {n}"
+        ),
+        None => panic!(
+            "{geom_label}::build: \"pick_id\" {where_} must be numeric (Number/Date/DateTime/Time/Duration), got {v:?}"
+        ),
+    }
+    };
+    match ch {
+        Channel::Constant(v) => check(v, "constant"),
+        Channel::Data(col) => {
+            for i in 0..col.len() {
+                check(&col.get(i), "data column");
+            }
+        }
+    }
+}
+
 /// Filter the geom's channel catalog against the channels actually
 /// supplied by the user. Each catalog entry is `(name, expected_output)`;
 /// supplied channels become [`ChannelDecl`] entries, others are dropped.

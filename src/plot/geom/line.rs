@@ -32,9 +32,11 @@
 //! channel's column varies within a mark, the divergence is silently
 //! ignored — no averaging.
 //!
-//! Pick budget: one ticket per mark, allocated by the orchestrator via
-//! [`Geom::mark_count`] (which LineGeom overrides to return the unique
-//! key count).
+//! Picking: per-mark via the `"pick_id"` channel. Resolved from the
+//! mark's first row like every other per-mark channel — so a column
+//! whose values are constant within a mark gives one pick id per
+//! line; variation within a mark is silently ignored. Unset channel
+//! → marks are non-pickable.
 
 use crate::brush::Brush;
 use crate::geometry::{Affine, Point};
@@ -46,10 +48,12 @@ use crate::stroke::{Cap, Join, Stroke};
 
 use super::resolve::{
     override_alpha, pt_to_px, resolve_cap_channel, resolve_color_channel, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_position,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
+    resolve_position,
 };
 use super::state::{
-    filter_declared, require_data_column, validate_channel_lengths, GeomState, KeysStrategy,
+    filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
+    GeomState, KeysStrategy,
 };
 use super::{
     empty_datacolumn_like, BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext,
@@ -78,6 +82,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("dash_offset", ExpectedOutput::Numbers),
     ("cap", ExpectedOutput::Strings),
     ("join", ExpectedOutput::Strings),
+    ("pick_id", ExpectedOutput::Numbers),
 ];
 
 // ─── LineGeom ────────────────────────────────────────────────────────────────
@@ -196,6 +201,7 @@ impl BuildableGeom for LineGeom {
             panic!("LineGeom::build: \"y\" length {y_len} does not match \"x\" length {n}");
         }
         validate_channel_lengths(&channels, n, "LineGeom");
+        validate_pick_id_channel(&channels, "LineGeom");
 
         // Validate any user-supplied or constant linetype value to have
         // even length. Structural error caught at build time rather than
@@ -330,6 +336,7 @@ impl Geom for LineGeom {
         let dash_offset_scale = ctx.scale_for("dash_offset");
         let cap_scale = ctx.scale_for("cap");
         let join_scale = ctx.scale_for("join");
+        let pick_id_scale = ctx.scale_for("pick_id");
         let x_offset_scale = ctx.scale_for("x_offset");
         let y_offset_scale = ctx.scale_for("y_offset");
         let x_band_scale = ctx.scale_for("x_band");
@@ -352,12 +359,13 @@ impl Geom for LineGeom {
         let dash_offset_ch = channels.get("dash_offset");
         let cap_ch = channels.get("cap");
         let join_ch = channels.get("join");
+        let pick_id_ch = channels.get("pick_id");
         let x_offset_ch = channels.get("x_offset");
         let y_offset_ch = channels.get("y_offset");
         let x_band_ch = channels.get("x_band");
         let y_band_ch = channels.get("y_band");
 
-        for (mark_idx, mark) in marks.iter().enumerate() {
+        for mark in marks.iter() {
             // ── Per-mark channel resolution (first row of mark). ──
             let i0 = mark.first_row;
             let stroke_color = override_alpha(
@@ -416,7 +424,7 @@ impl Geom for LineGeom {
             }
 
             let path = polyline(&points, PolylineOptions::default());
-            let pick = ctx.pick_id_for_row(mark_idx);
+            let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
             scene.stroke(
                 &stroke_spec,
                 Affine::IDENTITY,
@@ -473,9 +481,7 @@ mod tests {
         shapes: &'a crate::shape::ShapeRegistry,
         scales: &'a DirectScaleResolver<'a>,
     ) -> GeomContext<'a> {
-        let mut c = GeomContext::new(panel, 96.0, shapes, scales);
-        c.ticket_base = Some(0);
-        c
+        GeomContext::new(panel, 96.0, shapes, scales)
     }
 
     // ── build() validation ──
@@ -595,12 +601,16 @@ mod tests {
     }
 
     #[test]
-    fn draw_three_marks_emit_three_stroke_ops_with_unique_picks() {
+    fn draw_three_marks_emit_three_strokes_with_first_row_pick_ids() {
+        // Per-mark pick id resolution: each mark gets the pick_id value
+        // from its first row. Within-mark variation is silently ignored
+        // (matches every other per-mark channel).
         let mut g = LineGeom::builder()
             .keys(vec!["A", "A", "B", "B", "C", "C"])
             .set("x", vec![0.0_f64, 1.0, 0.0, 1.0, 0.0, 1.0])
             .set("y", vec![0.0_f64, 1.0, 2.0, 3.0, 4.0, 5.0])
             .set("stroke", red_solid())
+            .set("pick_id", vec![100_i64, 0, 200, 0, 300, 0])
             .build();
         g.rebuild_diff_against_previous();
         assert_eq!(g.mark_count(), 3);
@@ -621,7 +631,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(stroke_picks, vec![1, 2, 3]);
+        assert_eq!(stroke_picks, vec![100, 200, 300]);
     }
 
     #[test]

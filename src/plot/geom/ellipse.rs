@@ -43,10 +43,12 @@ use crate::stroke::{Cap, Join, Stroke};
 
 use super::resolve::{
     override_alpha, pt_to_px, resolve_cap_channel, resolve_color_channel, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_position,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
+    resolve_position,
 };
 use super::state::{
-    filter_declared, require_data_column, validate_channel_lengths, GeomState, KeysStrategy,
+    filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
+    GeomState, KeysStrategy,
 };
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
 
@@ -78,6 +80,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("dash_offset", ExpectedOutput::Numbers),
     ("cap", ExpectedOutput::Strings),
     ("join", ExpectedOutput::Strings),
+    ("pick_id", ExpectedOutput::Numbers),
 ];
 
 // ─── EllipseGeom ─────────────────────────────────────────────────────────────
@@ -105,6 +108,7 @@ impl BuildableGeom for EllipseGeom {
             }
         }
         validate_channel_lengths(&channels, n, "EllipseGeom");
+        validate_pick_id_channel(&channels, "EllipseGeom");
 
         let declared = filter_declared(&channels, CHANNELS);
         let state = GeomState::from_builder(keys_opt, channels, n, KeysStrategy::PerRow, declared);
@@ -160,6 +164,7 @@ impl Geom for EllipseGeom {
         let dash_offset_scale = ctx.scale_for("dash_offset");
         let cap_scale = ctx.scale_for("cap");
         let join_scale = ctx.scale_for("join");
+        let pick_id_scale = ctx.scale_for("pick_id");
 
         let channels = &self.state.channels;
         let x_col = match channels.get("x") {
@@ -196,6 +201,7 @@ impl Geom for EllipseGeom {
         let dash_offset_ch = channels.get("dash_offset");
         let cap_ch = channels.get("cap");
         let join_ch = channels.get("join");
+        let pick_id_ch = channels.get("pick_id");
 
         for i in 0..n {
             // ── Resolve centre + far edge in pixel space. ──
@@ -254,7 +260,7 @@ impl Geom for EllipseGeom {
             }
 
             let path = ellipse_path(Point::new(cx, cy), Vec2::new(rx, ry));
-            let pick = ctx.pick_id_for_row(i);
+            let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
 
             if let Some(fc) = fill_color {
                 scene.fill(
@@ -345,9 +351,7 @@ mod tests {
         registry: &'a crate::shape::ShapeRegistry,
         scales: &'a DirectScaleResolver<'a>,
     ) -> GeomContext<'a> {
-        let mut c = GeomContext::new(panel, 96.0, registry, scales);
-        c.ticket_base = Some(0);
-        c
+        GeomContext::new(panel, 96.0, registry, scales)
     }
 
     fn red() -> Color {
@@ -644,13 +648,14 @@ mod tests {
     }
 
     #[test]
-    fn unique_pick_ids_per_row() {
+    fn pick_id_channel_passes_through_per_row() {
         let g = EllipseGeom::builder()
             .set("x", vec![0.3_f64, 0.5, 0.7])
             .set("y", vec![0.5_f64, 0.5, 0.5])
             .set("x2", vec![0.35_f64, 0.55, 0.75])
             .set("y2", vec![0.6_f64, 0.6, 0.6])
             .set("fill", red())
+            .set("pick_id", vec![10_i64, 20, 30])
             .build();
         let shapes = shapes();
         let scales = DirectScaleResolver::new();
@@ -670,6 +675,70 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(picks, vec![1, 2, 3]);
+        assert_eq!(picks, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn pick_id_unset_emits_skip() {
+        let g = EllipseGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("x2", vec![0.7_f64])
+            .set("y2", vec![0.6_f64])
+            .set("fill", red())
+            .build();
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        for op in &scene.ops {
+            if let Op::Fill { pick_id, .. } = op {
+                assert!(matches!(pick_id, crate::pick::PickId::Skip));
+            }
+        }
+    }
+
+    #[test]
+    fn pick_id_zero_maps_to_block() {
+        let g = EllipseGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("x2", vec![0.7_f64])
+            .set("y2", vec![0.6_f64])
+            .set("fill", red())
+            .set("pick_id", 0_i64)
+            .build();
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let has_block = scene.ops.iter().any(|op| {
+            matches!(
+                op,
+                Op::Fill {
+                    pick_id: crate::pick::PickId::Block,
+                    ..
+                }
+            )
+        });
+        assert!(has_block);
+    }
+
+    #[test]
+    #[should_panic(expected = "must be a non-negative integer")]
+    fn pick_id_above_24_bit_panics_at_build() {
+        EllipseGeom::builder()
+            .set("x", vec![0.0_f64])
+            .set("y", vec![0.0_f64])
+            .set("x2", vec![1.0_f64])
+            .set("y2", vec![1.0_f64])
+            .set("pick_id", 0x100_0000_i64)
+            .build();
     }
 }

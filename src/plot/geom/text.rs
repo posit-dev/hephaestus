@@ -92,10 +92,11 @@ use crate::text::{draw_text, TextRun, TextStyle};
 
 use super::resolve::{
     band_width_at, override_alpha, pt_to_px, resolve_color_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_position,
+    resolve_number_channel_or, resolve_pick_id, resolve_position,
 };
 use super::state::{
-    filter_declared, require_data_column, validate_channel_lengths, GeomState, KeysStrategy,
+    filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
+    GeomState, KeysStrategy,
 };
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
 
@@ -135,6 +136,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("bg_linewidth", ExpectedOutput::Numbers),
     ("bg_corner_radius", ExpectedOutput::Numbers),
     ("bg_padding", ExpectedOutput::Numbers),
+    ("pick_id", ExpectedOutput::Numbers),
 ];
 
 // ─── TextGeom ────────────────────────────────────────────────────────────────
@@ -159,6 +161,7 @@ impl BuildableGeom for TextGeom {
         }
         require_data_column("text", &channels, "TextGeom");
         validate_channel_lengths(&channels, n, "TextGeom");
+        validate_pick_id_channel(&channels, "TextGeom");
 
         let declared = filter_declared(&channels, CHANNELS);
         let state = GeomState::from_builder(keys_opt, channels, n, KeysStrategy::PerRow, declared);
@@ -217,6 +220,7 @@ impl Geom for TextGeom {
         let bg_linewidth_scale = ctx.scale_for("bg_linewidth");
         let bg_corner_radius_scale = ctx.scale_for("bg_corner_radius");
         let bg_padding_scale = ctx.scale_for("bg_padding");
+        let pick_id_scale = ctx.scale_for("pick_id");
 
         let channels = &self.state.channels;
         let x_col = match channels.get("x") {
@@ -249,6 +253,7 @@ impl Geom for TextGeom {
         let bg_linewidth_ch = channels.get("bg_linewidth");
         let bg_corner_radius_ch = channels.get("bg_corner_radius");
         let bg_padding_ch = channels.get("bg_padding");
+        let pick_id_ch = channels.get("pick_id");
 
         for i in 0..n {
             // ── Resolve text string. ──
@@ -331,7 +336,7 @@ impl Geom for TextGeom {
             )
             .unwrap_or_else(default_fill);
 
-            let pick = ctx.pick_id_for_row(i);
+            let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
 
             // ── Background presence. ──
             let bg_fill = override_alpha(
@@ -497,9 +502,7 @@ mod tests {
         registry: &'a crate::shape::ShapeRegistry,
         scales: &'a DirectScaleResolver<'a>,
     ) -> GeomContext<'a> {
-        let mut c = GeomContext::new(panel, 96.0, registry, scales);
-        c.ticket_base = Some(0);
-        c
+        GeomContext::new(panel, 96.0, registry, scales)
     }
 
     fn red() -> Color {
@@ -621,12 +624,13 @@ mod tests {
     }
 
     #[test]
-    fn unique_pick_ids_per_row() {
+    fn pick_id_channel_passes_through_per_row() {
         let g = TextGeom::builder()
             .set("x", vec![0.2_f64, 0.5, 0.8])
             .set("y", vec![0.5_f64, 0.5, 0.5])
             .set("text", vec!["A", "B", "C"])
             .set("fill", red())
+            .set("pick_id", vec![41_i64, 42, 43])
             .build();
         let shapes = shapes();
         let scales = DirectScaleResolver::new();
@@ -646,8 +650,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        // 3 rows → 3 distinct pick ids 1..=3.
-        assert_eq!(picks, [1u32, 2, 3].into_iter().collect());
+        assert_eq!(picks, [41u32, 42, 43].into_iter().collect());
     }
 
     #[test]
@@ -964,6 +967,7 @@ mod tests {
             .set("text", vec!["hi"])
             .set("fill", red())
             .set("bg_fill", red())
+            .set("pick_id", 99_i64)
             .build();
         let shapes = shapes();
         let scales = DirectScaleResolver::new();
@@ -986,8 +990,8 @@ mod tests {
             },
             _ => None,
         });
-        assert_eq!(bg_pick, glyph_pick);
-        assert!(bg_pick.is_some());
+        assert_eq!(bg_pick, Some(99));
+        assert_eq!(glyph_pick, Some(99));
     }
 
     // ── Soft-wrap ──

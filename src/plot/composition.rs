@@ -33,7 +33,7 @@ use crate::geometry::Size;
 use crate::layout::Track;
 use crate::scene::SceneBuilder;
 
-use super::plot::{PickEntry, PickTable, Plot};
+use super::plot::Plot;
 use super::scale::{Scale, ScaleRegistry};
 
 // ─── Template ────────────────────────────────────────────────────────────────
@@ -240,8 +240,6 @@ pub struct PlotComposition {
     last_layout: Option<CompositionLayout>,
     last_size: Option<Size>,
     last_dpi: Option<f64>,
-    /// Pick-id resolution table — cleared at the start of every render.
-    pick_table: PickTable,
 }
 
 impl PlotComposition {
@@ -260,7 +258,6 @@ impl PlotComposition {
             last_layout: None,
             last_size: None,
             last_dpi: None,
-            pick_table: PickTable::new(),
         }
     }
 
@@ -396,9 +393,6 @@ impl PlotComposition {
             self.layout_dirty = false;
         }
 
-        // Reset pick table for the new render.
-        self.pick_table.clear();
-
         let layout = self
             .last_layout
             .as_ref()
@@ -413,29 +407,17 @@ impl PlotComposition {
             plot.draw_chrome_into(scene, layout, &self.scales, dpi);
         }
 
-        // Then panels (with geom content + pick reservations).
+        // Then panels. Picking is opt-in per geom via the `"pick_id"`
+        // channel — the orchestrator does no ticket allocation; the
+        // raw value reported by `VelloRenderer::pick_at` is the
+        // user-supplied id directly.
         for plot in self.plots.values_mut() {
-            plot.draw_panel_into(scene, layout, &self.scales, dpi, &mut self.pick_table);
+            plot.draw_panel_into(scene, layout, &self.scales, dpi);
         }
 
         // Clear dirty bits after a successful render.
         self.plot_dirty.clear();
         self.scale_dirty.clear();
-    }
-
-    // ── Picking ───────────────────────────────────────────────────────
-
-    /// Resolve a raw `PickId::Id(n)` from the latest render into a
-    /// [`PickEntry`]. Returns `None` for `Id(0)` (Block) or tickets
-    /// outside the table.
-    pub fn resolve_pick(&self, raw: u32) -> Option<PickEntry> {
-        self.pick_table.resolve(raw)
-    }
-
-    /// Read access to the pick table for advanced callers (e.g.
-    /// debugging the table contents after a render).
-    pub fn pick_table(&self) -> &PickTable {
-        &self.pick_table
     }
 
     // ── Validation ────────────────────────────────────────────────────
@@ -660,25 +642,30 @@ mod tests {
     }
 
     #[test]
-    fn render_populates_pick_table() {
+    fn render_passes_user_pick_ids_through() {
         let g = PointGeom::builder()
             .set("x", vec![0.0_f64, 1.0, 2.0])
             .set("y", vec![0.0_f64, 1.0, 2.0])
             .set("fill", crate::color::Color::new([1.0, 0.0, 0.0, 1.0]))
+            .set("pick_id", vec![100_i64, 200, 300])
             .build();
         let mut plot = crate::plot::Plot::new(&comp_two(), "a");
         let _gid = plot.add_geom(g);
         let mut view = PlotComposition::new(comp_two()).with_plot(plot);
         let mut scene = crate::scene::recording::RecordingScene::default();
         view.render(&mut scene, Size::new(400.0, 300.0), 96.0);
-        assert_eq!(view.pick_table().len(), 3);
-        let entry = view.resolve_pick(1).expect("ticket 1");
-        match entry {
-            PickEntry::Geom { plot_id, .. } => {
-                assert_eq!(&*plot_id, "a");
-            }
-            other => panic!("expected Geom variant, got {other:?}"),
-        }
+        let ids: Vec<u32> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                crate::scene::recording::Op::Fill {
+                    pick_id: crate::pick::PickId::Id(n),
+                    ..
+                } => Some(*n),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec![100, 200, 300]);
     }
 
     #[test]
@@ -688,8 +675,6 @@ mod tests {
             PlotComposition::new(comp_two()).with_plot(crate::plot::Plot::new(&comp_two(), "a"));
         let mut scene = crate::scene::recording::RecordingScene::default();
         view.render(&mut scene, Size::new(400.0, 300.0), 96.0);
-        // pick_table empty: "a" has no geoms.
-        assert_eq!(view.pick_table().len(), 0);
     }
 
     // ── validate() ──

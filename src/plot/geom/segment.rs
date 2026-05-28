@@ -25,10 +25,12 @@ use crate::stroke::{Cap, Join, Stroke};
 
 use super::resolve::{
     override_alpha, pt_to_px, resolve_cap_channel, resolve_color_channel, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_position,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
+    resolve_position,
 };
 use super::state::{
-    filter_declared, require_data_column, validate_channel_lengths, GeomState, KeysStrategy,
+    filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
+    GeomState, KeysStrategy,
 };
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
 
@@ -58,6 +60,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("dash_offset", ExpectedOutput::Numbers),
     ("cap", ExpectedOutput::Strings),
     ("join", ExpectedOutput::Strings),
+    ("pick_id", ExpectedOutput::Numbers),
 ];
 
 // ─── SegmentGeom ─────────────────────────────────────────────────────────────
@@ -85,6 +88,7 @@ impl BuildableGeom for SegmentGeom {
             }
         }
         validate_channel_lengths(&channels, n, "SegmentGeom");
+        validate_pick_id_channel(&channels, "SegmentGeom");
 
         let declared = filter_declared(&channels, CHANNELS);
         let state = GeomState::from_builder(keys_opt, channels, n, KeysStrategy::PerRow, declared);
@@ -138,6 +142,7 @@ impl Geom for SegmentGeom {
         let dash_offset_scale = ctx.scale_for("dash_offset");
         let cap_scale = ctx.scale_for("cap");
         let join_scale = ctx.scale_for("join");
+        let pick_id_scale = ctx.scale_for("pick_id");
 
         let channels = &self.state.channels;
         let x_col = match channels.get("x") {
@@ -172,6 +177,7 @@ impl Geom for SegmentGeom {
         let dash_offset_ch = channels.get("dash_offset");
         let cap_ch = channels.get("cap");
         let join_ch = channels.get("join");
+        let pick_id_ch = channels.get("pick_id");
 
         for i in 0..n {
             let stroke_color = override_alpha(
@@ -240,7 +246,7 @@ impl Geom for SegmentGeom {
                 dash_offset_pt,
                 ctx.dpi,
             );
-            let pick = ctx.pick_id_for_row(i);
+            let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
             scene.stroke(
                 &stroke_spec,
                 Affine::IDENTITY,
@@ -296,9 +302,7 @@ mod tests {
         registry: &'a crate::shape::ShapeRegistry,
         scales: &'a DirectScaleResolver<'a>,
     ) -> GeomContext<'a> {
-        let mut c = GeomContext::new(panel, 96.0, registry, scales);
-        c.ticket_base = Some(0);
-        c
+        GeomContext::new(panel, 96.0, registry, scales)
     }
 
     fn red() -> Color {
@@ -577,13 +581,14 @@ mod tests {
     }
 
     #[test]
-    fn unique_pick_ids_per_row() {
+    fn pick_id_channel_passes_through_per_row() {
         let g = SegmentGeom::builder()
             .set("x", vec![0.1_f64, 0.2, 0.3])
             .set("y", vec![0.1_f64, 0.2, 0.3])
             .set("x2", vec![0.9_f64, 0.8, 0.7])
             .set("y2", vec![0.9_f64, 0.8, 0.7])
             .set("stroke", red())
+            .set("pick_id", vec![11_i64, 22, 33])
             .build();
         let shapes = shapes();
         let scales = DirectScaleResolver::new();
@@ -603,7 +608,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(picks, vec![1, 2, 3]);
+        assert_eq!(picks, vec![11, 22, 33]);
     }
 
     #[test]

@@ -244,27 +244,19 @@ impl<'a> ScaleResolver for DirectScaleResolver<'a> {
 /// pixels, output of the composition solver), the dpi, the shape
 /// registry, and the channel→scale resolver.
 ///
-/// `ticket_base` is the geom's starting ticket index into the
-/// orchestrator-owned [`PickTable`](crate::plot::PickTable). When set,
-/// geoms emit `PickId::Id(ticket_base + row + 1)` for each per-row draw
-/// call (the `+ 1` keeps `PickId::Id(0)` reserved for
-/// [`PickId::Block`](crate::pick::PickId::Block)). When `None`, geoms
-/// emit `PickId::Skip` (default for stand-alone tests / non-pickable
-/// renders).
-///
-/// The 24-bit `PickId` budget caps the table at ~16M tickets per
-/// render. If `ticket_base + row + 1` exceeds that, `pick_id_for_row`
-/// falls back to `Skip` (no panic, no overflow).
+/// Picking is driven entirely by each geom's `"pick_id"` channel: the
+/// resolved value is the 24-bit id reported by
+/// [`pick_at`](crate::backend::vello::VelloRenderer::pick_at). Unset
+/// channel → `PickId::Skip` for the whole geom (no participation in
+/// the hitmap); resolved value `0` → `PickId::Block` (occlude without
+/// reporting); otherwise → `PickId::Id(value)`. The context does not
+/// allocate or track ids — the user owns the namespace.
 pub struct GeomContext<'a> {
     pub panel_rect: Rect,
     pub dpi: f64,
     pub shapes: &'a ShapeRegistry,
     pub scales: &'a dyn ScaleResolver,
-    pub ticket_base: Option<u32>,
 }
-
-/// Maximum valid pick ticket — capped by the 24-bit `PickId` budget.
-const MAX_TICKET: u32 = 0xFFFFFF;
 
 impl<'a> GeomContext<'a> {
     pub fn new(
@@ -278,32 +270,11 @@ impl<'a> GeomContext<'a> {
             dpi,
             shapes,
             scales,
-            ticket_base: None,
         }
     }
 
     pub fn scale_for(&self, channel: &str) -> Option<&Scale> {
         self.scales.scale_for(channel)
-    }
-
-    /// Build a `PickId` for the i-th row of this geom. Falls back to
-    /// `PickId::Skip` when no `ticket_base` is set (stand-alone
-    /// drawing) or when the resulting ticket exceeds the 24-bit budget.
-    pub fn pick_id_for_row(&self, row: usize) -> crate::pick::PickId {
-        let base = match self.ticket_base {
-            None => return crate::pick::PickId::Skip,
-            Some(b) => b,
-        };
-        let row_u32 = match u32::try_from(row) {
-            Ok(r) => r,
-            Err(_) => return crate::pick::PickId::Skip,
-        };
-        // ticket = base + row + 1; saturate-and-skip on overflow.
-        let ticket = match base.checked_add(row_u32).and_then(|t| t.checked_add(1)) {
-            Some(t) if t <= MAX_TICKET => t,
-            _ => return crate::pick::PickId::Skip,
-        };
-        crate::pick::PickId::Id(ticket)
     }
 }
 

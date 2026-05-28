@@ -67,10 +67,11 @@ use crate::stroke::{Cap, Join, Stroke};
 use super::resolve::{
     band_width_at, override_alpha, pt_to_px, resolve_cap_channel, resolve_color_channel,
     resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_position, smallest_nonzero,
+    resolve_number_channel_or, resolve_pick_id, resolve_position, smallest_nonzero,
 };
 use super::state::{
-    filter_declared, require_data_column, validate_channel_lengths, GeomState, KeysStrategy,
+    filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
+    GeomState, KeysStrategy,
 };
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
 
@@ -106,6 +107,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("dash_offset", ExpectedOutput::Numbers),
     ("cap", ExpectedOutput::Strings),
     ("join", ExpectedOutput::Strings),
+    ("pick_id", ExpectedOutput::Numbers),
 ];
 
 // ─── WedgeGeom ───────────────────────────────────────────────────────────────
@@ -129,6 +131,7 @@ impl BuildableGeom for WedgeGeom {
             panic!("WedgeGeom::build: \"y\" length {y_len} does not match \"x\" length {n}");
         }
         validate_channel_lengths(&channels, n, "WedgeGeom");
+        validate_pick_id_channel(&channels, "WedgeGeom");
 
         let declared = filter_declared(&channels, CHANNELS);
         let state = GeomState::from_builder(keys_opt, channels, n, KeysStrategy::PerRow, declared);
@@ -184,6 +187,7 @@ impl Geom for WedgeGeom {
         let dash_offset_scale = ctx.scale_for("dash_offset");
         let cap_scale = ctx.scale_for("cap");
         let join_scale = ctx.scale_for("join");
+        let pick_id_scale = ctx.scale_for("pick_id");
 
         let channels = &self.state.channels;
         let x_col = match channels.get("x") {
@@ -214,6 +218,7 @@ impl Geom for WedgeGeom {
         let dash_offset_ch = channels.get("dash_offset");
         let cap_ch = channels.get("cap");
         let join_ch = channels.get("join");
+        let pick_id_ch = channels.get("pick_id");
 
         for i in 0..n {
             let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
@@ -297,7 +302,7 @@ impl Geom for WedgeGeom {
                 wedge_path(centre, radius_px, prim_start, prim_sweep)
             };
 
-            let pick = ctx.pick_id_for_row(i);
+            let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
 
             if let Some(fc) = fill_color {
                 scene.fill(
@@ -389,9 +394,7 @@ mod tests {
         registry: &'a crate::shape::ShapeRegistry,
         scales: &'a DirectScaleResolver<'a>,
     ) -> GeomContext<'a> {
-        let mut c = GeomContext::new(panel, 96.0, registry, scales);
-        c.ticket_base = Some(0);
-        c
+        GeomContext::new(panel, 96.0, registry, scales)
     }
 
     fn red() -> Color {
@@ -747,12 +750,13 @@ mod tests {
     }
 
     #[test]
-    fn unique_pick_ids_per_row() {
+    fn pick_id_channel_passes_through_per_row() {
         let g = WedgeGeom::builder()
             .set("x", vec![0.3_f64, 0.5, 0.7])
             .set("y", vec![0.5_f64, 0.5, 0.5])
             .set("radius", vec![15.0_f64, 15.0, 15.0])
             .set("fill", red())
+            .set("pick_id", vec![7_i64, 8, 9])
             .build();
         let shapes = shapes();
         let scales = DirectScaleResolver::new();
@@ -772,7 +776,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(picks, vec![1, 2, 3]);
+        assert_eq!(picks, vec![7, 8, 9]);
     }
 
     #[test]

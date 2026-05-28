@@ -62,10 +62,12 @@ use crate::stroke::Stroke;
 
 use super::resolve::{
     band_width_at, override_alpha, pt_to_px, resolve_color_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_position, resolve_str_channel_or, smallest_nonzero,
+    resolve_number_channel_or, resolve_pick_id, resolve_position, resolve_str_channel_or,
+    smallest_nonzero,
 };
 use super::state::{
-    filter_declared, require_data_column, validate_channel_lengths, GeomState, KeysStrategy,
+    filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
+    GeomState, KeysStrategy,
 };
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
 
@@ -96,6 +98,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("size", ExpectedOutput::Numbers),
     ("size_band", ExpectedOutput::Numbers),
     ("shape", ExpectedOutput::Strings),
+    ("pick_id", ExpectedOutput::Numbers),
 ];
 
 // ─── PointGeom ───────────────────────────────────────────────────────────────
@@ -122,6 +125,7 @@ impl BuildableGeom for PointGeom {
             panic!("PointGeom::build: \"y\" length {y_len} does not match \"x\" length {n}");
         }
         validate_channel_lengths(&channels, n, "PointGeom");
+        validate_pick_id_channel(&channels, "PointGeom");
 
         // Install defaults for size + shape if unset.
         channels
@@ -178,6 +182,7 @@ impl Geom for PointGeom {
         let y_band_scale = ctx.scale_for("y_band");
         let size_scale = ctx.scale_for("size");
         let size_band_scale = ctx.scale_for("size_band");
+        let pick_id_scale = ctx.scale_for("pick_id");
 
         // x/y are always data columns (build_from guaranteed).
         let channels = &self.state.channels;
@@ -201,6 +206,7 @@ impl Geom for PointGeom {
         let size_ch = channels.get("size");
         let size_band_ch = channels.get("size_band");
         let shape_ch = channels.get("shape");
+        let pick_id_ch = channels.get("pick_id");
 
         for i in 0..n {
             // ── Position (per row) ──
@@ -255,7 +261,7 @@ impl Geom for PointGeom {
 
             let xform = Affine::translate((px, py)) * Affine::scale(size_px);
 
-            let pick = ctx.pick_id_for_row(i);
+            let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
             for sub in shape.paths() {
                 match shape.style() {
                     ShapeStyle::Fill => {
