@@ -146,7 +146,7 @@ fn build_marks_from_columns(keys: &DataColumn, ring_ch: Option<&Channel>) -> Vec
 
     // Second pass: within each mark, bucket rows by ring value.
     let ring_data = match ring_ch {
-        Some(Channel::Data(col)) => Some(col),
+        Some(Channel::Data(col)) | Some(Channel::RawData(col)) => Some(col),
         _ => None, // unset OR constant → all rows in one ring
     };
 
@@ -326,8 +326,8 @@ impl Geom for PolygonGeom {
             return;
         }
 
-        let x_scale = ctx.scale_for("x");
-        let y_scale = ctx.scale_for("y");
+        let x_scale_bound = ctx.scale_for("x");
+        let y_scale_bound = ctx.scale_for("y");
         let x_offset_scale = ctx.scale_for("x_offset");
         let y_offset_scale = ctx.scale_for("y_offset");
         let x_band_scale = ctx.scale_for("x_band");
@@ -344,12 +344,14 @@ impl Geom for PolygonGeom {
         let pick_id_scale = ctx.scale_for("pick_id");
 
         let channels = &self.state.channels;
-        let x_col = match channels.get("x") {
-            Some(Channel::Data(c)) => c,
+        let (x_col, x_scale) = match channels.get("x") {
+            Some(Channel::Data(c)) => (c, x_scale_bound),
+            Some(Channel::RawData(c)) => (c, None),
             _ => return,
         };
-        let y_col = match channels.get("y") {
-            Some(Channel::Data(c)) => c,
+        let (y_col, y_scale) = match channels.get("y") {
+            Some(Channel::Data(c)) => (c, y_scale_bound),
+            Some(Channel::RawData(c)) => (c, None),
             _ => return,
         };
         let x_offset_ch = channels.get("x_offset");

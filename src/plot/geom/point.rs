@@ -170,8 +170,11 @@ impl Geom for PointGeom {
         }
 
         // Resolve scales by channel name (None == identity / position-frac).
-        let x_scale = ctx.scale_for("x");
-        let y_scale = ctx.scale_for("y");
+        // `Channel::RawData` columns bypass the scale; we shadow the bound
+        // scale to None after the column pattern-match below so position
+        // resolution + band_width_at uniformly skip it.
+        let x_scale_bound = ctx.scale_for("x");
+        let y_scale_bound = ctx.scale_for("y");
         let fill_scale = ctx.scale_for("fill");
         let stroke_scale = ctx.scale_for("stroke");
         let fill_opacity_scale = ctx.scale_for("fill_opacity");
@@ -184,14 +187,18 @@ impl Geom for PointGeom {
         let size_band_scale = ctx.scale_for("size_band");
         let pick_id_scale = ctx.scale_for("pick_id");
 
-        // x/y are always data columns (build_from guaranteed).
+        // x/y are always data columns (build_from guaranteed). RawData
+        // columns supply pre-computed panel fractions and disable the
+        // bound scale for that axis.
         let channels = &self.state.channels;
-        let x_col = match channels.get("x") {
-            Some(Channel::Data(c)) => c,
+        let (x_col, x_scale) = match channels.get("x") {
+            Some(Channel::Data(c)) => (c, x_scale_bound),
+            Some(Channel::RawData(c)) => (c, None),
             _ => return,
         };
-        let y_col = match channels.get("y") {
-            Some(Channel::Data(c)) => c,
+        let (y_col, y_scale) = match channels.get("y") {
+            Some(Channel::Data(c)) => (c, y_scale_bound),
+            Some(Channel::RawData(c)) => (c, None),
             _ => return,
         };
 
@@ -299,7 +306,7 @@ mod tests {
     use super::*;
     use crate::color::Color;
     use crate::geometry::Rect;
-    use crate::plot::geom::{DirectScaleResolver, Keys};
+    use crate::plot::geom::{DirectScaleResolver, Keys, Raw};
     use crate::plot::value::Date;
     use crate::scene::recording::{Op, RecordingScene};
 
@@ -939,6 +946,192 @@ mod tests {
         assert!((xs[0] - 38.0).abs() < 1e-6);
         assert!((xs[1] - 50.0).abs() < 1e-6);
         assert!((xs[2] - 62.0).abs() < 1e-6);
+    }
+
+    // ── Raw (scale-bypass) channels ──
+
+    #[test]
+    fn raw_position_bypasses_scale() {
+        // x_scale maps domain [0..100] → [0,1] fraction. A Raw column
+        // should bypass that mapping entirely — supplied values are
+        // treated as panel fractions directly.
+        use crate::plot::scale;
+        let x_scale = scale::continuous(0.0..=100.0);
+        let resolver = DirectScaleResolver::new().with("x", &x_scale);
+        let g = PointGeom::builder()
+            .set("x", Raw(vec![0.25_f64, 0.5, 0.75]))
+            .set("y", vec![0.5_f64, 0.5, 0.5])
+            .set("fill", red_solid())
+            .build();
+        let panel = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let shapes = registry();
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &ctx(panel, &shapes, &resolver));
+        let xs: Vec<f64> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Fill { transform, .. } => Some(transform.translation().x),
+                _ => None,
+            })
+            .collect();
+        // Without bypass these would be domain values run through the
+        // scale → 0.25, 0.5, 0.75 → 0.0025, 0.005, 0.0075 of the panel.
+        // With bypass they're already fractions → 25, 50, 75 px.
+        assert!((xs[0] - 25.0).abs() < 1e-6, "xs[0] = {}", xs[0]);
+        assert!((xs[1] - 50.0).abs() < 1e-6, "xs[1] = {}", xs[1]);
+        assert!((xs[2] - 75.0).abs() < 1e-6, "xs[2] = {}", xs[2]);
+    }
+
+    #[test]
+    fn raw_color_bypasses_scale() {
+        // Even when a colour scale is bound to "fill", a Raw colour
+        // ignores it and uses the literal value.
+        use crate::plot::scale;
+        use crate::plot::value::Value;
+        let fill_scale = scale::ordinal(["a", "b"].iter().map(|s| Value::String(Arc::from(*s))))
+            .range_colors([
+                Color::new([0.0, 0.0, 1.0, 1.0]),
+                Color::new([0.0, 1.0, 0.0, 1.0]),
+            ]);
+        let resolver = DirectScaleResolver::new().with("fill", &fill_scale);
+        let literal = Color::new([1.0, 0.0, 0.0, 1.0]);
+        let g = PointGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("fill", Raw(literal))
+            .build();
+        let panel = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let shapes = registry();
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &ctx(panel, &shapes, &resolver));
+        let fill_color = scene.ops.iter().find_map(|op| match op {
+            Op::Fill {
+                brush: crate::brush::Brush::Solid(c),
+                ..
+            } => Some(*c),
+            _ => None,
+        });
+        let c = fill_color.expect("fill op");
+        assert!((c.components[0] - 1.0).abs() < 1e-6);
+        assert!((c.components[1] - 0.0).abs() < 1e-6);
+        assert!((c.components[2] - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn raw_position_outside_panel_clips() {
+        // Raw fractions outside [0, 1] are drawn at the corresponding
+        // off-panel pixel; the panel clip in draw_panel_into handles
+        // the visual cutoff. Here we just verify the geom emits the
+        // op with the off-panel translation (no skip / no panic).
+        let g = PointGeom::builder()
+            .set("x", Raw(vec![-0.5_f64, 1.5]))
+            .set("y", vec![0.5_f64, 0.5])
+            .set("fill", red_solid())
+            .build();
+        let panel = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let shapes = registry();
+        let resolver = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &ctx(panel, &shapes, &resolver));
+        let xs: Vec<f64> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Fill { transform, .. } => Some(transform.translation().x),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(xs.len(), 2);
+        assert!((xs[0] - -50.0).abs() < 1e-6);
+        assert!((xs[1] - 150.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn raw_constant_size_bypasses_size_scale() {
+        // size_scale maps domain values to pt; Raw("size", 20.0) skips
+        // it and uses 20pt directly. 20pt at 96dpi = ~26.67 px.
+        use crate::plot::scale;
+        let size_scale = scale::continuous(0.0..=10.0).range_numbers([2.0, 10.0]);
+        let resolver = DirectScaleResolver::new().with("size", &size_scale);
+        let g = PointGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("fill", red_solid())
+            .set("size", Raw(20.0_f64))
+            .build();
+        let panel = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let shapes = registry();
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &ctx(panel, &shapes, &resolver));
+        let scale_factor = scene.ops.iter().find_map(|op| match op {
+            Op::Fill { transform, .. } => Some(transform.as_coeffs()[0]),
+            _ => None,
+        });
+        let s = scale_factor.expect("fill");
+        // 20pt → 20 * 96/72 = 26.6667 px.
+        assert!((s - 20.0 * 96.0 / 72.0).abs() < 1e-6, "size = {s}");
+    }
+
+    #[test]
+    fn raw_length_validated_at_build() {
+        // RawData length mismatch panics just like Data length mismatch.
+        let r = std::panic::catch_unwind(|| {
+            PointGeom::builder()
+                .set("x", vec![0.0_f64, 1.0])
+                .set("y", Raw(vec![0.5_f64, 0.5, 0.5])) // wrong length
+                .build()
+        });
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn raw_data_x_is_required_position_data() {
+        // require_data_column accepts RawData for required position
+        // channels — building succeeds.
+        let g = PointGeom::builder()
+            .set("x", Raw(vec![0.25_f64, 0.75]))
+            .set("y", Raw(vec![0.5_f64, 0.5]))
+            .build();
+        assert_eq!(g.len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "must be a non-negative integer")]
+    fn raw_pick_id_validated_at_build() {
+        // RawConstant pick_id is build-validated the same as Constant.
+        PointGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("pick_id", Raw(0x100_0000_i64))
+            .build();
+    }
+
+    #[test]
+    fn raw_pick_id_passes_through_per_row() {
+        let g = PointGeom::builder()
+            .set("x", vec![0.2_f64, 0.5, 0.8])
+            .set("y", vec![0.5_f64, 0.5, 0.5])
+            .set("fill", red_solid())
+            .set("pick_id", Raw(vec![5_i64, 6, 7]))
+            .build();
+        let panel = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let shapes = registry();
+        let resolver = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &ctx(panel, &shapes, &resolver));
+        let picks: Vec<u32> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Fill {
+                    pick_id: crate::pick::PickId::Id(n),
+                    ..
+                } => Some(*n),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(picks, vec![5, 6, 7]);
     }
 
     #[test]

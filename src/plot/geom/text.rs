@@ -196,8 +196,8 @@ impl Geom for TextGeom {
             return;
         }
 
-        let x_scale = ctx.scale_for("x");
-        let y_scale = ctx.scale_for("y");
+        let x_scale_bound = ctx.scale_for("x");
+        let y_scale_bound = ctx.scale_for("y");
         let x_offset_scale = ctx.scale_for("x_offset");
         let y_offset_scale = ctx.scale_for("y_offset");
         let x_band_scale = ctx.scale_for("x_band");
@@ -223,12 +223,14 @@ impl Geom for TextGeom {
         let pick_id_scale = ctx.scale_for("pick_id");
 
         let channels = &self.state.channels;
-        let x_col = match channels.get("x") {
-            Some(Channel::Data(c)) => c,
+        let (x_col, x_scale) = match channels.get("x") {
+            Some(Channel::Data(c)) => (c, x_scale_bound),
+            Some(Channel::RawData(c)) => (c, None),
             _ => return,
         };
-        let y_col = match channels.get("y") {
-            Some(Channel::Data(c)) => c,
+        let (y_col, y_scale) = match channels.get("y") {
+            Some(Channel::Data(c)) => (c, y_scale_bound),
+            Some(Channel::RawData(c)) => (c, None),
             _ => return,
         };
         let text_ch = channels.get("text");
@@ -446,13 +448,15 @@ fn resolve_str_channel(
     scale: Option<&crate::plot::scale::Scale>,
     i: usize,
 ) -> Option<String> {
-    let raw = match channel? {
-        Channel::Constant(v) => v.clone(),
-        Channel::Data(col) => col.get(i),
+    let (raw, bypass) = match channel? {
+        Channel::Constant(v) => (v.clone(), false),
+        Channel::Data(col) => (col.get(i), false),
+        Channel::RawConstant(v) => (v.clone(), true),
+        Channel::RawData(col) => (col.get(i), true),
     };
-    let mapped = match scale {
-        Some(s) => s.map(&raw),
-        None => raw,
+    let mapped = match (bypass, scale) {
+        (true, _) | (false, None) => raw,
+        (false, Some(s)) => s.map(&raw),
     };
     mapped.as_str().map(str::to_owned)
 }
@@ -464,14 +468,16 @@ fn resolve_bool_or_italic_string(
     scale: Option<&crate::plot::scale::Scale>,
     i: usize,
 ) -> bool {
-    let raw = match channel {
+    let (raw, bypass) = match channel {
         None => return false,
-        Some(Channel::Constant(v)) => v.clone(),
-        Some(Channel::Data(col)) => col.get(i),
+        Some(Channel::Constant(v)) => (v.clone(), false),
+        Some(Channel::Data(col)) => (col.get(i), false),
+        Some(Channel::RawConstant(v)) => (v.clone(), true),
+        Some(Channel::RawData(col)) => (col.get(i), true),
     };
-    let mapped = match scale {
-        Some(s) => s.map(&raw),
-        None => raw,
+    let mapped = match (bypass, scale) {
+        (true, _) | (false, None) => raw,
+        (false, Some(s)) => s.map(&raw),
     };
     match mapped {
         Value::Bool(b) => b,

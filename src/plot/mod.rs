@@ -36,7 +36,7 @@ pub use diff::{diff_columns, diff_positional, KeyIndex};
 pub use geom::TextGeom;
 pub use geom::{
     linetype, BuildableGeom, Channel, ChannelDecl, EllipseGeom, ExpectedOutput, Geom, GeomBuilder,
-    GeomContext, Keys, LineGeom, PointGeom, PolygonGeom, RectGeom, ScaleResolver, SegmentGeom,
+    GeomContext, Keys, LineGeom, PointGeom, PolygonGeom, Raw, RectGeom, ScaleResolver, SegmentGeom,
     WedgeGeom,
 };
 pub use plot::{GeomId, Plot};

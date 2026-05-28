@@ -221,7 +221,7 @@ impl BuildableGeom for LineGeom {
 
 fn validate_linetype_channel(ch: &Channel) {
     match ch {
-        Channel::Constant(Value::Linetype(p)) => {
+        Channel::Constant(Value::Linetype(p)) | Channel::RawConstant(Value::Linetype(p)) => {
             if p.len() % 2 != 0 {
                 panic!(
                     "LineGeom::build: \"linetype\" array has odd length {}; \
@@ -230,8 +230,8 @@ fn validate_linetype_channel(ch: &Channel) {
                 );
             }
         }
-        Channel::Constant(_) => {} // non-Linetype constant — resolved at draw time
-        Channel::Data(DataColumn::Linetype(v)) => {
+        Channel::Constant(_) | Channel::RawConstant(_) => {} // non-Linetype constant — resolved at draw time
+        Channel::Data(DataColumn::Linetype(v)) | Channel::RawData(DataColumn::Linetype(v)) => {
             for (i, p) in v.iter().enumerate() {
                 if p.len() % 2 != 0 {
                     panic!(
@@ -242,7 +242,7 @@ fn validate_linetype_channel(ch: &Channel) {
                 }
             }
         }
-        Channel::Data(_) => {} // non-Linetype column — resolved at draw time
+        Channel::Data(_) | Channel::RawData(_) => {} // non-Linetype column — resolved at draw time
     }
 }
 
@@ -327,8 +327,8 @@ impl Geom for LineGeom {
             return;
         }
 
-        let x_scale = ctx.scale_for("x");
-        let y_scale = ctx.scale_for("y");
+        let x_scale_bound = ctx.scale_for("x");
+        let y_scale_bound = ctx.scale_for("y");
         let stroke_scale = ctx.scale_for("stroke");
         let stroke_opacity_scale = ctx.scale_for("stroke_opacity");
         let linewidth_scale = ctx.scale_for("linewidth");
@@ -343,12 +343,14 @@ impl Geom for LineGeom {
         let y_band_scale = ctx.scale_for("y_band");
 
         let channels = &self.state.channels;
-        let x_col = match channels.get("x") {
-            Some(Channel::Data(c)) => c,
+        let (x_col, x_scale) = match channels.get("x") {
+            Some(Channel::Data(c)) => (c, x_scale_bound),
+            Some(Channel::RawData(c)) => (c, None),
             _ => return,
         };
-        let y_col = match channels.get("y") {
-            Some(Channel::Data(c)) => c,
+        let (y_col, y_scale) = match channels.get("y") {
+            Some(Channel::Data(c)) => (c, y_scale_bound),
+            Some(Channel::RawData(c)) => (c, None),
             _ => return,
         };
 

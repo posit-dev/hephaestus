@@ -83,15 +83,15 @@ impl GeomState {
     }
 
     /// Update a single channel in place. Length-validates data columns
-    /// against the current row count and marks the state dirty.
+    /// (scaled or raw) against the current row count and marks the
+    /// state dirty.
     pub fn set(&mut self, channel: impl Into<String>, value: impl Into<Channel>) {
         let name: String = channel.into();
         let value: Channel = value.into();
-        if let Channel::Data(col) = &value {
-            if col.len() != self.keys.len() {
+        if let Some(len) = value.data_len() {
+            if len != self.keys.len() {
                 panic!(
-                    "GeomState::set: \"{name}\" length {} does not match row count {}",
-                    col.len(),
+                    "GeomState::set: \"{name}\" length {len} does not match row count {}",
                     self.keys.len()
                 );
             }
@@ -180,25 +180,22 @@ pub fn require_data_column<'a>(
     geom_label: &str,
 ) -> &'a DataColumn {
     match channels.get(name) {
-        Some(Channel::Data(c)) => c,
-        Some(Channel::Constant(_)) => panic!(
+        Some(Channel::Data(c)) | Some(Channel::RawData(c)) => c,
+        Some(Channel::Constant(_)) | Some(Channel::RawConstant(_)) => panic!(
             "{geom_label}::build: \"{name}\" must be data, not constant — positions vary per row"
         ),
         None => panic!("{geom_label}::build: missing required channel \"{name}\""),
     }
 }
 
-/// Validate that every data channel in `channels` has length `n`. Panics
-/// on mismatch with a geom-labelled message identifying the offending
-/// channel.
+/// Validate that every data channel in `channels` (scaled or raw) has
+/// length `n`. Panics on mismatch with a geom-labelled message
+/// identifying the offending channel.
 pub fn validate_channel_lengths(channels: &HashMap<String, Channel>, n: usize, geom_label: &str) {
     for (name, ch) in channels {
-        if let Channel::Data(col) = ch {
-            if col.len() != n {
-                panic!(
-                    "{geom_label}::build: \"{name}\" length {} does not match row count {n}",
-                    col.len()
-                );
+        if let Some(len) = ch.data_len() {
+            if len != n {
+                panic!("{geom_label}::build: \"{name}\" length {len} does not match row count {n}");
             }
         }
     }
@@ -229,8 +226,8 @@ pub fn validate_pick_id_channel(channels: &HashMap<String, Channel>, geom_label:
     }
     };
     match ch {
-        Channel::Constant(v) => check(v, "constant"),
-        Channel::Data(col) => {
+        Channel::Constant(v) | Channel::RawConstant(v) => check(v, "constant"),
+        Channel::Data(col) | Channel::RawData(col) => {
             for i in 0..col.len() {
                 check(&col.get(i), "data column");
             }
@@ -273,6 +270,8 @@ fn empty_channels_like(channels: &HashMap<String, Channel>) -> HashMap<String, C
             let prev = match ch {
                 Channel::Constant(v) => Channel::Constant(v.clone()),
                 Channel::Data(col) => Channel::Data(empty_datacolumn_like(col)),
+                Channel::RawConstant(v) => Channel::RawConstant(v.clone()),
+                Channel::RawData(col) => Channel::RawData(empty_datacolumn_like(col)),
             };
             (name.clone(), prev)
         })

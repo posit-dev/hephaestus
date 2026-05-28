@@ -148,10 +148,10 @@ impl Geom for RectGeom {
             return;
         }
 
-        let x_scale = ctx.scale_for("x");
-        let y_scale = ctx.scale_for("y");
-        let x2_scale = ctx.scale_for("x2").or(x_scale);
-        let y2_scale = ctx.scale_for("y2").or(y_scale);
+        let x_scale_bound = ctx.scale_for("x");
+        let y_scale_bound = ctx.scale_for("y");
+        let x2_scale_bound = ctx.scale_for("x2").or(x_scale_bound);
+        let y2_scale_bound = ctx.scale_for("y2").or(y_scale_bound);
         let x_offset_scale = ctx.scale_for("x_offset");
         let y_offset_scale = ctx.scale_for("y_offset");
         let x2_offset_scale = ctx.scale_for("x2_offset");
@@ -173,20 +173,24 @@ impl Geom for RectGeom {
         let pick_id_scale = ctx.scale_for("pick_id");
 
         let channels = &self.state.channels;
-        let x_col = match channels.get("x") {
-            Some(Channel::Data(c)) => c,
+        let (x_col, x_scale) = match channels.get("x") {
+            Some(Channel::Data(c)) => (c, x_scale_bound),
+            Some(Channel::RawData(c)) => (c, None),
             _ => return,
         };
-        let y_col = match channels.get("y") {
-            Some(Channel::Data(c)) => c,
+        let (y_col, y_scale) = match channels.get("y") {
+            Some(Channel::Data(c)) => (c, y_scale_bound),
+            Some(Channel::RawData(c)) => (c, None),
             _ => return,
         };
-        let x2_col = match channels.get("x2") {
-            Some(Channel::Data(c)) => c,
+        let (x2_col, x2_scale) = match channels.get("x2") {
+            Some(Channel::Data(c)) => (c, x2_scale_bound),
+            Some(Channel::RawData(c)) => (c, None),
             _ => return,
         };
-        let y2_col = match channels.get("y2") {
-            Some(Channel::Data(c)) => c,
+        let (y2_col, y2_scale) = match channels.get("y2") {
+            Some(Channel::Data(c)) => (c, y2_scale_bound),
+            Some(Channel::RawData(c)) => (c, None),
             _ => return,
         };
 

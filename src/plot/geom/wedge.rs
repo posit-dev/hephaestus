@@ -166,8 +166,8 @@ impl Geom for WedgeGeom {
             return;
         }
 
-        let x_scale = ctx.scale_for("x");
-        let y_scale = ctx.scale_for("y");
+        let x_scale_bound = ctx.scale_for("x");
+        let y_scale_bound = ctx.scale_for("y");
         let x_offset_scale = ctx.scale_for("x_offset");
         let y_offset_scale = ctx.scale_for("y_offset");
         let x_band_scale = ctx.scale_for("x_band");
@@ -190,12 +190,14 @@ impl Geom for WedgeGeom {
         let pick_id_scale = ctx.scale_for("pick_id");
 
         let channels = &self.state.channels;
-        let x_col = match channels.get("x") {
-            Some(Channel::Data(c)) => c,
+        let (x_col, x_scale) = match channels.get("x") {
+            Some(Channel::Data(c)) => (c, x_scale_bound),
+            Some(Channel::RawData(c)) => (c, None),
             _ => return,
         };
-        let y_col = match channels.get("y") {
-            Some(Channel::Data(c)) => c,
+        let (y_col, y_scale) = match channels.get("y") {
+            Some(Channel::Data(c)) => (c, y_scale_bound),
+            Some(Channel::RawData(c)) => (c, None),
             _ => return,
         };
 

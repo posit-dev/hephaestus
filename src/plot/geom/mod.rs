@@ -58,29 +58,66 @@ pub use wedge::WedgeGeom;
 
 // ─── Channel ─────────────────────────────────────────────────────────────────
 
-/// A geom channel — either a single constant value applied to every row,
-/// or a typed columnar data series with one value per row.
+/// A geom channel — a single constant value applied to every row, or a
+/// typed columnar data series with one value per row. The `Raw*`
+/// variants bypass any [`Scale`] bound to the channel name, letting
+/// callers supply values that are already in the output type the geom
+/// expects (panel fraction for positions, [`Color`] for colors, pt for
+/// sizes, dash-pattern for linetype, etc.).
+///
+/// The default scaled variants are produced by the `Into<Channel>`
+/// blanket on scalars and `Vec<T>`. The unscaled variants are produced
+/// by wrapping the value in [`Raw`]: `Raw(0.5_f64)` →
+/// `Channel::RawConstant`, `Raw(vec![0.1, 0.5, 0.9])` →
+/// `Channel::RawData`.
 #[derive(Clone, Debug)]
 pub enum Channel {
     Constant(Value),
     Data(DataColumn),
+    /// A constant value, **bypassing** any scale bound to the channel
+    /// name. Used as-is at draw time — must already be in the output
+    /// type the geom expects (e.g. a panel fraction in `[0, 1]` for a
+    /// position channel, or a [`Color`] for a color channel). Values
+    /// outside the usual range are accepted; positions outside `[0, 1]`
+    /// produce drawing outside the panel that the panel clip handles.
+    RawConstant(Value),
+    /// A per-row column, **bypassing** any scale bound to the channel
+    /// name. Each row's value is used as-is at draw time. Same
+    /// output-type contract as [`Channel::RawConstant`].
+    RawData(DataColumn),
 }
 
 impl Channel {
-    /// `true` if this channel is data-bound (one value per row).
+    /// `true` if this channel carries per-row data (scaled or raw).
     pub fn is_data(&self) -> bool {
-        matches!(self, Channel::Data(_))
+        matches!(self, Channel::Data(_) | Channel::RawData(_))
     }
 
-    /// Length of the data column if this is a [`Channel::Data`]; `None`
-    /// for [`Channel::Constant`].
+    /// Length of the data column if this is a per-row variant; `None`
+    /// for the constant variants.
     pub fn data_len(&self) -> Option<usize> {
         match self {
-            Channel::Constant(_) => None,
-            Channel::Data(c) => Some(c.len()),
+            Channel::Constant(_) | Channel::RawConstant(_) => None,
+            Channel::Data(c) | Channel::RawData(c) => Some(c.len()),
         }
     }
 }
+
+/// Marker wrapper that turns the inner value into a scale-bypassing
+/// [`Channel::RawConstant`] / [`Channel::RawData`] via `Into<Channel>`.
+///
+/// ```ignore
+/// PointGeom::builder()
+///     .set("x", xs)                      // scaled through "x" binding
+///     .set("y", Raw(prescaled_y_fracs))  // bypass the "y" binding
+///     .set("fill", Raw(rgb8(220, 60, 60)))
+///     .build();
+/// ```
+///
+/// `Raw(vec![...])` produces a [`Channel::RawData`]; `Raw(scalar)`
+/// produces a [`Channel::RawConstant`].
+#[derive(Clone, Debug)]
+pub struct Raw<T>(pub T);
 
 // ── `Into<Channel>` blanket — coerce Vecs to Data, scalars to Constant ──
 //
@@ -156,6 +193,78 @@ impl_channel_from_scalar!(Date);
 impl_channel_from_scalar!(DateTime);
 impl_channel_from_scalar!(Time);
 impl_channel_from_scalar!(Duration);
+
+// ── Raw<T> → Channel ──────────────────────────────────────────────────
+//
+// Mirrors the scaled `From` impls above but produces the `Raw*`
+// variants. Same coherence pattern — separate impls per concrete vec /
+// scalar type avoids the blanket overlap.
+
+impl From<Raw<DataColumn>> for Channel {
+    fn from(r: Raw<DataColumn>) -> Self {
+        Channel::RawData(r.0)
+    }
+}
+
+impl From<Raw<Value>> for Channel {
+    fn from(r: Raw<Value>) -> Self {
+        Channel::RawConstant(r.0)
+    }
+}
+
+macro_rules! impl_channel_from_raw_vec {
+    ($t:ty) => {
+        impl From<Raw<Vec<$t>>> for Channel {
+            fn from(r: Raw<Vec<$t>>) -> Self {
+                Channel::RawData(r.0.into())
+            }
+        }
+    };
+}
+
+impl_channel_from_raw_vec!(f64);
+impl_channel_from_raw_vec!(f32);
+impl_channel_from_raw_vec!(i32);
+impl_channel_from_raw_vec!(i64);
+impl_channel_from_raw_vec!(bool);
+impl_channel_from_raw_vec!(&'static str);
+impl_channel_from_raw_vec!(String);
+impl_channel_from_raw_vec!(Arc<str>);
+impl_channel_from_raw_vec!(Color);
+impl_channel_from_raw_vec!(Date);
+impl_channel_from_raw_vec!(DateTime);
+impl_channel_from_raw_vec!(Time);
+impl_channel_from_raw_vec!(Duration);
+
+impl From<Raw<std::ops::Range<i64>>> for Channel {
+    fn from(r: Raw<std::ops::Range<i64>>) -> Self {
+        Channel::RawData(r.0.into())
+    }
+}
+
+macro_rules! impl_channel_from_raw_scalar {
+    ($t:ty) => {
+        impl From<Raw<$t>> for Channel {
+            fn from(r: Raw<$t>) -> Self {
+                Channel::RawConstant(Value::from(r.0))
+            }
+        }
+    };
+}
+
+impl_channel_from_raw_scalar!(f64);
+impl_channel_from_raw_scalar!(f32);
+impl_channel_from_raw_scalar!(i32);
+impl_channel_from_raw_scalar!(i64);
+impl_channel_from_raw_scalar!(bool);
+impl_channel_from_raw_scalar!(&'static str);
+impl_channel_from_raw_scalar!(String);
+impl_channel_from_raw_scalar!(Arc<str>);
+impl_channel_from_raw_scalar!(Color);
+impl_channel_from_raw_scalar!(Date);
+impl_channel_from_raw_scalar!(DateTime);
+impl_channel_from_raw_scalar!(Time);
+impl_channel_from_raw_scalar!(Duration);
 
 // ─── ChannelDecl ─────────────────────────────────────────────────────────────
 
@@ -590,5 +699,36 @@ mod tests {
     fn vec_color_into_channel_is_data() {
         let c: Channel = vec![Color::new([1.0, 0.0, 0.0, 1.0])].into();
         assert!(matches!(c, Channel::Data(_)));
+    }
+
+    // ── Raw<T> → Channel ──
+
+    #[test]
+    fn raw_scalar_into_channel_is_raw_constant() {
+        let c: Channel = Raw(5.0_f64).into();
+        assert!(matches!(c, Channel::RawConstant(_)));
+        assert!(!c.is_data());
+        assert!(c.data_len().is_none());
+    }
+
+    #[test]
+    fn raw_vec_into_channel_is_raw_data() {
+        let c: Channel = Raw(vec![0.1_f64, 0.5, 0.9]).into();
+        assert!(matches!(c, Channel::RawData(_)));
+        assert!(c.is_data());
+        assert_eq!(c.data_len(), Some(3));
+    }
+
+    #[test]
+    fn raw_color_into_channel_is_raw_constant() {
+        let c: Channel = Raw(Color::new([1.0, 0.0, 0.0, 1.0])).into();
+        assert!(matches!(c, Channel::RawConstant(_)));
+    }
+
+    #[test]
+    fn raw_str_vec_into_channel_is_raw_data() {
+        let c: Channel = Raw(vec!["a", "b"]).into();
+        assert!(matches!(c, Channel::RawData(_)));
+        assert_eq!(c.data_len(), Some(2));
     }
 }

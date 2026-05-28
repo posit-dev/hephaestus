@@ -49,16 +49,23 @@ pub(crate) fn resolve_position(raw: Value, scale: Option<&Scale>, band_offset: f
 /// Read the raw `Value` at row `i` from a channel and run it through an
 /// optional scale. Returns `None` if `channel` itself is `None` (channel
 /// unset) — distinct from the scale producing `Value::Null`.
+///
+/// `Channel::Raw*` variants bypass the scale: the wrapped value flows
+/// through as-is, regardless of whether a scale is bound to the
+/// channel name. This lets callers draw with pre-computed output-unit
+/// values (panel fractions, colours, pt sizes) on a plot whose
+/// channels otherwise use scales.
 fn resolve_value(channel: Option<&Channel>, scale: Option<&Scale>, i: usize) -> Option<Value> {
-    let raw = match channel? {
-        Channel::Constant(v) => v.clone(),
-        Channel::Data(col) => col.get(i),
+    let (raw, bypass_scale) = match channel? {
+        Channel::Constant(v) => (v.clone(), false),
+        Channel::Data(col) => (col.get(i), false),
+        Channel::RawConstant(v) => (v.clone(), true),
+        Channel::RawData(col) => (col.get(i), true),
     };
-    let mapped = match scale {
-        Some(s) => s.map(&raw),
-        None => raw,
-    };
-    Some(mapped)
+    Some(match (bypass_scale, scale) {
+        (true, _) | (false, None) => raw,
+        (false, Some(s)) => s.map(&raw),
+    })
 }
 
 /// Resolve a colour channel. Returns `None` when unset or when the
