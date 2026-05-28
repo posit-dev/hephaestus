@@ -27,12 +27,30 @@
 //! - `"fill"`, `"fill_opacity"`, `"stroke"`, `"stroke_opacity"`,
 //!   `"linewidth"`, `"linetype"`, `"dash_offset"`, `"cap"`, `"join"` —
 //!   per-mark styling, resolved at the mark's first row.
+//! - `"expand"` — signed pt offset applied to every ring of the mark
+//!   (per-mark; default `0.0`). Positive grows outward, negative
+//!   contracts inward; holes are offset in the opposite direction
+//!   automatically. Backed by `clipper2`'s Miter-join offset with a
+//!   default miter clamp of 4.0. Output may contain more rings than
+//!   input (an inward offset can split a "dumbbell") or fewer (a hole
+//!   may collapse).
+//! - `"corner_radius"` — fillet size in pt applied at each vertex of
+//!   every ring after `"expand"` (per-mark; default `0.0`). Maps to
+//!   [`CornerRounding::max_cut`](crate::primitives::CornerRounding);
+//!   the cut is clamped to half the shorter adjacent edge.
+//!
+//! Order matters: `"expand"` is applied **before** `"corner_radius"`.
+//! Offsetting an already-filleted polygon would treat the existing
+//! arcs as polylines and bake them into the new outline; rounding the
+//! offset result is what users typically want ("inset by 4pt, then
+//! round the result").
 
 use crate::brush::Brush;
 use crate::geometry::{Affine, Point};
 use crate::path::{FillRule, Path};
 use crate::plot::diff::{diff_columns, diff_positional, KeyIndex};
 use crate::plot::value::{DataColumn, Value};
+use crate::primitives::{offset_polygon, round_corners, CornerRounding};
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
 
@@ -55,6 +73,11 @@ use super::{
 const DEFAULT_LINEWIDTH_PT: f64 = 1.0;
 const DEFAULT_CAP: Cap = Cap::Butt;
 const DEFAULT_JOIN: Join = Join::Miter;
+/// Miter clamp ratio passed to Clipper2 for `"expand"` offsets. Matches
+/// SVG's default `stroke-miterlimit`. Not user-configurable in v1.5; drop
+/// to `primitives::offset_polygon` directly if a different clamp is
+/// needed.
+const MITER_LIMIT: f64 = 4.0;
 
 const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("x", ExpectedOutput::Numbers),
@@ -73,6 +96,9 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("dash_offset", ExpectedOutput::Numbers),
     ("cap", ExpectedOutput::Strings),
     ("join", ExpectedOutput::Strings),
+    ("expand", ExpectedOutput::Numbers),
+    ("corner_radius", ExpectedOutput::Numbers),
+    ("corner_max_angle", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
 ];
 
@@ -342,6 +368,9 @@ impl Geom for PolygonGeom {
         let cap_scale = ctx.scale_for("cap");
         let join_scale = ctx.scale_for("join");
         let pick_id_scale = ctx.scale_for("pick_id");
+        let expand_scale = ctx.scale_for("expand");
+        let corner_radius_scale = ctx.scale_for("corner_radius");
+        let corner_max_angle_scale = ctx.scale_for("corner_max_angle");
 
         let channels = &self.state.channels;
         let (x_col, x_scale) = match channels.get("x") {
@@ -368,6 +397,9 @@ impl Geom for PolygonGeom {
         let cap_ch = channels.get("cap");
         let join_ch = channels.get("join");
         let pick_id_ch = channels.get("pick_id");
+        let expand_ch = channels.get("expand");
+        let corner_radius_ch = channels.get("corner_radius");
+        let corner_max_angle_ch = channels.get("corner_max_angle");
 
         for mark in marks.iter() {
             let i0 = mark.first_row;
@@ -384,9 +416,21 @@ impl Geom for PolygonGeom {
                 continue;
             }
 
-            // Build the combined path: one closed sub-path per ring.
-            let mut path = Path::new();
-            let mut any_rings_emitted = false;
+            // Resolve per-mark expand + corner_radius once.
+            let expand_pt = resolve_number_channel_or(expand_ch, expand_scale, i0, 0.0);
+            let expand_px = pt_to_px(expand_pt, ctx.dpi);
+            let corner_radius_pt =
+                resolve_number_channel_or(corner_radius_ch, corner_radius_scale, i0, 0.0);
+            let corner_radius_px = pt_to_px(corner_radius_pt, ctx.dpi);
+            let corner_max_angle_deg = resolve_number_channel_or(
+                corner_max_angle_ch,
+                corner_max_angle_scale,
+                i0,
+                f64::INFINITY,
+            );
+
+            // First pass: build vertex sequences for every ring.
+            let mut rings_pts: Vec<Vec<Point>> = Vec::with_capacity(mark.rings.len());
             for ring in &mark.rings {
                 let mut points: Vec<Point> = Vec::with_capacity(ring.len());
                 for &i in ring {
@@ -407,14 +451,48 @@ impl Geom for PolygonGeom {
                     }
                     points.push(Point::new(px, py));
                 }
-                if points.len() < 3 {
+                if points.len() >= 3 {
+                    rings_pts.push(points);
+                }
+            }
+            if rings_pts.is_empty() {
+                continue;
+            }
+
+            // Order is fixed: expand first, then corner rounding. Insetting
+            // a polygon with already-filleted corners produces an inset
+            // path whose old fillets are now lines plus a fresh inset
+            // shape with sharp corners — visually wrong. Offsetting first
+            // and rounding the offset rings gives the intuitive result.
+            let offset_rings: Vec<Vec<Point>> = if expand_px != 0.0 && expand_px.is_finite() {
+                let refs: Vec<&[Point]> = rings_pts.iter().map(|r| r.as_slice()).collect();
+                offset_polygon(&refs, expand_px, MITER_LIMIT)
+            } else {
+                rings_pts
+            };
+
+            let mut path = Path::new();
+            let mut any_rings_emitted = false;
+            for ring in &offset_rings {
+                if ring.len() < 3 {
                     continue;
                 }
-                path.move_to(points[0]);
-                for p in &points[1..] {
-                    path.line_to(*p);
+                if corner_radius_px > 0.0 {
+                    let opts = CornerRounding {
+                        max_cut: corner_radius_px,
+                        max_angle_deg: corner_max_angle_deg,
+                    };
+                    let sub = round_corners(ring, true, opts);
+                    for el in sub.iter() {
+                        path.push(el);
+                    }
+                } else {
+                    path.move_to(ring[0]);
+                    for p in &ring[1..] {
+                        path.line_to(*p);
+                    }
+                    path.close_path();
                 }
-                path.close_path();
                 any_rings_emitted = true;
             }
             if !any_rings_emitted {
@@ -497,7 +575,7 @@ mod tests {
 
     use crate::color::Color;
     use crate::geometry::Rect;
-    use crate::plot::geom::DirectScaleResolver;
+    use crate::plot::geom::{DirectScaleResolver, Raw};
     use crate::scene::recording::{Op, RecordingScene};
 
     fn shapes() -> crate::shape::ShapeRegistry {
@@ -883,5 +961,109 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted);
+    }
+
+    // ── corner_radius / expand ──
+
+    fn fill_path(scene: &RecordingScene) -> Option<crate::path::Path> {
+        scene.ops.iter().find_map(|op| match op {
+            Op::Fill { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn corner_radius_produces_fillets_per_corner() {
+        // Unit square (4 corners) drawn via Raw fractions, with
+        // corner_radius set → 4 fillets in the resulting path.
+        let mut g = PolygonGeom::builder()
+            .set("x", Raw(vec![0.2_f64, 0.8, 0.8, 0.2]))
+            .set("y", Raw(vec![0.2_f64, 0.2, 0.8, 0.8]))
+            .set("fill", red())
+            .set("corner_radius", 5.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let path = fill_path(&scene).expect("fill");
+        let curves = path
+            .elements()
+            .iter()
+            .filter(|el| matches!(el, kurbo::PathEl::CurveTo(_, _, _)))
+            .count();
+        assert_eq!(curves, 4);
+    }
+
+    #[test]
+    fn expand_grows_polygon_bbox() {
+        // Square 60×60 at panel fractions 0.2..0.8 → 20..80 px on a
+        // 100-px panel, so bbox is 60 wide. expand = 5pt (≈ 6.67px at
+        // 96 dpi) grows each side outward → bbox 60 + 2*6.67 ≈ 73.33.
+        use kurbo::Shape;
+        let mut g = PolygonGeom::builder()
+            .set("x", Raw(vec![0.2_f64, 0.8, 0.8, 0.2]))
+            .set("y", Raw(vec![0.2_f64, 0.2, 0.8, 0.8]))
+            .set("fill", red())
+            .set("expand", 5.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let path = fill_path(&scene).expect("fill");
+        let bb = path.bounding_box();
+        let expected_width = 60.0 + 2.0 * 5.0 * 96.0 / 72.0;
+        assert!(
+            (bb.width() - expected_width).abs() < 0.5,
+            "width = {}, expected ~{}",
+            bb.width(),
+            expected_width
+        );
+    }
+
+    #[test]
+    fn expand_then_corner_radius_order_is_fixed() {
+        // expand first → corner_radius applied to the expanded
+        // outline. The test just verifies the combination doesn't
+        // panic and the output has curves (from rounding) plus a
+        // bbox at least as large as the un-expanded original.
+        use kurbo::Shape;
+        let mut g = PolygonGeom::builder()
+            .set("x", Raw(vec![0.2_f64, 0.8, 0.8, 0.2]))
+            .set("y", Raw(vec![0.2_f64, 0.2, 0.8, 0.8]))
+            .set("fill", red())
+            .set("expand", 5.0_f64)
+            .set("corner_radius", 3.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let path = fill_path(&scene).expect("fill");
+        let curves = path
+            .elements()
+            .iter()
+            .filter(|el| matches!(el, kurbo::PathEl::CurveTo(_, _, _)))
+            .count();
+        assert!(
+            curves >= 4,
+            "expected ≥ 4 curves after expand+round, got {curves}"
+        );
+        let bb = path.bounding_box();
+        // Outer bbox should at least cover the expanded edges.
+        assert!(bb.width() > 65.0, "width = {}", bb.width());
     }
 }

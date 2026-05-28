@@ -47,6 +47,21 @@
 //! - `"fill"`, `"fill_opacity"`, `"stroke"`, `"stroke_opacity"`,
 //!   `"linewidth"`, `"linetype"`, `"dash_offset"`, `"cap"`, `"join"` —
 //!   same styling set as RectGeom.
+//! - `"expand"` — signed pt amount that grows (positive) or shrinks
+//!   (negative) the wedge boundary perpendicular to itself in every
+//!   direction (true polygon offset, not a radius tweak). The outer
+//!   arc moves outward, the inner arc — when present — moves inward
+//!   so the ring grows in thickness, and the radial sides shift
+//!   outward perpendicular to themselves. Backed by clipper's
+//!   `offset_polygon` with a Miter join (clamp 4.0). The arcs are
+//!   flattened to a sub-pixel polygon before offsetting, so an
+//!   expanded wedge has a polygonal (but visually smooth) boundary.
+//!   Default `0.0`. Applied before `"corner_radius"`.
+//! - `"corner_radius"` — fillet size in pt at each corner of the wedge
+//!   path. For a solid wedge that's three corners (the centre vertex
+//!   and the two radial-to-arc junctions); for an annular wedge it's
+//!   the four arc-to-radial junctions. Default `0.0`. Maps to
+//!   [`CornerRounding::max_cut`](crate::primitives::CornerRounding).
 //!
 //! Default `(theta = 0, theta2 = TAU)` makes a wedge with no angle
 //! channels set degenerate into a full circle of `radius`.
@@ -60,7 +75,10 @@ use std::f64::consts::TAU;
 use crate::brush::Brush;
 use crate::geometry::{Affine, Point};
 use crate::path::FillRule;
-use crate::primitives::{annular_wedge as annular_wedge_path, wedge as wedge_path};
+use crate::primitives::{
+    annular_wedge as annular_wedge_path, offset_polygon, path_to_rings, round_path_corners,
+    wedge as wedge_path, CornerRounding,
+};
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
 
@@ -80,6 +98,14 @@ use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomConte
 const DEFAULT_LINEWIDTH_PT: f64 = 1.0;
 const DEFAULT_CAP: Cap = Cap::Butt;
 const DEFAULT_JOIN: Join = Join::Miter;
+/// Flatten tolerance used before `offset_polygon` when `"expand"` is
+/// set. Matches the primitive module's `CURVE_TOLERANCE`. Sub-pixel
+/// segment deviation, visually indistinguishable from the curve at
+/// typical scales.
+const WEDGE_OFFSET_TOL: f64 = 0.1;
+/// Miter clamp ratio for `"expand"` offsets. Same default as PolygonGeom
+/// and SVG's `stroke-miterlimit`.
+const MITER_LIMIT: f64 = 4.0;
 
 const DEFAULT_RADIUS2_PT: f64 = 0.0;
 const DEFAULT_THETA: f64 = 0.0;
@@ -107,6 +133,9 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("dash_offset", ExpectedOutput::Numbers),
     ("cap", ExpectedOutput::Strings),
     ("join", ExpectedOutput::Strings),
+    ("expand", ExpectedOutput::Numbers),
+    ("corner_radius", ExpectedOutput::Numbers),
+    ("corner_max_angle", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
 ];
 
@@ -188,6 +217,9 @@ impl Geom for WedgeGeom {
         let cap_scale = ctx.scale_for("cap");
         let join_scale = ctx.scale_for("join");
         let pick_id_scale = ctx.scale_for("pick_id");
+        let expand_scale = ctx.scale_for("expand");
+        let corner_radius_scale = ctx.scale_for("corner_radius");
+        let corner_max_angle_scale = ctx.scale_for("corner_max_angle");
 
         let channels = &self.state.channels;
         let (x_col, x_scale) = match channels.get("x") {
@@ -221,6 +253,9 @@ impl Geom for WedgeGeom {
         let cap_ch = channels.get("cap");
         let join_ch = channels.get("join");
         let pick_id_ch = channels.get("pick_id");
+        let expand_ch = channels.get("expand");
+        let corner_radius_ch = channels.get("corner_radius");
+        let corner_max_angle_ch = channels.get("corner_max_angle");
 
         for i in 0..n {
             let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
@@ -298,10 +333,69 @@ impl Geom for WedgeGeom {
             }
 
             let centre = Point::new(cx, cy);
-            let path = if radius2_px > 0.0 {
+            let base_path = if radius2_px > 0.0 {
                 annular_wedge_path(centre, radius2_px, radius_px, prim_start, prim_sweep)
             } else {
                 wedge_path(centre, radius_px, prim_start, prim_sweep)
+            };
+
+            // `expand` runs through clipper's polygon offset so the
+            // wedge boundary moves outward in every direction: the
+            // outer arc grows, the inner arc (annular) shrinks, and
+            // the radial sides shift perpendicular to themselves. A
+            // pure radius adjustment would leave the radial sides
+            // anchored at the centre, which doesn't match the
+            // "uniform-thickness halo" mental model. Cost: the arcs
+            // are flattened to a polygon approximation at
+            // `WEDGE_OFFSET_TOL` (0.1 px) before offsetting.
+            let expand_pt = resolve_number_channel_or(expand_ch, expand_scale, i, 0.0);
+            let expand_px = pt_to_px(expand_pt, ctx.dpi);
+            let path = if expand_px != 0.0 && expand_px.is_finite() {
+                let rings = path_to_rings(&base_path, WEDGE_OFFSET_TOL);
+                let refs: Vec<&[Point]> = rings.iter().map(|r| r.as_slice()).collect();
+                let offset_rings = offset_polygon(&refs, expand_px, MITER_LIMIT);
+                let mut p = crate::path::Path::new();
+                for ring in &offset_rings {
+                    if ring.len() < 3 {
+                        continue;
+                    }
+                    p.move_to(ring[0]);
+                    for v in &ring[1..] {
+                        p.line_to(*v);
+                    }
+                    p.close_path();
+                }
+                if p.is_empty() {
+                    continue;
+                }
+                p
+            } else {
+                base_path
+            };
+
+            // Corner rounding applies to every join in the path.
+            // `round_path_corners` handles line+arc joins so an
+            // unexpanded wedge keeps its curved boundary; an expanded
+            // wedge is already polygonalised by `path_to_rings`, so
+            // rounding produces fillets at every flattened-arc
+            // vertex (visually identical to a smooth fillet at typical
+            // viewing scale because the segments are sub-pixel).
+            let corner_radius_pt =
+                resolve_number_channel_or(corner_radius_ch, corner_radius_scale, i, 0.0);
+            let path = if corner_radius_pt > 0.0 {
+                let max_angle_deg = resolve_number_channel_or(
+                    corner_max_angle_ch,
+                    corner_max_angle_scale,
+                    i,
+                    f64::INFINITY,
+                );
+                let opts = CornerRounding {
+                    max_cut: pt_to_px(corner_radius_pt, ctx.dpi),
+                    max_angle_deg,
+                };
+                round_path_corners(&path, opts)
+            } else {
+                path
             };
 
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
@@ -910,5 +1004,93 @@ mod tests {
         // Centre 50 + 12 = 62, radius 32 → x0 ≈ 30, x1 ≈ 94.
         let cx = (bb.x0 + bb.x1) * 0.5;
         assert!((cx - 62.0).abs() < 1e-3, "cx = {cx}");
+    }
+
+    // ── corner_radius / expand ──
+
+    #[test]
+    fn corner_radius_adds_curves_to_wedge() {
+        // A solid wedge has 3 corners (centre vertex + 2 arc-to-side
+        // junctions). round_path_corners produces a cubic fillet at
+        // each.
+        let g = WedgeGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("radius", vec![20.0_f64])
+            .set("theta", vec![0.0_f64])
+            .set("theta2", vec![std::f64::consts::FRAC_PI_2])
+            .set("fill", red())
+            .set("corner_radius", 4.0_f64)
+            .build();
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        // Count CurveTo elements in the fill path.
+        let curves = scene
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Fill { path, .. } => Some(
+                    path.elements()
+                        .iter()
+                        .filter(|el| matches!(el, kurbo::PathEl::CurveTo(_, _, _)))
+                        .count(),
+                ),
+                _ => None,
+            })
+            .expect("fill");
+        // At least 3 fillets (one per corner) plus the arc segments
+        // (cubics from kurbo's Arc::to_path). So curves ≥ 3.
+        assert!(curves >= 3, "expected ≥ 3 curves, got {curves}");
+    }
+
+    #[test]
+    fn expand_grows_wedge_outward() {
+        // Wedge with radius 20pt at centre (0.5, 0.5) on a 100×100
+        // panel. Without expand: bbox extends ~26.67 px from centre.
+        // With expand = 6pt (≈8 px), bbox grows by ~8 px in each
+        // direction. `first_fill_bbox` already does the bbox math.
+        let g_base = WedgeGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("radius", vec![20.0_f64])
+            .set("fill", red())
+            .build();
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut s1 = RecordingScene::default();
+        g_base.draw(
+            &mut s1,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let bb1 = first_fill_bbox(&s1).expect("fill");
+
+        let g_expanded = WedgeGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("radius", vec![20.0_f64])
+            .set("fill", red())
+            .set("expand", 6.0_f64)
+            .build();
+        let mut s2 = RecordingScene::default();
+        g_expanded.draw(
+            &mut s2,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let bb2 = first_fill_bbox(&s2).expect("fill expanded");
+        let expand_px = 6.0 * 96.0 / 72.0;
+        // bbox grew by ~expand_px in each direction (allow slack for
+        // polygonal approximation of the arc).
+        assert!(
+            bb2.width() - bb1.width() > 2.0 * expand_px - 1.0,
+            "expanded width {} vs base {} (expand_px = {})",
+            bb2.width(),
+            bb1.width(),
+            expand_px
+        );
     }
 }

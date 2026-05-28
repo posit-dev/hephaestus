@@ -19,7 +19,7 @@
 
 use crate::brush::Brush;
 use crate::geometry::{Affine, Point};
-use crate::primitives::segment as segment_path;
+use crate::primitives::{clip_polyline, segment as segment_path, EndClip};
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
 
@@ -60,6 +60,8 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("dash_offset", ExpectedOutput::Numbers),
     ("cap", ExpectedOutput::Strings),
     ("join", ExpectedOutput::Strings),
+    ("clip_start_radius", ExpectedOutput::Numbers),
+    ("clip_end_radius", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
 ];
 
@@ -143,6 +145,8 @@ impl Geom for SegmentGeom {
         let cap_scale = ctx.scale_for("cap");
         let join_scale = ctx.scale_for("join");
         let pick_id_scale = ctx.scale_for("pick_id");
+        let clip_start_radius_scale = ctx.scale_for("clip_start_radius");
+        let clip_end_radius_scale = ctx.scale_for("clip_end_radius");
 
         let channels = &self.state.channels;
         let (x_col, x_scale) = match channels.get("x") {
@@ -182,6 +186,8 @@ impl Geom for SegmentGeom {
         let cap_ch = channels.get("cap");
         let join_ch = channels.get("join");
         let pick_id_ch = channels.get("pick_id");
+        let clip_start_radius_ch = channels.get("clip_start_radius");
+        let clip_end_radius_ch = channels.get("clip_end_radius");
 
         for i in 0..n {
             let stroke_color = override_alpha(
@@ -241,7 +247,33 @@ impl Geom for SegmentGeom {
             let cap = resolve_cap_channel(cap_ch, cap_scale, i, DEFAULT_CAP);
             let join = resolve_join_channel(join_ch, join_scale, i, DEFAULT_JOIN);
 
-            let path = segment_path(Point::new(px, py), Point::new(px2, py2));
+            // Optional endpoint clipping by a circle at the segment's
+            // start / end. Trims the segment where it exits the circle;
+            // when the radius is ≥ the segment length the whole segment
+            // disappears (matches primitive behaviour).
+            let clip_start_pt =
+                resolve_number_channel_or(clip_start_radius_ch, clip_start_radius_scale, i, 0.0);
+            let clip_end_pt =
+                resolve_number_channel_or(clip_end_radius_ch, clip_end_radius_scale, i, 0.0);
+            let path = if clip_start_pt > 0.0 || clip_end_pt > 0.0 {
+                let p0 = Point::new(px, py);
+                let p1 = Point::new(px2, py2);
+                let start = (clip_start_pt > 0.0).then(|| EndClip::Circle {
+                    center: p0,
+                    radius: pt_to_px(clip_start_pt, ctx.dpi),
+                });
+                let end = (clip_end_pt > 0.0).then(|| EndClip::Circle {
+                    center: p1,
+                    radius: pt_to_px(clip_end_pt, ctx.dpi),
+                });
+                let pts = clip_polyline(&[p0, p1], start, end);
+                if pts.len() < 2 {
+                    continue;
+                }
+                segment_path(pts[0], pts[1])
+            } else {
+                segment_path(Point::new(px, py), Point::new(px2, py2))
+            };
             let stroke_spec = build_stroke(
                 linewidth_px,
                 cap,
@@ -291,7 +323,7 @@ mod tests {
 
     use crate::color::Color;
     use crate::geometry::Rect as GeomRect;
-    use crate::plot::geom::{linetype, DirectScaleResolver};
+    use crate::plot::geom::{linetype, DirectScaleResolver, Raw};
     use crate::plot::scale;
     use crate::plot::value::Value;
     use crate::scene::recording::{Op, RecordingScene};
@@ -642,5 +674,103 @@ mod tests {
             }
         }
         panic!("no stroke op");
+    }
+
+    // ── clip_start_radius / clip_end_radius ──
+
+    fn first_stroke_path(scene: &RecordingScene) -> Option<crate::path::Path> {
+        scene.ops.iter().find_map(|op| match op {
+            Op::Stroke { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn clip_start_radius_trims_segment_start() {
+        // Segment from (0, 50) to (100, 50). clip_start_radius = 15pt
+        // = 20 px → trimmed segment starts at (20, 50).
+        let g = SegmentGeom::builder()
+            .set("x", Raw(vec![0.0_f64]))
+            .set("y", Raw(vec![0.5_f64]))
+            .set("x2", Raw(vec![1.0_f64]))
+            .set("y2", Raw(vec![0.5_f64]))
+            .set("stroke", red())
+            .set("clip_start_radius", 15.0_f64)
+            .build();
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(GeomRect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let path = first_stroke_path(&scene).expect("stroke");
+        match path.elements().first() {
+            Some(kurbo::PathEl::MoveTo(p)) => {
+                let expected = 15.0 * 96.0 / 72.0;
+                assert!((p.x - expected).abs() < 1e-6, "start.x = {}", p.x);
+            }
+            other => panic!("expected MoveTo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clip_end_radius_trims_segment_end() {
+        let g = SegmentGeom::builder()
+            .set("x", Raw(vec![0.0_f64]))
+            .set("y", Raw(vec![0.5_f64]))
+            .set("x2", Raw(vec![1.0_f64]))
+            .set("y2", Raw(vec![0.5_f64]))
+            .set("stroke", red())
+            .set("clip_end_radius", 15.0_f64)
+            .build();
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(GeomRect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let path = first_stroke_path(&scene).expect("stroke");
+        // Last LineTo is the trimmed endpoint.
+        let last = path
+            .elements()
+            .iter()
+            .rev()
+            .find_map(|el| match el {
+                kurbo::PathEl::LineTo(p) => Some(*p),
+                _ => None,
+            })
+            .expect("LineTo");
+        let expected = 100.0 - 15.0 * 96.0 / 72.0;
+        assert!((last.x - expected).abs() < 1e-6, "end.x = {}", last.x);
+    }
+
+    #[test]
+    fn clip_radii_overlap_skips_segment() {
+        // 100-px segment with start+end clip radii summing to > segment
+        // length → no stroke emitted.
+        let g = SegmentGeom::builder()
+            .set("x", Raw(vec![0.0_f64]))
+            .set("y", Raw(vec![0.5_f64]))
+            .set("x2", Raw(vec![1.0_f64]))
+            .set("y2", Raw(vec![0.5_f64]))
+            .set("stroke", red())
+            .set("clip_start_radius", 80.0_f64)
+            .set("clip_end_radius", 80.0_f64)
+            .build();
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(GeomRect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let strokes = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .count();
+        assert_eq!(strokes, 0);
     }
 }

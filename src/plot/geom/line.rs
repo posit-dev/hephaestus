@@ -25,6 +25,16 @@
 //!   (per-mark; default `"butt"`).
 //! - `"join"` — line join style: `"miter"` / `"round"` / `"bevel"`
 //!   (per-mark; default `"miter"`).
+//! - `"corner_radius"` — fillet size in pt at each vertex of the
+//!   polyline (per-mark; default `0.0` — sharp corners). Maps to
+//!   [`CornerRounding::max_cut`](crate::primitives::CornerRounding); the
+//!   actual fillet is clamped to half the shorter adjacent segment.
+//! - `"clip_start_radius"` / `"clip_end_radius"` — circle clip radius
+//!   in pt at the polyline's first / last vertex (per-mark; default
+//!   `0.0` — no clip). When non-zero, the polyline is trimmed where it
+//!   exits a circle of that radius centred on the first / last vertex.
+//!   Use for arrowhead attachment or for trimming edges to node
+//!   boundaries in graph layouts.
 //!
 //! Per-mark channels resolve once per line: the geom takes the value at
 //! the *first row of the mark* (first row in source order whose key
@@ -42,7 +52,9 @@ use crate::brush::Brush;
 use crate::geometry::{Affine, Point};
 use crate::plot::diff::{diff_columns, diff_positional, KeyIndex};
 use crate::plot::value::{DataColumn, Value};
-use crate::primitives::{polyline, PolylineOptions};
+use crate::primitives::{
+    clip_polyline, polyline, round_corners, CornerRounding, EndClip, PolylineOptions,
+};
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
 
@@ -82,6 +94,10 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("dash_offset", ExpectedOutput::Numbers),
     ("cap", ExpectedOutput::Strings),
     ("join", ExpectedOutput::Strings),
+    ("corner_radius", ExpectedOutput::Numbers),
+    ("corner_max_angle", ExpectedOutput::Numbers),
+    ("clip_start_radius", ExpectedOutput::Numbers),
+    ("clip_end_radius", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
 ];
 
@@ -337,6 +353,10 @@ impl Geom for LineGeom {
         let cap_scale = ctx.scale_for("cap");
         let join_scale = ctx.scale_for("join");
         let pick_id_scale = ctx.scale_for("pick_id");
+        let corner_radius_scale = ctx.scale_for("corner_radius");
+        let corner_max_angle_scale = ctx.scale_for("corner_max_angle");
+        let clip_start_radius_scale = ctx.scale_for("clip_start_radius");
+        let clip_end_radius_scale = ctx.scale_for("clip_end_radius");
         let x_offset_scale = ctx.scale_for("x_offset");
         let y_offset_scale = ctx.scale_for("y_offset");
         let x_band_scale = ctx.scale_for("x_band");
@@ -362,6 +382,10 @@ impl Geom for LineGeom {
         let cap_ch = channels.get("cap");
         let join_ch = channels.get("join");
         let pick_id_ch = channels.get("pick_id");
+        let corner_radius_ch = channels.get("corner_radius");
+        let corner_max_angle_ch = channels.get("corner_max_angle");
+        let clip_start_radius_ch = channels.get("clip_start_radius");
+        let clip_end_radius_ch = channels.get("clip_end_radius");
         let x_offset_ch = channels.get("x_offset");
         let y_offset_ch = channels.get("y_offset");
         let x_band_ch = channels.get("x_band");
@@ -425,7 +449,45 @@ impl Geom for LineGeom {
                 continue;
             }
 
-            let path = polyline(&points, PolylineOptions::default());
+            // ── End clip + corner rounding (per-mark, first row). ──
+            let clip_start_pt =
+                resolve_number_channel_or(clip_start_radius_ch, clip_start_radius_scale, i0, 0.0);
+            let clip_end_pt =
+                resolve_number_channel_or(clip_end_radius_ch, clip_end_radius_scale, i0, 0.0);
+            let clipped: Vec<Point> = if clip_start_pt > 0.0 || clip_end_pt > 0.0 {
+                let start = (clip_start_pt > 0.0).then(|| EndClip::Circle {
+                    center: points[0],
+                    radius: pt_to_px(clip_start_pt, ctx.dpi),
+                });
+                let end = (clip_end_pt > 0.0).then(|| EndClip::Circle {
+                    center: *points.last().unwrap(),
+                    radius: pt_to_px(clip_end_pt, ctx.dpi),
+                });
+                clip_polyline(&points, start, end)
+            } else {
+                points
+            };
+            if clipped.len() < 2 {
+                continue;
+            }
+
+            let corner_radius_pt =
+                resolve_number_channel_or(corner_radius_ch, corner_radius_scale, i0, 0.0);
+            let path = if corner_radius_pt > 0.0 {
+                let max_angle_deg = resolve_number_channel_or(
+                    corner_max_angle_ch,
+                    corner_max_angle_scale,
+                    i0,
+                    f64::INFINITY,
+                );
+                let opts = CornerRounding {
+                    max_cut: pt_to_px(corner_radius_pt, ctx.dpi),
+                    max_angle_deg,
+                };
+                round_corners(&clipped, false, opts)
+            } else {
+                polyline(&clipped, PolylineOptions::default())
+            };
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
             scene.stroke(
                 &stroke_spec,
@@ -470,7 +532,7 @@ mod tests {
 
     use crate::color::Color;
     use crate::geometry::Rect;
-    use crate::plot::geom::{linetype, DirectScaleResolver};
+    use crate::plot::geom::{linetype, DirectScaleResolver, Raw};
     use crate::plot::scale;
     use crate::scene::recording::{Op, RecordingScene};
 
@@ -901,5 +963,166 @@ mod tests {
             g.state.exit
         );
         assert!(g.state.exit[0].key_eq(&Value::String(Arc::from("B"))));
+    }
+
+    // ── Primitive enhancement channels ──
+
+    fn stroke_path(scene: &RecordingScene) -> Option<crate::path::Path> {
+        scene.ops.iter().find_map(|op| match op {
+            Op::Stroke { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+    }
+
+    fn count_curves(path: &crate::path::Path) -> usize {
+        path.elements()
+            .iter()
+            .filter(|el| matches!(el, kurbo::PathEl::CurveTo(_, _, _)))
+            .count()
+    }
+
+    #[test]
+    fn corner_radius_produces_curves_at_each_vertex() {
+        // A 4-vertex zigzag has 2 interior joins → 2 fillets.
+        let mut g = LineGeom::builder()
+            .set("x", vec![0.0_f64, 0.3, 0.6, 0.9])
+            .set("y", vec![0.0_f64, 0.5, 0.0, 0.5])
+            .set("stroke", red_solid())
+            .set("corner_radius", 5.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let c = ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales);
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &c);
+        let path = stroke_path(&scene).expect("stroke");
+        assert_eq!(count_curves(&path), 2);
+    }
+
+    #[test]
+    fn corner_radius_zero_keeps_path_polyline() {
+        let mut g = LineGeom::builder()
+            .set("x", vec![0.0_f64, 0.3, 0.6])
+            .set("y", vec![0.0_f64, 0.5, 0.0])
+            .set("stroke", red_solid())
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let path = stroke_path(&scene).expect("stroke");
+        assert_eq!(count_curves(&path), 0);
+    }
+
+    #[test]
+    fn corner_max_angle_below_interior_skips_rounding() {
+        // L-shape with one 90° corner. max_angle_deg = 80 → corner is
+        // above threshold → not rounded. max_angle_deg = 95 → rounded.
+        let pts_x: Vec<f64> = vec![0.0, 0.5, 0.5];
+        let pts_y: Vec<f64> = vec![0.5, 0.5, 1.0];
+        let mut g = LineGeom::builder()
+            .set("x", Raw(pts_x.clone()))
+            .set("y", Raw(pts_y.clone()))
+            .set("stroke", red_solid())
+            .set("corner_radius", 5.0_f64)
+            .set("corner_max_angle", 80.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let path = stroke_path(&scene).expect("stroke");
+        assert_eq!(
+            count_curves(&path),
+            0,
+            "80° threshold should reject 90° corners"
+        );
+
+        // Same shape with looser threshold rounds.
+        let mut g2 = LineGeom::builder()
+            .set("x", Raw(pts_x))
+            .set("y", Raw(pts_y))
+            .set("stroke", red_solid())
+            .set("corner_radius", 5.0_f64)
+            .set("corner_max_angle", 95.0_f64)
+            .build();
+        g2.rebuild_diff_against_previous();
+        let mut scene2 = RecordingScene::default();
+        g2.draw(
+            &mut scene2,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let path2 = stroke_path(&scene2).expect("stroke");
+        assert_eq!(
+            count_curves(&path2),
+            1,
+            "95° threshold should accept 90° corners"
+        );
+    }
+
+    #[test]
+    fn clip_start_radius_trims_first_segment() {
+        // Polyline from (0,0) to (100,0). clip_start_radius = 20 (pt) =
+        // 20*96/72 ≈ 26.67 px. The trimmed polyline should start at
+        // (26.67, 0).
+        let mut g = LineGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 1.0]))
+            .set("y", Raw(vec![0.5_f64, 0.5]))
+            .set("stroke", red_solid())
+            .set("clip_start_radius", 20.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let path = stroke_path(&scene).expect("stroke");
+        // First element is MoveTo at the trim point.
+        match path.elements().first() {
+            Some(kurbo::PathEl::MoveTo(p)) => {
+                let expected = 20.0 * 96.0 / 72.0;
+                assert!((p.x - expected).abs() < 1e-6, "start.x = {}", p.x);
+            }
+            other => panic!("expected MoveTo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clip_radii_too_large_skip_the_line() {
+        // Polyline spans only 100 px; clip radii together exceed it →
+        // no segments emitted.
+        let mut g = LineGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 1.0]))
+            .set("y", Raw(vec![0.5_f64, 0.5]))
+            .set("stroke", red_solid())
+            .set("clip_start_radius", 100.0_f64)
+            .set("clip_end_radius", 100.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let strokes = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .count();
+        assert_eq!(strokes, 0);
     }
 }

@@ -87,6 +87,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("dash_offset", ExpectedOutput::Numbers),
     ("cap", ExpectedOutput::Strings),
     ("join", ExpectedOutput::Strings),
+    ("expand", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
 ];
 
@@ -171,6 +172,7 @@ impl Geom for RectGeom {
         let cap_scale = ctx.scale_for("cap");
         let join_scale = ctx.scale_for("join");
         let pick_id_scale = ctx.scale_for("pick_id");
+        let expand_scale = ctx.scale_for("expand");
 
         let channels = &self.state.channels;
         let (x_col, x_scale) = match channels.get("x") {
@@ -213,6 +215,7 @@ impl Geom for RectGeom {
         let cap_ch = channels.get("cap");
         let join_ch = channels.get("join");
         let pick_id_ch = channels.get("pick_id");
+        let expand_ch = channels.get("expand");
 
         for i in 0..n {
             // ── Resolve the four corner positions. ──
@@ -252,7 +255,17 @@ impl Geom for RectGeom {
             }
 
             // Build a normalised rect — robust to corner ordering and y axis flip.
-            let r = Rect::new(px.min(px2), py.min(py2), px.max(px2), py.max(py2));
+            // `expand` grows the rect outward (positive) / shrinks inward
+            // (negative) on every side by the same pt amount.
+            let expand_px = pt_to_px(
+                resolve_number_channel_or(expand_ch, expand_scale, i, 0.0),
+                ctx.dpi,
+            );
+            let x0 = px.min(px2) - expand_px;
+            let y0 = py.min(py2) - expand_px;
+            let x1 = px.max(px2) + expand_px;
+            let y1 = py.max(py2) + expand_px;
+            let r = Rect::new(x0, y0, x1, y1);
             if !r.is_finite() || r.width() <= 0.0 || r.height() <= 0.0 {
                 continue;
             }
@@ -349,7 +362,7 @@ mod tests {
 
     use crate::color::Color;
     use crate::geometry::Rect as GeomRect;
-    use crate::plot::geom::{linetype, DirectScaleResolver};
+    use crate::plot::geom::{linetype, DirectScaleResolver, Raw};
     use crate::plot::scale;
     use crate::plot::value::Value;
     use crate::scene::recording::{Op, RecordingScene};
@@ -729,5 +742,71 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted);
+    }
+
+    #[test]
+    fn expand_grows_rect_on_all_sides() {
+        use kurbo::Shape;
+        // Rect from (20, 20) → (80, 80) in panel-fraction Raw, so
+        // pixel bbox is 20..80 = 60 wide. expand = 3pt = 4 px → bbox
+        // 16..84 = 68 wide.
+        let g = RectGeom::builder()
+            .set("x", Raw(vec![0.2_f64]))
+            .set("y", Raw(vec![0.2_f64]))
+            .set("x2", Raw(vec![0.8_f64]))
+            .set("y2", Raw(vec![0.8_f64]))
+            .set("fill", red())
+            .set("expand", 3.0_f64)
+            .build();
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let bb = scene
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Fill { path, .. } => Some(path.bounding_box()),
+                _ => None,
+            })
+            .expect("fill");
+        let expand_px = 3.0 * 96.0 / 72.0;
+        let expected = 60.0 + 2.0 * expand_px;
+        assert!((bb.width() - expected).abs() < 0.5);
+        assert!((bb.height() - expected).abs() < 0.5);
+    }
+
+    #[test]
+    fn negative_expand_shrinks_rect() {
+        use kurbo::Shape;
+        let g = RectGeom::builder()
+            .set("x", Raw(vec![0.2_f64]))
+            .set("y", Raw(vec![0.2_f64]))
+            .set("x2", Raw(vec![0.8_f64]))
+            .set("y2", Raw(vec![0.8_f64]))
+            .set("fill", red())
+            .set("expand", -3.0_f64)
+            .build();
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let bb = scene
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Fill { path, .. } => Some(path.bounding_box()),
+                _ => None,
+            })
+            .expect("fill");
+        let expand_px = 3.0 * 96.0 / 72.0;
+        let expected = 60.0 - 2.0 * expand_px;
+        assert!((bb.width() - expected).abs() < 0.5);
     }
 }

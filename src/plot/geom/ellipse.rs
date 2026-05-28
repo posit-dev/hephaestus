@@ -80,6 +80,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("dash_offset", ExpectedOutput::Numbers),
     ("cap", ExpectedOutput::Strings),
     ("join", ExpectedOutput::Strings),
+    ("expand", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
 ];
 
@@ -165,6 +166,7 @@ impl Geom for EllipseGeom {
         let cap_scale = ctx.scale_for("cap");
         let join_scale = ctx.scale_for("join");
         let pick_id_scale = ctx.scale_for("pick_id");
+        let expand_scale = ctx.scale_for("expand");
 
         let channels = &self.state.channels;
         let (x_col, x_scale) = match channels.get("x") {
@@ -206,6 +208,7 @@ impl Geom for EllipseGeom {
         let cap_ch = channels.get("cap");
         let join_ch = channels.get("join");
         let pick_id_ch = channels.get("pick_id");
+        let expand_ch = channels.get("expand");
 
         for i in 0..n {
             // ── Resolve centre + far edge in pixel space. ──
@@ -244,8 +247,19 @@ impl Geom for EllipseGeom {
                 y2_px -= pt_to_px(off, ctx.dpi);
             }
 
-            let rx = (x2_px - cx).abs();
-            let ry = (y2_px - cy).abs();
+            // `expand` grows the ellipse outward (positive) / shrinks
+            // inward (negative) by the same pt amount along each axis,
+            // so the boundary moves perpendicular to itself by `expand`
+            // at every point only when rx == ry (a circle). For an
+            // ellipse with rx != ry the effect is the natural radii
+            // adjustment — sufficient and matches RectGeom's expand
+            // semantics on the bounding box.
+            let expand_px = pt_to_px(
+                resolve_number_channel_or(expand_ch, expand_scale, i, 0.0),
+                ctx.dpi,
+            );
+            let rx = (x2_px - cx).abs() + expand_px;
+            let ry = (y2_px - cy).abs() + expand_px;
             if !rx.is_finite() || !ry.is_finite() || rx <= 0.0 || ry <= 0.0 {
                 continue;
             }
@@ -744,5 +758,34 @@ mod tests {
             .set("y2", vec![1.0_f64])
             .set("pick_id", 0x100_0000_i64)
             .build();
+    }
+
+    #[test]
+    fn expand_grows_ellipse_radii() {
+        // Centre at 0.5, far edge at 0.7 → rx = 20 px. expand = 3pt =
+        // 4 px → rx = 24 px. bbox width = 48 px.
+        let g = EllipseGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("x2", vec![0.7_f64])
+            .set("y2", vec![0.6_f64])
+            .set("fill", red())
+            .set("expand", 3.0_f64)
+            .build();
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let bb = first_fill_bbox(&scene).expect("fill");
+        let expand_px = 3.0 * 96.0 / 72.0;
+        let expected_w = 2.0 * (20.0 + expand_px);
+        assert!(
+            (bb.x1 - bb.x0 - expected_w).abs() < 0.5,
+            "width = {}",
+            bb.x1 - bb.x0
+        );
     }
 }
