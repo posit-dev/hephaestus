@@ -9,14 +9,23 @@
 //! now consult the **width-aware** `height_at(width)` queries on children,
 //! using the widths from pass 1.
 //!
-//! If any cell signalled `WidthHint::NeedsHeight`, the two passes are
-//! wrapped in a damped fixed-point iteration capped at `MAX_ITER` rounds.
-//! Convergence is not guaranteed (rotated wrapped text genuinely oscillates);
-//! the cap is a safety valve.
+//! Both passes resolve [`Length::TrackOf`] references against the previous
+//! iteration's results — on iteration 0 the reference evaluates to 0, on
+//! later iterations it returns the cumulative size of the named tracks
+//! from the previous pass. Combined with the existing fixed-point loop
+//! (which already exists for [`WidthHint::NeedsHeight`] cells), this
+//! converges in 1–2 iterations for forward references and tolerates
+//! mild cycles up to `MAX_ITER`.
+//!
+//! If any cell signalled `WidthHint::NeedsHeight` or any Length::TrackOf
+//! reference is in the tree, the two passes are wrapped in a damped
+//! fixed-point iteration capped at `MAX_ITER` rounds. Convergence is not
+//! guaranteed (rotated wrapped text genuinely oscillates); the cap is a
+//! safety valve.
 
 use std::collections::HashMap;
 
-use super::{CellId, GridNode, Inset, Layout, Length, Node, Placement, Track, WidthHint};
+use super::{Axis, CellId, GridNode, Inset, Layout, Length, Node, Placement, Track, WidthHint};
 use crate::geometry::{Rect, Size};
 
 /// Maximum iterations for cells with `WidthHint::NeedsHeight`.
@@ -37,11 +46,30 @@ pub(super) fn solve(root: &GridNode, viewport: Size, dpi: f64) -> Layout {
     let mut seeds: HashMap<Vec<usize>, f64> = HashMap::new();
     collect_iterative_paths(root, &mut Vec::new(), dpi, &mut seeds);
 
+    // Pre-compute CellId → tree path for every tagged grid. Used by
+    // `Length::TrackOf` reference resolution.
+    let mut grid_paths: HashMap<CellId, Vec<usize>> = HashMap::new();
+    collect_grid_paths(root, &mut Vec::new(), &mut grid_paths);
+
+    let has_refs = tree_has_track_refs(root);
+
     let mut widths = WidthResults::default();
     let mut heights = HeightResults::default();
 
-    for iter in 0..MAX_ITER.max(1) {
-        widths = WidthResults::default();
+    let iter_cap = if seeds.is_empty() && !has_refs {
+        1
+    } else {
+        MAX_ITER
+    };
+
+    for iter in 0..iter_cap.max(1) {
+        let resolved = Resolved {
+            grid_paths: &grid_paths,
+            widths: if iter == 0 { None } else { Some(&widths) },
+            heights: if iter == 0 { None } else { Some(&heights) },
+        };
+
+        let mut new_widths = WidthResults::default();
         width_pass_grid(
             root,
             &mut Vec::new(),
@@ -51,26 +79,48 @@ pub(super) fn solve(root: &GridNode, viewport: Size, dpi: f64) -> Layout {
             root_cell.y1,
             &seeds,
             dpi,
-            &mut widths,
+            &resolved,
+            &mut new_widths,
         );
 
-        heights = HeightResults::default();
+        let mut new_heights = HeightResults::default();
         height_pass_grid(
             root,
             &mut Vec::new(),
             root_cell.y0,
             root_cell.y1,
-            &widths,
+            &new_widths,
             dpi,
-            &mut heights,
+            &resolved,
+            &mut new_heights,
         );
 
-        if seeds.is_empty() {
+        if seeds.is_empty() && !has_refs {
+            widths = new_widths;
+            heights = new_heights;
             break;
         }
 
-        let new_seeds = compute_new_seeds(root, &mut Vec::new(), &widths, &heights, &seeds, dpi);
-        if converged(&seeds, &new_seeds) || iter == MAX_ITER - 1 {
+        let stable = !has_refs
+            || (widths_match(&widths, &new_widths) && heights_match(&heights, &new_heights));
+
+        let new_seeds = compute_new_seeds(
+            root,
+            &mut Vec::new(),
+            &new_widths,
+            &new_heights,
+            &seeds,
+            dpi,
+        );
+        let seeds_converged = converged(&seeds, &new_seeds);
+
+        widths = new_widths;
+        heights = new_heights;
+
+        if (seeds.is_empty() || seeds_converged) && stable {
+            break;
+        }
+        if iter == iter_cap - 1 {
             break;
         }
         for (path, new) in new_seeds {
@@ -87,6 +137,164 @@ pub(super) fn solve(root: &GridNode, viewport: Size, dpi: f64) -> Layout {
         root: root_cell,
         rects,
     }
+}
+
+// ─── Reference resolution ────────────────────────────────────────────────────
+
+/// Carries the data needed to resolve [`Length::TrackOf`] references during
+/// a width or height pass: the tagged-grid path map, plus optionally the
+/// previous iteration's width and height results.
+struct Resolved<'a> {
+    grid_paths: &'a HashMap<CellId, Vec<usize>>,
+    widths: Option<&'a WidthResults>,
+    heights: Option<&'a HeightResults>,
+}
+
+impl<'a> Resolved<'a> {
+    /// Look up the summed track size for a `TrackOf` reference. Returns
+    /// `None` if the referenced grid hasn't been resolved yet (e.g.,
+    /// iteration 0) — the caller treats this as 0.
+    fn track_size(&self, grid: CellId, axis: Axis, track: u16, span: u16) -> Option<f64> {
+        let path = self.grid_paths.get(&grid)?;
+        let span = span.max(1) as usize;
+        let start = (track.saturating_sub(1)) as usize;
+        let end = start + span;
+        match axis {
+            Axis::Width => {
+                let gw = self.widths?.grids.get(path)?;
+                let end = end.min(gw.cols.len());
+                let start = start.min(end);
+                if start >= end {
+                    return Some(0.0);
+                }
+                let sum: f64 = gw.cols[start..end].iter().sum();
+                let gap_count = (end - start).saturating_sub(1) as f64;
+                Some(sum + gap_count * gw.col_gap)
+            }
+            Axis::Height => {
+                let gh = self.heights?.grids.get(path)?;
+                let end = end.min(gh.rows.len());
+                let start = start.min(end);
+                if start >= end {
+                    return Some(0.0);
+                }
+                let sum: f64 = gh.rows[start..end].iter().sum();
+                let gap_count = (end - start).saturating_sub(1) as f64;
+                Some(sum + gap_count * gh.row_gap)
+            }
+        }
+    }
+}
+
+/// Walk the tree once, recording the path for every grid tagged via
+/// [`super::Grid::id`]. The map is consulted by `Length::TrackOf`
+/// resolution during the width/height passes.
+fn collect_grid_paths(
+    node: &GridNode,
+    path: &mut Vec<usize>,
+    out: &mut HashMap<CellId, Vec<usize>>,
+) {
+    if let Some(id) = node.id {
+        out.insert(id, path.clone());
+    }
+    for (i, (_placement, child)) in node.children.iter().enumerate() {
+        if let Node::Grid(g) = child {
+            path.push(i);
+            collect_grid_paths(g, path, out);
+            path.pop();
+        }
+    }
+}
+
+/// Returns `true` if any `Length` in the tree contains a `TrackOf`
+/// variant — triggers the fixed-point iteration loop.
+fn tree_has_track_refs(node: &GridNode) -> bool {
+    if any_track_ref_in_track(&node.gap.0) || any_track_ref_in_track(&node.gap.1) {
+        return true;
+    }
+    for t in node.cols.iter().chain(node.rows.iter()) {
+        if let Track::Fixed(l) = t {
+            if length_has_track_ref(l) {
+                return true;
+            }
+        }
+    }
+    for (placement, child) in &node.children {
+        if inset_has_track_ref(&placement.inset) {
+            return true;
+        }
+        if let Node::Grid(g) = child {
+            if tree_has_track_refs(g) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn any_track_ref_in_track(l: &Length) -> bool {
+    length_has_track_ref(l)
+}
+
+fn length_has_track_ref(l: &Length) -> bool {
+    match l {
+        Length::Sum { .. } => false,
+        Length::Min(a, b) | Length::Max(a, b) => length_has_track_ref(a) || length_has_track_ref(b),
+        Length::TrackOf { .. } => true,
+    }
+}
+
+fn inset_has_track_ref(inset: &Inset) -> bool {
+    [
+        &inset.left,
+        &inset.right,
+        &inset.top,
+        &inset.bottom,
+        &inset.width,
+        &inset.height,
+    ]
+    .iter()
+    .any(|opt| opt.as_ref().is_some_and(length_has_track_ref))
+}
+
+fn widths_match(a: &WidthResults, b: &WidthResults) -> bool {
+    if a.grids.len() != b.grids.len() {
+        return false;
+    }
+    for (k, av) in &a.grids {
+        let Some(bv) = b.grids.get(k) else {
+            return false;
+        };
+        if av.cols.len() != bv.cols.len() {
+            return false;
+        }
+        for (ac, bc) in av.cols.iter().zip(bv.cols.iter()) {
+            if (ac - bc).abs() > EPSILON {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn heights_match(a: &HeightResults, b: &HeightResults) -> bool {
+    if a.grids.len() != b.grids.len() {
+        return false;
+    }
+    for (k, av) in &a.grids {
+        let Some(bv) = b.grids.get(k) else {
+            return false;
+        };
+        if av.rows.len() != bv.rows.len() {
+            return false;
+        }
+        for (ar, br) in av.rows.iter().zip(bv.rows.iter()) {
+            if (ar - br).abs() > EPSILON {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 // ─── Side tables ─────────────────────────────────────────────────────────────
@@ -119,6 +327,10 @@ struct HeightResults {
 struct GridHeights {
     y0: f64,
     y1: f64,
+    /// Resolved per-row sizes. Used by `Length::TrackOf { axis: Height, .. }`
+    /// reference resolution on the next iteration.
+    rows: Vec<f64>,
+    row_gap: f64,
 }
 
 // ─── Pass 1: widths ──────────────────────────────────────────────────────────
@@ -133,18 +345,19 @@ fn width_pass_grid(
     y1: f64,
     seeds: &HashMap<Vec<usize>, f64>,
     dpi: f64,
+    resolved: &Resolved,
     out: &mut WidthResults,
 ) {
     let avail = (x1 - x0).max(0.0);
     let avail_h = (y1 - y0).max(0.0);
-    let col_gap = length_to_px(&node.gap.0, dpi, avail);
+    let col_gap = length_to_px(&node.gap.0, dpi, avail, resolved);
     let col_gap_total = saturating_gap_total(node.cols.len(), col_gap);
 
-    let col_fixed = sum_fixed_track_size(&node.cols, dpi, avail);
+    let col_fixed = sum_fixed_track_size(&node.cols, dpi, avail, resolved);
     let col_fr_sum = sum_fr(&node.cols);
     let row_fr_sum = sum_fr(&node.rows);
 
-    let col_auto = auto_col_sizes(node, path, seeds, dpi);
+    let col_auto = auto_col_sizes(node, path, seeds, dpi, resolved);
     let col_auto_total: f64 = col_auto.iter().sum();
 
     let free_w = (avail - col_fixed - col_auto_total - col_gap_total).max(0.0);
@@ -161,9 +374,9 @@ fn width_pass_grid(
     // respect grids with no auto rows this matches pass 2 exactly. With auto
     // rows the grid may end up wider than respect strictly prescribes —
     // documented as the "best effort" combination.
-    let row_gap_pass1 = length_to_px(&node.gap.1, dpi, avail_h);
+    let row_gap_pass1 = length_to_px(&node.gap.1, dpi, avail_h, resolved);
     let row_gap_total_pass1 = saturating_gap_total(node.rows.len(), row_gap_pass1);
-    let row_fixed_pass1 = sum_fixed_track_size(&node.rows, dpi, avail_h);
+    let row_fixed_pass1 = sum_fixed_track_size(&node.rows, dpi, avail_h, resolved);
     let free_h_provisional = (avail_h - row_fixed_pass1 - row_gap_total_pass1).max(0.0);
     let per_fr_h_provisional = if row_fr_sum > 0.0 {
         free_h_provisional / row_fr_sum
@@ -182,7 +395,7 @@ fn width_pass_grid(
         .iter()
         .enumerate()
         .map(|(i, t)| match t {
-            Track::Fixed(l) => length_to_px(l, dpi, avail),
+            Track::Fixed(l) => length_to_px(l, dpi, avail, resolved),
             Track::Fr(f) => *f as f64 * per_fr_w,
             Track::Auto => col_auto[i],
         })
@@ -213,7 +426,7 @@ fn width_pass_grid(
         .rows
         .iter()
         .map(|t| match t {
-            Track::Fixed(l) => length_to_px(l, dpi, avail_h),
+            Track::Fixed(l) => length_to_px(l, dpi, avail_h, resolved),
             Track::Fr(f) => *f as f64 * per_fr_h_provisional,
             Track::Auto => 0.0,
         })
@@ -227,6 +440,7 @@ fn width_pass_grid(
             placement,
             &placement.inset,
             dpi,
+            resolved,
         );
         let (child_y0, child_y1) = child_y_range(
             &row_sizes_provisional,
@@ -235,12 +449,13 @@ fn width_pass_grid(
             placement,
             &placement.inset,
             dpi,
+            resolved,
             &[],
         );
         path.push(i);
         match child {
             Node::Grid(g) => width_pass_grid(
-                g, path, child_x0, child_x1, child_y0, child_y1, seeds, dpi, out,
+                g, path, child_x0, child_x1, child_y0, child_y1, seeds, dpi, resolved, out,
             ),
             Node::Cell(_) => {
                 out.cell_xs.insert(path.clone(), (child_x0, child_x1));
@@ -256,6 +471,7 @@ fn auto_col_sizes(
     path: &mut Vec<usize>,
     seeds: &HashMap<Vec<usize>, f64>,
     dpi: f64,
+    resolved: &Resolved,
 ) -> Vec<f64> {
     let mut out = vec![0.0; node.cols.len()];
     for (i, (placement, child)) in node.children.iter().enumerate() {
@@ -271,7 +487,7 @@ fn auto_col_sizes(
             continue;
         }
         path.push(i);
-        let contrib = child_min_width(child, path, &placement.inset, seeds, dpi);
+        let contrib = child_min_width(child, path, &placement.inset, seeds, dpi, resolved);
         path.pop();
         if contrib > out[col_idx] {
             out[col_idx] = contrib;
@@ -287,20 +503,21 @@ fn child_min_width(
     inset: &Inset,
     seeds: &HashMap<Vec<usize>, f64>,
     dpi: f64,
+    resolved: &Resolved,
 ) -> f64 {
     if let Some(w) = inset.width.as_ref() {
-        return length_to_px_abs(w, dpi);
+        return length_to_px_abs(w, dpi, resolved);
     }
     let l = inset
         .left
         .as_ref()
-        .map_or(0.0, |v| length_to_px_abs(v, dpi));
+        .map_or(0.0, |v| length_to_px_abs(v, dpi, resolved));
     let r = inset
         .right
         .as_ref()
-        .map_or(0.0, |v| length_to_px_abs(v, dpi));
+        .map_or(0.0, |v| length_to_px_abs(v, dpi, resolved));
     let inner = match child {
-        Node::Grid(g) => grid_min_width(g, path, seeds, dpi),
+        Node::Grid(g) => grid_min_width(g, path, seeds, dpi, resolved),
         Node::Cell(c) => match c.measure.width_hint(dpi) {
             WidthHint::Min(w) => w,
             WidthHint::NeedsHeight { seed } => seeds.get(path).copied().unwrap_or(seed),
@@ -316,15 +533,16 @@ fn grid_min_width(
     path: &mut Vec<usize>,
     seeds: &HashMap<Vec<usize>, f64>,
     dpi: f64,
+    resolved: &Resolved,
 ) -> f64 {
-    let col_gap = length_to_px_abs(&g.gap.0, dpi);
+    let col_gap = length_to_px_abs(&g.gap.0, dpi, resolved);
     let col_gap_total = saturating_gap_total(g.cols.len(), col_gap);
 
     // Pre-fill fixed contributions; auto rows are resolved below.
     let mut col_mins = vec![0.0; g.cols.len()];
     for (i, t) in g.cols.iter().enumerate() {
         if let Track::Fixed(l) = t {
-            col_mins[i] = length_to_px_abs(l, dpi);
+            col_mins[i] = length_to_px_abs(l, dpi, resolved);
         }
     }
     for (i, (placement, child)) in g.children.iter().enumerate() {
@@ -339,7 +557,7 @@ fn grid_min_width(
             continue;
         }
         path.push(i);
-        let contrib = child_min_width(child, path, &placement.inset, seeds, dpi);
+        let contrib = child_min_width(child, path, &placement.inset, seeds, dpi, resolved);
         path.pop();
         if contrib > col_mins[col_idx] {
             col_mins[col_idx] = contrib;
@@ -350,6 +568,7 @@ fn grid_min_width(
 
 // ─── Pass 2: heights ─────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn height_pass_grid(
     node: &GridNode,
     path: &mut Vec<usize>,
@@ -357,18 +576,20 @@ fn height_pass_grid(
     y1: f64,
     widths: &WidthResults,
     dpi: f64,
+    resolved: &Resolved,
     out: &mut HeightResults,
 ) {
-    let gw = widths.grids.get(path).expect("grid widths recorded");
     let avail = (y1 - y0).max(0.0);
-    let row_gap = length_to_px(&node.gap.1, dpi, avail);
+    let gw = widths.grids.get(path).expect("grid widths recorded");
+
+    let row_gap = length_to_px(&node.gap.1, dpi, avail, resolved);
     let row_gap_total = saturating_gap_total(node.rows.len(), row_gap);
 
-    let row_fixed = sum_fixed_track_size(&node.rows, dpi, avail);
+    let row_fixed = sum_fixed_track_size(&node.rows, dpi, avail, resolved);
     let row_fr_sum = sum_fr(&node.rows);
     let col_fr_sum = sum_fr(&node.cols);
 
-    let row_auto = auto_row_sizes(node, path, gw, widths, dpi);
+    let row_auto = auto_row_sizes(node, path, gw, widths, dpi, resolved);
     let row_auto_total: f64 = row_auto.iter().sum();
 
     let free_h = (avail - row_fixed - row_auto_total - row_gap_total).max(0.0);
@@ -394,7 +615,7 @@ fn height_pass_grid(
         .iter()
         .enumerate()
         .map(|(i, t)| match t {
-            Track::Fixed(l) => length_to_px(l, dpi, avail),
+            Track::Fixed(l) => length_to_px(l, dpi, avail, resolved),
             Track::Fr(f) => *f as f64 * per_fr_h,
             Track::Auto => row_auto[i],
         })
@@ -410,6 +631,8 @@ fn height_pass_grid(
         GridHeights {
             y0: resolved_y0,
             y1: resolved_y1,
+            rows: row_sizes.clone(),
+            row_gap,
         },
     );
 
@@ -421,13 +644,14 @@ fn height_pass_grid(
             placement,
             &placement.inset,
             dpi,
+            resolved,
             &row_auto,
         );
         path.push(i);
         match child {
             Node::Grid(_g) => {
                 if let Node::Grid(g) = child {
-                    height_pass_grid(g, path, child_y0, child_y1, widths, dpi, out);
+                    height_pass_grid(g, path, child_y0, child_y1, widths, dpi, resolved, out);
                 }
             }
             Node::Cell(_) => {
@@ -445,6 +669,7 @@ fn auto_row_sizes(
     gw: &GridWidths,
     widths: &WidthResults,
     dpi: f64,
+    resolved: &Resolved,
 ) -> Vec<f64> {
     let mut out = vec![0.0; node.rows.len()];
     for (i, (placement, child)) in node.children.iter().enumerate() {
@@ -464,9 +689,17 @@ fn auto_row_sizes(
         }
 
         // Compute the width this child receives.
-        let child_w = child_allocated_width(placement, gw, dpi);
+        let child_w = child_allocated_width(placement, gw, dpi, resolved);
         path.push(i);
-        let contrib = child_min_height(child, path, &placement.inset, child_w, widths, dpi);
+        let contrib = child_min_height(
+            child,
+            path,
+            &placement.inset,
+            child_w,
+            widths,
+            dpi,
+            resolved,
+        );
         path.pop();
         if contrib > out[row_idx] {
             out[row_idx] = contrib;
@@ -482,20 +715,24 @@ fn child_min_height(
     child_width: f64,
     widths: &WidthResults,
     dpi: f64,
+    resolved: &Resolved,
 ) -> f64 {
     if let Some(h) = inset.height.as_ref() {
-        return length_to_px_abs(h, dpi);
+        return length_to_px_abs(h, dpi, resolved);
     }
-    let t = inset.top.as_ref().map_or(0.0, |v| length_to_px_abs(v, dpi));
+    let t = inset
+        .top
+        .as_ref()
+        .map_or(0.0, |v| length_to_px_abs(v, dpi, resolved));
     let b = inset
         .bottom
         .as_ref()
-        .map_or(0.0, |v| length_to_px_abs(v, dpi));
+        .map_or(0.0, |v| length_to_px_abs(v, dpi, resolved));
     // The inner width available to the child's content (after applying any
     // leading/trailing insets that have already shrunk child_width).
     let inner_w = child_width;
     let inner = match child {
-        Node::Grid(g) => grid_height_at(g, path, inner_w, widths, dpi),
+        Node::Grid(g) => grid_height_at(g, path, inner_w, widths, dpi, resolved),
         Node::Cell(c) => c.measure.height_at(inner_w, dpi),
     };
     t + inner + b
@@ -509,16 +746,17 @@ fn grid_height_at(
     width: f64,
     widths: &WidthResults,
     dpi: f64,
+    resolved: &Resolved,
 ) -> f64 {
     // We know this grid's resolved widths from pass 1; reuse them.
     let gw = widths.grids.get(path).expect("grid widths recorded");
-    let row_gap = length_to_px_abs(&g.gap.1, dpi);
+    let row_gap = length_to_px_abs(&g.gap.1, dpi, resolved);
     let row_gap_total = saturating_gap_total(g.rows.len(), row_gap);
 
     let mut row_mins = vec![0.0; g.rows.len()];
     for (i, t) in g.rows.iter().enumerate() {
         if let Track::Fixed(l) = t {
-            row_mins[i] = length_to_px_abs(l, dpi);
+            row_mins[i] = length_to_px_abs(l, dpi, resolved);
         }
     }
     for (i, (placement, child)) in g.children.iter().enumerate() {
@@ -533,8 +771,16 @@ fn grid_height_at(
             continue;
         }
         path.push(i);
-        let child_w = child_allocated_width(placement, gw, dpi);
-        let contrib = child_min_height(child, path, &placement.inset, child_w, widths, dpi);
+        let child_w = child_allocated_width(placement, gw, dpi, resolved);
+        let contrib = child_min_height(
+            child,
+            path,
+            &placement.inset,
+            child_w,
+            widths,
+            dpi,
+            resolved,
+        );
         path.pop();
         if contrib > row_mins[row_idx] {
             row_mins[row_idx] = contrib;
@@ -654,11 +900,11 @@ fn converged(old: &HashMap<Vec<usize>, f64>, new: &HashMap<Vec<usize>, f64>) -> 
 
 // ─── Geometry helpers (lifted from previous solver) ──────────────────────────
 
-fn sum_fixed_track_size(tracks: &[Track], dpi: f64, axis: f64) -> f64 {
+fn sum_fixed_track_size(tracks: &[Track], dpi: f64, axis: f64, resolved: &Resolved) -> f64 {
     tracks
         .iter()
         .filter_map(|t| match t {
-            Track::Fixed(l) => Some(length_to_px(l, dpi, axis)),
+            Track::Fixed(l) => Some(length_to_px(l, dpi, axis, resolved)),
             _ => None,
         })
         .sum()
@@ -689,12 +935,12 @@ fn child_x_range(
     placement: &Placement,
     inset: &Inset,
     dpi: f64,
+    resolved: &Resolved,
 ) -> (f64, f64) {
     let col_span = placement.col_span.max(1);
     let col_start = (placement.col.saturating_sub(1)) as usize;
     let col_end_excl = (col_start + col_span as usize).min(col_sizes.len());
     let col_start = col_start.min(col_sizes.len());
-
     let cell_x0 = grid_x0 + track_offset(col_sizes, col_gap, col_start);
     let cell_x1 = if col_end_excl == 0 {
         cell_x0
@@ -709,9 +955,11 @@ fn child_x_range(
         inset.right.as_ref(),
         inset.width.as_ref(),
         dpi,
+        resolved,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn child_y_range(
     row_sizes: &[f64],
     row_gap: f64,
@@ -719,6 +967,7 @@ fn child_y_range(
     placement: &Placement,
     inset: &Inset,
     dpi: f64,
+    resolved: &Resolved,
     _row_auto: &[f64],
 ) -> (f64, f64) {
     let row_span = placement.row_span.max(1);
@@ -740,10 +989,16 @@ fn child_y_range(
         inset.bottom.as_ref(),
         inset.height.as_ref(),
         dpi,
+        resolved,
     )
 }
 
-fn child_allocated_width(placement: &Placement, gw: &GridWidths, dpi: f64) -> f64 {
+fn child_allocated_width(
+    placement: &Placement,
+    gw: &GridWidths,
+    dpi: f64,
+    resolved: &Resolved,
+) -> f64 {
     let (x0, x1) = child_x_range(
         &gw.cols,
         gw.col_gap,
@@ -751,6 +1006,7 @@ fn child_allocated_width(placement: &Placement, gw: &GridWidths, dpi: f64) -> f6
         placement,
         &placement.inset,
         dpi,
+        resolved,
     );
     (x1 - x0).max(0.0)
 }
@@ -787,9 +1043,10 @@ fn resolve_axis(
     trailing: Option<&Length>,
     size: Option<&Length>,
     dpi: f64,
+    resolved: &Resolved,
 ) -> (f64, f64) {
-    let l = leading.map_or(0.0, |v| length_to_px(v, dpi, avail));
-    let t = trailing.map_or(0.0, |v| length_to_px(v, dpi, avail));
+    let l = leading.map_or(0.0, |v| length_to_px(v, dpi, avail, resolved));
+    let t = trailing.map_or(0.0, |v| length_to_px(v, dpi, avail, resolved));
 
     match size {
         None => {
@@ -798,7 +1055,7 @@ fn resolve_axis(
             (start, end)
         }
         Some(w) => {
-            let w_px = length_to_px(w, dpi, avail);
+            let w_px = length_to_px(w, dpi, avail, resolved);
             match (leading.is_some(), trailing.is_some()) {
                 (true, _) => (origin + l, origin + l + w_px),
                 (false, true) => {
@@ -811,22 +1068,46 @@ fn resolve_axis(
     }
 }
 
-fn length_to_px(l: &Length, dpi: f64, axis_size: f64) -> f64 {
+fn length_to_px(l: &Length, dpi: f64, axis_size: f64, resolved: &Resolved) -> f64 {
     match l {
         Length::Sum {
             px,
             inches,
             percent,
         } => px + inches * dpi + percent * axis_size,
-        Length::Min(a, b) => length_to_px(a, dpi, axis_size).min(length_to_px(b, dpi, axis_size)),
-        Length::Max(a, b) => length_to_px(a, dpi, axis_size).max(length_to_px(b, dpi, axis_size)),
+        Length::Min(a, b) => {
+            length_to_px(a, dpi, axis_size, resolved).min(length_to_px(b, dpi, axis_size, resolved))
+        }
+        Length::Max(a, b) => {
+            length_to_px(a, dpi, axis_size, resolved).max(length_to_px(b, dpi, axis_size, resolved))
+        }
+        Length::TrackOf {
+            grid,
+            axis,
+            track,
+            span,
+        } => resolved
+            .track_size(*grid, *axis, *track, *span)
+            .unwrap_or(0.0),
     }
 }
 
-fn length_to_px_abs(l: &Length, dpi: f64) -> f64 {
+fn length_to_px_abs(l: &Length, dpi: f64, resolved: &Resolved) -> f64 {
     match l {
         Length::Sum { px, inches, .. } => px + inches * dpi,
-        Length::Min(a, b) => length_to_px_abs(a, dpi).min(length_to_px_abs(b, dpi)),
-        Length::Max(a, b) => length_to_px_abs(a, dpi).max(length_to_px_abs(b, dpi)),
+        Length::Min(a, b) => {
+            length_to_px_abs(a, dpi, resolved).min(length_to_px_abs(b, dpi, resolved))
+        }
+        Length::Max(a, b) => {
+            length_to_px_abs(a, dpi, resolved).max(length_to_px_abs(b, dpi, resolved))
+        }
+        Length::TrackOf {
+            grid,
+            axis,
+            track,
+            span,
+        } => resolved
+            .track_size(*grid, *axis, *track, *span)
+            .unwrap_or(0.0),
     }
 }

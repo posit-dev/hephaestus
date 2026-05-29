@@ -47,6 +47,26 @@ name = "composition_demo"
 required-features = ["vello", "png", "text"]
 
 [[example]]
+name = "nesting_asymmetric"
+required-features = ["vello", "png", "text"]
+
+[[example]]
+name = "nesting_chrome_coupling"
+required-features = ["vello", "png", "text"]
+
+[[example]]
+name = "nesting_outer_chrome_propagates"
+required-features = ["vello", "png", "text"]
+
+[[example]]
+name = "nesting_faceted_title"
+required-features = ["vello", "png", "text"]
+
+[[example]]
+name = "nesting_deep"
+required-features = ["vello", "png", "text"]
+
+[[example]]
 name = "shapes_demo"
 required-features = ["vello", "png"]
 

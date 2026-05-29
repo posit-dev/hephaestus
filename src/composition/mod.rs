@@ -12,12 +12,13 @@
 pub mod anatomy;
 
 pub use anatomy::{
-    Slot, PANEL_COL, PANEL_ROW, PLOT_BOTTOM, PLOT_LEFT, PLOT_RIGHT, PLOT_TOP, TABLE_COLS,
-    TABLE_ROWS,
+    Slot, MARGIN_BOTTOM_ROW, MARGIN_LEFT_COL, MARGIN_RIGHT_COL, MARGIN_TOP_ROW, PADDING_BOTTOM_ROW,
+    PADDING_LEFT_COL, PADDING_RIGHT_COL, PADDING_TOP_ROW, PANEL_COL, PANEL_ROW, PLOT_BOTTOM,
+    PLOT_LEFT, PLOT_RIGHT, PLOT_TOP, TABLE_COLS, TABLE_ROWS,
 };
 
 use crate::geometry::{Rect, Size};
-use crate::layout::{Cell, CellId, Grid, Layout, Node, Placement, Track};
+use crate::layout::{Axis, Cell, CellId, Grid, Inset, Layout, Length, Placement, Track};
 use std::collections::HashMap;
 
 const TABLE_COLS_U16: u16 = TABLE_COLS as u16;
@@ -38,11 +39,14 @@ pub struct Patch {
     id: Option<String>,
     placements: Vec<PatchPlacement>,
     aspect: Option<(f32, f32)>,
-    /// Content nested into this patch's panel via [`Patch::place_in_panel`].
-    /// The inner element's chrome merges into this patch's chrome at the
-    /// same anatomical positions; the inner's panel content fills this
-    /// patch's panel area.
-    inner: Option<Box<Element>>,
+    /// Outermost-ring track sizes. The [`Slot::Background`] does not extend
+    /// into these tracks. Defaults to `Inset::default()` (zero on every
+    /// side). See [`Patch::margin`].
+    margin: Inset,
+    /// Second-from-outermost-ring track sizes. The background covers the
+    /// padding area; chrome (axes, title, legend) sits inside the padding.
+    /// Defaults to `Inset::default()`. See [`Patch::padding`].
+    padding: Inset,
 }
 
 struct PatchPlacement {
@@ -59,7 +63,8 @@ impl Patch {
             id: Some(id.into()),
             placements: Vec::new(),
             aspect: None,
-            inner: None,
+            margin: Inset::default(),
+            padding: Inset::default(),
         }
     }
 
@@ -75,7 +80,8 @@ impl Patch {
             id: None,
             placements: Vec::new(),
             aspect: None,
-            inner: None,
+            margin: Inset::default(),
+            padding: Inset::default(),
         }
     }
 
@@ -117,19 +123,48 @@ impl Patch {
         self
     }
 
-    /// Nest `inner` into this patch's panel. The inner element's chrome
-    /// merges with this patch's chrome at the corresponding anatomical
-    /// positions (e.g. both titles land in the same super-grid title row,
-    /// both left-axes land in the same left-chrome column), so size
-    /// contributions take their max.
-    ///
-    /// For an inner [`Patch`], the result has the same `(1, 1)` block-shape
-    /// as a single patch — the two patches share the outer's anatomy.
-    /// For an inner [`Composition`] the result widens to the inner's
-    /// block-shape; see step 5.
-    pub fn place_in_panel(mut self, inner: impl Into<Element>) -> Element {
-        self.inner = Some(Box::new(inner.into()));
-        Element::Patch(self)
+    /// Per-side outer margin. Sizes the outermost ring tracks (row 1,
+    /// `TABLE_ROWS`, col 1, `TABLE_COLS`) of this patch's anatomy. The
+    /// [`Slot::Background`] does **not** extend into the margin, so when
+    /// two patches are composed side-by-side the gap between their
+    /// backgrounds equals `margin_a.right + margin_b.left`. Default is
+    /// zero on every side.
+    pub fn margin(mut self, inset: Inset) -> Self {
+        self.margin = inset;
+        self
+    }
+
+    /// Convenience: identical margin on every side.
+    pub fn margin_all(self, length: Length) -> Self {
+        self.margin(
+            Inset::default()
+                .left(length.clone())
+                .right(length.clone())
+                .top(length.clone())
+                .bottom(length),
+        )
+    }
+
+    /// Per-side inner padding. Sizes the second-from-outer-ring tracks
+    /// (row 2, `TABLE_ROWS - 1`, col 2, `TABLE_COLS - 1`). The
+    /// [`Slot::Background`] covers the padding, but chrome (axes, title,
+    /// legends) sits inside the padding — so padding is the breathing
+    /// room between the background's edge and the start of chrome.
+    /// Default is zero on every side.
+    pub fn padding(mut self, inset: Inset) -> Self {
+        self.padding = inset;
+        self
+    }
+
+    /// Convenience: identical padding on every side.
+    pub fn padding_all(self, length: Length) -> Self {
+        self.padding(
+            Inset::default()
+                .left(length.clone())
+                .right(length.clone())
+                .top(length.clone())
+                .bottom(length),
+        )
     }
 
     /// Solve this patch standalone in a `size`-sized viewport.
@@ -176,15 +211,37 @@ impl Span {
 /// Construct with [`beside`], [`stack`], [`grid`], or
 /// [`Composition::empty`] + [`Composition::place`] for spans.
 ///
-/// **v1 restriction**: every placed element must be a [`Patch`] (anonymous
-/// spacer or named). Nesting another [`Composition`] inside a composition is
-/// not supported in v1; nest via [`Patch::place_in_panel`] instead (step 5).
+/// Nested compositions are supported: an [`Element::Composition`] placed in
+/// a cell is simplified to the same canonical 13×16 anatomical block as a
+/// plain patch, with the inner composition's panel band collapsed into the
+/// outer block's panel cell and the inner border plots' chrome propagated
+/// to the outer block's chrome slots.
 pub struct Composition {
     placements: Vec<CompositionPlacement>,
     cols: usize,
     rows: usize,
     widths: Vec<Track>,
     heights: Vec<Track>,
+    /// Optional id for addressing chrome rects via
+    /// [`CompositionLayout::get`]. Set with [`Composition::id`].
+    /// `None` ⇒ chrome rects are placed but not retrievable by id.
+    id: Option<String>,
+    /// Composition-level chrome slots (Title, Caption, axis titles, …).
+    /// When non-empty, the composition is treated as a "simplified plot":
+    /// its facets fill the panel cell of a canonical 13×16 anatomical
+    /// block, and these chrome slots sit at the canonical positions
+    /// surrounding it. Mirrors patchwork's `plot_annotation()`.
+    chrome: Vec<PatchPlacement>,
+    /// When chrome is present, applies an aspect-ratio lock to the panel
+    /// cell (which contains the facets). Same wrapping as
+    /// [`Patch::aspect`].
+    aspect: Option<(f32, f32)>,
+    /// Outer margin around the simplified canonical block. Only applied
+    /// when chrome is present.
+    margin: Inset,
+    /// Inner padding inside the simplified canonical block. Only applied
+    /// when chrome is present.
+    padding: Inset,
 }
 
 struct CompositionPlacement {
@@ -195,8 +252,14 @@ struct CompositionPlacement {
     element: Element,
 }
 
-/// Either a [`Patch`] or a (nested) [`Composition`]. In v1, only `Patch`
-/// elements are allowed inside a `Composition`.
+/// Either a [`Patch`] or a (nested) [`Composition`].
+//
+// `Patch` carries the per-side margin + padding `Inset`s (6 `Option<Length>`
+// each), so the `Patch` variant is ~ 400 bytes heavier than `Composition`.
+// Acceptable given the small number of `Element` values typically
+// constructed (one per patch in a composition); boxing margin/padding inside
+// `Patch` would add allocations on every construction.
+#[allow(clippy::large_enum_variant)]
 pub enum Element {
     Patch(Patch),
     Composition(Composition),
@@ -225,7 +288,129 @@ impl Composition {
             rows,
             widths: vec![Track::Fr(1.0); cols],
             heights: vec![Track::Fr(1.0); rows],
+            id: None,
+            chrome: Vec::new(),
+            aspect: None,
+            margin: Inset::default(),
+            padding: Inset::default(),
         }
+    }
+
+    /// Set the composition's id for chrome lookups. Required if you
+    /// want to retrieve chrome rects (Title, Caption, …) via
+    /// [`CompositionLayout::get`]. The composition's id is independent
+    /// of patch ids inside it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
+    /// Add a chrome slot to this composition. The composition becomes a
+    /// "simplified plot" wrapping its facets in the canonical 13×16
+    /// anatomical block; the slot lives at its canonical position
+    /// around the panel band (which contains the facets).
+    ///
+    /// Useful for giving a faceted plot a shared title / subtitle /
+    /// caption / axis title that spans all facets.
+    ///
+    /// Panics on [`Slot::Panel`] — the composition's facets fill the
+    /// panel.
+    pub fn slot(mut self, s: Slot, cell: Cell) -> Self {
+        assert!(
+            !matches!(s, Slot::Panel),
+            "Composition::slot does not accept Slot::Panel; the composition's facets fill the panel"
+        );
+        let (r, c, rs, cs) = s.placement();
+        self.chrome.push(PatchPlacement {
+            placement: Placement::at(r, c).span(rs, cs),
+            region: s.name().to_string(),
+            cell,
+        });
+        self
+    }
+
+    /// Escape hatch for composition-level chrome: place content at a
+    /// raw 1-indexed `(row, col)` within the canonical 13×16 block,
+    /// addressable as `(composition_id, region)`. Mirrors
+    /// [`Patch::place_at`].
+    ///
+    /// Panics if `(row, col, span)` includes the canonical panel cell
+    /// (row 9 col 7) — that cell is reserved for the composition's
+    /// facets.
+    pub fn place_at(
+        mut self,
+        region: impl Into<String>,
+        row: u16,
+        col: u16,
+        span: Span,
+        cell: Cell,
+    ) -> Self {
+        let end_row = row + span.rows - 1;
+        let end_col = col + span.cols - 1;
+        assert!(
+            !(row <= PANEL_ROW && end_row >= PANEL_ROW && col <= PANEL_COL && end_col >= PANEL_COL),
+            "Composition::place_at cannot cover the panel cell (row {PANEL_ROW}, col {PANEL_COL}); the facets fill it"
+        );
+        self.chrome.push(PatchPlacement {
+            placement: Placement::at(row, col).span(span.rows, span.cols),
+            region: region.into(),
+            cell,
+        });
+        self
+    }
+
+    /// Lock the simplified plot's panel cell (which contains the
+    /// facets) to an aspect ratio. Same semantics as [`Patch::aspect`].
+    /// Only takes effect when the composition has chrome.
+    pub fn aspect(mut self, w: f32, h: f32) -> Self {
+        self.aspect = Some((w, h));
+        self
+    }
+
+    /// Per-side outer margin for the simplified canonical block. Same
+    /// semantics as [`Patch::margin`]. Only takes effect when the
+    /// composition has chrome.
+    pub fn margin(mut self, inset: Inset) -> Self {
+        self.margin = inset;
+        self
+    }
+
+    /// Convenience: identical margin on every side.
+    pub fn margin_all(self, length: Length) -> Self {
+        self.margin(
+            Inset::default()
+                .left(length.clone())
+                .right(length.clone())
+                .top(length.clone())
+                .bottom(length),
+        )
+    }
+
+    /// Per-side inner padding for the simplified canonical block. Same
+    /// semantics as [`Patch::padding`]. Only takes effect when the
+    /// composition has chrome.
+    pub fn padding(mut self, inset: Inset) -> Self {
+        self.padding = inset;
+        self
+    }
+
+    /// Convenience: identical padding on every side.
+    pub fn padding_all(self, length: Length) -> Self {
+        self.padding(
+            Inset::default()
+                .left(length.clone())
+                .right(length.clone())
+                .top(length.clone())
+                .bottom(length),
+        )
+    }
+
+    /// Has any composition-level chrome been added?
+    fn has_chrome(&self) -> bool {
+        !self.chrome.is_empty()
+            || self.aspect.is_some()
+            || !inset_is_zero(&self.margin)
+            || !inset_is_zero(&self.padding)
     }
 
     /// Place an element at 1-indexed `(row, col)` covering `span.rows ×
@@ -367,119 +552,606 @@ impl Composition {
 impl Element {
     /// Solve this element as the root of a layout.
     pub fn solve(self, size: Size, dpi: f64) -> CompositionLayout {
-        self.try_solve(size, dpi).expect(
-            "composition error — use try_solve to inspect (duplicate ids or unsupported nesting)",
-        )
+        self.try_solve(size, dpi)
+            .expect("composition error — use try_solve to inspect (duplicate ids)")
     }
 
     /// Like [`Self::solve`] but returns errors instead of panicking.
     pub fn try_solve(self, size: Size, dpi: f64) -> Result<CompositionLayout, CompositionError> {
-        let body = self.into_root_body();
-        let mut state = FlattenState::new(
-            body.block_cols,
-            body.block_rows,
-            body.widths.clone(),
-            body.heights.clone(),
-        );
-        body.flatten(&mut state)?;
-        let (grid, regions) = state.finish();
+        let mut state = BuildState::new();
+        let root_id = state.alloc_id();
+        let grid = match self {
+            Element::Patch(p) => build_single_patch(p, root_id, &mut state)?,
+            Element::Composition(c) => build_composition_grid(c, root_id, &mut state, None)?,
+        };
         let layout = grid.solve(size, dpi);
-        Ok(CompositionLayout { layout, regions })
+        Ok(CompositionLayout {
+            layout,
+            regions: state.regions,
+        })
+    }
+}
+
+// ─── Build pipeline ──────────────────────────────────────────────────────────
+//
+// Each composition produces a uniform `rows · TABLE_ROWS × cols · TABLE_COLS`
+// outer grid — one canonical 13×16 anatomical block per outer cell, no
+// expansion for nested compositions. A nested composition is placed as a
+// sub-`Grid` spanning the entire outer block (rows 1..16, cols 1..13). The
+// inner composition's outer-facing chrome aligns with the outer block's
+// chrome rows/cols via `Length::TrackOf` sizer cells on both sides of the
+// boundary: forward sizers in the outer point at sub-Grid chrome tracks;
+// back sizers in the sub point at outer chrome tracks. The fixed-point
+// iteration over `TrackOf` references in the solver converges this
+// bidirectional coupling in two or three iterations per nesting level.
+
+struct BuildState {
+    next_id: u64,
+    regions: HashMap<(String, String), CellId>,
+}
+
+impl BuildState {
+    fn new() -> Self {
+        Self {
+            next_id: 1,
+            regions: HashMap::new(),
+        }
     }
 
-    /// Determine the super-grid shape and decompose the element into a
-    /// flattening recipe. See [`RootBody`].
-    fn into_root_body(self) -> RootBody {
-        match self {
-            Element::Patch(mut p) => {
-                let inner = p.inner.take();
-                match inner {
-                    Some(boxed) => match *boxed {
-                        Element::Composition(c) => {
-                            // Outer patch wraps a composition — block shape
-                            // comes from the inner composition.
-                            RootBody {
-                                block_cols: c.cols,
-                                block_rows: c.rows,
-                                widths: c.widths,
-                                heights: c.heights,
-                                kind: RootKind::OuterWithComposition {
-                                    outer: p,
-                                    placements: c.placements,
-                                },
-                            }
-                        }
-                        Element::Patch(inner_patch) => {
-                            // Nested patch — re-attach and treat as a single
-                            // (1, 1) block.
-                            p.inner = Some(Box::new(Element::Patch(inner_patch)));
-                            RootBody {
-                                block_cols: 1,
-                                block_rows: 1,
-                                widths: vec![Track::Fr(1.0)],
-                                heights: vec![Track::Fr(1.0)],
-                                kind: RootKind::Patch(p),
-                            }
-                        }
-                    },
-                    None => RootBody {
-                        block_cols: 1,
-                        block_rows: 1,
-                        widths: vec![Track::Fr(1.0)],
-                        heights: vec![Track::Fr(1.0)],
-                        kind: RootKind::Patch(p),
-                    },
-                }
+    fn alloc_id(&mut self) -> CellId {
+        let id = CellId(self.next_id);
+        self.next_id += 1;
+        id
+    }
+
+    fn register_region(
+        &mut self,
+        patch_id: &Option<String>,
+        region: &str,
+    ) -> Result<CellId, CompositionError> {
+        let cell_id = self.alloc_id();
+        if let Some(pid) = patch_id {
+            let key = (pid.clone(), region.to_string());
+            if self.regions.contains_key(&key) {
+                return Err(CompositionError::DuplicateId(format!("{pid}:{region}")));
             }
-            Element::Composition(c) => RootBody {
-                block_cols: c.cols,
-                block_rows: c.rows,
-                widths: c.widths,
-                heights: c.heights,
-                kind: RootKind::Composition(c.placements),
-            },
+            self.regions.insert(key, cell_id);
+        }
+        Ok(cell_id)
+    }
+}
+
+/// Couples a sub-composition's inner border tracks to the parent
+/// composition's outer-block chrome tracks. Carried into
+/// [`build_composition_grid`] when recursing into a nested composition.
+struct ParentCoupling {
+    parent_id: CellId,
+    /// 0-based row of the parent outer block this nested composition sits in.
+    parent_block_row: usize,
+    /// 0-based column of the parent outer block.
+    parent_block_col: usize,
+    /// Number of parent outer-block rows spanned by this composition.
+    parent_block_row_span: usize,
+    /// Number of parent outer-block columns spanned.
+    parent_block_col_span: usize,
+}
+
+/// Build a single-patch root: wrap one patch as a 1×1 composition's outer
+/// block. Reuses the same emit_patch_into machinery for consistency.
+fn build_single_patch(
+    p: Patch,
+    grid_id: CellId,
+    state: &mut BuildState,
+) -> Result<Grid, CompositionError> {
+    let cols = patch_block_tracks(Track::Fr(1.0), Axis::Width);
+    let rows = patch_block_tracks(Track::Fr(1.0), Axis::Height);
+    let mut g = Grid::new(cols, rows).id(grid_id);
+    emit_patch_into(&mut g, p, 0, 0, 1, 1, state)?;
+    Ok(g)
+}
+
+fn inset_is_zero(inset: &Inset) -> bool {
+    inset.left.is_none()
+        && inset.right.is_none()
+        && inset.top.is_none()
+        && inset.bottom.is_none()
+        && inset.width.is_none()
+        && inset.height.is_none()
+}
+
+/// Recursively build a `Grid` for `c`. `parent` is `Some` when `c` is a
+/// nested composition embedded in another composition's outer block; in
+/// that case the function emits back-sizers binding `c`'s inner border
+/// chrome tracks to the parent's outer chrome tracks. The caller pre-
+/// allocates `grid_id` so it can reference the new grid via `TrackOf`.
+fn build_composition_grid(
+    c: Composition,
+    grid_id: CellId,
+    state: &mut BuildState,
+    parent: Option<ParentCoupling>,
+) -> Result<Grid, CompositionError> {
+    if c.has_chrome() {
+        return build_wrapped_composition(c, grid_id, state, parent);
+    }
+    let cols = composition_col_tracks(&c);
+    let rows = composition_row_tracks(&c);
+    let mut g = Grid::new(cols, rows).id(grid_id);
+
+    let placements = c.placements;
+    for cp in placements {
+        let block_row = (cp.row - 1) as usize;
+        let block_col = (cp.col - 1) as usize;
+        let block_row_span = cp.span.rows.max(1) as usize;
+        let block_col_span = cp.span.cols.max(1) as usize;
+        match cp.element {
+            Element::Patch(p) => {
+                emit_patch_into(
+                    &mut g,
+                    p,
+                    block_row,
+                    block_col,
+                    block_row_span,
+                    block_col_span,
+                    state,
+                )?;
+            }
+            Element::Composition(inner) => {
+                let sub_rows = inner.rows;
+                let sub_cols = inner.cols;
+                let sub_id = state.alloc_id();
+                let sub = build_composition_grid(
+                    inner,
+                    sub_id,
+                    state,
+                    Some(ParentCoupling {
+                        parent_id: grid_id,
+                        parent_block_row: block_row,
+                        parent_block_col: block_col,
+                        parent_block_row_span: block_row_span,
+                        parent_block_col_span: block_col_span,
+                    }),
+                )?;
+                let span_rows = (block_row_span * TABLE_ROWS) as u16;
+                let span_cols = (block_col_span * TABLE_COLS) as u16;
+                let start_row = (block_row * TABLE_ROWS) as u16 + 1;
+                let start_col = (block_col * TABLE_COLS) as u16 + 1;
+                g.place(
+                    Placement::at(start_row, start_col).span(span_rows, span_cols),
+                    sub,
+                );
+                emit_forward_sizers(
+                    &mut g,
+                    block_row,
+                    block_col,
+                    block_row_span,
+                    block_col_span,
+                    sub_id,
+                    sub_rows,
+                    sub_cols,
+                );
+            }
+        }
+    }
+
+    if let Some(parent) = parent {
+        emit_back_sizers(&mut g, &parent, c.rows, c.cols);
+    }
+
+    Ok(g)
+}
+
+/// Build a Composition that carries composition-level chrome (Title,
+/// Caption, axis titles, …) as a single canonical 13×16 outer block.
+/// The facets sub-Grid spans the **entire** wrapping block (rows 1..16,
+/// cols 1..13), with forward and back sizers binding the inner border
+/// facets' chrome tracks to the wrapping block's canonical chrome
+/// tracks — same mechanism as nested-composition-in-a-cell.
+///
+/// Consequence: composition-level chrome (e.g.
+/// `composition.slot(Slot::Title, …)`) shares canonical rows with the
+/// inner border facets' own chrome. If both are populated for the same
+/// anatomical slot, both rects resolve to the **same y range**, with
+/// the composition chrome spanning the full plot-area width and the
+/// per-facet chrome spanning a single facet's width. Intended — the
+/// outer wider chrome visually sits behind the narrower per-facet
+/// chrome at the same canonical row.
+///
+/// Mirrors patchwork's `simplify_gt.gtable_patchwork`: a 16×13
+/// canonical anatomy whose chrome cols/rows are shared between the
+/// wrapping annotation and the inner border facets.
+fn build_wrapped_composition(
+    mut c: Composition,
+    grid_id: CellId,
+    state: &mut BuildState,
+    parent: Option<ParentCoupling>,
+) -> Result<Grid, CompositionError> {
+    // Extract chrome metadata; leave `c` as the bare facets composition.
+    let chrome = std::mem::take(&mut c.chrome);
+    let comp_id = c.id.take();
+    // Aspect on a wrapped composition has no clean semantics yet — the
+    // sub-Grid spans the entire wrapping block. Silently dropped.
+    c.aspect = None;
+    let margin = std::mem::take(&mut c.margin);
+    let padding = std::mem::take(&mut c.padding);
+
+    // Outer wrapping grid is a single canonical 13×16 block.
+    let cols = patch_block_tracks(Track::Fr(1.0), Axis::Width);
+    let rows = patch_block_tracks(Track::Fr(1.0), Axis::Height);
+    let mut g = Grid::new(cols, rows).id(grid_id);
+
+    // Emit chrome slots at canonical positions of this single block.
+    for ch in chrome {
+        let cell_id = state.register_region(&comp_id, &ch.region)?;
+        let translated = translate_patch_placement(&ch.placement, 0, 0, 1, 1);
+        g.place(translated, ch.cell.id(cell_id));
+    }
+
+    // Ring sizers for margin/padding.
+    emit_ring_sizers(&mut g, 0, 0, 1, 1, &margin, &padding);
+
+    // Build the chromeless facets sub-Grid, coupled to this wrapping
+    // block via back sizers (so its inner border chrome tracks bind to
+    // the wrapping block's canonical chrome tracks).
+    let sub_rows = c.rows;
+    let sub_cols = c.cols;
+    let sub_id = state.alloc_id();
+    let sub_parent = ParentCoupling {
+        parent_id: grid_id,
+        parent_block_row: 0,
+        parent_block_col: 0,
+        parent_block_row_span: 1,
+        parent_block_col_span: 1,
+    };
+    let sub = build_composition_grid(c, sub_id, state, Some(sub_parent))?;
+
+    // Place the sub-Grid spanning the entire wrapping block — same
+    // semantics as a nested composition placed in a parent's outer
+    // block. Forward sizers in the wrapping block read sub-Grid tracks.
+    g.place(
+        Placement::at(1, 1).span(TABLE_ROWS_U16, TABLE_COLS_U16),
+        sub,
+    );
+    emit_forward_sizers(&mut g, 0, 0, 1, 1, sub_id, sub_rows, sub_cols);
+
+    // Back sizers when THIS wrapping block is itself nested in another
+    // composition's outer block.
+    if let Some(parent) = parent {
+        emit_back_sizers(&mut g, &parent, 1, 1);
+    }
+
+    Ok(g)
+}
+
+/// Outer block track pattern (13 cols): Auto everywhere except the panel
+/// column, which is `panel`.
+fn patch_block_tracks(panel: Track, axis: Axis) -> Vec<Track> {
+    let (count, panel_idx) = match axis {
+        Axis::Width => (TABLE_COLS_U16, PANEL_COL),
+        Axis::Height => (TABLE_ROWS_U16, PANEL_ROW),
+    };
+    (1..=count)
+        .map(|i| {
+            if i == panel_idx {
+                panel.clone()
+            } else {
+                Track::Auto
+            }
+        })
+        .collect()
+}
+
+fn composition_col_tracks(c: &Composition) -> Vec<Track> {
+    let mut out = Vec::with_capacity(c.cols * TABLE_COLS);
+    for col in 0..c.cols {
+        let panel = c.widths[col].clone();
+        for i in 1..=TABLE_COLS_U16 {
+            out.push(if i == PANEL_COL {
+                panel.clone()
+            } else {
+                Track::Auto
+            });
+        }
+    }
+    out
+}
+
+fn composition_row_tracks(c: &Composition) -> Vec<Track> {
+    let mut out = Vec::with_capacity(c.rows * TABLE_ROWS);
+    for row in 0..c.rows {
+        let panel = c.heights[row].clone();
+        for r in 1..=TABLE_ROWS_U16 {
+            out.push(if r == PANEL_ROW {
+                panel.clone()
+            } else {
+                Track::Auto
+            });
+        }
+    }
+    out
+}
+
+/// Emit a patch's anatomical slots, margin/padding ring sizers, and
+/// optional aspect-locked panel wrap into the outer grid at block
+/// `(block_row, block_col)`, spanning `block_row_span × block_col_span`
+/// outer blocks.
+fn emit_patch_into(
+    g: &mut Grid,
+    patch: Patch,
+    block_row: usize,
+    block_col: usize,
+    block_row_span: usize,
+    block_col_span: usize,
+    state: &mut BuildState,
+) -> Result<(), CompositionError> {
+    let Patch {
+        id,
+        placements,
+        aspect,
+        margin,
+        padding,
+    } = patch;
+    for p in placements {
+        let cell_id = state.register_region(&id, &p.region)?;
+        let translated = translate_patch_placement(
+            &p.placement,
+            block_row,
+            block_col,
+            block_row_span,
+            block_col_span,
+        );
+        let is_panel = p.placement.row == PANEL_ROW
+            && p.placement.col == PANEL_COL
+            && p.placement.row_span <= 1
+            && p.placement.col_span <= 1;
+        let panel_with_aspect = aspect.is_some() && is_panel;
+        if panel_with_aspect {
+            let (aw, ah) = aspect.unwrap();
+            let cell = p.cell.id(cell_id);
+            let mut wrapped = Grid::new([Track::Fr(aw)], [Track::Fr(ah)]).respect();
+            wrapped.place(Placement::at(1, 1), cell);
+            g.place(translated, wrapped);
+        } else {
+            g.place(translated, p.cell.id(cell_id));
+        }
+    }
+    emit_ring_sizers(
+        g,
+        block_row,
+        block_col,
+        block_row_span,
+        block_col_span,
+        &margin,
+        &padding,
+    );
+    Ok(())
+}
+
+/// Emit empty sizer cells at the four margin tracks and four padding
+/// tracks of the outer block at `(block_row, block_col)`. Each cell uses
+/// `Inset::width` / `Inset::height` to force the corresponding Auto track
+/// to size to the requested length.
+fn emit_ring_sizers(
+    g: &mut Grid,
+    block_row: usize,
+    block_col: usize,
+    block_row_span: usize,
+    block_col_span: usize,
+    margin: &Inset,
+    padding: &Inset,
+) {
+    let end_block_row = block_row + block_row_span - 1;
+    let end_block_col = block_col + block_col_span - 1;
+    // Top/bottom ring rows live in the start/end block respectively.
+    let row_sizers: [(u16, usize, &Option<Length>); 4] = [
+        (MARGIN_TOP_ROW, block_row, &margin.top),
+        (MARGIN_BOTTOM_ROW, end_block_row, &margin.bottom),
+        (PADDING_TOP_ROW, block_row, &padding.top),
+        (PADDING_BOTTOM_ROW, end_block_row, &padding.bottom),
+    ];
+    // Left/right ring cols similarly anchor to start/end block.
+    let col_sizers: [(u16, usize, &Option<Length>); 4] = [
+        (MARGIN_LEFT_COL, block_col, &margin.left),
+        (MARGIN_RIGHT_COL, end_block_col, &margin.right),
+        (PADDING_LEFT_COL, block_col, &padding.left),
+        (PADDING_RIGHT_COL, end_block_col, &padding.right),
+    ];
+
+    for (anat_row, br, length) in row_sizers {
+        if let Some(l) = length {
+            let row = (br * TABLE_ROWS) as u16 + anat_row;
+            let col = (block_col * TABLE_COLS) as u16 + PANEL_COL;
+            g.place(
+                Placement::at(row, col).inset(Inset::default().height(l.clone())),
+                Cell::empty(),
+            );
+        }
+    }
+    for (anat_col, bc, length) in col_sizers {
+        if let Some(l) = length {
+            let row = (block_row * TABLE_ROWS) as u16 + PANEL_ROW;
+            let col = (bc * TABLE_COLS) as u16 + anat_col;
+            g.place(
+                Placement::at(row, col).inset(Inset::default().width(l.clone())),
+                Cell::empty(),
+            );
         }
     }
 }
 
-/// Decomposed root element ready for flattening.
-struct RootBody {
-    block_cols: usize,
-    block_rows: usize,
-    widths: Vec<Track>,
-    heights: Vec<Track>,
-    kind: RootKind,
+/// Emit forward sizers in the OUTER grid at every chrome row/col of the
+/// outer block `(block_row, block_col)`, referencing the sub-Grid's
+/// inner border-block chrome tracks. Each sizer is a single-span
+/// `Cell::empty()` whose `inset.height` / `inset.width` is a
+/// `Length::track_of(sub_id, ...)` reference — the solver's fixed-point
+/// iteration over `TrackOf` makes the outer Auto track grow to the
+/// sub-Grid's resolved inner-border track size.
+#[allow(clippy::too_many_arguments)]
+fn emit_forward_sizers(
+    g: &mut Grid,
+    block_row: usize,
+    block_col: usize,
+    block_row_span: usize,
+    block_col_span: usize,
+    sub_id: CellId,
+    sub_rows: usize,
+    sub_cols: usize,
+) {
+    let end_block_row = block_row + block_row_span - 1;
+    let end_block_col = block_col + block_col_span - 1;
+    // Top chrome rows of the start block point at the inner TOP border
+    // block (inner row 1) of the sub-Grid.
+    // Bottom chrome rows of the end block point at the inner BOTTOM
+    // border block (inner row sub_rows).
+    for anat_r in (1u16..=8).chain(10..=16) {
+        let (outer_block_row, sub_inner_row): (usize, u16) = if anat_r <= 8 {
+            (block_row, anat_r) // inner top block (inner row 0), anat row r
+        } else {
+            (end_block_row, ((sub_rows - 1) * TABLE_ROWS) as u16 + anat_r)
+        };
+        let outer_row = (outer_block_row * TABLE_ROWS) as u16 + anat_r;
+        let outer_col = (block_col * TABLE_COLS) as u16 + PANEL_COL;
+        g.place(
+            Placement::at(outer_row, outer_col).inset(Inset::default().height(Length::track_of(
+                sub_id,
+                Axis::Height,
+                sub_inner_row,
+            ))),
+            Cell::empty(),
+        );
+    }
+    for anat_c in (1u16..=6).chain(8..=13) {
+        let (outer_block_col, sub_inner_col): (usize, u16) = if anat_c <= 6 {
+            (block_col, anat_c)
+        } else {
+            (end_block_col, ((sub_cols - 1) * TABLE_COLS) as u16 + anat_c)
+        };
+        let outer_row = (block_row * TABLE_ROWS) as u16 + PANEL_ROW;
+        let outer_col = (outer_block_col * TABLE_COLS) as u16 + anat_c;
+        g.place(
+            Placement::at(outer_row, outer_col).inset(Inset::default().width(Length::track_of(
+                sub_id,
+                Axis::Width,
+                sub_inner_col,
+            ))),
+            Cell::empty(),
+        );
+    }
 }
 
-enum RootKind {
-    /// A single patch (possibly with a nested patch via `place_in_panel`).
-    /// Block shape `(1, 1)`.
-    Patch(Patch),
-    /// A bare composition. Each placement goes to its own composition cell.
-    Composition(Vec<CompositionPlacement>),
-    /// An outer patch wrapping a composition. The outer's chrome spans the
-    /// full block range; each inner placement goes to its own composition
-    /// cell.
-    OuterWithComposition {
-        outer: Patch,
-        placements: Vec<CompositionPlacement>,
-    },
-}
+/// Emit back sizers in the SUB grid at every chrome row/col of the inner
+/// border blocks, each referencing the parent's outer-block chrome track.
+/// The bidirectional pair (forward + back) makes the two Auto tracks
+/// converge to their pointwise max under the solver's TrackOf iteration.
+fn emit_back_sizers(g: &mut Grid, parent: &ParentCoupling, sub_rows: usize, sub_cols: usize) {
+    let pid = parent.parent_id;
+    let p_start_row = parent.parent_block_row;
+    let p_end_row = parent.parent_block_row + parent.parent_block_row_span - 1;
+    let p_start_col = parent.parent_block_col;
+    let p_end_col = parent.parent_block_col + parent.parent_block_col_span - 1;
 
-impl RootBody {
-    fn flatten(self, state: &mut FlattenState) -> Result<(), CompositionError> {
-        let m = self.block_cols as u16;
-        let n = self.block_rows as u16;
-        match self.kind {
-            RootKind::Patch(p) => add_patch_at(state, p, 1, 1, 1, 1),
-            RootKind::Composition(placements) => flatten_composition_cells(state, placements),
-            RootKind::OuterWithComposition { outer, placements } => {
-                // Outer's chrome spans all blocks of the composition.
-                add_patch_at(state, outer, 1, 1, n, m)?;
-                flatten_composition_cells(state, placements)
-            }
+    // For each inner column on the top border (inner row 0), sizer at
+    // (anat r, inner-col-anchor) pointing at parent's start-block row r.
+    // Symmetric for bottom border.
+    for inner_c in 0..sub_cols {
+        for anat_r in (1u16..=8).chain(10..=16) {
+            let (inner_row_block, p_row_block): (usize, usize) = if anat_r <= 8 {
+                (0, p_start_row)
+            } else {
+                (sub_rows - 1, p_end_row)
+            };
+            let sub_row = (inner_row_block * TABLE_ROWS) as u16 + anat_r;
+            let sub_col = (inner_c * TABLE_COLS) as u16 + PANEL_COL;
+            let parent_track = (p_row_block * TABLE_ROWS) as u16 + anat_r;
+            g.place(
+                Placement::at(sub_row, sub_col).inset(Inset::default().height(Length::track_of(
+                    pid,
+                    Axis::Height,
+                    parent_track,
+                ))),
+                Cell::empty(),
+            );
         }
     }
+    // Left/right border for cols.
+    for inner_r in 0..sub_rows {
+        for anat_c in (1u16..=6).chain(8..=13) {
+            let (inner_col_block, p_col_block): (usize, usize) = if anat_c <= 6 {
+                (0, p_start_col)
+            } else {
+                (sub_cols - 1, p_end_col)
+            };
+            let sub_row = (inner_r * TABLE_ROWS) as u16 + PANEL_ROW;
+            let sub_col = (inner_col_block * TABLE_COLS) as u16 + anat_c;
+            let parent_track = (p_col_block * TABLE_COLS) as u16 + anat_c;
+            g.place(
+                Placement::at(sub_row, sub_col).inset(Inset::default().width(Length::track_of(
+                    pid,
+                    Axis::Width,
+                    parent_track,
+                ))),
+                Cell::empty(),
+            );
+        }
+    }
+}
+
+/// Translate a patch-local anatomy placement into outer-grid coordinates.
+/// Anatomy cols `1..=PANEL_COL` left-anchor to the start block; cols
+/// `PANEL_COL+1..=TABLE_COLS` right-anchor to the end block. Same for
+/// rows. The single-cell panel placement (PANEL_ROW × PANEL_COL, 1×1
+/// span) stretches across all spanned outer blocks' panel cells.
+fn translate_patch_placement(
+    local: &Placement,
+    block_row: usize,
+    block_col: usize,
+    block_row_span: usize,
+    block_col_span: usize,
+) -> Placement {
+    let pr = local.row;
+    let pc = local.col;
+    let pcs_r = local.row_span.max(1);
+    let pcs_c = local.col_span.max(1);
+    let end_pr = pr + pcs_r - 1;
+    let end_pc = pc + pcs_c - 1;
+    let start_block_row_u16 = (block_row as u16) * TABLE_ROWS_U16;
+    let end_block_row_u16 = (block_row + block_row_span - 1) as u16 * TABLE_ROWS_U16;
+    let start_block_col_u16 = (block_col as u16) * TABLE_COLS_U16;
+    let end_block_col_u16 = (block_col + block_col_span - 1) as u16 * TABLE_COLS_U16;
+
+    let stretch_panel =
+        pc == PANEL_COL && end_pc == PANEL_COL && pr == PANEL_ROW && end_pr == PANEL_ROW;
+
+    let map_col = |c: u16| -> u16 {
+        if c <= PANEL_COL {
+            start_block_col_u16 + c
+        } else {
+            end_block_col_u16 + c
+        }
+    };
+    let map_row = |r: u16| -> u16 {
+        if r <= PANEL_ROW {
+            start_block_row_u16 + r
+        } else {
+            end_block_row_u16 + r
+        }
+    };
+
+    let super_col = map_col(pc);
+    let super_col_end = if stretch_panel {
+        end_block_col_u16 + PANEL_COL
+    } else {
+        map_col(end_pc)
+    };
+    let super_row = map_row(pr);
+    let super_row_end = if stretch_panel {
+        end_block_row_u16 + PANEL_ROW
+    } else {
+        map_row(end_pr)
+    };
+
+    Placement::at(super_row, super_col)
+        .span(super_row_end - super_row + 1, super_col_end - super_col + 1)
+        .inset(local.inset.clone())
 }
 
 /// Recursively walk an [`Element`] tree, returning `true` if any
@@ -487,48 +1159,9 @@ impl RootBody {
 /// [`Composition::contains_patch_id`].
 fn element_contains_patch_id(e: &Element, id: &str) -> bool {
     match e {
-        Element::Patch(p) => {
-            if p.id() == Some(id) {
-                return true;
-            }
-            // Nested inner (via Patch::place_in_panel).
-            if let Some(inner) = &p.inner {
-                if element_contains_patch_id(inner, id) {
-                    return true;
-                }
-            }
-            false
-        }
+        Element::Patch(p) => p.id() == Some(id),
         Element::Composition(c) => c.contains_patch_id(id),
     }
-}
-
-fn flatten_composition_cells(
-    state: &mut FlattenState,
-    placements: Vec<CompositionPlacement>,
-) -> Result<(), CompositionError> {
-    for cp in placements {
-        match cp.element {
-            Element::Patch(p) => {
-                // A patch with a nested Composition can only appear at the
-                // root, not inside a Composition's cell.
-                if let Some(boxed) = &p.inner {
-                    if matches!(**boxed, Element::Composition(_)) {
-                        return Err(CompositionError::UnsupportedNesting(
-                            "Patch with inner Composition cannot be nested in a composition cell",
-                        ));
-                    }
-                }
-                add_patch_at(state, p, cp.row, cp.col, cp.span.rows, cp.span.cols)?;
-            }
-            Element::Composition(_) => {
-                return Err(CompositionError::UnsupportedNesting(
-                    "Composition placed directly in another Composition's cell — use Patch::place_in_panel",
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Errors produced by [`Composition::try_solve`].
@@ -536,9 +1169,6 @@ fn flatten_composition_cells(
 pub enum CompositionError {
     /// Two patches reachable from the root carry the same id.
     DuplicateId(String),
-    /// A nested element type that v1 does not support (e.g. a Composition
-    /// directly inside another Composition's cell).
-    UnsupportedNesting(&'static str),
 }
 
 impl std::fmt::Display for CompositionError {
@@ -546,9 +1176,6 @@ impl std::fmt::Display for CompositionError {
         match self {
             CompositionError::DuplicateId(id) => {
                 write!(f, "duplicate patch id: {id:?}")
-            }
-            CompositionError::UnsupportedNesting(what) => {
-                write!(f, "unsupported nesting: {what}")
             }
         }
     }
@@ -598,210 +1225,6 @@ pub fn spacer() -> Patch {
 /// A patch wrapping `cell` in its Panel slot. Addressable as `(id, "panel")`.
 pub fn wrap(id: impl Into<String>, cell: Cell) -> Patch {
     Patch::new(id).slot(Slot::Panel, cell)
-}
-
-// ─── Flatten state (private) ─────────────────────────────────────────────────
-
-/// Mutable scratchpad collecting placements and id assignments as the
-/// flattener walks the element tree.
-struct FlattenState {
-    next_id: u64,
-    regions: HashMap<(String, String), CellId>,
-    emissions: Vec<(Placement, Node)>,
-    block_cols: usize,
-    block_rows: usize,
-    widths: Vec<Track>,
-    heights: Vec<Track>,
-}
-
-impl FlattenState {
-    fn new(block_cols: usize, block_rows: usize, widths: Vec<Track>, heights: Vec<Track>) -> Self {
-        Self {
-            next_id: 1,
-            regions: HashMap::new(),
-            emissions: Vec::new(),
-            block_cols,
-            block_rows,
-            widths,
-            heights,
-        }
-    }
-
-    fn alloc_id(&mut self) -> CellId {
-        let id = CellId(self.next_id);
-        self.next_id += 1;
-        id
-    }
-
-    /// Register a patch's region under its id. Returns the allocated cell id,
-    /// or `Err(DuplicateId)` if the same `(id, region)` is registered twice.
-    fn register_region(
-        &mut self,
-        patch_id: &Option<String>,
-        region: &str,
-    ) -> Result<CellId, CompositionError> {
-        let cell_id = self.alloc_id();
-        if let Some(pid) = patch_id {
-            let key = (pid.clone(), region.to_string());
-            if self.regions.contains_key(&key) {
-                return Err(CompositionError::DuplicateId(format!("{}:{}", pid, region)));
-            }
-            self.regions.insert(key, cell_id);
-        }
-        Ok(cell_id)
-    }
-
-    /// Consume the state and produce the super-grid plus the regions map.
-    fn finish(self) -> (Grid, HashMap<(String, String), CellId>) {
-        let mut grid = Grid::new(
-            super_cols_tracks(self.block_cols, &self.widths),
-            super_rows_tracks(self.block_rows, &self.heights),
-        );
-        for (placement, node) in self.emissions {
-            grid.place(placement, node);
-        }
-        (grid, self.regions)
-    }
-}
-
-/// Add a patch to the super-grid at composition cell `(cr, cc)` with span
-/// `(sr, sc)`. Both `cr/cc` and `sr/sc` are 1-indexed.
-///
-/// If the patch carries a nested `inner` (set via
-/// [`Patch::place_in_panel`]), recurse into it at the same composition cell
-/// — the inner's chrome merges with the outer's by sharing super-grid
-/// positions.
-fn add_patch_at(
-    state: &mut FlattenState,
-    patch: Patch,
-    cr: u16,
-    cc: u16,
-    sr: u16,
-    sc: u16,
-) -> Result<(), CompositionError> {
-    let Patch {
-        id,
-        placements,
-        aspect,
-        inner,
-    } = patch;
-    for p in placements {
-        let cell_id = state.register_region(&id, &p.region)?;
-        let translated = translate_placement(&p.placement, cc, cr, sc, sr);
-        let panel_with_aspect = aspect.is_some() && is_panel_anatomical(&p.placement);
-        if panel_with_aspect {
-            let (aw, ah) = aspect.unwrap();
-            let cell = p.cell.id(cell_id);
-            let mut wrapped = Grid::new([Track::Fr(aw)], [Track::Fr(ah)]).respect();
-            wrapped.place(Placement::at(1, 1), cell);
-            state.emissions.push((translated, wrapped.into()));
-        } else {
-            let cell = p.cell.id(cell_id);
-            state.emissions.push((translated, cell.into()));
-        }
-    }
-    // Recurse into nested content. For inner = Patch, the inner shares the
-    // outer's composition cell+span (same (1, 1) block-shape contribution).
-    // For inner = Composition, the routing happens at the root (via
-    // `Element::into_root_body`); here we'd see only Composition if the
-    // user nested a `place_in_panel(Composition)` patch inside a Composition
-    // cell, which we reject before reaching this branch in
-    // `flatten_composition_cells`.
-    if let Some(boxed) = inner {
-        match *boxed {
-            Element::Patch(inner_patch) => {
-                add_patch_at(state, inner_patch, cr, cc, sr, sc)?;
-            }
-            Element::Composition(_) => {
-                return Err(CompositionError::UnsupportedNesting(
-                    "Composition in panel must be at the root (not nested in another structure)",
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Translate a patch-local placement to its super-grid coordinates.
-///
-/// `(cc, cr)` is the patch's 1-indexed top-left composition cell, and
-/// `(sc, sr)` is the composition span (how many cells the patch covers).
-///
-/// The panel-band rule: per-patch left chrome (cols < PANEL_COL) maps to the
-/// leftmost spanned block; right chrome maps to the rightmost spanned block;
-/// content at or spanning PANEL_COL spans across all spanned blocks at the
-/// panel column. Same logic on the row axis.
-fn translate_placement(local: &Placement, cc: u16, cr: u16, sc: u16, sr: u16) -> Placement {
-    let pr = local.row;
-    let pc = local.col;
-    let pcs_r = local.row_span.max(1);
-    let pcs_c = local.col_span.max(1);
-    let end_pr = pr + pcs_r - 1;
-    let end_pc = pc + pcs_c - 1;
-
-    // Columns.
-    let start_col_block = if pc <= PANEL_COL { cc - 1 } else { cc + sc - 2 };
-    let end_col_block = if end_pc >= PANEL_COL {
-        cc + sc - 2
-    } else {
-        cc - 1
-    };
-    let super_col = start_col_block * TABLE_COLS_U16 + pc;
-    let super_col_end = end_col_block * TABLE_COLS_U16 + end_pc;
-    let super_col_span = super_col_end - super_col + 1;
-
-    // Rows.
-    let start_row_block = if pr <= PANEL_ROW { cr - 1 } else { cr + sr - 2 };
-    let end_row_block = if end_pr >= PANEL_ROW {
-        cr + sr - 2
-    } else {
-        cr - 1
-    };
-    let super_row = start_row_block * TABLE_ROWS_U16 + pr;
-    let super_row_end = end_row_block * TABLE_ROWS_U16 + end_pr;
-    let super_row_span = super_row_end - super_row + 1;
-
-    Placement::at(super_row, super_col)
-        .span(super_row_span, super_col_span)
-        .inset(local.inset.clone())
-}
-
-/// Build the column-track sequence for an `m`-block-wide super-grid.
-fn super_cols_tracks(m: usize, widths: &[Track]) -> Vec<Track> {
-    assert_eq!(widths.len(), m, "widths length must equal block-cols (m)");
-    assert!(m >= 1, "super-grid needs at least one block column");
-    let mut cols = Vec::with_capacity(m * TABLE_COLS);
-    for panel_track in widths.iter() {
-        for i in 1..=TABLE_COLS_U16 {
-            cols.push(if i == PANEL_COL {
-                panel_track.clone()
-            } else {
-                Track::Auto
-            });
-        }
-    }
-    cols
-}
-
-/// Build the row-track sequence for an `n`-block-tall super-grid.
-fn super_rows_tracks(n: usize, heights: &[Track]) -> Vec<Track> {
-    assert_eq!(heights.len(), n, "heights length must equal block-rows (n)");
-    assert!(n >= 1, "super-grid needs at least one block row");
-    let mut rows = Vec::with_capacity(n * TABLE_ROWS);
-    for panel_track in heights.iter() {
-        for r in 1..=TABLE_ROWS_U16 {
-            rows.push(if r == PANEL_ROW {
-                panel_track.clone()
-            } else {
-                Track::Auto
-            });
-        }
-    }
-    rows
-}
-
-fn is_panel_anatomical(p: &Placement) -> bool {
-    p.row == PANEL_ROW && p.col == PANEL_COL && p.row_span <= 1 && p.col_span <= 1
 }
 
 // ─── CompositionLayout + Region ──────────────────────────────────────────────
@@ -1207,172 +1630,561 @@ mod tests {
         approx_eq(pan2.y1, pan3.y1, 0.5, "p2/p3 share y1");
     }
 
-    // ─── Step 4: nested Patch in Panel ──────────────────────────────────
+    // ─── Margin + padding tests ─────────────────────────────────────────
 
     #[test]
-    fn nested_patch_in_panel_inherits_outer_chrome() {
-        // outer has a 30px title; inner has a 20px title. Both contribute to
-        // the same super-grid title row (Auto), which resolves to max(30, 20)
-        // = 30. Both layout.get(_, Title) return rects with that height.
-        let inner = Patch::new("inner")
-            .slot(Slot::Title, sized(0.0, 20.0))
-            .slot(Slot::Panel, Cell::empty());
-        let composed = Patch::new("outer")
-            .slot(Slot::Title, sized(0.0, 30.0))
-            .place_in_panel(inner);
-        let layout = composed.solve(Size::new(400.0, 400.0), 96.0);
-
-        let outer_title = layout.get("outer", Slot::Title).unwrap();
-        let inner_title = layout.get("inner", Slot::Title).unwrap();
-        // Same row → identical rects (placed in the same super-grid cell).
-        approx_eq(outer_title.y0, inner_title.y0, 0.5, "title rows align");
-        approx_eq(outer_title.y1, inner_title.y1, 0.5, "title rows align");
+    fn margin_pushes_panel_inward_uniformly() {
+        // 200×200 viewport with margin = 10pt (= ~13.33 px at 96 dpi).
+        // No padding, no chrome → panel fills viewport minus 2*margin
+        // on each axis.
+        let p = Patch::new("p")
+            .slot(Slot::Panel, Cell::empty())
+            .margin_all(Length::pt(10.0));
+        let layout = p.solve(Size::new(200.0, 200.0), 96.0);
+        let panel = layout.get("p", Slot::Panel).unwrap();
+        let margin_px = 10.0 * 96.0 / 72.0;
+        approx_eq(panel.x0, margin_px, 0.5, "panel starts after margin_left");
+        approx_eq(panel.y0, margin_px, 0.5, "panel starts after margin_top");
         approx_eq(
-            outer_title.y1 - outer_title.y0,
-            30.0,
+            panel.x1,
+            200.0 - margin_px,
             0.5,
-            "title height = max(30, 20)",
-        );
-        // Both addressable.
-        let outer_panel = layout.get("outer", Slot::Panel);
-        let inner_panel = layout.get("inner", Slot::Panel).unwrap();
-        assert!(
-            outer_panel.is_none(),
-            "outer has no Panel slot since it didn't set one"
-        );
-        // Inner's panel sits below the title row.
-        approx_eq(inner_panel.y0, 30.0, 0.5, "inner panel y0 below title");
-    }
-
-    // ─── Step 5: nested Composition in Panel ────────────────────────────
-
-    #[test]
-    fn nested_composition_in_panel_widens_outer() {
-        // outer.place_in_panel(beside(a, b)):
-        //  - outer's Title should span across both inner panels (its rect
-        //    width >= a.panel.x1 - to b.panel.x0).
-        //  - outer's left chrome (AxisLeft) merges with a's left chrome at the
-        //    same super-grid col.
-        //  - outer's right chrome merges with b's right chrome.
-        //  - a and b share y range (same panel row).
-        let a = Patch::new("a")
-            .slot(Slot::AxisLeft, sized(20.0, 0.0))
-            .slot(Slot::Panel, Cell::empty());
-        let b = Patch::new("b")
-            .slot(Slot::AxisRight, sized(30.0, 0.0))
-            .slot(Slot::Panel, Cell::empty());
-        let composed = Patch::new("outer")
-            .slot(Slot::Title, sized(0.0, 40.0))
-            .slot(Slot::AxisLeftTitle, sized(50.0, 0.0))
-            .place_in_panel(beside(a, b));
-        let layout = composed.solve(Size::new(1000.0, 400.0), 96.0);
-
-        let outer_title = layout.get("outer", Slot::Title).unwrap();
-        let outer_axis_title = layout.get("outer", Slot::AxisLeftTitle).unwrap();
-        let a_axis = layout.get("a", Slot::AxisLeft).unwrap();
-        let a_panel = layout.get("a", Slot::Panel).unwrap();
-        let b_panel = layout.get("b", Slot::Panel).unwrap();
-        let b_axis = layout.get("b", Slot::AxisRight).unwrap();
-
-        // Title spans across both panels.
-        assert!(
-            outer_title.x0 <= a_panel.x0 + 0.5,
-            "outer title reaches left of a.panel"
-        );
-        assert!(
-            outer_title.x1 >= b_panel.x1 - 0.5,
-            "outer title reaches right of b.panel"
+            "panel ends before margin_right",
         );
         approx_eq(
-            outer_title.y1 - outer_title.y0,
-            40.0,
+            panel.y1,
+            200.0 - margin_px,
             0.5,
-            "title height 40",
+            "panel ends before margin_bottom",
         );
+    }
 
-        // Outer's AxisLeftTitle sits in the same column as where a's left
-        // chrome would be — i.e. left of a's AxisLeft.
-        assert!(
-            outer_axis_title.x1 <= a_axis.x0 + 0.5,
-            "outer.AxisLeftTitle.x1 ({}) <= a.AxisLeft.x0 ({})",
-            outer_axis_title.x1,
-            a_axis.x0
+    #[test]
+    fn padding_pushes_panel_inward_too() {
+        // Padding has the same effect on chrome+panel position as margin —
+        // both ring tracks contribute to pushing the panel inward.
+        // Difference: bg covers padding area; bg does not cover margin
+        // (verified in a separate test).
+        let p = Patch::new("p")
+            .slot(Slot::Panel, Cell::empty())
+            .padding_all(Length::pt(6.0));
+        let layout = p.solve(Size::new(200.0, 200.0), 96.0);
+        let panel = layout.get("p", Slot::Panel).unwrap();
+        let padding_px = 6.0 * 96.0 / 72.0;
+        approx_eq(panel.x0, padding_px, 0.5, "panel starts after padding_left");
+        approx_eq(
+            panel.x1,
+            200.0 - padding_px,
+            0.5,
+            "panel ends before padding_right",
+        );
+    }
+
+    #[test]
+    fn margin_and_padding_combine() {
+        // margin = 5pt, padding = 3pt → chrome offset = 8pt on each side.
+        let p = Patch::new("p")
+            .slot(Slot::Panel, Cell::empty())
+            .margin_all(Length::pt(5.0))
+            .padding_all(Length::pt(3.0));
+        let layout = p.solve(Size::new(200.0, 200.0), 96.0);
+        let panel = layout.get("p", Slot::Panel).unwrap();
+        let combined_px = (5.0 + 3.0) * 96.0 / 72.0;
+        approx_eq(
+            panel.x0,
+            combined_px,
+            0.5,
+            "panel starts after margin + padding",
         );
         approx_eq(
-            outer_axis_title.x1 - outer_axis_title.x0,
-            50.0,
+            panel.x1,
+            200.0 - combined_px,
             0.5,
-            "outer.AxisLeftTitle col = 50",
-        );
-
-        // Panels share y range.
-        approx_eq(a_panel.y0, b_panel.y0, 0.5, "a/b share y0");
-        approx_eq(a_panel.y1, b_panel.y1, 0.5, "a/b share y1");
-
-        // b.AxisRight is to the right of b.panel — between the two panels
-        // (interior chrome) or at the far right? It's on b's right which in
-        // a 2-block composition is the rightmost block's right chrome → far
-        // right of the whole grid.
-        assert!(
-            b_axis.x0 >= b_panel.x1 - 0.5,
-            "b.AxisRight is to the right of b.panel"
+            "panel ends before margin + padding",
         );
     }
 
     #[test]
-    fn nested_composition_outer_left_chrome_merges_with_leftmost_block() {
-        // outer AxisLeft = 100, a (leftmost) AxisLeft = 40 → merged to 100.
-        let a = Patch::new("a")
-            .slot(Slot::AxisLeft, sized(40.0, 0.0))
-            .slot(Slot::Panel, Cell::empty());
-        let b = Patch::new("b").slot(Slot::Panel, Cell::empty());
-        let composed = Patch::new("outer")
-            .slot(Slot::AxisLeft, sized(100.0, 0.0))
-            .place_in_panel(beside(a, b));
-        let layout = composed.solve(Size::new(1000.0, 400.0), 96.0);
-        let outer_axis = layout.get("outer", Slot::AxisLeft).unwrap();
-        let a_axis = layout.get("a", Slot::AxisLeft).unwrap();
-        approx_eq(outer_axis.x0, a_axis.x0, 0.5, "merged x0");
-        approx_eq(outer_axis.x1, a_axis.x1, 0.5, "merged x1");
-        approx_eq(outer_axis.x1 - outer_axis.x0, 100.0, 0.5, "max of 100/40");
-        // a's panel starts after the 100px axis col.
-        let a_panel = layout.get("a", Slot::Panel).unwrap();
-        approx_eq(a_panel.x0, 100.0, 0.5, "a.panel after merged 100px axis");
+    fn background_covers_padding_but_not_margin() {
+        // With margin = 5pt, padding = 3pt, the bg should be drawn from
+        // offset 5pt (margin only) to (size - 5pt), so its area covers the
+        // padding ring + chrome+panel area.
+        let p = Patch::new("p")
+            .slot(Slot::Background, sized(0.0, 0.0)) // bg present, intrinsic 0
+            .slot(Slot::Panel, Cell::empty())
+            .margin_all(Length::pt(5.0))
+            .padding_all(Length::pt(3.0));
+        let layout = p.solve(Size::new(200.0, 200.0), 96.0);
+        let bg = layout.get("p", Slot::Background).unwrap();
+        let margin_px = 5.0 * 96.0 / 72.0;
+        approx_eq(
+            bg.x0,
+            margin_px,
+            0.5,
+            "bg starts after margin (not padding)",
+        );
+        approx_eq(bg.x1, 200.0 - margin_px, 0.5, "bg ends before margin");
+        approx_eq(bg.y0, margin_px, 0.5, "bg top after margin_top");
+        approx_eq(
+            bg.y1,
+            200.0 - margin_px,
+            0.5,
+            "bg bottom before margin_bottom",
+        );
+        // Sanity: padding-sized space between bg edge and panel.
+        let panel = layout.get("p", Slot::Panel).unwrap();
+        let padding_px = 3.0 * 96.0 / 72.0;
+        approx_eq(
+            panel.x0 - bg.x0,
+            padding_px,
+            0.5,
+            "padding-sized gap between bg.left and panel.left",
+        );
     }
 
     #[test]
-    fn nested_patch_chrome_merges_per_direction() {
-        // Outer's left axis 100 wide, inner's left axis 40 wide → merged
-        // left chrome col = 100.
-        let inner = Patch::new("inner")
-            .slot(Slot::AxisLeft, sized(40.0, 0.0))
-            .slot(Slot::Panel, Cell::empty());
-        let composed = Patch::new("outer")
-            .slot(Slot::AxisLeft, sized(100.0, 0.0))
-            .place_in_panel(inner);
-        let layout = composed.solve(Size::new(800.0, 400.0), 96.0);
-        let inner_panel = layout.get("inner", Slot::Panel).unwrap();
-        approx_eq(inner_panel.x0, 100.0, 0.5, "panel starts after max axis");
-        let outer_axis = layout.get("outer", Slot::AxisLeft).unwrap();
-        let inner_axis = layout.get("inner", Slot::AxisLeft).unwrap();
-        approx_eq(outer_axis.x0, inner_axis.x0, 0.5, "axis cells share x0");
-        approx_eq(outer_axis.x1, inner_axis.x1, 0.5, "axis cells share x1");
+    fn adjacent_patches_have_margin_gap_between_backgrounds() {
+        // Two patches side-by-side, each with margin = 4pt. The bgs should
+        // be separated by 8pt (margin_a.right + margin_b.left).
+        let p1 = Patch::new("p1")
+            .slot(Slot::Background, sized(0.0, 0.0))
+            .slot(Slot::Panel, Cell::empty())
+            .margin_all(Length::pt(4.0));
+        let p2 = Patch::new("p2")
+            .slot(Slot::Background, sized(0.0, 0.0))
+            .slot(Slot::Panel, Cell::empty())
+            .margin_all(Length::pt(4.0));
+        let comp = beside(p1, p2);
+        let layout = comp.solve(Size::new(400.0, 200.0), 96.0);
+        let bg1 = layout.get("p1", Slot::Background).unwrap();
+        let bg2 = layout.get("p2", Slot::Background).unwrap();
+        let margin_px = 4.0 * 96.0 / 72.0;
+        approx_eq(
+            bg2.x0 - bg1.x1,
+            2.0 * margin_px,
+            0.5,
+            "gap between bgs = margin_a.right + margin_b.left",
+        );
     }
 
     #[test]
-    fn composition_in_composition_unsupported() {
-        // Nesting a Composition directly inside a Composition is rejected
-        // in v1.
+    fn asymmetric_margin_per_side() {
+        // Different margin on each side — verify each is applied independently.
+        let p = Patch::new("p").slot(Slot::Panel, Cell::empty()).margin(
+            Inset::default()
+                .left(Length::pt(2.0))
+                .right(Length::pt(8.0))
+                .top(Length::pt(3.0))
+                .bottom(Length::pt(6.0)),
+        );
+        let layout = p.solve(Size::new(200.0, 200.0), 96.0);
+        let panel = layout.get("p", Slot::Panel).unwrap();
+        approx_eq(panel.x0, 2.0 * 96.0 / 72.0, 0.5, "left margin");
+        approx_eq(panel.x1, 200.0 - 8.0 * 96.0 / 72.0, 0.5, "right margin");
+        approx_eq(panel.y0, 3.0 * 96.0 / 72.0, 0.5, "top margin");
+        approx_eq(panel.y1, 200.0 - 6.0 * 96.0 / 72.0, 0.5, "bottom margin");
+    }
+
+    // ─── Nesting tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn composition_in_composition_cell_solves() {
+        // Nesting a 1×2 inner composition directly inside a 1×1 outer's
+        // single cell. With the recursive flatten this is well-defined —
+        // the outer's cell footprint expands to accommodate the inner.
         let inner = beside(
             Patch::new("a").slot(Slot::Panel, Cell::empty()),
             Patch::new("b").slot(Slot::Panel, Cell::empty()),
         );
         let outer = Composition::empty(1, 1).place(1, 1, Span::cell(), inner);
-        let result = outer.try_solve(Size::new(400.0, 200.0), 96.0);
+        let layout = outer.solve(Size::new(400.0, 200.0), 96.0);
+        let a = layout.get("a", Slot::Panel).unwrap();
+        let b = layout.get("b", Slot::Panel).unwrap();
+        // Two inner panels split the 400px-wide viewport evenly.
+        approx_eq(a.x0, 0.0, 0.5, "a starts at left");
+        approx_eq(a.x1, 200.0, 0.5, "a ends at midpoint");
+        approx_eq(b.x0, 200.0, 0.5, "b starts at midpoint");
+        approx_eq(b.x1, 400.0, 0.5, "b ends at right");
+        // Both panels share y bounds.
+        approx_eq(a.y0, b.y0, 0.5, "panels share y0");
+        approx_eq(a.y1, b.y1, 0.5, "panels share y1");
+    }
+
+    #[test]
+    fn nested_composition_in_composition_cell_with_axis_chrome() {
+        // Outer 1×2 composition: cell (1,1) is a plain patch with a 20px
+        // axis_left; cell (1,2) is a nested 1×2 composition with two inner
+        // patches. The plain block's axis_left contributes 20px to its
+        // outer block's axis_left col. The nested block's axis_left col
+        // has no content (inner_a has no axis_left), so it stays 0.
+        let plain = Patch::new("plain")
+            .slot(Slot::AxisLeft, sized(20.0, 0.0))
+            .slot(Slot::Panel, Cell::empty());
+        let inner = beside(
+            Patch::new("inner_a").slot(Slot::Panel, Cell::empty()),
+            Patch::new("inner_b").slot(Slot::Panel, Cell::empty()),
+        );
+        let comp = beside(plain, inner);
+        let layout = comp.solve(Size::new(800.0, 300.0), 96.0);
+
+        let plain_axis = layout.get("plain", Slot::AxisLeft).unwrap();
+        approx_eq(plain_axis.x1 - plain_axis.x0, 20.0, 0.5, "plain axis width");
+
+        // Nested cell contains both inner panels side-by-side.
+        let inner_a_panel = layout.get("inner_a", Slot::Panel).unwrap();
+        let inner_b_panel = layout.get("inner_b", Slot::Panel).unwrap();
+        approx_eq(
+            inner_a_panel.y0,
+            inner_b_panel.y0,
+            0.5,
+            "inner panels share y0",
+        );
+        approx_eq(
+            inner_a_panel.x1,
+            inner_b_panel.x0,
+            0.5,
+            "inner_a's right edge meets inner_b's left edge",
+        );
+        // Plain panel y range matches inner panels.
+        let plain_panel = layout.get("plain", Slot::Panel).unwrap();
+        approx_eq(
+            plain_panel.y0,
+            inner_a_panel.y0,
+            0.5,
+            "plain and inner share y0",
+        );
+    }
+
+    #[test]
+    fn stack_of_1x3_and_1x2_compositions() {
+        // User's stated "would cause havoc" case: a 1×3 stacked over a 1×2.
+        // Each row should fill its half of the viewport: row_a's 3 panels
+        // tile its 200px height, row_b's 2 panels tile its 200px height.
+        // Both rows should consume the full viewport width.
+        let row_a = grid(
+            1,
+            3,
+            vec![
+                Patch::new("a1").slot(Slot::Panel, Cell::empty()).into(),
+                Patch::new("a2").slot(Slot::Panel, Cell::empty()).into(),
+                Patch::new("a3").slot(Slot::Panel, Cell::empty()).into(),
+            ],
+        );
+        let row_b = grid(
+            1,
+            2,
+            vec![
+                Patch::new("b1").slot(Slot::Panel, Cell::empty()).into(),
+                Patch::new("b2").slot(Slot::Panel, Cell::empty()).into(),
+            ],
+        );
+        let stacked = stack(row_a, row_b);
+        let layout = stacked.solve(Size::new(600.0, 400.0), 96.0);
+        let a1 = layout.get("a1", Slot::Panel).unwrap();
+        let a2 = layout.get("a2", Slot::Panel).unwrap();
+        let a3 = layout.get("a3", Slot::Panel).unwrap();
+        let b1 = layout.get("b1", Slot::Panel).unwrap();
+        let b2 = layout.get("b2", Slot::Panel).unwrap();
+
+        // row_a: 3 panels tile the 600 px row width.
+        approx_eq(a1.x0, 0.0, 0.5, "a1 starts at left edge");
+        approx_eq(a3.x1, 600.0, 0.5, "a3 ends at right edge");
+        approx_eq(a1.x1, a2.x0, 0.5, "a1.x1 meets a2.x0");
+        approx_eq(a2.x1, a3.x0, 0.5, "a2.x1 meets a3.x0");
+
+        // row_b: 2 panels tile the 600 px row width.
+        approx_eq(b1.x0, 0.0, 0.5, "b1 starts at left edge");
+        approx_eq(b2.x1, 600.0, 0.5, "b2 ends at right edge");
+        approx_eq(b1.x1, b2.x0, 0.5, "b1.x1 meets b2.x0");
+        approx_eq(
+            b2.x1 - b2.x0,
+            300.0,
+            0.5,
+            "b2 fills its half of the row (300 px)",
+        );
+
+        // Rows are vertically separated.
+        approx_eq(a1.y1, b1.y0, 0.5, "row_a's bottom meets row_b's top");
+    }
+
+    #[test]
+    fn nested_composition_panels_align_with_sibling_panel() {
+        // A 1×2 outer where cell (1,1) is plain and cell (1,2) is nested
+        // 1×2. Both blocks share rows → all panels share y bounds.
+        let plain = Patch::new("plain").slot(Slot::Panel, Cell::empty());
+        let inner = beside(
+            Patch::new("a").slot(Slot::Panel, Cell::empty()),
+            Patch::new("b").slot(Slot::Panel, Cell::empty()),
+        );
+        let comp = beside(plain, inner);
+        let layout = comp.solve(Size::new(600.0, 200.0), 96.0);
+        let plain_panel = layout.get("plain", Slot::Panel).unwrap();
+        let a_panel = layout.get("a", Slot::Panel).unwrap();
+        let b_panel = layout.get("b", Slot::Panel).unwrap();
+        approx_eq(plain_panel.y0, a_panel.y0, 0.5, "plain & a share y0");
+        approx_eq(plain_panel.y1, a_panel.y1, 0.5, "plain & a share y1");
+        approx_eq(a_panel.y0, b_panel.y0, 0.5, "a & b share y0");
+    }
+
+    // ─── Cross-grid sizer coupling tests ────────────────────────────────
+
+    #[test]
+    fn nested_sibling_grows_inner_chrome() {
+        // Outer 1×2: plain patch with AxisTop=80 in cell (1,1); nested
+        // 1×2 composition in cell (1,2) whose inner patches have no
+        // AxisTop. The outer-grid row band 1..16 is shared across both
+        // blocks; outer row 8 (AxisTop) resolves from the plain patch's
+        // 80px content cell. The nested block contributes 0 (inner has
+        // no axis_top); back-sizer in the sub-Grid reads outer row 8 and
+        // forces sub's inner row 8 to also be 80. Both panels start at
+        // y = 80 (the resolved row band height above panel).
+        let plain = Patch::new("plain")
+            .slot(Slot::AxisTop, sized(0.0, 80.0))
+            .slot(Slot::Panel, Cell::empty());
+        let inner = beside(
+            Patch::new("c1").slot(Slot::Panel, Cell::empty()),
+            Patch::new("c2").slot(Slot::Panel, Cell::empty()),
+        );
+        let comp = beside(plain, inner);
+        let layout = comp.solve(Size::new(800.0, 400.0), 96.0);
+        let plain_panel = layout.get("plain", Slot::Panel).unwrap();
+        let c1_panel = layout.get("c1", Slot::Panel).unwrap();
+        let c2_panel = layout.get("c2", Slot::Panel).unwrap();
+        approx_eq(plain_panel.y0, 80.0, 0.5, "plain panel below 80px axis_top");
+        approx_eq(
+            c1_panel.y0,
+            80.0,
+            0.5,
+            "c1 panel also below 80 via coupling",
+        );
+        approx_eq(
+            c2_panel.y0,
+            80.0,
+            0.5,
+            "c2 panel also below 80 via coupling",
+        );
+    }
+
+    #[test]
+    fn nested_inner_grows_sibling_chrome() {
+        // Symmetric: plain patch has no AxisTop; nested inner patches do
+        // (60px). The sub-Grid's inner row 8 resolves to 60 from its
+        // content. The forward sizer in the outer reads 60 and grows
+        // outer row 8 to 60. Plain side now starts its panel at y=60.
+        let plain = Patch::new("plain").slot(Slot::Panel, Cell::empty());
+        let inner = beside(
+            Patch::new("c1")
+                .slot(Slot::AxisTop, sized(0.0, 60.0))
+                .slot(Slot::Panel, Cell::empty()),
+            Patch::new("c2")
+                .slot(Slot::AxisTop, sized(0.0, 60.0))
+                .slot(Slot::Panel, Cell::empty()),
+        );
+        let comp = beside(plain, inner);
+        let layout = comp.solve(Size::new(800.0, 400.0), 96.0);
+        let plain_panel = layout.get("plain", Slot::Panel).unwrap();
+        let c1_panel = layout.get("c1", Slot::Panel).unwrap();
+        approx_eq(
+            plain_panel.y0,
+            60.0,
+            0.5,
+            "plain panel grown by inner chrome",
+        );
+        approx_eq(c1_panel.y0, 60.0, 0.5, "c1 panel below own axis_top");
+    }
+
+    #[test]
+    fn nested_axis_left_width_propagates() {
+        // Sibling plain patch has no axis_left; nested has c1 with
+        // axis_left=70. Outer block col 6 (axis_left col) of the nested
+        // block resolves via forward sizer to 70. The plain panel starts
+        // at x=0; nested c1 panel starts at x = plain_block_total + 70
+        // (start of nested block + axis_left).
+        let plain = Patch::new("plain").slot(Slot::Panel, Cell::empty());
+        let inner = beside(
+            Patch::new("c1")
+                .slot(Slot::AxisLeft, sized(70.0, 0.0))
+                .slot(Slot::Panel, Cell::empty()),
+            Patch::new("c2").slot(Slot::Panel, Cell::empty()),
+        );
+        let comp = beside(plain, inner);
+        let layout = comp.solve(Size::new(800.0, 200.0), 96.0);
+        let c1_axis = layout.get("c1", Slot::AxisLeft).unwrap();
+        approx_eq(c1_axis.x1 - c1_axis.x0, 70.0, 0.5, "c1 axis_left = 70");
+        let c1_panel = layout.get("c1", Slot::Panel).unwrap();
+        approx_eq(
+            c1_panel.x0 - c1_axis.x0,
+            70.0,
+            0.5,
+            "panel sits right of axis",
+        );
+    }
+
+    #[test]
+    fn three_level_nesting_converges() {
+        // Composition-of-composition-of-composition. Deepest inner
+        // patches have non-trivial chrome (axis_top, axis_left). The
+        // bidirectional sizer pair at each boundary needs ~3 iterations
+        // to propagate sizes through the 3-level chain. Just verify
+        // finite rects and panel alignment.
+        let leaf_row = beside(
+            Patch::new("l1")
+                .slot(Slot::AxisTop, sized(0.0, 25.0))
+                .slot(Slot::Panel, Cell::empty()),
+            Patch::new("l2").slot(Slot::Panel, Cell::empty()),
+        );
+        let mid_row = beside(Patch::new("m1").slot(Slot::Panel, Cell::empty()), leaf_row);
+        let outer = beside(Patch::new("o1").slot(Slot::Panel, Cell::empty()), mid_row);
+        let layout = outer.solve(Size::new(1200.0, 400.0), 96.0);
+        let l1 = layout.get("l1", Slot::Panel).unwrap();
+        let l2 = layout.get("l2", Slot::Panel).unwrap();
+        let m1 = layout.get("m1", Slot::Panel).unwrap();
+        let o1 = layout.get("o1", Slot::Panel).unwrap();
+        approx_eq(l1.y0, l2.y0, 0.5, "leaf siblings share y0");
+        approx_eq(l1.y0, m1.y0, 0.5, "leaf and mid sibling share y0");
+        approx_eq(l1.y0, o1.y0, 0.5, "leaf and outer sibling share y0");
+        approx_eq(
+            l1.y0,
+            25.0,
+            0.5,
+            "all panels below 25px axis_top from deepest leaf",
+        );
+        assert!(l1.x1 - l1.x0 > 0.0, "l1 panel has positive width");
+        assert!(l2.x1 - l2.x0 > 0.0, "l2 panel has positive width");
+    }
+
+    // ─── Composition-level chrome tests ─────────────────────────────────
+
+    #[test]
+    fn composition_with_title_spans_facets() {
+        // A 2×3 facet composition with a composition-level Title slot.
+        // The Title rect should span across all facet panels (since the
+        // facets fill the panel cell of the simplified canonical block,
+        // and Title at anatomical row 3 cols 3..11 stretches across the
+        // composition's full plot-area width).
+        let facets = grid(
+            2,
+            3,
+            vec![
+                Patch::new("f1").slot(Slot::Panel, Cell::empty()).into(),
+                Patch::new("f2").slot(Slot::Panel, Cell::empty()).into(),
+                Patch::new("f3").slot(Slot::Panel, Cell::empty()).into(),
+                Patch::new("f4").slot(Slot::Panel, Cell::empty()).into(),
+                Patch::new("f5").slot(Slot::Panel, Cell::empty()).into(),
+                Patch::new("f6").slot(Slot::Panel, Cell::empty()).into(),
+            ],
+        )
+        .id("plot")
+        .slot(Slot::Title, sized(0.0, 30.0))
+        .slot(Slot::Caption, sized(0.0, 15.0));
+        let layout = facets.solve(Size::new(900.0, 400.0), 96.0);
+
+        let title = layout.get("plot", Slot::Title).expect("title rect");
+        let caption = layout.get("plot", Slot::Caption).expect("caption rect");
+        let f1 = layout.get("f1", Slot::Panel).unwrap();
+        let f3 = layout.get("f3", Slot::Panel).unwrap();
+        let f4 = layout.get("f4", Slot::Panel).unwrap();
+        let f6 = layout.get("f6", Slot::Panel).unwrap();
+
+        // Title sits above all facet panels.
         assert!(
-            matches!(result, Err(CompositionError::UnsupportedNesting(_))),
-            "expected UnsupportedNesting (got {})",
-            if result.is_ok() { "Ok" } else { "wrong-error" }
+            title.y1 <= f1.y0 + 0.5,
+            "title.y1 ({}) above facet panels",
+            title.y1
+        );
+        approx_eq(title.y1 - title.y0, 30.0, 0.5, "title height = 30");
+        // Title spans the full width of the panel band.
+        assert!(title.x0 <= f1.x0 + 0.5, "title reaches first facet left");
+        assert!(title.x1 >= f3.x1 - 0.5, "title reaches last facet right");
+
+        // Caption sits below all facet panels.
+        assert!(caption.y0 >= f4.y1 - 0.5, "caption below all facets");
+        approx_eq(caption.y1 - caption.y0, 15.0, 0.5, "caption height = 15");
+
+        // Facet rows align: f1/f2/f3 share y; f4/f5/f6 share y.
+        approx_eq(f1.y0, f3.y0, 0.5, "row 1 facets share y0");
+        approx_eq(f4.y0, f6.y0, 0.5, "row 2 facets share y0");
+    }
+
+    #[test]
+    fn composition_chrome_axis_left_title_spans_facet_rows() {
+        // A 1×2 facet composition with a left-axis-title at the
+        // canonical (panel_row, axis_left_title_col) position. The
+        // title sits to the left of BOTH facet panels (since they fill
+        // the canonical panel cell).
+        let facets = grid(
+            1,
+            2,
+            vec![
+                Patch::new("f1").slot(Slot::Panel, Cell::empty()).into(),
+                Patch::new("f2").slot(Slot::Panel, Cell::empty()).into(),
+            ],
+        )
+        .id("plot")
+        .slot(Slot::AxisLeftTitle, sized(40.0, 0.0));
+        let layout = facets.solve(Size::new(800.0, 200.0), 96.0);
+
+        let axis_title = layout.get("plot", Slot::AxisLeftTitle).unwrap();
+        let f1 = layout.get("f1", Slot::Panel).unwrap();
+        let f2 = layout.get("f2", Slot::Panel).unwrap();
+        approx_eq(
+            axis_title.x1 - axis_title.x0,
+            40.0,
+            0.5,
+            "axis title width 40",
+        );
+        assert!(
+            axis_title.x1 <= f1.x0 + 0.5,
+            "axis title sits left of facet panels"
+        );
+        approx_eq(f1.y0, f2.y0, 0.5, "facet panels share y0");
+        // Facets together occupy the panel cell.
+        assert!(f2.x1 - f1.x0 > 0.0, "facets span the panel area");
+    }
+
+    #[test]
+    fn composition_chrome_nested_inside_another_composition() {
+        // A wrapped composition (with chrome) placed in another
+        // composition's cell behaves like a single Patch with chrome:
+        // its Title aligns to outer block row 3 and propagates to the
+        // sibling row via the existing Auto + sizer mechanism.
+        let plain = Patch::new("plain")
+            .slot(Slot::Title, sized(0.0, 60.0))
+            .slot(Slot::Panel, Cell::empty());
+        let facets = grid(
+            1,
+            2,
+            vec![
+                Patch::new("c1").slot(Slot::Panel, Cell::empty()).into(),
+                Patch::new("c2").slot(Slot::Panel, Cell::empty()).into(),
+            ],
+        )
+        .id("nested")
+        .slot(Slot::Title, sized(0.0, 60.0));
+        let comp = beside(plain, facets);
+        let layout = comp.solve(Size::new(800.0, 400.0), 96.0);
+
+        let plain_title = layout.get("plain", Slot::Title).unwrap();
+        let nested_title = layout.get("nested", Slot::Title).unwrap();
+        let plain_panel = layout.get("plain", Slot::Panel).unwrap();
+        let c1_panel = layout.get("c1", Slot::Panel).unwrap();
+
+        // Both titles at the same y range (shared outer-grid title row).
+        approx_eq(plain_title.y0, nested_title.y0, 0.5, "titles share y0");
+        approx_eq(plain_title.y1, nested_title.y1, 0.5, "titles share y1");
+        approx_eq(
+            plain_title.y1 - plain_title.y0,
+            60.0,
+            0.5,
+            "title row = 60px",
+        );
+
+        // Panels share y0.
+        approx_eq(
+            plain_panel.y0,
+            c1_panel.y0,
+            0.5,
+            "plain and inner panel share y0",
         );
     }
 }

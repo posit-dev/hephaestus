@@ -75,14 +75,6 @@ enum ElementTemplate {
     Spacer,
     /// Nested composition (placed via `Composition::place`).
     Composition(CompositionTemplate),
-    /// A patch with a nested element inside its panel (via
-    /// `Patch::place_in_panel`). v1 captures only the outer id and
-    /// drops the inner — orchestrator-managed nesting is v1.5. Not
-    /// emitted in v1 (the capture pass doesn't see `inner`), but
-    /// reserved so v1.5 can hook in without changing the public type
-    /// shape.
-    #[allow(dead_code)]
-    NamedPatchWithInner(String),
 }
 
 impl CompositionTemplate {
@@ -150,7 +142,7 @@ impl ElementTemplate {
         dpi: f64,
     ) -> Element {
         match self {
-            ElementTemplate::NamedPatch(id) | ElementTemplate::NamedPatchWithInner(id) => {
+            ElementTemplate::NamedPatch(id) => {
                 let patch = wire_into_patch(id, plots, registry, dpi);
                 Element::Patch(patch)
             }

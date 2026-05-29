@@ -9,8 +9,8 @@
 
 use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
-use hephaestus::composition::{beside, Patch, Slot};
-use hephaestus::layout::Cell;
+use hephaestus::composition::{beside, Composition, Patch, Slot, Span};
+use hephaestus::layout::{Cell, Track};
 use hephaestus::stroke::Stroke;
 use hephaestus::text::{draw_text_in_rect, TextRun, TextStyle};
 use hephaestus::{Affine, Brush, FillRule, Path, PickId, Renderer, SceneBuilder};
@@ -69,7 +69,10 @@ fn main() {
         "Time (s)",
     );
 
-    let composed = Patch::new("outer")
+    // Header carries title + subtitle; footer carries caption. Both have no
+    // panel content — their composition rows are sized to chrome height only
+    // (Fr(0.0) panel weight so the middle row absorbs all leftover height).
+    let header = Patch::new("header")
         .slot(
             Slot::Title,
             weighted_text_cell("Reactor diagnostics", 28.0, 700),
@@ -77,12 +80,16 @@ fn main() {
         .slot(
             Slot::Subtitle,
             text_cell("Pressure and particle count over the morning run", 16.0),
-        )
-        .slot(
-            Slot::Caption,
-            text_cell("Source: in-line telemetry, smoothed at 1s intervals", 11.0),
-        )
-        .place_in_panel(beside(inner_a, inner_b));
+        );
+    let footer = Patch::new("footer").slot(
+        Slot::Caption,
+        text_cell("Source: in-line telemetry, smoothed at 1s intervals", 11.0),
+    );
+    let composed = Composition::empty(3, 1)
+        .heights(vec![Track::Fr(0.0), Track::Fr(1.0), Track::Fr(0.0)])
+        .place(1, 1, Span::cell(), header)
+        .place(2, 1, Span::cell(), beside(inner_a, inner_b))
+        .place(3, 1, Span::cell(), footer);
 
     let layout = composed.solve(hephaestus::Size::new(w as f64, h as f64), dpi);
 
@@ -156,9 +163,9 @@ fn main() {
                 continue;
             }
             let text = match (id, region) {
-                ("outer", "title") => "Reactor diagnostics",
-                ("outer", "subtitle") => "Pressure and particle count over the morning run",
-                ("outer", "caption") => "Source: in-line telemetry, smoothed at 1s intervals",
+                ("header", "title") => "Reactor diagnostics",
+                ("header", "subtitle") => "Pressure and particle count over the morning run",
+                ("footer", "caption") => "Source: in-line telemetry, smoothed at 1s intervals",
                 ("plot_a", "axis_left") => "0\n50\n100",
                 ("plot_a", "axis_left_title") => "Pressure (kPa)",
                 ("plot_a", "axis_bottom") => "0  25  50  75  100",
@@ -201,8 +208,8 @@ fn main() {
 
     let panel_a = layout.get("plot_a", Slot::Panel).unwrap();
     let panel_b = layout.get("plot_b", Slot::Panel).unwrap();
-    let title = layout.get("outer", Slot::Title).unwrap();
+    let title = layout.get("header", Slot::Title).unwrap();
     println!("plot_a.panel = {:?}", panel_a);
     println!("plot_b.panel = {:?}", panel_b);
-    println!("outer.title  = {:?}", title);
+    println!("header.title = {:?}", title);
 }

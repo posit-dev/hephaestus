@@ -31,12 +31,6 @@ fn main() {
 
     // Layout: a flat 2×3 grid. Cells (1,1)..(2,2) are the four facets;
     // cell (1,3) holds the summary plot, spanning both rows.
-    //
-    // Nested compositions aren't directly placeable in v1 — the solver
-    // requires `Patch::place_in_panel` for true nesting. Spans on a
-    // single grid give the same visual shape without that machinery,
-    // so the orchestrator's plot map can route mutations by a flat
-    // patch id.
     let comp_shape = || {
         Composition::empty(2, 3)
             .place(1, 1, Span::cell(), Patch::new("q1"))

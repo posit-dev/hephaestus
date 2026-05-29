@@ -22,16 +22,31 @@ use std::ops::{Add, Div, Mul, Neg, Sub};
 
 mod solver;
 
+/// Identifies an axis (column or row) of a [`Grid`] for [`Length::TrackOf`]
+/// references.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Axis {
+    /// Column axis (track width).
+    Width,
+    /// Row axis (track height).
+    Height,
+}
+
 /// A length value. Internally either a linear combination of pixels, inches,
-/// and percentage of the containing axis, or a deferred `min`/`max` of two
+/// and percentage of the containing axis, a deferred `min`/`max` of two
 /// sub-lengths (because `min(absolute, percent)` cannot be reduced without
-/// knowing the axis size).
+/// knowing the axis size), or a reference to a tagged grid's resolved track
+/// size (which is only known after solve).
 ///
 /// Construct via the `px` / `mm` / `cm` / `inch` / `pt` / `percent`
-/// associated functions, or [`Length::min`] / [`Length::max`]. Lengths
-/// compose with `+`, `-`, unary `-`, `* f64`, and `/ f64`; addition through
-/// `Min`/`Max` distributes exactly (`min(a, b) + c = min(a+c, b+c)`), so
-/// arithmetic stays closed without losing structure.
+/// associated functions, [`Length::min`] / [`Length::max`], or
+/// [`Length::track_of`] / [`Length::tracks_of`]. Lengths compose with `+`,
+/// `-`, unary `-`, `* f64`, and `/ f64`; addition through `Min`/`Max`
+/// distributes exactly (`min(a, b) + c = min(a+c, b+c)`), so arithmetic
+/// stays closed without losing structure. `TrackOf` is opaque to arithmetic
+/// — it composes with `Min`/`Max` transparently but `+ / - / *` on a tree
+/// containing `TrackOf` panics. Reach a multi-segment sum via
+/// [`Length::tracks_of`]'s `span` parameter.
 ///
 /// Physical units (`mm`, `cm`, `inch`, `pt`) are resolved to pixels via the
 /// `dpi` passed to [`Grid::solve`]. `percent` is taken as a fraction of the
@@ -52,6 +67,28 @@ pub enum Length {
     Min(Box<Length>, Box<Length>),
     /// Pointwise maximum of two lengths, evaluated at resolution time.
     Max(Box<Length>, Box<Length>),
+    /// Resolves at solve time to the summed resolved size of `span`
+    /// consecutive tracks starting at `track` (1-indexed) on the given
+    /// `axis` of the [`Grid`] tagged with `id == grid`. For `span > 1`
+    /// the corresponding gaps between tracks are included.
+    ///
+    /// The solver runs as a damped fixed-point iteration over its width
+    /// and height passes; on the first iteration `TrackOf` evaluates to
+    /// `0` (no prior data); on subsequent iterations it picks up the
+    /// resolved track size from the previous iteration. Forward
+    /// references (a track that references a track later in the solve)
+    /// are handled by iteration; cycles will not converge and exhaust
+    /// `MAX_ITER`.
+    TrackOf {
+        /// Tag of the target [`Grid`] (from [`Grid::id`]).
+        grid: CellId,
+        /// Whether to read column widths or row heights.
+        axis: Axis,
+        /// 1-indexed start track within the target grid.
+        track: u16,
+        /// Number of consecutive tracks to sum. Treated as 1 if 0.
+        span: u16,
+    },
 }
 
 impl Length {
@@ -120,13 +157,39 @@ impl Length {
         Length::Max(Box::new(a), Box::new(b))
     }
 
-    /// True if this length has no `percent` term anywhere in its tree.
-    /// Lengths that are absolute can be resolved to pixels without an axis
-    /// size (used for intrinsic-size computation in `Track::Auto`).
+    /// Reference the resolved size of a single track in a tagged grid.
+    /// `track` is 1-indexed. See [`Length::TrackOf`].
+    pub const fn track_of(grid: CellId, axis: Axis, track: u16) -> Self {
+        Length::TrackOf {
+            grid,
+            axis,
+            track,
+            span: 1,
+        }
+    }
+
+    /// Reference the resolved summed size of `span` consecutive tracks in
+    /// a tagged grid, starting at `start` (1-indexed). Gaps between
+    /// tracks are included. See [`Length::TrackOf`].
+    pub const fn tracks_of(grid: CellId, axis: Axis, start: u16, span: u16) -> Self {
+        Length::TrackOf {
+            grid,
+            axis,
+            track: start,
+            span: if span == 0 { 1 } else { span },
+        }
+    }
+
+    /// True if this length has no `percent` term anywhere in its tree and
+    /// no [`Length::TrackOf`] reference (whose value isn't known without
+    /// a prior solve pass). Lengths that are absolute can be resolved to
+    /// pixels without an axis size or prior resolved tracks (used for
+    /// intrinsic-size computation in `Track::Auto`).
     pub fn is_absolute(&self) -> bool {
         match self {
             Length::Sum { percent, .. } => *percent == 0.0,
             Length::Min(a, b) | Length::Max(a, b) => a.is_absolute() && b.is_absolute(),
+            Length::TrackOf { .. } => false,
         }
     }
 }
@@ -180,6 +243,11 @@ impl Add for Length {
                 let other_clone = other.clone();
                 Length::Max(Box::new(other + *a), Box::new(other_clone + *b))
             }
+            (Length::TrackOf { .. }, _) | (_, Length::TrackOf { .. }) => panic!(
+                "Length::TrackOf cannot participate in +/-/*; \
+                 use Length::tracks_of(.., span = N) for consecutive tracks, \
+                 or compose via Length::min / Length::max"
+            ),
         }
     }
 }
@@ -200,6 +268,9 @@ impl Neg for Length {
             // Negating swaps Min/Max: -min(a,b) = max(-a, -b).
             Length::Min(a, b) => Length::Max(Box::new(-*a), Box::new(-*b)),
             Length::Max(a, b) => Length::Min(Box::new(-*a), Box::new(-*b)),
+            Length::TrackOf { .. } => panic!(
+                "Length::TrackOf cannot be negated; use Length::min / Length::max for composition"
+            ),
         }
     }
 }
@@ -230,6 +301,9 @@ impl Mul<f64> for Length {
             Length::Min(a, b) => Length::Max(Box::new(*a * k), Box::new(*b * k)),
             Length::Max(a, b) if k >= 0.0 => Length::Max(Box::new(*a * k), Box::new(*b * k)),
             Length::Max(a, b) => Length::Min(Box::new(*a * k), Box::new(*b * k)),
+            Length::TrackOf { .. } => panic!(
+                "Length::TrackOf cannot be scaled by f64; use Length::min / Length::max for composition"
+            ),
         }
     }
 }
@@ -1239,5 +1313,86 @@ mod tests {
         }
         let total_area: f64 = leaves.iter().map(|r| (r.x1 - r.x0) * (r.y1 - r.y0)).sum();
         approx_eq(total_area, 160_000.0, 1.0, "tiling total area");
+    }
+
+    #[test]
+    fn track_of_width_one_iteration() {
+        // A 2-col root with a tagged inner grid in col 1 whose first column
+        // resolves to 50 px (Fixed). The root's col 2 is sized to `TrackOf`
+        // of inner's first column → after the iteration loop, col 2 is 50 px.
+        let inner_grid_id = CellId(101);
+        let mut inner =
+            Grid::new([Track::Fixed(Length::px(50.0))], [Track::Fr(1.0)]).id(inner_grid_id);
+        inner.place(Placement::at(1, 1), Grid::cell().id(CellId(1)));
+
+        let mut root = Grid::new(
+            [
+                Track::Fixed(Length::px(100.0)),
+                Track::Fixed(Length::track_of(inner_grid_id, Axis::Width, 1)),
+            ],
+            [Track::Fr(1.0)],
+        );
+        root.place(Placement::at(1, 1), inner);
+        root.place(Placement::at(1, 2), Grid::cell().id(CellId(2)));
+
+        let layout = root.solve(Size::new(200.0, 100.0), 96.0);
+        let r = layout.rect(CellId(2)).unwrap();
+        approx_eq(r.x1 - r.x0, 50.0, 0.5, "col 2 sized to inner col 1 (50 px)");
+    }
+
+    #[test]
+    fn track_of_height_picks_up_inner_size() {
+        // Tagged inner grid has two Fixed rows (40 px each, gap 0); an outer
+        // row references both via `tracks_of(inner_id, Axis::Height, 1, 2)` →
+        // outer row resolves to 80 px.
+        let inner_id = CellId(7);
+        let mut inner = Grid::new(
+            [Track::Fr(1.0)],
+            [
+                Track::Fixed(Length::px(40.0)),
+                Track::Fixed(Length::px(40.0)),
+            ],
+        )
+        .id(inner_id);
+        inner.place(Placement::at(1, 1), Grid::cell().id(CellId(10)));
+
+        let mut root = Grid::new(
+            [Track::Fr(1.0)],
+            [
+                Track::Fr(1.0),
+                Track::Fixed(Length::tracks_of(inner_id, Axis::Height, 1, 2)),
+            ],
+        );
+        root.place(Placement::at(1, 1), inner);
+        root.place(Placement::at(2, 1), Grid::cell().id(CellId(99)));
+
+        let layout = root.solve(Size::new(200.0, 200.0), 96.0);
+        let r = layout.rect(CellId(99)).unwrap();
+        approx_eq(
+            r.y1 - r.y0,
+            80.0,
+            0.5,
+            "outer row picks up sum of inner rows",
+        );
+    }
+
+    #[test]
+    fn track_of_unknown_id_is_zero() {
+        // Reference to a CellId not present in the tree resolves to 0 every
+        // iteration — solver doesn't panic, just treats the reference as 0.
+        let bogus = CellId(999);
+        let mut root = Grid::new(
+            [
+                Track::Fixed(Length::px(100.0)),
+                Track::Fixed(Length::track_of(bogus, Axis::Width, 1)),
+            ],
+            [Track::Fr(1.0)],
+        );
+        root.place(Placement::at(1, 1), Grid::cell().id(CellId(1)));
+        root.place(Placement::at(1, 2), Grid::cell().id(CellId(2)));
+
+        let layout = root.solve(Size::new(200.0, 100.0), 96.0);
+        let r = layout.rect(CellId(2)).unwrap();
+        approx_eq(r.x1 - r.x0, 0.0, 0.5, "unknown reference → 0 px");
     }
 }
