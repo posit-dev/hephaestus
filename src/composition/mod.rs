@@ -665,11 +665,18 @@ fn inset_is_zero(inset: &Inset) -> bool {
 /// chrome tracks to the parent's outer chrome tracks. The caller pre-
 /// allocates `grid_id` so it can reference the new grid via `TrackOf`.
 fn build_composition_grid(
-    c: Composition,
+    mut c: Composition,
     grid_id: CellId,
     state: &mut BuildState,
     parent: Option<ParentCoupling>,
 ) -> Result<Grid, CompositionError> {
+    // Composition::aspect propagates to descendants that don't carry their
+    // own aspect. Cascading is recursive: a child Composition that just
+    // received the propagated aspect propagates further when its own
+    // `build_composition_grid` runs.
+    if let Some(asp) = c.aspect.take() {
+        propagate_aspect(&mut c.placements, asp);
+    }
     if c.has_chrome() {
         return build_wrapped_composition(c, grid_id, state, parent);
     }
@@ -903,15 +910,19 @@ fn emit_patch_into(
             && p.placement.col == PANEL_COL
             && p.placement.row_span <= 1
             && p.placement.col_span <= 1;
-        let panel_with_aspect = aspect.is_some() && is_panel;
-        if panel_with_aspect {
-            let (aw, ah) = aspect.unwrap();
-            let cell = p.cell.id(cell_id);
-            let mut wrapped = Grid::new([Track::Fr(aw)], [Track::Fr(ah)]).respect();
-            wrapped.place(Placement::at(1, 1), cell);
-            g.place(translated, wrapped);
-        } else {
-            g.place(translated, p.cell.id(cell_id));
+        g.place(translated.clone(), p.cell.id(cell_id));
+        if let (Some((aw, ah)), true) = (aspect, is_panel) {
+            // Adopting R `grid`'s selective-respect path: mark the outer
+            // panel cell in the respect matrix and set the panel col/row
+            // Fr weights to (aw, ah) so the solver couples them at the
+            // requested ratio. Sibling unrespected fr tracks absorb the
+            // slack — `beside(fixed.aspect(1, 1), flex)` makes flex
+            // expand to fill, matching patchwork's behaviour.
+            let panel_row_0 = (translated.row as usize).saturating_sub(1);
+            let panel_col_0 = (translated.col as usize).saturating_sub(1);
+            install_respect_at(g, panel_row_0, panel_col_0);
+            set_fr_if_fr(&mut g.node.cols, panel_col_0, aw);
+            set_fr_if_fr(&mut g.node.rows, panel_row_0, ah);
         }
     }
     emit_ring_sizers(
@@ -924,6 +935,70 @@ fn emit_patch_into(
         &padding,
     );
     Ok(())
+}
+
+/// Push a composition's `aspect = Some((aw, ah))` down to immediate
+/// children that don't already carry their own. Cascading to grandchildren
+/// happens naturally when each child Composition's
+/// [`build_composition_grid`] runs and propagates again from its own
+/// (possibly just-received) aspect. A child with its own explicit aspect
+/// wins and blocks further propagation past that node.
+fn propagate_aspect(placements: &mut [CompositionPlacement], aspect: (f32, f32)) {
+    for p in placements.iter_mut() {
+        match &mut p.element {
+            Element::Patch(patch) if patch.aspect.is_none() => {
+                patch.aspect = Some(aspect);
+            }
+            Element::Composition(child) if child.aspect.is_none() => {
+                child.aspect = Some(aspect);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Mark `(row, col)` (0-based) as respected on the outer grid. Allocates
+/// a matrix sized to the current grid if one doesn't exist; preserves
+/// previously-marked cells. If the grid was set to `Respect::All`, this
+/// call leaves it as `All` (already respects every cell).
+fn install_respect_at(g: &mut Grid, row: usize, col: usize) {
+    let nrows = g.node.rows.len();
+    let ncols = g.node.cols.len();
+    if row >= nrows || col >= ncols {
+        return;
+    }
+    use crate::layout::Respect;
+    let m = match std::mem::replace(&mut g.node.respect, Respect::None) {
+        Respect::All => {
+            // All respected already; nothing to do.
+            g.node.respect = Respect::All;
+            return;
+        }
+        Respect::Matrix(mut m) => {
+            if m.len() < nrows {
+                m.resize_with(nrows, || vec![false; ncols]);
+            }
+            for row_v in m.iter_mut() {
+                if row_v.len() < ncols {
+                    row_v.resize(ncols, false);
+                }
+            }
+            m
+        }
+        Respect::None => vec![vec![false; ncols]; nrows],
+    };
+    let mut m = m;
+    m[row][col] = true;
+    g.node.respect = Respect::Matrix(m);
+}
+
+/// If `tracks[idx]` is a `Track::Fr`, replace its weight with `f`. No-op
+/// for Fixed/Auto tracks (the panel sized by an explicit constraint
+/// shouldn't be overridden by aspect).
+fn set_fr_if_fr(tracks: &mut [Track], idx: usize, f: f32) {
+    if let Some(Track::Fr(w)) = tracks.get_mut(idx) {
+        *w = f;
+    }
 }
 
 /// Emit empty sizer cells at the four margin tracks and four padding
@@ -1370,6 +1445,141 @@ mod tests {
         let w = panel.x1 - panel.x0;
         let h = panel.y1 - panel.y0;
         approx_eq(w / h, 16.0 / 9.0, 0.01, "aspect ratio 16:9");
+    }
+
+    #[test]
+    fn patch_aspect_lets_flex_sibling_absorb_slack() {
+        // The central regression that drove the layout-level rewrite:
+        // `beside(fixed.aspect(1, 1), flex)` should let flex absorb the
+        // horizontal slack instead of leaving an empty square next to a
+        // centred fixed plot. In 800×400 viewport, fixed's row is 400
+        // (binding) → fixed panel = 400×400; flex panel absorbs the
+        // remaining 400 width → 400×400.
+        let fixed = Patch::new("fixed")
+            .aspect(1.0, 1.0)
+            .slot(Slot::Panel, Cell::empty());
+        let flex = Patch::new("flex").slot(Slot::Panel, Cell::empty());
+        let layout = beside(fixed, flex).solve(Size::new(800.0, 400.0), 96.0);
+        let fp = layout.get("fixed", Slot::Panel).unwrap();
+        let xp = layout.get("flex", Slot::Panel).unwrap();
+        approx_eq(fp.x1 - fp.x0, 400.0, 0.5, "fixed panel width");
+        approx_eq(fp.y1 - fp.y0, 400.0, 0.5, "fixed panel height");
+        approx_eq(xp.x1 - xp.x0, 400.0, 0.5, "flex panel absorbs slack");
+        approx_eq(xp.y1 - xp.y0, 400.0, 0.5, "flex panel shares row height");
+    }
+
+    #[test]
+    fn composition_aspect_propagates_to_each_facet() {
+        // 2×2 facet composition with title chrome and .aspect(1, 1).
+        // Each facet panel ends up square. With viewport 800×600 and a
+        // 40px title row, the per-facet panel area is min((800/2),
+        // (600-40)/2) = min(400, 280) = 280 → each panel 280×280.
+        let facet = |id: &str| Patch::new(id).slot(Slot::Panel, Cell::empty());
+        let comp = beside(
+            stack(facet("q1"), facet("q3")),
+            stack(facet("q2"), facet("q4")),
+        )
+        .id("outer")
+        .aspect(1.0, 1.0);
+        let layout = comp.solve(Size::new(800.0, 600.0), 96.0);
+        for id in &["q1", "q2", "q3", "q4"] {
+            let r = layout.get(id, Slot::Panel).unwrap();
+            let w = r.x1 - r.x0;
+            let h = r.y1 - r.y0;
+            assert!(w > 0.0, "{id} non-zero width");
+            assert!(h > 0.0, "{id} non-zero height");
+            approx_eq(w / h, 1.0, 0.02, &format!("{id} panel is square"));
+        }
+    }
+
+    #[test]
+    fn composition_aspect_does_not_override_explicit_patch_aspect() {
+        // Outer .aspect(16, 9); child has its own .aspect(4, 3). The
+        // explicit child aspect blocks propagation past it. Single-facet
+        // composition so siblings don't compete for the shared row fr
+        // (the multi-aspect-conflict case is a documented limitation
+        // matching patchwork's "if one fixed aspect plot conflicts with
+        // another one, one of them will end up not using the full space"
+        // behaviour).
+        let a = Patch::new("a")
+            .aspect(4.0, 3.0)
+            .slot(Slot::Panel, Cell::empty());
+        let comp = Composition::empty(1, 1)
+            .place(1, 1, Span::cell(), a)
+            .aspect(16.0, 9.0);
+        let layout = comp.solve(Size::new(800.0, 800.0), 96.0);
+        let ap = layout.get("a", Slot::Panel).unwrap();
+        approx_eq(
+            (ap.x1 - ap.x0) / (ap.y1 - ap.y0),
+            4.0 / 3.0,
+            0.02,
+            "a keeps its own 4:3 despite outer 16:9",
+        );
+    }
+
+    #[test]
+    fn composition_aspect_blocked_by_inner_aspect() {
+        // Outer .aspect(16, 9) propagates to an immediate-child
+        // composition WITHOUT its own aspect; that child propagates
+        // further. But an inner composition with its own .aspect(1, 1)
+        // wins and blocks propagation past it.
+        let leaf_outer = Patch::new("outer_leaf").slot(Slot::Panel, Cell::empty());
+        let leaf_inner_a = Patch::new("inner_a").slot(Slot::Panel, Cell::empty());
+        let leaf_inner_b = Patch::new("inner_b").slot(Slot::Panel, Cell::empty());
+        let inner = beside(leaf_inner_a, leaf_inner_b).aspect(1.0, 1.0);
+        let outer = beside(leaf_outer, inner).id("outer").aspect(16.0, 9.0);
+        let layout = outer.solve(Size::new(1200.0, 400.0), 96.0);
+        let outer_leaf = layout.get("outer_leaf", Slot::Panel).unwrap();
+        approx_eq(
+            (outer_leaf.x1 - outer_leaf.x0) / (outer_leaf.y1 - outer_leaf.y0),
+            16.0 / 9.0,
+            0.02,
+            "outer leaf receives propagated 16:9",
+        );
+        let ia = layout.get("inner_a", Slot::Panel).unwrap();
+        let ib = layout.get("inner_b", Slot::Panel).unwrap();
+        approx_eq(
+            (ia.x1 - ia.x0) / (ia.y1 - ia.y0),
+            1.0,
+            0.02,
+            "inner_a from inner .aspect(1,1)",
+        );
+        approx_eq(
+            (ib.x1 - ib.x0) / (ib.y1 - ib.y0),
+            1.0,
+            0.02,
+            "inner_b from inner .aspect(1,1)",
+        );
+    }
+
+    #[test]
+    fn composition_aspect_plus_tall_axis_grows_chrome() {
+        // A composition with .aspect(1, 1) on facets that carry a tall
+        // axis_bottom. The chrome row grows (forward sizer fires) AND
+        // each facet panel remains square in any viewport — the
+        // solver's second iteration picks up the resolved Auto-row
+        // heights from iter 0's pass 2 and reshapes the respected fr
+        // distribution to the actual ratio. Any slack appears as empty
+        // space around the grid; chrome doesn't fight the lock.
+        let facet = |id: &str| {
+            Patch::new(id)
+                .slot(Slot::Panel, Cell::empty())
+                .slot(Slot::AxisBottom, sized(0.0, 40.0))
+        };
+        let comp = beside(facet("a"), facet("b")).aspect(1.0, 1.0);
+        // 800w × 400h: height binds. Panel row = 400 - 40 axis = 360 per side.
+        let layout = comp.solve(Size::new(800.0, 400.0), 96.0);
+        for id in &["a", "b"] {
+            let panel = layout.get(id, Slot::Panel).unwrap();
+            let axis = layout.get(id, Slot::AxisBottom).unwrap();
+            approx_eq(
+                (panel.x1 - panel.x0) / (panel.y1 - panel.y0),
+                1.0,
+                0.02,
+                &format!("{id} panel is square under chrome"),
+            );
+            approx_eq(axis.y1 - axis.y0, 40.0, 0.5, &format!("{id} axis 40px"));
+        }
     }
 
     #[test]

@@ -449,9 +449,54 @@ pub struct GridNode {
     pub(crate) cols: Vec<Track>,
     pub(crate) rows: Vec<Track>,
     pub(crate) gap: (Length, Length),
-    pub(crate) respect: bool,
+    pub(crate) respect: Respect,
     pub(crate) id: Option<CellId>,
     pub(crate) children: Vec<(Placement, Node)>,
+}
+
+/// Per-grid respect policy. Mirrors R `grid`'s `respect` argument:
+/// `None` lets each axis size independently; `All` couples every fr
+/// track across both axes (today's `Grid::respect()` behaviour); `Matrix`
+/// selectively couples only the (row, col) cells marked `true` so the
+/// unrespected fr tracks absorb whatever slack remains.
+#[derive(Clone, Debug, Default)]
+pub enum Respect {
+    /// Each axis sizes independently. Default.
+    #[default]
+    None,
+    /// Every (row, col) pair is respected — couples per-fr-w and per-fr-h
+    /// across the grid.
+    All,
+    /// Per-cell respect. `Matrix[row][col] = true` couples that cell's row
+    /// and column to the global respected scale; `false` cells let their
+    /// row/column stretch with the unrespected remainder. Empty matrix is
+    /// treated as `None`.
+    Matrix(Vec<Vec<bool>>),
+}
+
+impl Respect {
+    /// True if any cell in column `col` is respected. For `All`, always
+    /// true. For `Matrix`, true if any row at `col` is marked.
+    pub(crate) fn col_respected(&self, col: usize) -> bool {
+        match self {
+            Respect::None => false,
+            Respect::All => true,
+            Respect::Matrix(m) => m.iter().any(|row| row.get(col).copied().unwrap_or(false)),
+        }
+    }
+
+    /// True if any cell in row `row` is respected. For `All`, always true.
+    /// For `Matrix`, true if any col at `row` is marked.
+    pub(crate) fn row_respected(&self, row: usize) -> bool {
+        match self {
+            Respect::None => false,
+            Respect::All => true,
+            Respect::Matrix(m) => m
+                .get(row)
+                .map(|cols| cols.iter().any(|b| *b))
+                .unwrap_or(false),
+        }
+    }
 }
 
 impl Grid {
@@ -465,7 +510,7 @@ impl Grid {
                 cols: cols.into_iter().collect(),
                 rows: rows.into_iter().collect(),
                 gap: (Length::ZERO, Length::ZERO),
-                respect: false,
+                respect: Respect::None,
                 id: None,
                 children: Vec::new(),
             },
@@ -485,15 +530,60 @@ impl Grid {
         self
     }
 
-    /// Force `Fr` tracks across both axes to share a single per-fr pixel size
-    /// (R grid's `respect = TRUE`). The grid's natural aspect ratio
-    /// `sum_fr_cols : sum_fr_rows` is preserved; the grid shrinks to fit the
-    /// available cell area and is centered within it.
+    /// Force every `Fr` track across both axes to share a single per-fr
+    /// pixel size (R grid's `respect = TRUE`). The grid's natural aspect
+    /// ratio `sum_fr_cols : sum_fr_rows` is preserved; the grid shrinks
+    /// to fit the available cell area and is centered within it.
     ///
     /// Specific aspect ratios are expressed by choosing fr weights:
     /// a 16:9 single cell is `Grid::new([Fr(16.0)], [Fr(9.0)]).respect()`.
     pub fn respect(mut self) -> Self {
-        self.node.respect = true;
+        self.node.respect = Respect::All;
+        self
+    }
+
+    /// Selectively respect a single `(row, col)` cell. Couples that cell's
+    /// row-fr and column-fr to the global respected scale (R grid's
+    /// `respect = matrix(...)` with one `1` cell). Unrespected fr tracks
+    /// absorb any remaining slack — use this to compose a fixed-aspect
+    /// plot beside a flex plot and have the flex plot expand to fill.
+    ///
+    /// Indices are 0-based and clamped to the current `rows.len()` /
+    /// `cols.len()`. Subsequent calls accumulate. If the matrix didn't
+    /// exist yet, it is allocated sized to the current grid; if
+    /// `respect()` (all) was called previously, this call replaces it
+    /// with a single-cell matrix.
+    pub fn respect_at(mut self, row: usize, col: usize) -> Self {
+        let nrows = self.node.rows.len();
+        let ncols = self.node.cols.len();
+        if row >= nrows || col >= ncols {
+            return self;
+        }
+        let m = match std::mem::replace(&mut self.node.respect, Respect::None) {
+            Respect::Matrix(mut m) => {
+                // Resize to current grid shape if it had grown.
+                if m.len() < nrows {
+                    m.resize_with(nrows, || vec![false; ncols]);
+                }
+                for row_v in m.iter_mut() {
+                    if row_v.len() < ncols {
+                        row_v.resize(ncols, false);
+                    }
+                }
+                m
+            }
+            _ => vec![vec![false; ncols]; nrows],
+        };
+        let mut m = m;
+        m[row][col] = true;
+        self.node.respect = Respect::Matrix(m);
+        self
+    }
+
+    /// Set the full respect matrix directly. Rows beyond `rows.len()` and
+    /// cols beyond `cols.len()` are clipped at solve time.
+    pub fn respect_matrix(mut self, m: Vec<Vec<bool>>) -> Self {
+        self.node.respect = Respect::Matrix(m);
         self
     }
 
@@ -1261,6 +1351,160 @@ mod tests {
         // The grid's resolved height = 100 (auto) + 200 (fr clamped) = 300.
         approx_eq(r0.y1 - r0.y0, 300.0, 0.5, "grid total height after respect");
         approx_eq(r1.y1 - r1.y0, 100.0, 0.5, "auto row from content");
+    }
+
+    #[test]
+    fn respect_matrix_all_true_matches_respect_all() {
+        // A 2x2 Fr grid with a fully-true respect matrix should produce the
+        // same layout as the same grid with `.respect()` (all).
+        let m = vec![vec![true, true], vec![true, true]];
+        let mut a = Grid::new(
+            [Track::Fr(1.0), Track::Fr(1.0)],
+            [Track::Fr(1.0), Track::Fr(1.0)],
+        )
+        .respect_matrix(m);
+        a.place(Placement::at(1, 1), Grid::cell().id(CellId(1)));
+        a.place(Placement::at(2, 2), Grid::cell().id(CellId(2)));
+        let la = a.solve(Size::new(400.0, 200.0), 96.0);
+
+        let mut b = Grid::new(
+            [Track::Fr(1.0), Track::Fr(1.0)],
+            [Track::Fr(1.0), Track::Fr(1.0)],
+        )
+        .respect();
+        b.place(Placement::at(1, 1), Grid::cell().id(CellId(1)));
+        b.place(Placement::at(2, 2), Grid::cell().id(CellId(2)));
+        let lb = b.solve(Size::new(400.0, 200.0), 96.0);
+
+        let ra1 = la.rect(CellId(1)).unwrap();
+        let rb1 = lb.rect(CellId(1)).unwrap();
+        approx_eq(ra1.x0, rb1.x0, 0.5, "cell1 x0");
+        approx_eq(ra1.x1, rb1.x1, 0.5, "cell1 x1");
+        approx_eq(ra1.y0, rb1.y0, 0.5, "cell1 y0");
+        approx_eq(ra1.y1, rb1.y1, 0.5, "cell1 y1");
+    }
+
+    #[test]
+    fn respect_matrix_none_matches_no_respect() {
+        // Empty matrix (no cells marked) behaves like no respect.
+        let mut a = Grid::new(
+            [Track::Fr(1.0), Track::Fr(1.0)],
+            [Track::Fr(1.0), Track::Fr(1.0)],
+        )
+        .respect_matrix(vec![vec![false, false], vec![false, false]]);
+        a.place(Placement::at(1, 1), Grid::cell().id(CellId(1)));
+        let la = a.solve(Size::new(400.0, 200.0), 96.0);
+
+        let mut b = Grid::new(
+            [Track::Fr(1.0), Track::Fr(1.0)],
+            [Track::Fr(1.0), Track::Fr(1.0)],
+        );
+        b.place(Placement::at(1, 1), Grid::cell().id(CellId(1)));
+        let lb = b.solve(Size::new(400.0, 200.0), 96.0);
+
+        let ra = la.rect(CellId(1)).unwrap();
+        let rb = lb.rect(CellId(1)).unwrap();
+        approx_eq(ra.x1 - ra.x0, rb.x1 - rb.x0, 0.5, "col 1 width");
+        approx_eq(ra.y1 - ra.y0, rb.y1 - rb.y0, 0.5, "row 1 height");
+    }
+
+    #[test]
+    fn respect_matrix_single_cell_locks_one_pair() {
+        // A 1x2 grid `[Fr(1), Fr(1)] × [Fr(1)]` with respect_at(0, 0) in
+        // 800×400. Respected col 0 + row 0 lock to a uniform per-fr scale;
+        // the binding axis is height (400/1 = 400 vs 800/1 = 800 → 400 wins).
+        // So col 0 width = 1*400 = 400 (locked square at 400×400).
+        // Unrespected col 1 absorbs the remaining 800 - 400 = 400 →
+        // col 1 width = 400.
+        let mut g = Grid::new([Track::Fr(1.0), Track::Fr(1.0)], [Track::Fr(1.0)]).respect_at(0, 0);
+        g.place(Placement::at(1, 1), Grid::cell().id(CellId(1)));
+        g.place(Placement::at(1, 2), Grid::cell().id(CellId(2)));
+        let layout = g.solve(Size::new(800.0, 400.0), 96.0);
+
+        let r1 = layout.rect(CellId(1)).unwrap();
+        approx_eq(r1.x1 - r1.x0, 400.0, 0.5, "fixed col 0 width");
+        approx_eq(r1.y1 - r1.y0, 400.0, 0.5, "row 0 height");
+
+        let r2 = layout.rect(CellId(2)).unwrap();
+        approx_eq(r2.x1 - r2.x0, 400.0, 0.5, "flex col 1 absorbs slack");
+        approx_eq(r2.y1 - r2.y0, 400.0, 0.5, "row 0 height shared");
+    }
+
+    #[test]
+    fn respect_matrix_locks_under_fixed_chrome() {
+        // [Fixed(100px), Fr(1), Fr(1)] cols × [Fixed(50px), Fr(1)] rows in
+        // 600×450. Fixed pre-allocation: 100 col + 50 row = 100 col left,
+        // 400 row left after fixed. Free width for Fr = 600 - 100 = 500.
+        // respect_at(1, 1) marks cell (row 1, col 1). Respected col 1 fr=1,
+        // unrespected col 2 fr=1, respected row 1 fr=1.
+        // resp_scale: width 500/1 = 500 vs height 400/1 = 400 → 400 binds.
+        // col 1 = 1*400 = 400. col 2 = (500 - 400) / 1 = 100. row 1 = 400.
+        let mut g = Grid::new(
+            [
+                Track::Fixed(Length::px(100.0)),
+                Track::Fr(1.0),
+                Track::Fr(1.0),
+            ],
+            [Track::Fixed(Length::px(50.0)), Track::Fr(1.0)],
+        )
+        .respect_at(1, 1);
+        g.place(Placement::at(2, 2), Grid::cell().id(CellId(1)));
+        g.place(Placement::at(2, 3), Grid::cell().id(CellId(2)));
+        let layout = g.solve(Size::new(600.0, 450.0), 96.0);
+
+        let r1 = layout.rect(CellId(1)).unwrap();
+        approx_eq(r1.x1 - r1.x0, 400.0, 0.5, "respected col width");
+        approx_eq(r1.y1 - r1.y0, 400.0, 0.5, "respected row height");
+
+        let r2 = layout.rect(CellId(2)).unwrap();
+        approx_eq(r2.x1 - r2.x0, 100.0, 0.5, "unrespected col absorbs slack");
+    }
+
+    #[test]
+    fn respect_matrix_two_respected_cols_share_scale() {
+        // [Fr(1), Fr(2)] cols × [Fr(1)] rows in 600×100. Both cols
+        // respected via the matrix; one row respected.
+        // resp_scale: width 600 / (1+2) = 200 vs height 100/1 = 100 → 100
+        // binds. col 0 = 1*100 = 100, col 1 = 2*100 = 200; row 0 = 100.
+        // Remaining width 600 - 300 = 300 has no unrespected fr to absorb,
+        // so the grid centres at the 300px total width.
+        let m = vec![vec![true, true]];
+        let mut g = Grid::new([Track::Fr(1.0), Track::Fr(2.0)], [Track::Fr(1.0)]).respect_matrix(m);
+        g.place(Placement::at(1, 1), Grid::cell().id(CellId(1)));
+        g.place(Placement::at(1, 2), Grid::cell().id(CellId(2)));
+        let layout = g.solve(Size::new(600.0, 100.0), 96.0);
+
+        let r1 = layout.rect(CellId(1)).unwrap();
+        let r2 = layout.rect(CellId(2)).unwrap();
+        approx_eq(r1.x1 - r1.x0, 100.0, 0.5, "respected col fr=1");
+        approx_eq(r2.x1 - r2.x0, 200.0, 0.5, "respected col fr=2");
+        // Ratio preserved
+        approx_eq(
+            (r2.x1 - r2.x0) / (r1.x1 - r1.x0),
+            2.0,
+            0.05,
+            "respected cols share resp_scale (ratio = fr weights)",
+        );
+    }
+
+    #[test]
+    fn respect_matrix_width_binding_uses_smaller_scale() {
+        // Same shape as `respect_matrix_single_cell_locks_one_pair` but
+        // with the aspect-ratio flipped so width is the binding axis.
+        // 1×2 grid `[Fr(1), Fr(1)] × [Fr(1)]` in 200×800 viewport
+        // (tall narrow) with respect_at(0, 0).
+        // resp_scale: width 200/1 = 200 vs height 800/1 = 800 → 200 binds.
+        // col 0 = 200, col 1 unrespected = (200 - 200)/1 = 0 (no slack);
+        // row 0 = 200.
+        let mut g = Grid::new([Track::Fr(1.0), Track::Fr(1.0)], [Track::Fr(1.0)]).respect_at(0, 0);
+        g.place(Placement::at(1, 1), Grid::cell().id(CellId(1)));
+        g.place(Placement::at(1, 2), Grid::cell().id(CellId(2)));
+        let layout = g.solve(Size::new(200.0, 800.0), 96.0);
+        let r1 = layout.rect(CellId(1)).unwrap();
+        approx_eq(r1.x1 - r1.x0, 200.0, 0.5, "width-bound col 0");
+        approx_eq(r1.y1 - r1.y0, 200.0, 0.5, "row 0 height matches");
+        let r2 = layout.rect(CellId(2)).unwrap();
+        approx_eq(r2.x1 - r2.x0, 0.0, 0.5, "unrespected col gets zero slack");
     }
 
     #[test]

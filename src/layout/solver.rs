@@ -52,15 +52,13 @@ pub(super) fn solve(root: &GridNode, viewport: Size, dpi: f64) -> Layout {
     collect_grid_paths(root, &mut Vec::new(), &mut grid_paths);
 
     let has_refs = tree_has_track_refs(root);
+    let has_respect_auto = tree_has_respect_with_auto_rows(root);
 
     let mut widths = WidthResults::default();
     let mut heights = HeightResults::default();
 
-    let iter_cap = if seeds.is_empty() && !has_refs {
-        1
-    } else {
-        MAX_ITER
-    };
+    let needs_iteration = !seeds.is_empty() || has_refs || has_respect_auto;
+    let iter_cap = if needs_iteration { MAX_ITER } else { 1 };
 
     for iter in 0..iter_cap.max(1) {
         let resolved = Resolved {
@@ -95,13 +93,14 @@ pub(super) fn solve(root: &GridNode, viewport: Size, dpi: f64) -> Layout {
             &mut new_heights,
         );
 
-        if seeds.is_empty() && !has_refs {
+        if seeds.is_empty() && !has_refs && !has_respect_auto {
             widths = new_widths;
             heights = new_heights;
             break;
         }
 
-        let stable = !has_refs
+        let needs_stability_check = has_refs || has_respect_auto;
+        let stable = !needs_stability_check
             || (widths_match(&widths, &new_widths) && heights_match(&heights, &new_heights));
 
         let new_seeds = compute_new_seeds(
@@ -204,6 +203,29 @@ fn collect_grid_paths(
             path.pop();
         }
     }
+}
+
+/// Returns `true` if any grid in the tree carries an active respect
+/// (selective or all) **and** has at least one Auto row. Aspect locks
+/// with Auto chrome rows need a second iteration: pass 1 of iter 0
+/// treats Auto rows as 0 in `per_fr_h_provisional`; iter 1 picks up the
+/// resolved Auto heights from iter 0's pass 2 and recomputes resp_scale
+/// to the correct ratio. Without this trigger, the lock would land
+/// slightly off-ratio (cols committed too generously on iter 0).
+fn tree_has_respect_with_auto_rows(node: &GridNode) -> bool {
+    use crate::layout::Respect;
+    let respect_active = !matches!(node.respect, Respect::None);
+    if respect_active && node.rows.iter().any(|t| matches!(t, Track::Auto)) {
+        return true;
+    }
+    for (_placement, child) in &node.children {
+        if let Node::Grid(g) = child {
+            if tree_has_respect_with_auto_rows(g) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Returns `true` if any `Length` in the tree contains a `TrackOf`
@@ -367,27 +389,81 @@ fn width_pass_grid(
         0.0
     };
 
-    // Respect's clamp needs the height-axis per-fr too. We don't know auto
-    // rows' content-driven heights yet, so we estimate per_fr_h treating auto
-    // rows as 0 (the lower bound — they only consume more, never less, so
-    // per_fr_h_provisional is an upper bound for per_fr_h_actual). For
-    // respect grids with no auto rows this matches pass 2 exactly. With auto
-    // rows the grid may end up wider than respect strictly prescribes —
-    // documented as the "best effort" combination.
+    // Respect's clamp needs the height-axis per-fr too. We don't know
+    // Auto rows' content-driven heights on iter 0 — estimate them as 0
+    // (lower bound; they only grow). On iter > 0 we have the previous
+    // iteration's resolved row heights via `resolved.heights` and use
+    // them as the Auto-row contribution, which lets per_fr_h_provisional
+    // converge to the actual per_fr_h. Aspect locks with Auto chrome
+    // rows reach the requested ratio in two iterations this way.
     let row_gap_pass1 = length_to_px(&node.gap.1, dpi, avail_h, resolved);
     let row_gap_total_pass1 = saturating_gap_total(node.rows.len(), row_gap_pass1);
     let row_fixed_pass1 = sum_fixed_track_size(&node.rows, dpi, avail_h, resolved);
-    let free_h_provisional = (avail_h - row_fixed_pass1 - row_gap_total_pass1).max(0.0);
+    let row_auto_pass1: f64 = if let Some(heights) = resolved.heights {
+        if let Some(prev) = heights.grids.get(path) {
+            node.rows
+                .iter()
+                .enumerate()
+                .filter_map(|(i, t)| match t {
+                    Track::Auto => prev.rows.get(i).copied(),
+                    _ => None,
+                })
+                .sum()
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+    let free_h_provisional =
+        (avail_h - row_fixed_pass1 - row_auto_pass1 - row_gap_total_pass1).max(0.0);
     let per_fr_h_provisional = if row_fr_sum > 0.0 {
         free_h_provisional / row_fr_sum
     } else {
         0.0
     };
 
-    let per_fr_w = if node.respect && col_fr_sum > 0.0 && row_fr_sum > 0.0 {
-        per_fr_w_default.min(per_fr_h_provisional)
+    // Selective respect (R `grid`'s algorithm): split Fr tracks into
+    // respected and unrespected; respected tracks share a single scale
+    // bound by the smaller of the two axes' demand; unrespected tracks
+    // absorb the remainder.
+    let (col_fr_respected, col_fr_unrespected) =
+        split_fr(&node.cols, |i| node.respect.col_respected(i));
+    let (row_fr_respected, _row_fr_unrespected) =
+        split_fr(&node.rows, |i| node.respect.row_respected(i));
+
+    let respect_active = col_fr_respected > 0.0 && row_fr_respected > 0.0;
+
+    // resp_scale: the per-fr scale used by every respected track. The
+    // smaller of (width-side demand, provisional-height-side demand) wins
+    // (the binding axis). When respect isn't active, this is unused.
+    let resp_scale_w = if respect_active {
+        free_w / col_fr_respected
     } else {
+        0.0
+    };
+    let resp_scale_h_prov = if respect_active {
+        free_h_provisional / row_fr_respected
+    } else {
+        0.0
+    };
+    let resp_scale = if respect_active {
+        resp_scale_w.min(resp_scale_h_prov)
+    } else {
+        0.0
+    };
+
+    // unresp_scale_w: scale for unrespected Fr cols. The respected cols
+    // consume `col_fr_respected * resp_scale`; the rest distributes to
+    // unrespected fr cols. If there are no unrespected fr cols, this is
+    // unused. If respect isn't active, this is the default per-fr.
+    let respected_w_total = col_fr_respected * resp_scale;
+    let unresp_scale_w = if respect_active && col_fr_unrespected > 0.0 {
+        ((free_w - respected_w_total).max(0.0)) / col_fr_unrespected
+    } else if !respect_active {
         per_fr_w_default
+    } else {
+        0.0
     };
 
     let col_sizes: Vec<f64> = node
@@ -396,7 +472,14 @@ fn width_pass_grid(
         .enumerate()
         .map(|(i, t)| match t {
             Track::Fixed(l) => length_to_px(l, dpi, avail, resolved),
-            Track::Fr(f) => *f as f64 * per_fr_w,
+            Track::Fr(f) => {
+                let scale = if respect_active && node.respect.col_respected(i) {
+                    resp_scale
+                } else {
+                    unresp_scale_w
+                };
+                *f as f64 * scale
+            }
             Track::Auto => col_auto[i],
         })
         .collect();
@@ -405,6 +488,15 @@ fn width_pass_grid(
     let off_x = ((avail - total_w) * 0.5).max(0.0);
     let resolved_x0 = x0 + off_x;
     let resolved_x1 = resolved_x0 + total_w;
+
+    // Pass 2 (height) needs the respected scale from pass 1 to enforce
+    // cross-axis consistency on respected row tracks. Store resp_scale
+    // when active; otherwise the default per-fr-w (kept for diagnostics).
+    let per_fr_w = if respect_active {
+        resp_scale
+    } else {
+        per_fr_w_default
+    };
 
     out.grids.insert(
         path.clone(),
@@ -417,7 +509,7 @@ fn width_pass_grid(
         },
     );
 
-    let _ = (per_fr_w_default, row_fr_sum, node.respect);
+    let _ = (per_fr_w_default, row_fr_sum, col_fr_sum);
 
     // Provisional row sizes used only to derive children's y-ranges for the
     // respect clamp in nested width passes. Auto rows are treated as 0
@@ -599,16 +691,37 @@ fn height_pass_grid(
         0.0
     };
 
-    // respect: pick the smaller of the two axes' per-fr so a single per-fr
-    // applies in both directions. Auto rows have already consumed their
-    // content height from `free_h`, so if content demand was larger than
-    // respect's prediction the grid grows past respect (documented).
-    let per_fr_h = if node.respect && col_fr_sum > 0.0 && row_fr_sum > 0.0 {
-        per_fr_h_default.min(gw.per_fr_w)
+    // Selective respect (height side). Mirror of the width pass:
+    // respected rows share a single scale clamped against pass 1's
+    // resp_scale (`gw.per_fr_w`); unrespected rows absorb remainder.
+    // Auto rows have already consumed their content height from
+    // `free_h`, so if content demand was larger than respect's prediction
+    // the grid grows past respect (documented).
+    let (row_fr_respected, row_fr_unrespected) =
+        split_fr(&node.rows, |i| node.respect.row_respected(i));
+    let (col_fr_respected, _col_fr_unrespected) =
+        split_fr(&node.cols, |i| node.respect.col_respected(i));
+    let respect_active = col_fr_respected > 0.0 && row_fr_respected > 0.0;
+
+    let resp_scale_h = if respect_active {
+        free_h / row_fr_respected
     } else {
-        per_fr_h_default
+        0.0
     };
-    let _ = col_fr_sum;
+    let resp_scale = if respect_active {
+        resp_scale_h.min(gw.per_fr_w)
+    } else {
+        0.0
+    };
+    let respected_h_total = row_fr_respected * resp_scale;
+    let unresp_scale_h = if respect_active && row_fr_unrespected > 0.0 {
+        ((free_h - respected_h_total).max(0.0)) / row_fr_unrespected
+    } else if !respect_active {
+        per_fr_h_default
+    } else {
+        0.0
+    };
+    let _ = (col_fr_sum, row_fr_sum);
 
     let row_sizes: Vec<f64> = node
         .rows
@@ -616,7 +729,14 @@ fn height_pass_grid(
         .enumerate()
         .map(|(i, t)| match t {
             Track::Fixed(l) => length_to_px(l, dpi, avail, resolved),
-            Track::Fr(f) => *f as f64 * per_fr_h,
+            Track::Fr(f) => {
+                let scale = if respect_active && node.respect.row_respected(i) {
+                    resp_scale
+                } else {
+                    unresp_scale_h
+                };
+                *f as f64 * scale
+            }
             Track::Auto => row_auto[i],
         })
         .collect();
@@ -918,6 +1038,24 @@ fn sum_fr(tracks: &[Track]) -> f64 {
             _ => None,
         })
         .sum()
+}
+
+/// Sum Fr weights split by the `respected` predicate. Returns
+/// `(respected_sum, unrespected_sum)`. Fixed/Auto tracks contribute to
+/// neither.
+fn split_fr<F: Fn(usize) -> bool>(tracks: &[Track], respected: F) -> (f64, f64) {
+    let mut resp = 0.0;
+    let mut unresp = 0.0;
+    for (i, t) in tracks.iter().enumerate() {
+        if let Track::Fr(f) = t {
+            if respected(i) {
+                resp += *f as f64;
+            } else {
+                unresp += *f as f64;
+            }
+        }
+    }
+    (resp, unresp)
 }
 
 fn saturating_gap_total(track_count: usize, gap: f64) -> f64 {
