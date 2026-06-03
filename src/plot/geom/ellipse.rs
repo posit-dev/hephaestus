@@ -30,9 +30,10 @@
 //! - `"fill"`, `"fill_opacity"`, `"stroke"`, `"stroke_opacity"`,
 //!   `"linewidth"`, `"linetype"`, `"dash_offset"`, `"cap"`, `"join"` —
 //!   same styling set as RectGeom.
-//!
-//! Rotation is not in v1.5 — pending the cross-geom rotation decision
-//! flagged in the geom plan. v1.5 ellipses are axis-aligned.
+//! - `"angle"` — rotation in **radians** around the ellipse centre,
+//!   mathematical CCW (positive rotates the ellipse counter-clockwise
+//!   in the rendered image). Default `0.0` (no rotation). Useful for
+//!   eigenvector-aligned covariance ellipses.
 
 use crate::brush::Brush;
 use crate::geometry::{Affine, Point, Vec2};
@@ -42,9 +43,9 @@ use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
 
 use super::resolve::{
-    override_alpha, pt_to_px, resolve_cap_channel, resolve_color_channel, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
-    resolve_position,
+    override_alpha, pt_to_px, resolve_angle_channel, resolve_cap_channel, resolve_color_channel,
+    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, resolve_position,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -81,6 +82,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("cap", ExpectedOutput::Strings),
     ("join", ExpectedOutput::Strings),
     ("expand", ExpectedOutput::Numbers),
+    ("angle", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
 ];
 
@@ -167,6 +169,7 @@ impl Geom for EllipseGeom {
         let join_scale = ctx.scale_for("join");
         let pick_id_scale = ctx.scale_for("pick_id");
         let expand_scale = ctx.scale_for("expand");
+        let angle_scale = ctx.scale_for("angle");
 
         let channels = &self.state.channels;
         let (x_col, x_scale) = match channels.get("x") {
@@ -209,6 +212,7 @@ impl Geom for EllipseGeom {
         let join_ch = channels.get("join");
         let pick_id_ch = channels.get("pick_id");
         let expand_ch = channels.get("expand");
+        let angle_ch = channels.get("angle");
 
         for i in 0..n {
             // ── Resolve centre + far edge in pixel space. ──
@@ -280,10 +284,21 @@ impl Geom for EllipseGeom {
             let path = ellipse_path(Point::new(cx, cy), Vec2::new(rx, ry));
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
 
+            // Rotation around the ellipse centre. Math CCW from the user
+            // → negate for kurbo (screen y points down). Identity when
+            // angle == 0 to keep the recording byte-identical for the
+            // unrotated case (regression guard for existing tests).
+            let angle = resolve_angle_channel(angle_ch, angle_scale, i);
+            let xform = if angle == 0.0 {
+                Affine::IDENTITY
+            } else {
+                Affine::rotate_about(-angle, Point::new(cx, cy))
+            };
+
             if let Some(fc) = fill_color {
                 scene.fill(
                     FillRule::NonZero,
-                    Affine::IDENTITY,
+                    xform,
                     &Brush::Solid(fc),
                     None,
                     &path,
@@ -312,14 +327,7 @@ impl Geom for EllipseGeom {
                         dash_offset_pt,
                         ctx.dpi,
                     );
-                    scene.stroke(
-                        &stroke_spec,
-                        Affine::IDENTITY,
-                        &Brush::Solid(sc),
-                        None,
-                        &path,
-                        pick,
-                    );
+                    scene.stroke(&stroke_spec, xform, &Brush::Solid(sc), None, &path, pick);
                 }
             }
         }
@@ -758,6 +766,82 @@ mod tests {
             .set("y2", vec![1.0_f64])
             .set("pick_id", 0x100_0000_i64)
             .build();
+    }
+
+    #[test]
+    fn angle_zero_produces_identity_xform() {
+        // Regression guard: explicit angle=0 produces the same Affine
+        // (Identity) as a geom without an angle binding at all.
+        let g_no_angle = EllipseGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("x2", vec![0.7_f64])
+            .set("y2", vec![0.6_f64])
+            .set("fill", red())
+            .build();
+        let g_zero = EllipseGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("x2", vec![0.7_f64])
+            .set("y2", vec![0.6_f64])
+            .set("fill", red())
+            .set("angle", 0.0_f64)
+            .build();
+        let panel = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut s1 = RecordingScene::default();
+        let mut s2 = RecordingScene::default();
+        g_no_angle.draw(&mut s1, &ctx(panel, &shapes, &scales));
+        g_zero.draw(&mut s2, &ctx(panel, &shapes, &scales));
+        let coeffs = |scene: &RecordingScene| {
+            scene.ops.iter().find_map(|op| match op {
+                Op::Fill { transform, .. } => Some(transform.as_coeffs()),
+                _ => None,
+            })
+        };
+        assert_eq!(coeffs(&s1), coeffs(&s2));
+    }
+
+    #[test]
+    fn angle_uses_centre_as_pivot() {
+        // Ellipse centred at (50, 50). After rotation by π/2 (math CCW),
+        // the centre stays at (50, 50). The Affine's translation should
+        // therefore be (50, 50) post-rotation about that point — i.e.,
+        // the matrix maps (50, 50) back to (50, 50).
+        use std::f64::consts::FRAC_PI_2;
+        let g = EllipseGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("x2", vec![0.7_f64])
+            .set("y2", vec![0.6_f64])
+            .set("fill", red())
+            .set("angle", FRAC_PI_2)
+            .build();
+        let panel = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &ctx(panel, &shapes, &scales));
+        let xform = scene
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Fill { transform, .. } => Some(*transform),
+                _ => None,
+            })
+            .expect("fill op");
+        let pivot_world = xform * kurbo::Point::new(50.0, 50.0);
+        assert!(
+            (pivot_world.x - 50.0).abs() < 1e-6,
+            "pivot.x = {}",
+            pivot_world.x
+        );
+        assert!(
+            (pivot_world.y - 50.0).abs() < 1e-6,
+            "pivot.y = {}",
+            pivot_world.y
+        );
     }
 
     #[test]

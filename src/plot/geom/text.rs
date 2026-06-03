@@ -74,7 +74,20 @@
 //! directly. `anchor_x = 0.5, anchor_y = 0.5` therefore centres
 //! whichever the user actually sees.
 //!
-//! Rotation isn't in v1.5 — pending the cross-geom rotation decision.
+//! - `"angle"` — rotation in **radians** around the resolved
+//!   **alignment** anchor `(anchor_px, anchor_py)`, mathematical CCW
+//!   (positive rotates the label counter-clockwise in the rendered
+//!   image). Default `0.0`. The alignment anchor (set via
+//!   `anchor_x` / `anchor_y` channels) is the rotation pivot — line
+//!   justification within the laid-out box does not move the pivot.
+//!   Both the laid-out text and any background rect rotate together.
+//! - `"justify_x"` — **line justification** within the wrap box.
+//!   Strings: `"start"` (default), `"center"`, `"end"`, `"justify"`.
+//!   Orthogonal to `anchor_x` / `anchor_y` (which is alignment — where
+//!   the box itself sits relative to the placement point). Only has
+//!   visible effect when `"width"` causes wrap; a single-line label
+//!   has nothing to justify against. Unknown values fall back to
+//!   `"start"`.
 //!
 //! Picking: each row gets its own pick ticket allocated by the
 //! orchestrator; every glyph in that row tags itself with the row's id.
@@ -82,17 +95,17 @@
 //! coverage in the pick scene).
 
 use crate::brush::Brush;
-use crate::geometry::{Affine, Rect};
+use crate::geometry::{Affine, Point, Rect};
 use crate::path::FillRule;
 use crate::plot::value::Value;
 use crate::primitives::{rect as rect_path, rounded_rect};
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
-use crate::text::{draw_text, TextRun, TextStyle};
+use crate::text::{draw_text, Alignment, TextRun, TextStyle};
 
 use super::resolve::{
-    band_width_at, override_alpha, pt_to_px, resolve_color_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position,
+    band_width_at, override_alpha, pt_to_px, resolve_angle_channel, resolve_color_channel,
+    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -136,6 +149,8 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("bg_linewidth", ExpectedOutput::Numbers),
     ("bg_corner_radius", ExpectedOutput::Numbers),
     ("bg_padding", ExpectedOutput::Numbers),
+    ("angle", ExpectedOutput::Numbers),
+    ("justify_x", ExpectedOutput::Strings),
     ("pick_id", ExpectedOutput::Numbers),
 ];
 
@@ -220,6 +235,8 @@ impl Geom for TextGeom {
         let bg_linewidth_scale = ctx.scale_for("bg_linewidth");
         let bg_corner_radius_scale = ctx.scale_for("bg_corner_radius");
         let bg_padding_scale = ctx.scale_for("bg_padding");
+        let angle_scale = ctx.scale_for("angle");
+        let justify_x_scale = ctx.scale_for("justify_x");
         let pick_id_scale = ctx.scale_for("pick_id");
 
         let channels = &self.state.channels;
@@ -255,6 +272,8 @@ impl Geom for TextGeom {
         let bg_linewidth_ch = channels.get("bg_linewidth");
         let bg_corner_radius_ch = channels.get("bg_corner_radius");
         let bg_padding_ch = channels.get("bg_padding");
+        let angle_ch = channels.get("angle");
+        let justify_x_ch = channels.get("justify_x");
         let pick_id_ch = channels.get("pick_id");
 
         for i in 0..n {
@@ -319,8 +338,12 @@ impl Geom for TextGeom {
             let width_band_frac =
                 resolve_number_channel_or(width_band_ch, width_band_scale, i, 0.0);
             let wrap_width_px = pt_to_px(width_pt, ctx.dpi) + width_band_frac * x_band_width_px;
+            // Justification (inner line placement). Only meaningful when
+            // the layout wraps — single-line labels have nothing to
+            // justify against.
+            let justify_x = resolve_justify_channel(justify_x_ch, justify_x_scale, i);
             let (text_w, text_h) = if wrap_width_px > 0.0 && wrap_width_px.is_finite() {
-                run.set_max_width(wrap_width_px as f32);
+                run.set_max_width(wrap_width_px as f32, justify_x);
                 (run.content_width(), run.current_height())
             } else {
                 (run.natural_width(), run.natural_height())
@@ -385,6 +408,20 @@ impl Geom for TextGeom {
                 (dx, dy, None)
             };
 
+            // ── Rotation transform. ──
+            // Rotation pivots on the ALIGNMENT anchor — the user-visible
+            // point that the text box's `anchor_x` / `anchor_y` fractions
+            // pin to. Math CCW from the user → negate for kurbo (screen
+            // y-down). Justification (line placement within the box) is
+            // orthogonal: it changes where glyphs sit inside the layout
+            // box, not the rotation pivot.
+            let angle = resolve_angle_channel(angle_ch, angle_scale, i);
+            let xform = if angle == 0.0 {
+                Affine::IDENTITY
+            } else {
+                Affine::rotate_about(-angle, Point::new(anchor_px, anchor_py))
+            };
+
             // ── Background rect (drawn before glyphs to sit behind). ──
             if let Some(bg_rect) = bg_rect_opt {
                 if bg_rect.is_finite() && bg_rect.width() > 0.0 && bg_rect.height() > 0.0 {
@@ -403,7 +440,7 @@ impl Geom for TextGeom {
                     if let Some(fc) = bg_fill {
                         scene.fill(
                             FillRule::NonZero,
-                            Affine::IDENTITY,
+                            xform,
                             &Brush::Solid(fc),
                             None,
                             &bg_path,
@@ -424,7 +461,7 @@ impl Geom for TextGeom {
                                 .with_join(Join::Miter);
                             scene.stroke(
                                 &stroke_spec,
-                                Affine::IDENTITY,
+                                xform,
                                 &Brush::Solid(sc),
                                 None,
                                 &bg_path,
@@ -436,7 +473,15 @@ impl Geom for TextGeom {
             }
 
             // ── Emit glyphs. ──
-            draw_text(scene, &run, draw_x, draw_y, &Brush::Solid(fill_color), pick);
+            draw_text(
+                scene,
+                &run,
+                draw_x,
+                draw_y,
+                &Brush::Solid(fill_color),
+                xform,
+                pick,
+            );
         }
     }
 }
@@ -459,6 +504,28 @@ fn resolve_str_channel(
         (false, Some(s)) => s.map(&raw),
     };
     mapped.as_str().map(str::to_owned)
+}
+
+/// Resolve a `"justify_x"` channel to a parley `Alignment`. Recognises
+/// the canonical string aliases — `"start"` / `"center"` / `"end"` /
+/// `"justify"`. Unknown / non-string / unset → `Alignment::Start`,
+/// matching the historical (pre-channel) behaviour.
+fn resolve_justify_channel(
+    channel: Option<&Channel>,
+    scale: Option<&crate::plot::scale::Scale>,
+    i: usize,
+) -> Alignment {
+    let s = match resolve_str_channel(channel, scale, i) {
+        Some(s) => s,
+        None => return Alignment::Start,
+    };
+    match s.as_str() {
+        "start" => Alignment::Start,
+        "center" | "centre" | "middle" => Alignment::Center,
+        "end" => Alignment::End,
+        "justify" | "justified" => Alignment::Justify,
+        _ => Alignment::Start,
+    }
 }
 
 /// Resolve `"italic"` as either a `Value::Bool` or a string ("italic" /

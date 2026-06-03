@@ -67,6 +67,10 @@ name = "nesting_deep"
 required-features = ["vello", "png", "text"]
 
 [[example]]
+name = "nesting_fixed_aspect"
+required-features = ["vello", "png", "text"]
+
+[[example]]
 name = "shapes_demo"
 required-features = ["vello", "png"]
 
@@ -116,6 +120,14 @@ required-features = ["vello", "png", "text"]
 
 [[example]]
 name = "polygon_features"
+required-features = ["vello", "png", "text"]
+
+[[example]]
+name = "rotation"
+required-features = ["vello", "png", "text"]
+
+[[example]]
+name = "text_fit"
 required-features = ["vello", "png", "text"]
 
 [[test]]

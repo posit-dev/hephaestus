@@ -43,6 +43,8 @@ pub mod segment;
 pub mod state;
 #[cfg(feature = "text")]
 pub mod text;
+#[cfg(feature = "text")]
+pub mod text_fit;
 pub mod wedge;
 
 pub use ellipse::EllipseGeom;
@@ -54,6 +56,8 @@ pub use segment::SegmentGeom;
 pub use state::{GeomState, KeysStrategy};
 #[cfg(feature = "text")]
 pub use text::TextGeom;
+#[cfg(feature = "text")]
+pub use text_fit::TextFitGeom;
 pub use wedge::WedgeGeom;
 
 // ─── Channel ─────────────────────────────────────────────────────────────────

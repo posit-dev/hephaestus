@@ -25,21 +25,27 @@
 //! - `"fill"`, `"stroke"`, `"fill_opacity"`, `"stroke_opacity"`,
 //!   `"linewidth"`, `"linetype"`, `"dash_offset"`, `"cap"`, `"join"`
 //!   — same styling set as LineGeom / PointGeom.
+//! - `"angle"` — rotation in **radians** around the rect centre,
+//!   mathematical CCW (positive rotates the rect counter-clockwise in
+//!   the rendered image). Default `0.0` (no rotation). Band offsets
+//!   are resolved **before** rotation, so a band-aligned bar rotated
+//!   by `π/4` keeps its band-aligned bbox but the rect's corners poke
+//!   beyond the band visually — expected behaviour, not a bug.
 //!
 //! Stroke is drawn around the rect outline. Fill and stroke are
 //! independent — set one, the other, or both.
 
 use crate::brush::Brush;
-use crate::geometry::{Affine, Rect};
+use crate::geometry::{Affine, Point, Rect};
 use crate::path::FillRule;
 use crate::primitives::{rect as rect_path, rounded_rect};
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
 
 use super::resolve::{
-    override_alpha, pt_to_px, resolve_cap_channel, resolve_color_channel, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
-    resolve_position,
+    override_alpha, pt_to_px, resolve_angle_channel, resolve_cap_channel, resolve_color_channel,
+    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, resolve_position,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -88,6 +94,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("cap", ExpectedOutput::Strings),
     ("join", ExpectedOutput::Strings),
     ("expand", ExpectedOutput::Numbers),
+    ("angle", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
 ];
 
@@ -173,6 +180,7 @@ impl Geom for RectGeom {
         let join_scale = ctx.scale_for("join");
         let pick_id_scale = ctx.scale_for("pick_id");
         let expand_scale = ctx.scale_for("expand");
+        let angle_scale = ctx.scale_for("angle");
 
         let channels = &self.state.channels;
         let (x_col, x_scale) = match channels.get("x") {
@@ -216,6 +224,7 @@ impl Geom for RectGeom {
         let join_ch = channels.get("join");
         let pick_id_ch = channels.get("pick_id");
         let expand_ch = channels.get("expand");
+        let angle_ch = channels.get("angle");
 
         for i in 0..n {
             // ── Resolve the four corner positions. ──
@@ -300,10 +309,23 @@ impl Geom for RectGeom {
 
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
 
+            // Rotation around the rect centre. Math CCW from the user
+            // → negate for kurbo (screen y-down). Identity when angle
+            // == 0 keeps the recording byte-identical for unrotated
+            // rects.
+            let angle = resolve_angle_channel(angle_ch, angle_scale, i);
+            let xform = if angle == 0.0 {
+                Affine::IDENTITY
+            } else {
+                let cx = 0.5 * (x0 + x1);
+                let cy = 0.5 * (y0 + y1);
+                Affine::rotate_about(-angle, Point::new(cx, cy))
+            };
+
             if let Some(fc) = fill_color {
                 scene.fill(
                     FillRule::NonZero,
-                    Affine::IDENTITY,
+                    xform,
                     &Brush::Solid(fc),
                     None,
                     &path,
@@ -320,14 +342,7 @@ impl Geom for RectGeom {
                         dash_offset_pt,
                         ctx.dpi,
                     );
-                    scene.stroke(
-                        &stroke_spec,
-                        Affine::IDENTITY,
-                        &Brush::Solid(sc),
-                        None,
-                        &path,
-                        pick,
-                    );
+                    scene.stroke(&stroke_spec, xform, &Brush::Solid(sc), None, &path, pick);
                 }
             }
         }

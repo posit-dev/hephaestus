@@ -100,6 +100,18 @@ pub(crate) fn resolve_number_channel_or(
     resolve_number_channel(channel, scale, i).unwrap_or(default)
 }
 
+/// Resolve a rotation angle channel. Radians, mathematical CCW (positive
+/// rotates +x toward +y in math coords; geoms flip internally when
+/// emitting to the y-down render space). Returns `0.0` (no rotation)
+/// when the channel is unset or the resolved value isn't numeric.
+pub(crate) fn resolve_angle_channel(
+    channel: Option<&Channel>,
+    scale: Option<&Scale>,
+    i: usize,
+) -> f64 {
+    resolve_number_channel(channel, scale, i).unwrap_or(0.0)
+}
+
 /// Resolve a linetype channel to an `Arc<[f64]>` of pt dash/gap lengths.
 /// Falls back to solid (empty array) when the channel is unset or the
 /// resolved value isn't a `Value::Linetype`.

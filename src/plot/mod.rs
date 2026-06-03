@@ -32,13 +32,13 @@ pub mod value;
 
 pub use composition::{PlotComposition, ValidationIssue};
 pub use diff::{diff_columns, diff_positional, KeyIndex};
-#[cfg(feature = "text")]
-pub use geom::TextGeom;
 pub use geom::{
     linetype, BuildableGeom, Channel, ChannelDecl, EllipseGeom, ExpectedOutput, Geom, GeomBuilder,
     GeomContext, Keys, LineGeom, PointGeom, PolygonGeom, Raw, RectGeom, ScaleResolver, SegmentGeom,
     WedgeGeom,
 };
+#[cfg(feature = "text")]
+pub use geom::{TextFitGeom, TextGeom};
 pub use plot::{GeomId, Plot};
 pub use scale::{
     AxisSide, InputRange, LegendSide, OutputRange, Scale, ScaleRegistry, ScaleType, ScaleTypeKind,

@@ -35,6 +35,11 @@
 //!   exits a circle of that radius centred on the first / last vertex.
 //!   Use for arrowhead attachment or for trimming edges to node
 //!   boundaries in graph layouts.
+//! - `"angle"` — rotation in **radians** around the mark's centroid
+//!   (mean of finite vertex positions in panel space), mathematical
+//!   CCW. Per-mark; default `0.0`. Applies after vertex resolution
+//!   (clip + corner rounding happen in the unrotated frame; the final
+//!   constructed line is rotated as a rigid body around its centroid).
 //!
 //! Per-mark channels resolve once per line: the geom takes the value at
 //! the *first row of the mark* (first row in source order whose key
@@ -59,9 +64,9 @@ use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
 
 use super::resolve::{
-    override_alpha, pt_to_px, resolve_cap_channel, resolve_color_channel, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
-    resolve_position,
+    override_alpha, pt_to_px, resolve_angle_channel, resolve_cap_channel, resolve_color_channel,
+    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, resolve_position,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -98,6 +103,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("corner_max_angle", ExpectedOutput::Numbers),
     ("clip_start_radius", ExpectedOutput::Numbers),
     ("clip_end_radius", ExpectedOutput::Numbers),
+    ("angle", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
 ];
 
@@ -357,6 +363,7 @@ impl Geom for LineGeom {
         let corner_max_angle_scale = ctx.scale_for("corner_max_angle");
         let clip_start_radius_scale = ctx.scale_for("clip_start_radius");
         let clip_end_radius_scale = ctx.scale_for("clip_end_radius");
+        let angle_scale = ctx.scale_for("angle");
         let x_offset_scale = ctx.scale_for("x_offset");
         let y_offset_scale = ctx.scale_for("y_offset");
         let x_band_scale = ctx.scale_for("x_band");
@@ -386,6 +393,7 @@ impl Geom for LineGeom {
         let corner_max_angle_ch = channels.get("corner_max_angle");
         let clip_start_radius_ch = channels.get("clip_start_radius");
         let clip_end_radius_ch = channels.get("clip_end_radius");
+        let angle_ch = channels.get("angle");
         let x_offset_ch = channels.get("x_offset");
         let y_offset_ch = channels.get("y_offset");
         let x_band_ch = channels.get("x_band");
@@ -449,6 +457,21 @@ impl Geom for LineGeom {
                 continue;
             }
 
+            // ── Rotation: per-mark angle around the centroid of finite
+            // vertex positions. Computed from `points` (after band +
+            // offset resolution, before clip / round) so clip and corner
+            // rounding still happen in the unrotated frame and the rigid
+            // line is then rotated as a whole around the centroid.
+            let angle = resolve_angle_channel(angle_ch, angle_scale, i0);
+            let xform = if angle == 0.0 {
+                Affine::IDENTITY
+            } else {
+                let n_pts = points.len() as f64;
+                let cx = points.iter().map(|p| p.x).sum::<f64>() / n_pts;
+                let cy = points.iter().map(|p| p.y).sum::<f64>() / n_pts;
+                Affine::rotate_about(-angle, Point::new(cx, cy))
+            };
+
             // ── End clip + corner rounding (per-mark, first row). ──
             let clip_start_pt =
                 resolve_number_channel_or(clip_start_radius_ch, clip_start_radius_scale, i0, 0.0);
@@ -491,7 +514,7 @@ impl Geom for LineGeom {
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
             scene.stroke(
                 &stroke_spec,
-                Affine::IDENTITY,
+                xform,
                 &Brush::Solid(stroke_color),
                 None,
                 &path,
@@ -549,6 +572,76 @@ mod tests {
     }
 
     // ── build() validation ──
+
+    #[test]
+    fn angle_pivots_around_mark_centroid() {
+        // Three vertices forming a triangle. Their centroid is (1, 1).
+        // After a math-CCW rotation of π by the geom, every vertex
+        // should map to its 180° reflection across the centroid.
+        use std::f64::consts::PI;
+        let mut g = LineGeom::builder()
+            .set("x", vec![0.0_f64, 0.02, 0.0])
+            .set("y", vec![0.0_f64, 0.0, 0.02])
+            .set("stroke", Color::new([1.0, 0.0, 0.0, 1.0]))
+            .set("angle", PI)
+            .build();
+        g.rebuild_diff_against_previous();
+        let panel = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let shapes = registry();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &ctx(panel, &shapes, &scales));
+        let xform = scene
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Stroke { transform, .. } => Some(*transform),
+                _ => None,
+            })
+            .expect("stroke op");
+        // Vertex positions in panel space: x in [0, 0.02] → [0, 2] px;
+        // y_panel = 100 - y_frac * 100 → y in [98, 100]. Centroid:
+        // ((0+2+0)/3, (100+100+98)/3) = (0.667, 99.333).
+        let pivot = crate::geometry::Point::new(2.0 / 3.0, (100.0 + 100.0 + 98.0) / 3.0);
+        let mapped = xform * pivot;
+        // The pivot of an Affine::rotate_about(theta, pivot) maps to itself.
+        assert!((mapped.x - pivot.x).abs() < 1e-6, "pivot.x = {}", mapped.x);
+        assert!((mapped.y - pivot.y).abs() < 1e-6, "pivot.y = {}", mapped.y);
+        // Vertex (0, 100) → after PI rotation about pivot → (2*px - 0,
+        // 2*py - 100) = (1.333, 98.667).
+        let v0 = xform * crate::geometry::Point::new(0.0, 100.0);
+        assert!((v0.x - 2.0 * pivot.x).abs() < 1e-6, "v0.x = {}", v0.x);
+        assert!(
+            (v0.y - (2.0 * pivot.y - 100.0)).abs() < 1e-6,
+            "v0.y = {}",
+            v0.y
+        );
+    }
+
+    #[test]
+    fn angle_zero_produces_identity_xform() {
+        let mut g = LineGeom::builder()
+            .set("x", vec![0.0_f64, 0.5, 1.0])
+            .set("y", vec![0.0_f64, 0.5, 0.0])
+            .set("stroke", Color::new([1.0, 0.0, 0.0, 1.0]))
+            .set("angle", 0.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let panel = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let shapes = registry();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &ctx(panel, &shapes, &scales));
+        let xform = scene
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Stroke { transform, .. } => Some(*transform),
+                _ => None,
+            })
+            .expect("stroke op");
+        assert_eq!(xform.as_coeffs(), Affine::IDENTITY.as_coeffs());
+    }
 
     #[test]
     fn builder_no_keys_synthesises_single_mark() {

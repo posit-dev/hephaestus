@@ -66,9 +66,14 @@
 //! Default `(theta = 0, theta2 = TAU)` makes a wedge with no angle
 //! channels set degenerate into a full circle of `radius`.
 //!
-//! Polar rotation as a whole (the cross-geom rotation concept flagged
-//! in the geom plan) is not in v1.5. To rotate a slice, the user
-//! offsets `theta` and `theta2` by the same amount.
+//! - `"angle"` — rotation in **radians** around the wedge centre
+//!   `(x, y)`, mathematical CCW. Default `0.0`. **Does not replace**
+//!   `theta` / `theta2` — those describe the wedge's own sweep (slice
+//!   start/end in its local polar frame). `angle` rotates the entire
+//!   wedge (including the sweep) around its centre afterwards. The
+//!   equivalent of "rotate this slice 30° CCW" is `angle = π/6`; the
+//!   equivalent of "redirect this slice to start at 30°" is changing
+//!   `theta`. Both compose if you want.
 
 use std::f64::consts::TAU;
 
@@ -83,8 +88,8 @@ use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
 
 use super::resolve::{
-    band_width_at, override_alpha, pt_to_px, resolve_cap_channel, resolve_color_channel,
-    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
+    band_width_at, override_alpha, pt_to_px, resolve_angle_channel, resolve_cap_channel,
+    resolve_color_channel, resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
     resolve_number_channel_or, resolve_pick_id, resolve_position, smallest_nonzero,
 };
 use super::state::{
@@ -136,6 +141,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("expand", ExpectedOutput::Numbers),
     ("corner_radius", ExpectedOutput::Numbers),
     ("corner_max_angle", ExpectedOutput::Numbers),
+    ("angle", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
 ];
 
@@ -220,6 +226,7 @@ impl Geom for WedgeGeom {
         let expand_scale = ctx.scale_for("expand");
         let corner_radius_scale = ctx.scale_for("corner_radius");
         let corner_max_angle_scale = ctx.scale_for("corner_max_angle");
+        let angle_scale = ctx.scale_for("angle");
 
         let channels = &self.state.channels;
         let (x_col, x_scale) = match channels.get("x") {
@@ -256,6 +263,7 @@ impl Geom for WedgeGeom {
         let expand_ch = channels.get("expand");
         let corner_radius_ch = channels.get("corner_radius");
         let corner_max_angle_ch = channels.get("corner_max_angle");
+        let angle_ch = channels.get("angle");
 
         for i in 0..n {
             let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
@@ -400,10 +408,22 @@ impl Geom for WedgeGeom {
 
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
 
+            // Rotation around the wedge centre. Math CCW from the user
+            // → negate for kurbo (screen y-down). This is independent
+            // of `theta` / `theta2` (the wedge's own sweep); the wedge
+            // is constructed with its local theta and then rotated as
+            // a rigid body.
+            let angle = resolve_angle_channel(angle_ch, angle_scale, i);
+            let xform = if angle == 0.0 {
+                Affine::IDENTITY
+            } else {
+                Affine::rotate_about(-angle, centre)
+            };
+
             if let Some(fc) = fill_color {
                 scene.fill(
                     FillRule::NonZero,
-                    Affine::IDENTITY,
+                    xform,
                     &Brush::Solid(fc),
                     None,
                     &path,
@@ -432,14 +452,7 @@ impl Geom for WedgeGeom {
                         dash_offset_pt,
                         ctx.dpi,
                     );
-                    scene.stroke(
-                        &stroke_spec,
-                        Affine::IDENTITY,
-                        &Brush::Solid(sc),
-                        None,
-                        &path,
-                        pick,
-                    );
+                    scene.stroke(&stroke_spec, xform, &Brush::Solid(sc), None, &path, pick);
                 }
             }
         }

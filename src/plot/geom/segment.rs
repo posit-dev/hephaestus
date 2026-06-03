@@ -16,6 +16,9 @@
 //! - `"stroke"`, `"stroke_opacity"`, `"linewidth"`, `"linetype"`,
 //!   `"dash_offset"`, `"cap"`, `"join"` — same styling set as
 //!   LineGeom / RectGeom.
+//! - `"angle"` — rotation in **radians** around the segment midpoint,
+//!   mathematical CCW (positive rotates the segment counter-clockwise
+//!   in the rendered image). Default `0.0` (no rotation).
 
 use crate::brush::Brush;
 use crate::geometry::{Affine, Point};
@@ -24,9 +27,9 @@ use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
 
 use super::resolve::{
-    override_alpha, pt_to_px, resolve_cap_channel, resolve_color_channel, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
-    resolve_position,
+    override_alpha, pt_to_px, resolve_angle_channel, resolve_cap_channel, resolve_color_channel,
+    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, resolve_position,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -62,6 +65,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("join", ExpectedOutput::Strings),
     ("clip_start_radius", ExpectedOutput::Numbers),
     ("clip_end_radius", ExpectedOutput::Numbers),
+    ("angle", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
 ];
 
@@ -147,6 +151,7 @@ impl Geom for SegmentGeom {
         let pick_id_scale = ctx.scale_for("pick_id");
         let clip_start_radius_scale = ctx.scale_for("clip_start_radius");
         let clip_end_radius_scale = ctx.scale_for("clip_end_radius");
+        let angle_scale = ctx.scale_for("angle");
 
         let channels = &self.state.channels;
         let (x_col, x_scale) = match channels.get("x") {
@@ -188,6 +193,7 @@ impl Geom for SegmentGeom {
         let pick_id_ch = channels.get("pick_id");
         let clip_start_radius_ch = channels.get("clip_start_radius");
         let clip_end_radius_ch = channels.get("clip_end_radius");
+        let angle_ch = channels.get("angle");
 
         for i in 0..n {
             let stroke_color = override_alpha(
@@ -283,9 +289,21 @@ impl Geom for SegmentGeom {
                 ctx.dpi,
             );
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
+
+            // Rotation around the segment midpoint. Math CCW from the
+            // user → negate for kurbo (screen y-down).
+            let angle = resolve_angle_channel(angle_ch, angle_scale, i);
+            let xform = if angle == 0.0 {
+                Affine::IDENTITY
+            } else {
+                let mx = 0.5 * (px + px2);
+                let my = 0.5 * (py + py2);
+                Affine::rotate_about(-angle, Point::new(mx, my))
+            };
+
             scene.stroke(
                 &stroke_spec,
-                Affine::IDENTITY,
+                xform,
                 &Brush::Solid(stroke_color),
                 None,
                 &path,

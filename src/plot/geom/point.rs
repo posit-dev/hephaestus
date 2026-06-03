@@ -37,6 +37,12 @@
 //!   5pt `"size"` default is unchanged, so callers wanting pure band
 //!   sizing also pass `size = 0`.
 //! - `"shape"` — registered shape name (optional; defaults to "circle").
+//! - `"angle"` — rotation in **radians** around the placement point,
+//!   mathematical CCW (positive rotates the glyph counter-clockwise in
+//!   the rendered image). Default `0.0` (no rotation). Applies after
+//!   scale + pivot resolution and before the pt-space offsets — the
+//!   offsets translate the rotated glyph by absolute pt, they aren't
+//!   rotated themselves.
 //!
 //! Channels are stored in a `HashMap<String, Channel>` keyed by channel
 //! name. There is a single binding method, [`PointGeomBuilder::set`] on
@@ -61,9 +67,9 @@ use crate::shape::{Shape, ShapeStyle};
 use crate::stroke::Stroke;
 
 use super::resolve::{
-    band_width_at, override_alpha, pt_to_px, resolve_color_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position, resolve_str_channel_or,
-    smallest_nonzero,
+    band_width_at, override_alpha, pt_to_px, resolve_angle_channel, resolve_color_channel,
+    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
+    resolve_str_channel_or, smallest_nonzero,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -98,6 +104,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("size", ExpectedOutput::Numbers),
     ("size_band", ExpectedOutput::Numbers),
     ("shape", ExpectedOutput::Strings),
+    ("angle", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
 ];
 
@@ -185,6 +192,7 @@ impl Geom for PointGeom {
         let y_band_scale = ctx.scale_for("y_band");
         let size_scale = ctx.scale_for("size");
         let size_band_scale = ctx.scale_for("size_band");
+        let angle_scale = ctx.scale_for("angle");
         let pick_id_scale = ctx.scale_for("pick_id");
 
         // x/y are always data columns (build_from guaranteed). RawData
@@ -213,6 +221,7 @@ impl Geom for PointGeom {
         let size_ch = channels.get("size");
         let size_band_ch = channels.get("size_band");
         let shape_ch = channels.get("shape");
+        let angle_ch = channels.get("angle");
         let pick_id_ch = channels.get("pick_id");
 
         for i in 0..n {
@@ -266,7 +275,18 @@ impl Geom for PointGeom {
                 None => continue,
             };
 
-            let xform = Affine::translate((px, py)) * Affine::scale(size_px);
+            // Rotation: math CCW from the user (positive = visible
+            // counter-clockwise). Kurbo's `Affine::rotate` uses
+            // mathematical convention where positive theta rotates +x
+            // toward +y — in screen space (y-down) this looks clockwise.
+            // Negate to get user-visible CCW. Rotation is around the
+            // glyph's own centre, which is the path origin pre-translate.
+            let angle = resolve_angle_channel(angle_ch, angle_scale, i);
+            let xform = if angle == 0.0 {
+                Affine::translate((px, py)) * Affine::scale(size_px)
+            } else {
+                Affine::translate((px, py)) * Affine::rotate(-angle) * Affine::scale(size_px)
+            };
 
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
             for sub in shape.paths() {
@@ -1314,6 +1334,84 @@ mod tests {
         g.draw(&mut scene, &ctx(panel, &shapes, &resolver));
         let s = first_fill_scale(&scene).expect("fill");
         assert!((s - 20.5).abs() < 1e-6, "diameter = {s}");
+    }
+
+    #[test]
+    fn angle_zero_produces_unrotated_recording() {
+        // Regression guard: angle=0 must produce the same Affine as a
+        // build with no `angle` channel at all.
+        let g_no_angle = PointGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("fill", red_solid())
+            .set("size", 10.0_f64)
+            .build();
+        let g_zero = PointGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("fill", red_solid())
+            .set("size", 10.0_f64)
+            .set("angle", 0.0_f64)
+            .build();
+        let panel = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let shapes = registry();
+        let resolver = no_scales();
+        let mut s1 = RecordingScene::default();
+        let mut s2 = RecordingScene::default();
+        g_no_angle.draw(&mut s1, &ctx(panel, &shapes, &resolver));
+        g_zero.draw(&mut s2, &ctx(panel, &shapes, &resolver));
+        let t1 = first_fill_translation(&s1).unwrap();
+        let t2 = first_fill_translation(&s2).unwrap();
+        assert!((t1.0 - t2.0).abs() < 1e-9 && (t1.1 - t2.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn angle_rotates_glyph_about_centre_math_ccw() {
+        // triangle-up apex is at path-local (0, -0.92). After a math-CCW
+        // rotation of π/2 about the placement point, the apex should
+        // land to the LEFT of the placement point (because math CCW in
+        // a y-up frame moves +y → -x; on the screen y-down frame, the
+        // geom internally negates angle so the visible motion is +up →
+        // -x = left).
+        use std::f64::consts::FRAC_PI_2;
+        let g = PointGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("fill", red_solid())
+            .set("size", 10.0_f64)
+            .set("shape", "triangle-up")
+            .set("angle", FRAC_PI_2)
+            .build();
+        let panel = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let shapes = registry();
+        let resolver = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &ctx(panel, &shapes, &resolver));
+        let xform = scene.ops.iter().find_map(|op| match op {
+            Op::Fill { transform, .. } => Some(*transform),
+            _ => None,
+        });
+        let xform = xform.expect("fill op");
+        // Apex world position. size_px = pt_to_px(10) = 10*96/72 ≈ 13.33.
+        // Apex path (0, -0.92). Math CCW by π/2 should put the apex at
+        // (x_centre - 0.92*size_px, y_centre).
+        let apex_path = crate::geometry::Point::new(0.0, -0.92);
+        let apex_world = xform * apex_path;
+        let size_px = 10.0 * 96.0 / 72.0;
+        let expected_x = 50.0 - 0.92 * size_px;
+        let expected_y = 50.0;
+        assert!(
+            (apex_world.x - expected_x).abs() < 0.5,
+            "apex.x = {}, expected {}",
+            apex_world.x,
+            expected_x
+        );
+        assert!(
+            (apex_world.y - expected_y).abs() < 0.5,
+            "apex.y = {}, expected {}",
+            apex_world.y,
+            expected_y
+        );
     }
 
     #[test]

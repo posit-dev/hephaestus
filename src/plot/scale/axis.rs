@@ -29,7 +29,7 @@ use crate::plot::scale::Scale;
 use crate::plot::value::Value;
 use crate::scene::SceneBuilder;
 use crate::stroke::Stroke;
-use crate::text::{draw_text, TextRun, TextStyle};
+use crate::text::{draw_text, Alignment, TextRun, TextStyle};
 use kurbo::Shape;
 
 use super::chrome::AxisSide;
@@ -86,7 +86,7 @@ impl AxisMeasure {
             let label = scale.format(v);
             let run = TextRun::new(&label, &style);
             // Lay out unconstrained to get the natural single-line width.
-            let h = run.set_max_width(f32::INFINITY) as f64;
+            let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
             // Width: ask for the min width (= longest unbreakable
             // cluster), then for a single-line label that's effectively
             // the label's full natural width.
@@ -213,7 +213,7 @@ impl Scale {
             let run = TextRun::new(&label, &style);
             // Lay out unconstrained to get the single-line glyph runs at
             // their natural width.
-            let label_h = run.set_max_width(f32::INFINITY) as f64;
+            let label_h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
             let label_w = match run.width_hint(dpi) {
                 WidthHint::Min(w) => w,
                 WidthHint::NeedsHeight { seed } => seed,
@@ -230,7 +230,15 @@ impl Scale {
                     // gap_px below the tick.
                     let label_x = x - label_w / 2.0;
                     let label_y = slot_rect.y0 + tick_px + gap_px;
-                    draw_text(scene, &run, label_x, label_y, &brush, PickId::Skip);
+                    draw_text(
+                        scene,
+                        &run,
+                        label_x,
+                        label_y,
+                        &brush,
+                        Affine::IDENTITY,
+                        PickId::Skip,
+                    );
                 }
                 AxisSide::Top => {
                     let x = panel_rect.x0 + frac * panel_w;
@@ -241,7 +249,15 @@ impl Scale {
                     // gap_px above the tick top (which is at y1 - tick).
                     let label_x = x - label_w / 2.0;
                     let label_y = slot_rect.y1 - tick_px - gap_px - label_h;
-                    draw_text(scene, &run, label_x, label_y, &brush, PickId::Skip);
+                    draw_text(
+                        scene,
+                        &run,
+                        label_x,
+                        label_y,
+                        &brush,
+                        Affine::IDENTITY,
+                        PickId::Skip,
+                    );
                 }
                 AxisSide::Left => {
                     // Y axes flip: frac=0 is at the bottom of the panel.
@@ -253,7 +269,15 @@ impl Scale {
                     // vertically centred on the tick.
                     let label_x = slot_rect.x1 - tick_px - gap_px - label_w;
                     let label_y = y - label_h / 2.0;
-                    draw_text(scene, &run, label_x, label_y, &brush, PickId::Skip);
+                    draw_text(
+                        scene,
+                        &run,
+                        label_x,
+                        label_y,
+                        &brush,
+                        Affine::IDENTITY,
+                        PickId::Skip,
+                    );
                 }
                 AxisSide::Right => {
                     let y = panel_rect.y1 - frac * panel_h;
@@ -262,7 +286,15 @@ impl Scale {
                     stroke_line(scene, &stroke, &brush, p0, p1);
                     let label_x = slot_rect.x0 + tick_px + gap_px;
                     let label_y = y - label_h / 2.0;
-                    draw_text(scene, &run, label_x, label_y, &brush, PickId::Skip);
+                    draw_text(
+                        scene,
+                        &run,
+                        label_x,
+                        label_y,
+                        &brush,
+                        Affine::IDENTITY,
+                        PickId::Skip,
+                    );
                 }
             }
         }

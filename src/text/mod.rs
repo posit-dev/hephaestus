@@ -19,9 +19,17 @@ use std::cell::RefCell;
 use std::sync::{Mutex, OnceLock};
 
 use parley::{
-    Alignment, AlignmentOptions, FontContext, FontFamily, FontFamilyName, FontStyle, FontWeight,
+    AlignmentOptions, FontContext, FontFamily, FontFamilyName, FontStyle, FontWeight,
     GenericFamily, LayoutContext, PositionedLayoutItem, StyleProperty,
 };
+
+/// Line justification within the text box. Re-exported from parley so
+/// downstream geoms can construct one without depending on parley directly.
+///
+/// Geom-facing string aliases (used by the `justify_x` channel parser):
+/// `"start"` → [`Alignment::Start`], `"center"` → [`Alignment::Center`],
+/// `"end"` → [`Alignment::End`], `"justify"` → [`Alignment::Justify`].
+pub use parley::Alignment;
 
 use crate::brush::Brush;
 use crate::geometry::{Affine, Rect};
@@ -155,13 +163,19 @@ impl TextRun {
         }
     }
 
-    /// Re-break lines at `max_width` pixels. Equivalent to
-    /// `Measure::height_at(max_width, _)` but exposed for callers that want
-    /// to draw without first running through a composition solve.
-    pub fn set_max_width(&self, max_width: f32) -> f32 {
+    /// Re-break lines at `max_width` pixels, applying `alignment` to the
+    /// resulting layout. Equivalent to `Measure::height_at(max_width, _)`
+    /// but exposed for callers that want to draw without first running
+    /// through a composition solve.
+    ///
+    /// `alignment` controls justification within the wrap box: `Start`
+    /// is the historical default (every line flush-left within the wrap
+    /// width). `Middle` / `End` / `Justified` apply matching parley
+    /// alignments.
+    pub fn set_max_width(&self, max_width: f32, alignment: Alignment) -> f32 {
         let mut layout = self.layout.borrow_mut();
         layout.break_all_lines(Some(max_width));
-        layout.align(Alignment::Start, AlignmentOptions::default());
+        layout.align(alignment, AlignmentOptions::default());
         *self.last_break_width.borrow_mut() = Some(max_width);
         layout.height()
     }
@@ -232,7 +246,10 @@ impl Measure for TextRun {
     }
 
     fn height_at(&self, width: f64, _dpi: f64) -> f64 {
-        self.set_max_width(width as f32) as f64
+        // Measure is alignment-agnostic — solver only cares about layout
+        // height. Alignment is reapplied at draw time by callers that
+        // care.
+        self.set_max_width(width as f32, Alignment::Start) as f64
     }
 }
 
@@ -246,6 +263,11 @@ impl Measure for TextRun {
 /// layout is laid out unconstrained (one line per paragraph break in the
 /// source text).
 ///
+/// `transform` is applied to the glyph run as a whole (used by rotated
+/// labels — pass `Affine::IDENTITY` for unrotated text). The transform
+/// runs after glyph placement, so it rotates / scales the entire laid-out
+/// box around its own pivot rather than per-glyph.
+///
 /// Pass [`PickId::Skip`] for non-interactive chrome (titles, axis
 /// labels); pass `PickId::Id(ticket)` for picking-enabled labels (e.g.
 /// `TextGeom` rows).
@@ -255,6 +277,7 @@ pub fn draw_text<S: SceneBuilder + ?Sized>(
     x: f64,
     y: f64,
     brush: &Brush,
+    transform: Affine,
     pick_id: PickId,
 ) {
     let layout = run.layout.borrow();
@@ -279,7 +302,7 @@ pub fn draw_text<S: SceneBuilder + ?Sized>(
             let glyph_run = GlyphRun {
                 font: &font,
                 font_size: prun.font_size(),
-                transform: Affine::IDENTITY,
+                transform,
                 glyph_transform: None,
                 brush,
                 brush_alpha: 1.0,
@@ -301,8 +324,16 @@ pub fn draw_text_in_rect<S: SceneBuilder + ?Sized>(
     brush: &Brush,
     pick_id: PickId,
 ) {
-    run.set_max_width((rect.x1 - rect.x0) as f32);
-    draw_text(scene, run, rect.x0, rect.y0, brush, pick_id);
+    run.set_max_width((rect.x1 - rect.x0) as f32, Alignment::Start);
+    draw_text(
+        scene,
+        run,
+        rect.x0,
+        rect.y0,
+        brush,
+        Affine::IDENTITY,
+        pick_id,
+    );
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
