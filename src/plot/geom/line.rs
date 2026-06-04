@@ -76,11 +76,12 @@ use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
 
 use super::linetype;
+use super::marks::{build_marks_from_column, MarkSlot};
 use super::resolve::{
-    build_stroke_for_pattern, draw_linetype_with_markers, override_alpha, pt_to_px,
-    resolve_angle_channel, resolve_cap_channel, resolve_color_channel, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
-    resolve_position,
+    build_stroke_for_pattern, draw_linetype_with_markers, emit_endpoint_marker, endpoint_outward,
+    override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or, resolve_cap_channel,
+    resolve_color_channel, resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, resolve_position, resolve_str_channel_or,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -120,6 +121,14 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("clip_end_radius", ExpectedOutput::Numbers),
     ("angle", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
+    ("start_marker", ExpectedOutput::Strings),
+    ("end_marker", ExpectedOutput::Strings),
+    ("start_marker_size", ExpectedOutput::Numbers),
+    ("end_marker_size", ExpectedOutput::Numbers),
+    ("start_marker_fill", ExpectedOutput::Colors),
+    ("end_marker_fill", ExpectedOutput::Colors),
+    ("start_marker_invert", ExpectedOutput::Any),
+    ("end_marker_invert", ExpectedOutput::Any),
 ];
 
 // ─── LineGeom ────────────────────────────────────────────────────────────────
@@ -134,63 +143,13 @@ pub struct LineGeom {
     pub(crate) marks: Vec<MarkSlot>,
 }
 
-/// One mark in the geom — a logical line composed of N rows.
-#[derive(Clone, Debug)]
-pub(crate) struct MarkSlot {
-    /// Source-order row index of the first appearance of this mark's key.
-    /// Used to resolve per-mark channels.
-    pub(crate) first_row: usize,
-    /// Row indices that make up this mark's polyline, in source order.
-    pub(crate) rows: Vec<usize>,
-}
-
 crate::impl_geom_inherents_grouped!(LineGeom);
 
 impl LineGeom {
     /// Build the mark layout from the current keys column.
     pub(crate) fn build_marks(&self) -> Vec<MarkSlot> {
-        match &self.state.keys {
-            // No-keys default (after `build_from` rewriting) should never
-            // reach this branch — the rewriter replaces Positional with an
-            // Explicit single-value column. But if a user-driven Positional
-            // somehow slips through, fall back to "every row is its own
-            // mark" — matches PointGeom semantics for the diff path.
-            Keys::Positional(n) => (0..*n)
-                .map(|i| MarkSlot {
-                    first_row: i,
-                    rows: vec![i],
-                })
-                .collect(),
-            Keys::Explicit(col) => build_marks_from_column(col),
-        }
+        super::marks::build_marks(&self.state.keys)
     }
-}
-
-/// Walk `col` and produce one [`MarkSlot`] per unique key value, in
-/// first-appearance order. Each slot's `rows` are in source order.
-fn build_marks_from_column(col: &DataColumn) -> Vec<MarkSlot> {
-    let n = col.len();
-    let mut order: Vec<MarkSlot> = Vec::new();
-    // For small mark counts (typical: K << N) a linear scan over `order`
-    // is cheaper than maintaining a HashMap.
-    for i in 0..n {
-        let key_i = col.get(i);
-        let mut found = false;
-        for slot in order.iter_mut() {
-            if col.get(slot.first_row).key_eq(&key_i) {
-                slot.rows.push(i);
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            order.push(MarkSlot {
-                first_row: i,
-                rows: vec![i],
-            });
-        }
-    }
-    order
 }
 
 /// Build a column holding one entry per mark — the key value of each
@@ -403,6 +362,22 @@ impl Geom for LineGeom {
         let y_offset_ch = channels.get("y_offset");
         let x_band_ch = channels.get("x_band");
         let y_band_ch = channels.get("y_band");
+        let start_marker_ch = channels.get("start_marker");
+        let end_marker_ch = channels.get("end_marker");
+        let start_marker_size_ch = channels.get("start_marker_size");
+        let end_marker_size_ch = channels.get("end_marker_size");
+        let start_marker_fill_ch = channels.get("start_marker_fill");
+        let end_marker_fill_ch = channels.get("end_marker_fill");
+        let start_marker_invert_ch = channels.get("start_marker_invert");
+        let end_marker_invert_ch = channels.get("end_marker_invert");
+        let start_marker_size_scale = ctx.scale_for("start_marker_size");
+        let end_marker_size_scale = ctx.scale_for("end_marker_size");
+        let start_marker_fill_scale = ctx.scale_for("start_marker_fill");
+        let end_marker_fill_scale = ctx.scale_for("end_marker_fill");
+        let start_marker_invert_scale = ctx.scale_for("start_marker_invert");
+        let end_marker_invert_scale = ctx.scale_for("end_marker_invert");
+        let start_marker_scale = ctx.scale_for("start_marker");
+        let end_marker_scale = ctx.scale_for("end_marker");
 
         for mark in marks.iter() {
             // ── Per-mark channel resolution (first row of mark). ──
@@ -489,7 +464,7 @@ impl Geom for LineGeom {
                 });
                 clip_polyline(&points, start, end)
             } else {
-                points
+                points.clone()
             };
             if clipped.len() < 2 {
                 continue;
@@ -513,6 +488,48 @@ impl Geom for LineGeom {
                 polyline(&clipped, PolylineOptions::default())
             };
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
+
+            // Resolve endpoint-marker channels up front so we can emit
+            // the start marker *before* the stroke (so a self-
+            // intersecting polyline's later segments draw over the start
+            // marker — see Phase C.5's path-order convention).
+            let start_name = resolve_str_channel_or(start_marker_ch, start_marker_scale, i0, "");
+            let end_name = resolve_str_channel_or(end_marker_ch, end_marker_scale, i0, "");
+            let default_marker_size_pt = 3.0 * linewidth_pt;
+            let marker_outline_px = linewidth_px.max(pt_to_px(0.5, ctx.dpi));
+
+            if !start_name.is_empty() {
+                let size_pt = resolve_number_channel_or(
+                    start_marker_size_ch,
+                    start_marker_size_scale,
+                    i0,
+                    default_marker_size_pt,
+                );
+                let size_px = pt_to_px(size_pt, ctx.dpi);
+                let fill = resolve_color_channel(start_marker_fill_ch, start_marker_fill_scale, i0)
+                    .unwrap_or(marker_fill);
+                let invert = resolve_bool_channel_or(
+                    start_marker_invert_ch,
+                    start_marker_invert_scale,
+                    i0,
+                    false,
+                );
+                let outward = endpoint_outward(&clipped, &points, true, clip_start_pt > 0.0);
+                emit_endpoint_marker(
+                    scene,
+                    clipped[0],
+                    outward,
+                    invert,
+                    &start_name,
+                    size_px,
+                    fill,
+                    stroke_color,
+                    marker_outline_px,
+                    xform,
+                    ctx.shapes,
+                    pick,
+                );
+            }
 
             if !has_markers {
                 // Fast path: pure-dash linetype (or solid). One stroke
@@ -561,6 +578,43 @@ impl Geom for LineGeom {
                     ctx.dpi,
                     pick,
                     /* distribute */ false,
+                );
+            }
+
+            // End marker (Phase C.5). Emitted *after* the stroke so it
+            // sits on top of the line termination — matching the
+            // path-order convention (start cap → segments → end cap).
+            if !end_name.is_empty() {
+                let size_pt = resolve_number_channel_or(
+                    end_marker_size_ch,
+                    end_marker_size_scale,
+                    i0,
+                    default_marker_size_pt,
+                );
+                let size_px = pt_to_px(size_pt, ctx.dpi);
+                let fill = resolve_color_channel(end_marker_fill_ch, end_marker_fill_scale, i0)
+                    .unwrap_or(marker_fill);
+                let invert = resolve_bool_channel_or(
+                    end_marker_invert_ch,
+                    end_marker_invert_scale,
+                    i0,
+                    false,
+                );
+                let outward = endpoint_outward(&clipped, &points, false, clip_end_pt > 0.0);
+                let placement = *clipped.last().unwrap();
+                emit_endpoint_marker(
+                    scene,
+                    placement,
+                    outward,
+                    invert,
+                    &end_name,
+                    size_px,
+                    fill,
+                    stroke_color,
+                    marker_outline_px,
+                    xform,
+                    ctx.shapes,
+                    pick,
                 );
             }
         }
@@ -1546,6 +1600,307 @@ mod tests {
             }
             other => panic!("expected MoveTo, got {other:?}"),
         }
+    }
+
+    // ── Endpoint markers (Phase C.5) ──
+
+    fn horizontal_line_with(
+        extra: impl FnOnce(&mut crate::plot::geom::GeomBuilder<LineGeom>),
+    ) -> LineGeom {
+        let mut b = LineGeom::builder();
+        b.set("x", Raw(vec![0.0_f64, 1.0]))
+            .set("y", Raw(vec![0.5_f64, 0.5]))
+            .set("stroke", red_solid())
+            .set("linewidth", 2.0_f64);
+        extra(&mut b);
+        let mut g = b.build();
+        g.rebuild_diff_against_previous();
+        g
+    }
+
+    fn draw_into(g: &LineGeom) -> RecordingScene {
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        scene
+    }
+
+    fn fills_before_stroke(scene: &RecordingScene) -> Vec<Affine> {
+        let mut out = Vec::new();
+        for op in &scene.ops {
+            match op {
+                Op::Fill { transform, .. } => out.push(*transform),
+                Op::Stroke { .. } => break,
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn fills_after_stroke(scene: &RecordingScene) -> Vec<Affine> {
+        let mut seen_stroke = false;
+        let mut out = Vec::new();
+        for op in &scene.ops {
+            match op {
+                Op::Stroke { .. } => seen_stroke = true,
+                Op::Fill { transform, .. } if seen_stroke => out.push(*transform),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn line_endpoint_marker_unset_emits_no_extra_ops() {
+        let g = horizontal_line_with(|_| {});
+        let scene = draw_into(&g);
+        let fills = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count();
+        assert_eq!(fills, 0);
+    }
+
+    #[test]
+    fn line_end_marker_anchor_lands_at_last_vertex() {
+        let g = horizontal_line_with(|b| {
+            b.set("end_marker", "arrow-closed")
+                .set("end_marker_size", 10.0_f64);
+        });
+        let scene = draw_into(&g);
+        let xforms = fills_after_stroke(&scene);
+        assert!(!xforms.is_empty());
+        let anchor = xforms[0] * Point::new(-1.0, 0.0);
+        assert!((anchor.x - 100.0).abs() < 1e-6);
+        assert!((anchor.y - 50.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn line_start_marker_emitted_before_stroke() {
+        // For self-intersecting polylines the start marker must sit
+        // under later segments — verify it appears before the stroke
+        // op in the recording.
+        let g = horizontal_line_with(|b| {
+            b.set("start_marker", "arrow-closed")
+                .set("start_marker_size", 10.0_f64);
+        });
+        let scene = draw_into(&g);
+        let stroke_idx = scene
+            .ops
+            .iter()
+            .position(|op| matches!(op, Op::Stroke { .. }))
+            .expect("stroke op");
+        let fill_idx = scene
+            .ops
+            .iter()
+            .position(|op| matches!(op, Op::Fill { .. }))
+            .expect("start-marker fill");
+        assert!(
+            fill_idx < stroke_idx,
+            "start marker fill (idx {fill_idx}) must precede stroke (idx {stroke_idx})"
+        );
+        // Anchor lands at (0, 50).
+        let xf = fills_before_stroke(&scene)[0];
+        let anchor = xf * Point::new(-1.0, 0.0);
+        assert!((anchor.x - 0.0).abs() < 1e-6);
+        assert!((anchor.y - 50.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn line_marker_size_default_is_three_times_linewidth() {
+        // linewidth = 2pt → marker default = 6pt = 8px at 96 dpi.
+        let g = horizontal_line_with(|b| {
+            b.set("end_marker", "arrow-closed");
+        });
+        let scene = draw_into(&g);
+        let xf = fills_after_stroke(&scene)[0];
+        let coeffs = xf.as_coeffs();
+        let det = coeffs[0] * coeffs[3] - coeffs[1] * coeffs[2];
+        let expected = 6.0 * 96.0 / 72.0;
+        assert!((det.abs() - expected * expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn line_marker_direction_is_chord_toward_original_endpoint() {
+        // L-shaped polyline in Raw fractions:
+        //   Raw (0, 1) → panel (0, 0)   first
+        //   Raw (1, 1) → panel (100, 0) middle
+        //   Raw (1, 0) → panel (100, 100) last
+        // (Raw y is flipped: panel.y = panel.y1 - y_frac * panel_h, so
+        // Raw y=1 → panel y=0; Raw y=0 → panel y=100.)
+        //
+        // Choose clip_end_radius such that the trim eats the entire
+        // last segment (length 100 px) and bites into the first edge.
+        // clip_end_radius_pt = 100 → 133.33 px. Walking back from
+        // (100, 100), the segment to (100, 0) (length 100) is fully
+        // consumed; we continue into the first edge from (100, 0)
+        // toward (0, 0). The exit point on a circle of radius
+        // 133.33 centred on (100, 100) lies at (100 - t, 0) where
+        // sqrt(t² + 100²) = 133.33 → t ≈ 88.19. So clipped last ≈
+        // (11.81, 0) and the chord toward original last (100, 100)
+        // has direction ≈ (88.19, 100), length 133.33, unit
+        // (0.6614, 0.7500).
+        let g = horizontal_line_with(|b| {
+            b.set("x", Raw(vec![0.0_f64, 1.0, 1.0]))
+                .set("y", Raw(vec![1.0_f64, 1.0, 0.0]))
+                .set("end_marker", "arrow-closed")
+                .set("end_marker_size", 10.0_f64)
+                .set("clip_end_radius", 100.0_f64);
+        });
+        let scene = draw_into(&g);
+        let xforms = fills_after_stroke(&scene);
+        assert!(!xforms.is_empty(), "end marker emitted");
+        let xf = xforms[0];
+        let anchor = xf * Point::new(-1.0, 0.0);
+        let tip = xf * Point::new(0.0, 0.0);
+        let outward_x = tip.x - anchor.x;
+        let outward_y = tip.y - anchor.y;
+        let size_px = 10.0 * 96.0 / 72.0;
+
+        // Expected unit chord toward the original last vertex in
+        // panel coords (100, 100). Re-derive from the *actual*
+        // recorded anchor so the test isn't fragile to primitive
+        // precision in the trim calculation.
+        let original_last = Point::new(100.0, 100.0);
+        let clipped_last = anchor;
+        let dx = original_last.x - clipped_last.x;
+        let dy = original_last.y - clipped_last.y;
+        let len = (dx * dx + dy * dy).sqrt();
+        let exp_ox = dx / len * size_px;
+        let exp_oy = dy / len * size_px;
+        assert!(
+            (outward_x - exp_ox).abs() < 1e-3,
+            "outward.x mismatch: got {outward_x}, expected {exp_ox}"
+        );
+        assert!(
+            (outward_y - exp_oy).abs() < 1e-3,
+            "outward.y mismatch: got {outward_y}, expected {exp_oy}"
+        );
+        // Sanity: chord direction has a non-trivial y component. If
+        // we'd used the local tangent along the first edge instead,
+        // outward would be (±1, 0) and outward_y would be ~0.
+        assert!(
+            outward_y.abs() > 0.1 * size_px,
+            "chord must carry a y component (was: {outward_y})"
+        );
+    }
+
+    #[test]
+    fn line_marker_respects_clip_start_radius() {
+        // Horizontal line clipped at start. The chord from clipped
+        // start to original first vertex points back along -x, so
+        // the start marker rotates the same way as the no-clip case
+        // — but the anchor lands at the clipped start.
+        let g = horizontal_line_with(|b| {
+            b.set("start_marker", "arrow-closed")
+                .set("start_marker_size", 10.0_f64)
+                .set("clip_start_radius", 15.0_f64);
+        });
+        let scene = draw_into(&g);
+        let xf = fills_before_stroke(&scene)[0];
+        let anchor = xf * Point::new(-1.0, 0.0);
+        let expected_x = 15.0 * 96.0 / 72.0;
+        assert!((anchor.x - expected_x).abs() < 1e-6);
+    }
+
+    #[test]
+    fn line_marker_invert_flips_rotation() {
+        let g = horizontal_line_with(|b| {
+            b.set("end_marker", "arrow-closed")
+                .set("end_marker_size", 10.0_f64)
+                .set("end_marker_invert", true);
+        });
+        let scene = draw_into(&g);
+        let xf = fills_after_stroke(&scene)[0];
+        let tip = xf * Point::new(0.0, 0.0);
+        let size_px = 10.0 * 96.0 / 72.0;
+        assert!(
+            (tip.x - (100.0 - size_px)).abs() < 1e-6,
+            "tip.x = {} (expected {})",
+            tip.x,
+            100.0 - size_px
+        );
+    }
+
+    #[test]
+    fn line_marker_unknown_name_is_silent_no_op() {
+        let g = horizontal_line_with(|b| {
+            b.set("end_marker", "no-such-shape");
+        });
+        let scene = draw_into(&g);
+        let fills = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count();
+        assert_eq!(fills, 0);
+    }
+
+    #[test]
+    fn line_marker_fill_chain() {
+        let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
+        let green = Color::new([0.0, 1.0, 0.0, 1.0]);
+
+        // No fill, no end_marker_fill → marker uses stroke (red).
+        let g = horizontal_line_with(|b| {
+            b.set("end_marker", "arrow-closed");
+        });
+        let scene = draw_into(&g);
+        let c = scene
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Fill {
+                    brush: crate::brush::Brush::Solid(c),
+                    ..
+                } => Some(*c),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(c, red_solid());
+
+        // fill=blue → marker uses blue.
+        let g = horizontal_line_with(|b| {
+            b.set("end_marker", "arrow-closed").set("fill", blue);
+        });
+        let scene = draw_into(&g);
+        let c = scene
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Fill {
+                    brush: crate::brush::Brush::Solid(c),
+                    ..
+                } => Some(*c),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(c, blue);
+
+        // end_marker_fill=green overrides fill for the end marker.
+        let g = horizontal_line_with(|b| {
+            b.set("end_marker", "arrow-closed")
+                .set("fill", blue)
+                .set("end_marker_fill", green);
+        });
+        let scene = draw_into(&g);
+        let c = scene
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Fill {
+                    brush: crate::brush::Brush::Solid(c),
+                    ..
+                } => Some(*c),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(c, green);
     }
 
     #[test]

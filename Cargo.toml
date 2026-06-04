@@ -131,6 +131,10 @@ name = "ribbon_gradient"
 required-features = ["vello", "png"]
 
 [[example]]
+name = "endpoint_arrows"
+required-features = ["vello", "png"]
+
+[[example]]
 name = "polygon_features"
 required-features = ["vello", "png", "text"]
 
@@ -140,6 +144,10 @@ required-features = ["vello", "png", "text"]
 
 [[example]]
 name = "text_fit"
+required-features = ["vello", "png", "text"]
+
+[[example]]
+name = "text_path"
 required-features = ["vello", "png", "text"]
 
 [[test]]

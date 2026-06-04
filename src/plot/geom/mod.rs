@@ -35,6 +35,7 @@ use crate::shape::ShapeRegistry;
 
 pub mod ellipse;
 pub mod line;
+pub(crate) mod marks;
 pub mod point;
 pub mod polygon;
 pub mod rect;
@@ -45,6 +46,8 @@ pub mod state;
 pub mod text;
 #[cfg(feature = "text")]
 pub mod text_fit;
+#[cfg(feature = "text")]
+pub mod text_path;
 pub mod wedge;
 
 pub use ellipse::EllipseGeom;
@@ -58,6 +61,8 @@ pub use state::{GeomState, KeysStrategy};
 pub use text::TextGeom;
 #[cfg(feature = "text")]
 pub use text_fit::TextFitGeom;
+#[cfg(feature = "text")]
+pub use text_path::TextPathGeom;
 pub use wedge::WedgeGeom;
 
 // ─── Channel ─────────────────────────────────────────────────────────────────

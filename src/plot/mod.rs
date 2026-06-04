@@ -38,7 +38,7 @@ pub use geom::{
     WedgeGeom,
 };
 #[cfg(feature = "text")]
-pub use geom::{TextFitGeom, TextGeom};
+pub use geom::{TextFitGeom, TextGeom, TextPathGeom};
 pub use plot::{GeomId, Plot};
 pub use scale::{
     AxisSide, InputRange, LegendSide, OutputRange, Scale, ScaleRegistry, ScaleType, ScaleTypeKind,

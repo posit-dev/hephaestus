@@ -32,10 +32,10 @@ use crate::stroke::{Cap, Join, Stroke};
 
 use super::linetype;
 use super::resolve::{
-    build_stroke_for_pattern, draw_linetype_with_markers, override_alpha, pt_to_px,
-    resolve_angle_channel, resolve_cap_channel, resolve_color_channel, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
-    resolve_position,
+    build_stroke_for_pattern, draw_linetype_with_markers, emit_endpoint_marker, endpoint_outward,
+    override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or, resolve_cap_channel,
+    resolve_color_channel, resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, resolve_position, resolve_str_channel_or,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -74,6 +74,14 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("clip_end_radius", ExpectedOutput::Numbers),
     ("angle", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
+    ("start_marker", ExpectedOutput::Strings),
+    ("end_marker", ExpectedOutput::Strings),
+    ("start_marker_size", ExpectedOutput::Numbers),
+    ("end_marker_size", ExpectedOutput::Numbers),
+    ("start_marker_fill", ExpectedOutput::Colors),
+    ("end_marker_fill", ExpectedOutput::Colors),
+    ("start_marker_invert", ExpectedOutput::Any),
+    ("end_marker_invert", ExpectedOutput::Any),
 ];
 
 // ─── SegmentGeom ─────────────────────────────────────────────────────────────
@@ -203,6 +211,22 @@ impl Geom for SegmentGeom {
         let clip_start_radius_ch = channels.get("clip_start_radius");
         let clip_end_radius_ch = channels.get("clip_end_radius");
         let angle_ch = channels.get("angle");
+        let start_marker_ch = channels.get("start_marker");
+        let end_marker_ch = channels.get("end_marker");
+        let start_marker_size_ch = channels.get("start_marker_size");
+        let end_marker_size_ch = channels.get("end_marker_size");
+        let start_marker_fill_ch = channels.get("start_marker_fill");
+        let end_marker_fill_ch = channels.get("end_marker_fill");
+        let start_marker_invert_ch = channels.get("start_marker_invert");
+        let end_marker_invert_ch = channels.get("end_marker_invert");
+        let start_marker_scale = ctx.scale_for("start_marker");
+        let end_marker_scale = ctx.scale_for("end_marker");
+        let start_marker_size_scale = ctx.scale_for("start_marker_size");
+        let end_marker_size_scale = ctx.scale_for("end_marker_size");
+        let start_marker_fill_scale = ctx.scale_for("start_marker_fill");
+        let end_marker_fill_scale = ctx.scale_for("end_marker_fill");
+        let start_marker_invert_scale = ctx.scale_for("start_marker_invert");
+        let end_marker_invert_scale = ctx.scale_for("end_marker_invert");
 
         for i in 0..n {
             let stroke_color = override_alpha(
@@ -270,9 +294,11 @@ impl Geom for SegmentGeom {
                 resolve_number_channel_or(clip_start_radius_ch, clip_start_radius_scale, i, 0.0);
             let clip_end_pt =
                 resolve_number_channel_or(clip_end_radius_ch, clip_end_radius_scale, i, 0.0);
-            let path = if clip_start_pt > 0.0 || clip_end_pt > 0.0 {
-                let p0 = Point::new(px, py);
-                let p1 = Point::new(px2, py2);
+            let p0 = Point::new(px, py);
+            let p1 = Point::new(px2, py2);
+            let original = [p0, p1];
+            let was_clipped = clip_start_pt > 0.0 || clip_end_pt > 0.0;
+            let pts: Vec<Point> = if was_clipped {
                 let start = (clip_start_pt > 0.0).then(|| EndClip::Circle {
                     center: p0,
                     radius: pt_to_px(clip_start_pt, ctx.dpi),
@@ -281,14 +307,14 @@ impl Geom for SegmentGeom {
                     center: p1,
                     radius: pt_to_px(clip_end_pt, ctx.dpi),
                 });
-                let pts = clip_polyline(&[p0, p1], start, end);
-                if pts.len() < 2 {
-                    continue;
-                }
-                segment_path(pts[0], pts[1])
+                clip_polyline(&[p0, p1], start, end)
             } else {
-                segment_path(Point::new(px, py), Point::new(px2, py2))
+                vec![p0, p1]
             };
+            if pts.len() < 2 {
+                continue;
+            }
+            let path = segment_path(pts[0], pts[1]);
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
 
             // Rotation around the segment midpoint. Math CCW from the
@@ -301,6 +327,50 @@ impl Geom for SegmentGeom {
                 let my = 0.5 * (py + py2);
                 Affine::rotate_about(-angle, Point::new(mx, my))
             };
+
+            let marker_fill = resolve_color_channel(fill_ch, fill_scale, i).unwrap_or(stroke_color);
+
+            // Endpoint-marker channel resolution. Resolved up front so
+            // the start marker can be emitted before the stroke and the
+            // end marker after — matching LineGeom's path-order
+            // convention.
+            let start_name = resolve_str_channel_or(start_marker_ch, start_marker_scale, i, "");
+            let end_name = resolve_str_channel_or(end_marker_ch, end_marker_scale, i, "");
+            let default_marker_size_pt = 3.0 * linewidth_pt;
+            let marker_outline_px = linewidth_px.max(pt_to_px(0.5, ctx.dpi));
+
+            if !start_name.is_empty() {
+                let size_pt = resolve_number_channel_or(
+                    start_marker_size_ch,
+                    start_marker_size_scale,
+                    i,
+                    default_marker_size_pt,
+                );
+                let size_px = pt_to_px(size_pt, ctx.dpi);
+                let fill = resolve_color_channel(start_marker_fill_ch, start_marker_fill_scale, i)
+                    .unwrap_or(marker_fill);
+                let invert = resolve_bool_channel_or(
+                    start_marker_invert_ch,
+                    start_marker_invert_scale,
+                    i,
+                    false,
+                );
+                let outward = endpoint_outward(&pts, &original, true, clip_start_pt > 0.0);
+                emit_endpoint_marker(
+                    scene,
+                    pts[0],
+                    outward,
+                    invert,
+                    &start_name,
+                    size_px,
+                    fill,
+                    stroke_color,
+                    marker_outline_px,
+                    xform,
+                    ctx.shapes,
+                    pick,
+                );
+            }
 
             if linetype::is_marker_free(&dash_pattern_pt) {
                 let stroke_spec = build_stroke_for_pattern(
@@ -325,8 +395,6 @@ impl Geom for SegmentGeom {
                 // comes from the `"fill"` channel, defaulting to the
                 // resolved stroke colour. Marker outlines use the
                 // stroke colour.
-                let marker_fill =
-                    resolve_color_channel(fill_ch, fill_scale, i).unwrap_or(stroke_color);
                 let samplers = PolylineSampler::from_path(&path, 0.5);
                 let solid_stroke_spec = Stroke::new(linewidth_px).with_caps(cap).with_join(join);
                 let dash_offset_px = pt_to_px(dash_offset_pt, ctx.dpi);
@@ -344,6 +412,39 @@ impl Geom for SegmentGeom {
                     ctx.dpi,
                     pick,
                     /* distribute */ false,
+                );
+            }
+
+            if !end_name.is_empty() {
+                let size_pt = resolve_number_channel_or(
+                    end_marker_size_ch,
+                    end_marker_size_scale,
+                    i,
+                    default_marker_size_pt,
+                );
+                let size_px = pt_to_px(size_pt, ctx.dpi);
+                let fill = resolve_color_channel(end_marker_fill_ch, end_marker_fill_scale, i)
+                    .unwrap_or(marker_fill);
+                let invert = resolve_bool_channel_or(
+                    end_marker_invert_ch,
+                    end_marker_invert_scale,
+                    i,
+                    false,
+                );
+                let outward = endpoint_outward(&pts, &original, false, clip_end_pt > 0.0);
+                emit_endpoint_marker(
+                    scene,
+                    pts[pts.len() - 1],
+                    outward,
+                    invert,
+                    &end_name,
+                    size_px,
+                    fill,
+                    stroke_color,
+                    marker_outline_px,
+                    xform,
+                    ctx.shapes,
+                    pick,
                 );
             }
         }
@@ -809,5 +910,344 @@ mod tests {
             .filter(|op| matches!(op, Op::Stroke { .. }))
             .count();
         assert_eq!(strokes, 0);
+    }
+
+    // ── Endpoint markers (Phase C.5) ──
+
+    /// Build a horizontal segment from (0, 50) to (100, 50) in screen
+    /// space, with the given endpoint-marker channel set.
+    fn horizontal_segment_with(extra: impl FnOnce(&mut GeomBuilder<SegmentGeom>)) -> SegmentGeom {
+        let mut b = SegmentGeom::builder();
+        b.set("x", Raw(vec![0.0_f64]))
+            .set("y", Raw(vec![0.5_f64]))
+            .set("x2", Raw(vec![1.0_f64]))
+            .set("y2", Raw(vec![0.5_f64]))
+            .set("stroke", red())
+            .set("linewidth", 2.0_f64);
+        extra(&mut b);
+        b.build()
+    }
+
+    fn draw_into_scene(g: &SegmentGeom) -> RecordingScene {
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(GeomRect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        scene
+    }
+
+    fn fills_after_strokes(scene: &RecordingScene) -> Vec<kurbo::Affine> {
+        let mut found_stroke = false;
+        let mut out = Vec::new();
+        for op in &scene.ops {
+            match op {
+                Op::Stroke { .. } => found_stroke = true,
+                Op::Fill { transform, .. } if found_stroke => out.push(*transform),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn fills_before_strokes(scene: &RecordingScene) -> Vec<kurbo::Affine> {
+        let mut out = Vec::new();
+        for op in &scene.ops {
+            match op {
+                Op::Fill { transform, .. } => out.push(*transform),
+                Op::Stroke { .. } => break,
+                _ => {}
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn endpoint_marker_unset_emits_no_extra_ops() {
+        let g = horizontal_segment_with(|_| {});
+        let scene = draw_into_scene(&g);
+        let fills = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count();
+        assert_eq!(fills, 0, "no markers → no fill ops");
+    }
+
+    #[test]
+    fn endpoint_unknown_marker_name_is_silent_no_op() {
+        let g = horizontal_segment_with(|b| {
+            b.set("end_marker", "no-such-shape");
+        });
+        let scene = draw_into_scene(&g);
+        let fills = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count();
+        assert_eq!(fills, 0);
+    }
+
+    #[test]
+    fn end_marker_anchor_lands_at_last_vertex() {
+        // arrow-closed has anchor (-1, 0). Place end marker on the
+        // (100, 50) endpoint; transform * anchor should map to (100, 50).
+        let g = horizontal_segment_with(|b| {
+            b.set("end_marker", "arrow-closed")
+                .set("end_marker_size", 10.0_f64);
+        });
+        let scene = draw_into_scene(&g);
+        let xforms = fills_after_strokes(&scene);
+        assert!(!xforms.is_empty(), "expected an end-marker fill");
+        let xf = xforms[0];
+        let anchor = xf * kurbo::Point::new(-1.0, 0.0);
+        assert!((anchor.x - 100.0).abs() < 1e-6, "anchor.x = {}", anchor.x);
+        assert!((anchor.y - 50.0).abs() < 1e-6, "anchor.y = {}", anchor.y);
+    }
+
+    #[test]
+    fn end_marker_tip_extends_outward() {
+        // For arrow-closed: local (0, 0) is the tip. After transform it
+        // should land beyond the endpoint, in the +x direction.
+        let g = horizontal_segment_with(|b| {
+            b.set("end_marker", "arrow-closed")
+                .set("end_marker_size", 10.0_f64);
+        });
+        let scene = draw_into_scene(&g);
+        let xforms = fills_after_strokes(&scene);
+        let tip = xforms[0] * kurbo::Point::new(0.0, 0.0);
+        // size = 10 pt = 10 * 96/72 ≈ 13.33 px.
+        let size_px = 10.0 * 96.0 / 72.0;
+        assert!(
+            (tip.x - (100.0 + size_px)).abs() < 1e-6,
+            "tip.x = {} (expected {})",
+            tip.x,
+            100.0 + size_px
+        );
+        assert!((tip.y - 50.0).abs() < 1e-6, "tip.y = {}", tip.y);
+    }
+
+    #[test]
+    fn start_marker_anchor_lands_at_first_vertex_and_tip_points_back() {
+        // Mode B at start: outward = (-1, 0). After rotation+anchor
+        // math, the anchor (-1, 0) lands on (0, 50) and the tip (0, 0)
+        // sits in the -x direction beyond (0, 50).
+        let g = horizontal_segment_with(|b| {
+            b.set("start_marker", "arrow-closed")
+                .set("start_marker_size", 10.0_f64);
+        });
+        let scene = draw_into_scene(&g);
+        // Start marker is emitted BEFORE the stroke.
+        let xforms = fills_before_strokes(&scene);
+        assert!(!xforms.is_empty(), "expected a start-marker fill");
+        let xf = xforms[0];
+        let anchor = xf * kurbo::Point::new(-1.0, 0.0);
+        assert!((anchor.x - 0.0).abs() < 1e-6, "anchor.x = {}", anchor.x);
+        assert!((anchor.y - 50.0).abs() < 1e-6, "anchor.y = {}", anchor.y);
+        let tip = xf * kurbo::Point::new(0.0, 0.0);
+        let size_px = 10.0 * 96.0 / 72.0;
+        assert!(
+            (tip.x - (0.0 - size_px)).abs() < 1e-6,
+            "tip.x = {} (expected {})",
+            tip.x,
+            -size_px
+        );
+    }
+
+    #[test]
+    fn marker_size_default_is_three_times_linewidth() {
+        // linewidth = 2 pt → default marker size = 6 pt = 8 px at 96 dpi.
+        let g = horizontal_segment_with(|b| {
+            b.set("end_marker", "arrow-closed");
+        });
+        let scene = draw_into_scene(&g);
+        let xforms = fills_after_strokes(&scene);
+        let xf = xforms[0];
+        let coeffs = xf.as_coeffs();
+        // Linear part determinant = size_px^2 for any rotation.
+        let det = coeffs[0] * coeffs[3] - coeffs[1] * coeffs[2];
+        let expected_size = 6.0 * 96.0 / 72.0;
+        assert!(
+            (det.abs() - expected_size * expected_size).abs() < 1e-6,
+            "det = {}, expected ±{}",
+            det,
+            expected_size * expected_size
+        );
+    }
+
+    #[test]
+    fn marker_size_override_takes_pt() {
+        let g = horizontal_segment_with(|b| {
+            b.set("end_marker", "arrow-closed")
+                .set("end_marker_size", 18.0_f64);
+        });
+        let scene = draw_into_scene(&g);
+        let xf = fills_after_strokes(&scene)[0];
+        let coeffs = xf.as_coeffs();
+        let det = coeffs[0] * coeffs[3] - coeffs[1] * coeffs[2];
+        let expected_size = 18.0 * 96.0 / 72.0;
+        assert!((det.abs() - expected_size * expected_size).abs() < 1e-6);
+    }
+
+    #[test]
+    fn marker_respects_clip_start_radius() {
+        // Horizontal segment, clip_start_radius = 15 pt = 20 px.
+        // Start marker's anchor should land at (20, 50), and outward
+        // direction (chord) points back to (0, 50) ⇒ -x.
+        let g = horizontal_segment_with(|b| {
+            b.set("start_marker", "arrow-closed")
+                .set("start_marker_size", 10.0_f64)
+                .set("clip_start_radius", 15.0_f64);
+        });
+        let scene = draw_into_scene(&g);
+        let xf = fills_before_strokes(&scene)[0];
+        let anchor = xf * kurbo::Point::new(-1.0, 0.0);
+        let expected_x = 15.0 * 96.0 / 72.0;
+        assert!(
+            (anchor.x - expected_x).abs() < 1e-6,
+            "anchor.x = {} (expected {})",
+            anchor.x,
+            expected_x
+        );
+        // Tip is in the chord direction (toward original first vertex
+        // at (0, 50)) → -x from anchor.
+        let tip = xf * kurbo::Point::new(0.0, 0.0);
+        let size_px = 10.0 * 96.0 / 72.0;
+        assert!(
+            (tip.x - (expected_x - size_px)).abs() < 1e-6,
+            "tip.x = {} (expected {})",
+            tip.x,
+            expected_x - size_px
+        );
+    }
+
+    #[test]
+    fn marker_fill_default_is_marker_fill_chain() {
+        // Default: no fill, no start_marker_fill → marker fills with
+        // stroke (red).
+        let g = horizontal_segment_with(|b| {
+            b.set("end_marker", "arrow-closed");
+        });
+        let scene = draw_into_scene(&g);
+        let fill_color = scene
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Fill {
+                    brush: Brush::Solid(c),
+                    ..
+                } => Some(*c),
+                _ => None,
+            })
+            .expect("end-marker fill op");
+        assert_eq!(fill_color, red());
+
+        // With fill=blue (no start_marker_fill): marker uses blue.
+        let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
+        let g = horizontal_segment_with(|b| {
+            b.set("end_marker", "arrow-closed").set("fill", blue);
+        });
+        let scene = draw_into_scene(&g);
+        let fill_color = scene
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Fill {
+                    brush: Brush::Solid(c),
+                    ..
+                } => Some(*c),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(fill_color, blue);
+
+        // With end_marker_fill=green: green wins for end; start unaffected.
+        let green = Color::new([0.0, 1.0, 0.0, 1.0]);
+        let g = horizontal_segment_with(|b| {
+            b.set("end_marker", "arrow-closed")
+                .set("fill", blue)
+                .set("end_marker_fill", green);
+        });
+        let scene = draw_into_scene(&g);
+        let fill_color = scene
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Fill {
+                    brush: Brush::Solid(c),
+                    ..
+                } => Some(*c),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(fill_color, green);
+    }
+
+    #[test]
+    fn endpoint_fills_are_independently_controllable() {
+        let green = Color::new([0.0, 1.0, 0.0, 1.0]);
+        let orange = Color::new([1.0, 0.5, 0.0, 1.0]);
+        let g = horizontal_segment_with(|b| {
+            b.set("start_marker", "arrow-closed")
+                .set("end_marker", "arrow-closed")
+                .set("start_marker_fill", green)
+                .set("end_marker_fill", orange);
+        });
+        let scene = draw_into_scene(&g);
+        let start_fills = fills_before_strokes(&scene);
+        let end_fills = fills_after_strokes(&scene);
+        assert!(!start_fills.is_empty() && !end_fills.is_empty());
+        // Order: start fill ops come before the stroke, end fill ops
+        // come after. Look up each colour from the corresponding range.
+        let start_color = scene
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Fill {
+                    brush: Brush::Solid(c),
+                    ..
+                } => Some(*c),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(start_color, green);
+        let end_color = scene
+            .ops
+            .iter()
+            .rev()
+            .find_map(|op| match op {
+                Op::Fill {
+                    brush: Brush::Solid(c),
+                    ..
+                } => Some(*c),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(end_color, orange);
+    }
+
+    #[test]
+    fn marker_invert_flips_rotation() {
+        // Default end-marker on horizontal +x segment: tip at +x.
+        // With end_marker_invert = true: tip points back along the line
+        // (i.e., into the segment from the endpoint).
+        let g = horizontal_segment_with(|b| {
+            b.set("end_marker", "arrow-closed")
+                .set("end_marker_size", 10.0_f64)
+                .set("end_marker_invert", true);
+        });
+        let scene = draw_into_scene(&g);
+        let xf = fills_after_strokes(&scene)[0];
+        let tip = xf * kurbo::Point::new(0.0, 0.0);
+        let size_px = 10.0 * 96.0 / 72.0;
+        // Inverted: tip should land at (100 - size_px, 50), pointing inward.
+        assert!(
+            (tip.x - (100.0 - size_px)).abs() < 1e-6,
+            "tip.x = {} (expected {})",
+            tip.x,
+            100.0 - size_px
+        );
     }
 }

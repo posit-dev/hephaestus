@@ -253,6 +253,56 @@ impl Measure for TextRun {
     }
 }
 
+// ─── Per-glyph access ────────────────────────────────────────────────────────
+
+/// One positioned glyph extracted from a [`TextRun`] alongside the font
+/// and font-size needed to emit a [`GlyphRun`] containing it. Used by
+/// callers that need per-glyph affine transforms — e.g. `TextPathGeom`
+/// placing each glyph at a different point along a curve.
+///
+/// `x` / `y` are cumulative offsets from the run origin (the same units
+/// the parley layout uses); `advance` is the glyph's horizontal advance
+/// (how much arc length the glyph occupies in flow direction).
+#[derive(Clone)]
+pub struct LaidGlyph {
+    pub id: u32,
+    pub x: f32,
+    pub y: f32,
+    pub advance: f32,
+    pub font: Font,
+    pub font_size: f32,
+}
+
+/// Walk `run`'s laid-out lines and yield every glyph as a [`LaidGlyph`].
+/// Caller is responsible for skipping inline boxes — none are produced
+/// by [`TextRun::new`] in v1 but the iteration accepts whatever parley
+/// emits, ignoring non-glyph items.
+pub fn run_layout_glyphs(run: &TextRun) -> Vec<LaidGlyph> {
+    let layout = run.layout.borrow();
+    let mut out = Vec::new();
+    for line in layout.lines() {
+        for item in line.items() {
+            let PositionedLayoutItem::GlyphRun(gr) = item else {
+                continue;
+            };
+            let prun = gr.run();
+            let font = Font(prun.font().clone());
+            let font_size = prun.font_size();
+            for g in gr.positioned_glyphs() {
+                out.push(LaidGlyph {
+                    id: g.id,
+                    x: g.x,
+                    y: g.y,
+                    advance: g.advance,
+                    font: font.clone(),
+                    font_size,
+                });
+            }
+        }
+    }
+    out
+}
+
 // ─── Drawing ────────────────────────────────────────────────────────────────
 
 /// Draw `run` at `(x, y)` (top-left of the layout box) into `scene`,

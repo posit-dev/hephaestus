@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use crate::brush::Brush;
 use crate::color::Color;
-use crate::geometry::Affine;
+use crate::geometry::{Affine, Point, Vec2};
 use crate::path::{FillRule, Path};
 use crate::pick::PickId;
 use crate::plot::scale::Scale;
@@ -107,6 +107,23 @@ pub(crate) fn resolve_number_channel_or(
     default: f64,
 ) -> f64 {
     resolve_number_channel(channel, scale, i).unwrap_or(default)
+}
+
+/// Resolve a boolean channel with a fallback default. Reads
+/// `Value::Bool`; any other resolved value (including numeric)
+/// falls back to `default` rather than coercing — keeps the channel
+/// strictly boolean so a misbound numeric scale doesn't silently
+/// flip behaviour.
+pub(crate) fn resolve_bool_channel_or(
+    channel: Option<&Channel>,
+    scale: Option<&Scale>,
+    i: usize,
+    default: bool,
+) -> bool {
+    match resolve_value(channel, scale, i) {
+        Some(Value::Bool(b)) => b,
+        _ => default,
+    }
 }
 
 /// Resolve a rotation angle channel. Radians, mathematical CCW (positive
@@ -473,10 +490,103 @@ fn resolve_pattern_px(
         .collect()
 }
 
+/// Compute the outward direction for an endpoint marker.
+///
+/// The rule, per Phase C.5: the arrowhead's local +x axis points along
+/// the chord from the post-clip endpoint toward the *original* endpoint
+/// (i.e. the direction the line "would have continued" if it hadn't
+/// been trimmed). When the endpoint wasn't trimmed (`was_clipped =
+/// false`), falls back to the terminal polyline edge direction —
+/// identical to the chord in that limit.
+///
+/// Returns a normalised [`Vec2`]; degenerate inputs (single-vertex
+/// polyline, coincident neighbour, etc.) return [`Vec2::ZERO`] and the
+/// downstream [`emit_endpoint_marker`] no-ops on zero-length vectors.
+pub(crate) fn endpoint_outward(
+    clipped: &[Point],
+    original: &[Point],
+    at_start: bool,
+    was_clipped: bool,
+) -> Vec2 {
+    if clipped.len() < 2 {
+        return Vec2::ZERO;
+    }
+    let dir = if was_clipped && !original.is_empty() {
+        let (clip_pt, orig_pt) = if at_start {
+            (clipped[0], original[0])
+        } else {
+            (clipped[clipped.len() - 1], original[original.len() - 1])
+        };
+        orig_pt - clip_pt
+    } else if at_start {
+        clipped[0] - clipped[1]
+    } else {
+        let n = clipped.len();
+        clipped[n - 1] - clipped[n - 2]
+    };
+    let len_sq = dir.length_squared();
+    if len_sq < 1e-24 {
+        Vec2::ZERO
+    } else {
+        dir / len_sq.sqrt()
+    }
+}
+
+/// Stamp a registered shape at a polyline endpoint. Mode-B placement:
+/// the shape's `anchor()` lands on `placement`; the shape is rotated so
+/// its local +x axis aligns with `outward`. `invert` flips the outward
+/// direction. No-op if `marker_name` is empty, unknown to the registry,
+/// or `outward` is the zero vector.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_endpoint_marker(
+    scene: &mut dyn SceneBuilder,
+    placement: Point,
+    outward: Vec2,
+    invert: bool,
+    marker_name: &str,
+    size_px: f64,
+    marker_fill: Color,
+    marker_stroke: Color,
+    stroke_width_px: f64,
+    xform: Affine,
+    shapes: &ShapeRegistry,
+    pick: PickId,
+) {
+    if marker_name.is_empty() {
+        return;
+    }
+    let Some(shape) = shapes.get(marker_name) else {
+        return;
+    };
+    let dir = if invert { -outward } else { outward };
+    if dir.length_squared() < 1e-12 {
+        return;
+    }
+    let theta = dir.atan2();
+    let rot = Affine::rotate(theta);
+    let scaled_anchor = shape.anchor().to_vec2() * size_px;
+    let (sn, cs) = theta.sin_cos();
+    let anchor_world = Vec2::new(
+        cs * scaled_anchor.x - sn * scaled_anchor.y,
+        sn * scaled_anchor.x + cs * scaled_anchor.y,
+    );
+    let origin = placement.to_vec2() - anchor_world;
+    let local = Affine::translate(origin) * rot * Affine::scale(size_px);
+    emit_marker_shape(
+        scene,
+        shape,
+        xform * local,
+        marker_fill,
+        marker_stroke,
+        stroke_width_px,
+        pick,
+    );
+}
+
 /// Stamp one shape's subpaths at `xform`. Mirrors PointGeom's emission
 /// loop — fill subpaths take `marker_fill`; stroke subpaths take
 /// `marker_stroke`.
-fn emit_marker_shape(
+pub(crate) fn emit_marker_shape(
     scene: &mut dyn SceneBuilder,
     shape: &Shape,
     xform: Affine,
