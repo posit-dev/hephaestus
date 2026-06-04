@@ -44,4 +44,4 @@ pub use scale::{
     AxisSide, InputRange, LegendSide, OutputRange, Scale, ScaleRegistry, ScaleType, ScaleTypeKind,
     Transform, TransformKind,
 };
-pub use value::{DataColumn, Date, DateTime, Duration, Time, Value};
+pub use value::{DataColumn, Date, DateTime, Duration, LinetypeStep, Time, Value};

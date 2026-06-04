@@ -13,12 +13,23 @@
 //! - `"x_offset"` / `"y_offset"` — absolute pt offset added per vertex.
 //! - `"x_band"` / `"y_band"` — band-fraction offset folded into the
 //!   scale's `map_with_offset` (per vertex).
-//! - `"stroke"` — outline color (per-mark; first-row-of-mark).
+//! - `"stroke"` — outline color (per-mark; first-row-of-mark). Also
+//!   used as the stroke color for any markers in the linetype.
 //! - `"stroke_opacity"` — overrides alpha of `"stroke"` (per-mark).
+//! - `"fill"` — fill color for markers in the linetype (per-mark;
+//!   defaults to the resolved stroke color when unset). The line
+//!   itself is stroked, not filled — this channel only affects marker
+//!   interiors.
 //! - `"linewidth"` — stroke width in pt (per-mark; default 1.0 pt).
-//! - `"linetype"` — `Value::Linetype` dash pattern (per-mark; default
-//!   solid). Pt array of alternating dash/gap. Use the
-//!   [`crate::plot::geom::linetype`] helpers for the named patterns.
+//!   Also dictates the marker size (markers are sized to one
+//!   `linewidth` of arc length, rotated to the local tangent).
+//! - `"linetype"` — [`LinetypeStep`] pattern (per-mark; default
+//!   solid). Even-length, alternating Dash | Marker and Gap. A pure
+//!   dashed pattern (no Marker entries) renders via the kurbo stroke
+//!   fast path; patterns containing Marker entries walk the polyline
+//!   in arc length and emit per-step strokes + shape stamps. Use the
+//!   [`crate::plot::geom::linetype`] helpers (`dash` / `gap` /
+//!   `marker` / `pattern` / canonical patterns).
 //! - `"dash_offset"` — phase shift along the dash pattern in pt
 //!   (per-mark). Has no effect on solid lines.
 //! - `"cap"` — line cap style: `"butt"` / `"round"` / `"square"`
@@ -59,14 +70,17 @@ use crate::plot::diff::{diff_columns, diff_positional, KeyIndex};
 use crate::plot::value::{DataColumn, Value};
 use crate::primitives::{
     clip_polyline, polyline, round_corners, CornerRounding, EndClip, PolylineOptions,
+    PolylineSampler,
 };
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
 
+use super::linetype;
 use super::resolve::{
-    override_alpha, pt_to_px, resolve_angle_channel, resolve_cap_channel, resolve_color_channel,
-    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position,
+    build_stroke_for_pattern, draw_linetype_with_markers, override_alpha, pt_to_px,
+    resolve_angle_channel, resolve_cap_channel, resolve_color_channel, resolve_join_channel,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
+    resolve_position,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -92,6 +106,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("y_offset", ExpectedOutput::Numbers),
     ("x_band", ExpectedOutput::Numbers),
     ("y_band", ExpectedOutput::Numbers),
+    ("fill", ExpectedOutput::Colors),
     ("stroke", ExpectedOutput::Colors),
     ("stroke_opacity", ExpectedOutput::Numbers),
     ("linewidth", ExpectedOutput::Numbers),
@@ -244,24 +259,12 @@ impl BuildableGeom for LineGeom {
 fn validate_linetype_channel(ch: &Channel) {
     match ch {
         Channel::Constant(Value::Linetype(p)) | Channel::RawConstant(Value::Linetype(p)) => {
-            if p.len() % 2 != 0 {
-                panic!(
-                    "LineGeom::build: \"linetype\" array has odd length {}; \
-                     dash patterns must alternate dash/gap (even length, or empty for solid)",
-                    p.len()
-                );
-            }
+            linetype::validate_pattern(p);
         }
         Channel::Constant(_) | Channel::RawConstant(_) => {} // non-Linetype constant — resolved at draw time
         Channel::Data(DataColumn::Linetype(v)) | Channel::RawData(DataColumn::Linetype(v)) => {
-            for (i, p) in v.iter().enumerate() {
-                if p.len() % 2 != 0 {
-                    panic!(
-                        "LineGeom::build: \"linetype\"[{i}] array has odd length {}; \
-                         dash patterns must alternate dash/gap (even length, or empty for solid)",
-                        p.len()
-                    );
-                }
+            for p in v.iter() {
+                linetype::validate_pattern(p);
             }
         }
         Channel::Data(_) | Channel::RawData(_) => {} // non-Linetype column — resolved at draw time
@@ -351,6 +354,7 @@ impl Geom for LineGeom {
 
         let x_scale_bound = ctx.scale_for("x");
         let y_scale_bound = ctx.scale_for("y");
+        let fill_scale = ctx.scale_for("fill");
         let stroke_scale = ctx.scale_for("stroke");
         let stroke_opacity_scale = ctx.scale_for("stroke_opacity");
         let linewidth_scale = ctx.scale_for("linewidth");
@@ -381,6 +385,7 @@ impl Geom for LineGeom {
             _ => return,
         };
 
+        let fill_ch = channels.get("fill");
         let stroke_ch = channels.get("stroke");
         let stroke_opacity_ch = channels.get("stroke_opacity");
         let linewidth_ch = channels.get("linewidth");
@@ -424,14 +429,10 @@ impl Geom for LineGeom {
             let cap = resolve_cap_channel(cap_ch, cap_scale, i0, DEFAULT_CAP);
             let join = resolve_join_channel(join_ch, join_scale, i0, DEFAULT_JOIN);
 
-            let stroke_spec = build_stroke(
-                linewidth_px,
-                cap,
-                join,
-                &dash_pattern_pt,
-                dash_offset_pt,
-                ctx.dpi,
-            );
+            // Marker fill defaults to the resolved stroke color.
+            let marker_fill =
+                resolve_color_channel(fill_ch, fill_scale, i0).unwrap_or(stroke_color);
+            let has_markers = !linetype::is_marker_free(&dash_pattern_pt);
 
             // ── Per-vertex positions for this mark. ──
             let mut points: Vec<Point> = Vec::with_capacity(mark.rows.len());
@@ -512,38 +513,58 @@ impl Geom for LineGeom {
                 polyline(&clipped, PolylineOptions::default())
             };
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
-            scene.stroke(
-                &stroke_spec,
-                xform,
-                &Brush::Solid(stroke_color),
-                None,
-                &path,
-                pick,
-            );
+
+            if !has_markers {
+                // Fast path: pure-dash linetype (or solid). One stroke
+                // op carries the kurbo dash pattern.
+                let stroke_spec = build_stroke_for_pattern(
+                    linewidth_px,
+                    cap,
+                    join,
+                    &dash_pattern_pt,
+                    dash_offset_pt,
+                    linewidth_pt,
+                    ctx.dpi,
+                );
+                scene.stroke(
+                    &stroke_spec,
+                    xform,
+                    &Brush::Solid(stroke_color),
+                    None,
+                    &path,
+                    pick,
+                );
+            } else {
+                // Marker path: walk arc length through the linetype
+                // pattern, emitting dash sub-strokes and marker stamps
+                // independently.
+                let dash_offset_px = pt_to_px(dash_offset_pt, ctx.dpi);
+                let linewidth_px_for_marker = pt_to_px(linewidth_pt, ctx.dpi);
+                let samplers = if corner_radius_pt > 0.0 {
+                    PolylineSampler::from_path(&path, 0.5)
+                } else {
+                    // No rounded corners → walk the polyline directly.
+                    vec![PolylineSampler::from_polyline(&clipped)]
+                };
+                let solid_stroke_spec = Stroke::new(linewidth_px).with_caps(cap).with_join(join);
+                draw_linetype_with_markers(
+                    scene,
+                    &samplers,
+                    &dash_pattern_pt,
+                    dash_offset_px,
+                    linewidth_px_for_marker,
+                    marker_fill,
+                    stroke_color,
+                    &solid_stroke_spec,
+                    xform,
+                    ctx.shapes,
+                    ctx.dpi,
+                    pick,
+                    /* distribute */ false,
+                );
+            }
         }
     }
-}
-
-// ─── Stroke construction ─────────────────────────────────────────────────────
-
-/// Construct a [`Stroke`] with the pt dash pattern + offset converted
-/// to px using `dpi`. An empty pattern leaves the stroke un-dashed
-/// (solid).
-fn build_stroke(
-    width_px: f64,
-    cap: Cap,
-    join: Join,
-    pattern_pt: &[f64],
-    offset_pt: f64,
-    dpi: f64,
-) -> Stroke {
-    let mut s = Stroke::new(width_px).with_caps(cap).with_join(join);
-    if !pattern_pt.is_empty() {
-        let pattern_px: Vec<f64> = pattern_pt.iter().map(|p| pt_to_px(*p, dpi)).collect();
-        let offset_px = pt_to_px(offset_pt, dpi);
-        s = s.with_dashes(offset_px, pattern_px);
-    }
-    s
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -551,6 +572,7 @@ fn build_stroke(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plot::value::LinetypeStep;
     use std::sync::Arc;
 
     use crate::color::Color;
@@ -708,12 +730,19 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "odd length")]
+    #[should_panic(expected = "even length")]
     fn builder_odd_length_linetype_constant_panics() {
         LineGeom::builder()
             .set("x", vec![0.0_f64, 1.0])
             .set("y", vec![0.0_f64, 1.0])
-            .set("linetype", Value::Linetype(Arc::from(vec![1.0, 2.0, 3.0])))
+            .set(
+                "linetype",
+                Value::Linetype(Arc::from(vec![
+                    LinetypeStep::Dash(1.0),
+                    LinetypeStep::Gap(2.0),
+                    LinetypeStep::Dash(3.0),
+                ])),
+            )
             .build();
     }
 
@@ -952,6 +981,333 @@ mod tests {
         let expected_b = 4.0 * 96.0 / 72.0;
         assert!((dash_patterns[1][0] - expected_a).abs() < 1e-9);
         assert!((dash_patterns[1][1] - expected_b).abs() < 1e-9);
+    }
+
+    // ── Marker linetype (C.2) ──
+
+    /// Build a marker-only linetype: stamp the named shape, advance by
+    /// `gap_pt`, repeat.
+    fn marker_pattern(name: &str, gap_pt: f64) -> std::sync::Arc<[LinetypeStep]> {
+        linetype::pattern([linetype::marker(name), linetype::gap(gap_pt)])
+    }
+
+    #[test]
+    fn linetype_solid_emits_one_stroke_op_no_markers() {
+        let mut g = LineGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 1.0]))
+            .set("y", Raw(vec![0.5_f64, 0.5]))
+            .set("stroke", red_solid())
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let c = ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales);
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &c);
+        let strokes = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .count();
+        let fills = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count();
+        assert_eq!(strokes, 1);
+        assert_eq!(fills, 0);
+    }
+
+    #[test]
+    fn linetype_pure_dashes_uses_fast_path_one_stroke_op() {
+        let mut g = LineGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 1.0]))
+            .set("y", Raw(vec![0.5_f64, 0.5]))
+            .set("stroke", red_solid())
+            .set("linetype", Value::Linetype(linetype::dashed()))
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let c = ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales);
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &c);
+        let strokes: Vec<_> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Stroke { stroke, .. } => Some(stroke.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(strokes.len(), 1, "fast path: one stroke op");
+        assert!(
+            !strokes[0].dash_pattern.is_empty(),
+            "kurbo dash pattern set"
+        );
+    }
+
+    #[test]
+    fn linetype_marker_pattern_emits_marker_fills() {
+        // 100-px polyline, linewidth 4 pt = 4*96/72 ≈ 5.333 px, gap 5 pt
+        // = 5*96/72 ≈ 6.667 px → period ≈ 12.0 px → ~8 markers fit.
+        let mut g = LineGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 100.0]))
+            .set("y", Raw(vec![50.0, 50.0]))
+            .set("stroke", red_solid())
+            .set("linewidth", 4.0_f64)
+            .set("linetype", Value::Linetype(marker_pattern("circle", 5.0)))
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let c = ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales);
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &c);
+        let fills = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count();
+        let strokes: Vec<_> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Stroke { stroke, .. } => Some(stroke.clone()),
+                _ => None,
+            })
+            .collect();
+        // The line itself emits no stroke ops on the marker-only
+        // path (no Dash entries). Every stroke op present comes from
+        // the marker's own outline (the "circle" shape registers as
+        // Fill-style, so no marker outlines unless we add a default
+        // thin stroke — which we don't in v1).
+        assert!(fills >= 6, "expected several marker fills, got {fills}");
+        // No kurbo dash pattern in any emitted stroke (we walked
+        // the pattern manually).
+        for s in &strokes {
+            assert!(
+                s.dash_pattern.is_empty(),
+                "marker walker should not emit kurbo dashes"
+            );
+        }
+    }
+
+    #[test]
+    fn linetype_marker_consumes_linewidth_of_arc() {
+        // With linewidth = 4 pt and gap = 5 pt at 96 dpi:
+        //   linewidth_px = 4 * 96/72 ≈ 5.333
+        //   gap_px       = 5 * 96/72 ≈ 6.667
+        //   period_px ≈ 12.0
+        // Markers should be ~12 px apart (center-to-center) along the
+        // line — measured between consecutive fill ops' translation
+        // components.
+        let mut g = LineGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 100.0]))
+            .set("y", Raw(vec![50.0, 50.0]))
+            .set("stroke", red_solid())
+            .set("linewidth", 4.0_f64)
+            .set("linetype", Value::Linetype(marker_pattern("circle", 5.0)))
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let c = ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales);
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &c);
+        let translations: Vec<f64> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Fill { transform, .. } => Some(transform.translation().x),
+                _ => None,
+            })
+            .collect();
+        assert!(translations.len() >= 3);
+        // The period should match `(linewidth + gap) * 96/72`.
+        let expected_period = (4.0 + 5.0) * 96.0 / 72.0;
+        for w in translations.windows(2) {
+            let delta = w[1] - w[0];
+            assert!(
+                (delta - expected_period).abs() < 1e-6,
+                "marker spacing {delta} ≠ expected {expected_period}",
+            );
+        }
+    }
+
+    #[test]
+    fn linetype_marker_rotates_to_tangent() {
+        // Polyline along +y at panel-x = 50 px → tangent direction
+        // (0, +y). The Affine should carry a 90° rotation in screen
+        // frame (sin = 1, cos = 0).
+        let mut g = LineGeom::builder()
+            .set("x", Raw(vec![50.0, 50.0]))
+            .set("y", Raw(vec![100.0, 0.0])) // (y_pixel 100 → 0 means line goes down→up in panel; we just want a +y direction)
+            .set("stroke", red_solid())
+            .set("linewidth", 4.0_f64)
+            .set("linetype", Value::Linetype(marker_pattern("circle", 5.0)))
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let c = ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales);
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &c);
+        let coeffs = scene
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Fill { transform, .. } => Some(transform.as_coeffs()),
+                _ => None,
+            })
+            .expect("at least one marker fill");
+        // Expected linear part: translate * rotate(theta) *
+        // scale(linewidth_px / shape.bounding_box().height()). The
+        // per-shape height division ensures the marker's local y-extent
+        // matches linewidth exactly. For the builtin circle the local
+        // bbox is 1.6 × 1.6 (radius 0.8). For raw input the line in
+        // panel space runs (50, 0) -> (50, 100) — tangent (0, +y) screen
+        // -down. rotate(atan2(1, 0)) = rotate(π/2). Linear part = R(π/2)
+        // * scale(s). coeffs are [a, b, c, d, e, f] where matrix is
+        // [[a, c], [b, d]] (kurbo convention). R(π/2) * scale(s) =
+        // [[0, -s], [s, 0]] → a=0, b=s, c=-s, d=0.
+        let linewidth_px = 4.0 * 96.0 / 72.0;
+        let circle_bbox_h = 1.6;
+        let s = linewidth_px / circle_bbox_h;
+        assert!(coeffs[0].abs() < 1e-9, "a ≈ 0, got {}", coeffs[0]);
+        assert!((coeffs[1] - s).abs() < 1e-9, "b ≈ s, got {}", coeffs[1]);
+        assert!((coeffs[2] + s).abs() < 1e-9, "c ≈ -s, got {}", coeffs[2]);
+        assert!(coeffs[3].abs() < 1e-9, "d ≈ 0, got {}", coeffs[3]);
+    }
+
+    #[test]
+    fn linetype_marker_fill_defaults_to_stroke_color() {
+        let stroke = red_solid();
+        let mut g = LineGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 100.0]))
+            .set("y", Raw(vec![50.0, 50.0]))
+            .set("stroke", stroke)
+            .set("linewidth", 4.0_f64)
+            .set("linetype", Value::Linetype(marker_pattern("circle", 5.0)))
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let c = ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales);
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &c);
+        let fill_colors: Vec<_> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Fill {
+                    brush: crate::brush::Brush::Solid(c),
+                    ..
+                } => Some(*c),
+                _ => None,
+            })
+            .collect();
+        assert!(!fill_colors.is_empty());
+        for c in fill_colors {
+            assert_eq!(c, stroke, "marker fill defaults to stroke color");
+        }
+    }
+
+    #[test]
+    fn linetype_fill_channel_overrides_marker_color() {
+        let stroke = red_solid();
+        let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
+        let mut g = LineGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 100.0]))
+            .set("y", Raw(vec![50.0, 50.0]))
+            .set("stroke", stroke)
+            .set("fill", blue)
+            .set("linewidth", 4.0_f64)
+            .set("linetype", Value::Linetype(marker_pattern("circle", 5.0)))
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let c = ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales);
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &c);
+        let fill_color = scene
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Fill {
+                    brush: crate::brush::Brush::Solid(c),
+                    ..
+                } => Some(*c),
+                _ => None,
+            })
+            .expect("at least one marker fill");
+        assert_eq!(fill_color, blue);
+    }
+
+    #[test]
+    fn linetype_mixed_dash_and_marker() {
+        // Pattern: 5pt dash, 2pt gap, circle, 4pt gap; linewidth 2pt.
+        // Both stroke and fill ops should appear.
+        let pat = linetype::pattern([
+            linetype::dash(5.0),
+            linetype::gap(2.0),
+            linetype::marker("circle"),
+            linetype::gap(4.0),
+        ]);
+        let mut g = LineGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 200.0]))
+            .set("y", Raw(vec![50.0, 50.0]))
+            .set("stroke", red_solid())
+            .set("linewidth", 2.0_f64)
+            .set("linetype", Value::Linetype(pat))
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let c = ctx(Rect::new(0.0, 0.0, 200.0, 100.0), &shapes, &scales);
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &c);
+        let fills = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count();
+        let strokes = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .count();
+        assert!(fills > 0, "markers emit fills");
+        assert!(strokes > 0, "dashes emit strokes");
+    }
+
+    #[test]
+    fn linetype_marker_on_rounded_corner_follows_path() {
+        // L-shape with corner rounding → markers walk the rounded
+        // curve. We can't assert exact positions but we can check that
+        // marker count for a rounded path is greater than 0 (i.e., the
+        // walker successfully sampled the curved geometry).
+        let mut g = LineGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 50.0, 50.0]))
+            .set("y", Raw(vec![50.0, 50.0, 100.0]))
+            .set("stroke", red_solid())
+            .set("linewidth", 3.0_f64)
+            .set("corner_radius", 10.0_f64)
+            .set("linetype", Value::Linetype(marker_pattern("circle", 4.0)))
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let c = ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales);
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &c);
+        let fills = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count();
+        assert!(fills > 0, "marker walker handled the rounded path");
     }
 
     #[test]

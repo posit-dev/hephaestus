@@ -7,6 +7,7 @@
 use crate::blend::BlendMode;
 use crate::brush::{Brush, Image, Sampling};
 use crate::geometry::Affine;
+use crate::mesh::Mesh;
 use crate::path::{FillRule, Path};
 use crate::pick::PickId;
 
@@ -59,6 +60,18 @@ pub trait SceneBuilder {
     /// responsibility — this crate consumes already-placed glyphs.
     /// See [`Self::fill`] for `pick_id` semantics.
     fn draw_glyphs(&mut self, run: &GlyphRun<'_>, pick_id: PickId);
+
+    /// Draw a 2D triangle mesh with per-vertex colour. `transform`
+    /// applies to vertex positions (not colours). The whole mesh
+    /// shares a single `pick_id` — picking does not distinguish
+    /// individual triangles.
+    ///
+    /// No backend currently has a native indexed-mesh primitive;
+    /// every backend decomposes the mesh into its own draw ops (e.g.
+    /// the Vello backend emits one `fill` per triangle with a
+    /// per-triangle linear-gradient brush). See [`Self::fill`] for
+    /// `pick_id` semantics.
+    fn draw_mesh(&mut self, mesh: &Mesh, transform: Affine, pick_id: PickId);
 
     /// Push a layer. Subsequent draws are clipped to `clip` (transformed by
     /// `transform`) and composited into the parent layer using `blend` and

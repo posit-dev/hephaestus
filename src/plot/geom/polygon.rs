@@ -55,14 +55,16 @@ use crate::geometry::{Affine, Point};
 use crate::path::{FillRule, Path};
 use crate::plot::diff::{diff_columns, diff_positional, KeyIndex};
 use crate::plot::value::{DataColumn, Value};
-use crate::primitives::{offset_polygon, round_corners, CornerRounding};
+use crate::primitives::{offset_polygon, round_corners, CornerRounding, PolylineSampler};
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
 
+use super::linetype;
 use super::resolve::{
-    override_alpha, pt_to_px, resolve_angle_channel, resolve_cap_channel, resolve_color_channel,
-    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position,
+    build_stroke_for_pattern, draw_linetype_with_markers, override_alpha, pt_to_px,
+    resolve_angle_channel, resolve_cap_channel, resolve_color_channel, resolve_join_channel,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
+    resolve_position,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -548,38 +550,45 @@ impl Geom for PolygonGeom {
                         resolve_number_channel_or(dash_offset_ch, dash_offset_scale, i0, 0.0);
                     let cap = resolve_cap_channel(cap_ch, cap_scale, i0, DEFAULT_CAP);
                     let join = resolve_join_channel(join_ch, join_scale, i0, DEFAULT_JOIN);
-                    let stroke_spec = build_stroke(
-                        linewidth_px,
-                        cap,
-                        join,
-                        &dash_pattern_pt,
-                        dash_offset_pt,
-                        ctx.dpi,
-                    );
-                    scene.stroke(&stroke_spec, xform, &Brush::Solid(sc), None, &path, pick);
+                    if linetype::is_marker_free(&dash_pattern_pt) {
+                        let stroke_spec = build_stroke_for_pattern(
+                            linewidth_px,
+                            cap,
+                            join,
+                            &dash_pattern_pt,
+                            dash_offset_pt,
+                            linewidth_pt,
+                            ctx.dpi,
+                        );
+                        scene.stroke(&stroke_spec, xform, &Brush::Solid(sc), None, &path, pick);
+                    } else {
+                        // Markers: walk the closed perimeter, scale
+                        // gaps so the pattern fits seamlessly, fill
+                        // every marker with the stroke colour.
+                        let samplers = PolylineSampler::from_closed_path(&path, 0.5);
+                        let solid_stroke_spec =
+                            Stroke::new(linewidth_px).with_caps(cap).with_join(join);
+                        let dash_offset_px = pt_to_px(dash_offset_pt, ctx.dpi);
+                        draw_linetype_with_markers(
+                            scene,
+                            &samplers,
+                            &dash_pattern_pt,
+                            dash_offset_px,
+                            linewidth_px,
+                            sc,
+                            sc,
+                            &solid_stroke_spec,
+                            xform,
+                            ctx.shapes,
+                            ctx.dpi,
+                            pick,
+                            /* distribute */ true,
+                        );
+                    }
                 }
             }
         }
     }
-}
-
-// ─── Stroke construction ─────────────────────────────────────────────────────
-
-fn build_stroke(
-    width_px: f64,
-    cap: Cap,
-    join: Join,
-    pattern_pt: &[f64],
-    offset_pt: f64,
-    dpi: f64,
-) -> Stroke {
-    let mut s = Stroke::new(width_px).with_caps(cap).with_join(join);
-    if !pattern_pt.is_empty() {
-        let pattern_px: Vec<f64> = pattern_pt.iter().map(|p| pt_to_px(*p, dpi)).collect();
-        let offset_px = pt_to_px(offset_pt, dpi);
-        s = s.with_dashes(offset_px, pattern_px);
-    }
-    s
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -1081,5 +1090,79 @@ mod tests {
         let bb = path.bounding_box();
         // Outer bbox should at least cover the expanded edges.
         assert!(bb.width() > 65.0, "width = {}", bb.width());
+    }
+
+    #[test]
+    fn linetype_marker_stamps_around_closed_perimeter() {
+        // Polygon with a marker-only linetype. Closed-shape semantics:
+        // - markers are stamped along the perimeter via fill ops;
+        // - marker fill colour is the stroke colour (does NOT consult
+        //   the `"fill"` channel — that fills the polygon interior);
+        // - gaps are distributed so the pattern wraps seamlessly,
+        //   meaning we get an integer number of markers around the
+        //   loop with no visible seam.
+        use crate::plot::geom::linetype;
+        let pat = linetype::pattern([linetype::marker("circle"), linetype::gap(5.0)]);
+        let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
+        let mut g = PolygonGeom::builder()
+            // Unit square in Raw [0, 1] fractions; on a 100×100 panel
+            // this paints a 100×100 square (perimeter = 400 px).
+            .set("x", Raw(vec![0.0_f64, 1.0, 1.0, 0.0]))
+            .set("y", Raw(vec![0.0_f64, 0.0, 1.0, 1.0]))
+            .set("stroke", red())
+            // Polygon interior fill — markers ignore this and use the
+            // stroke colour.
+            .set("fill", blue)
+            .set("linewidth", 4.0_f64)
+            .set("linetype", Value::Linetype(pat))
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        // Marker-only pattern emits no dash sub-strokes.
+        let strokes = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .count();
+        assert_eq!(strokes, 0, "marker-only pattern emits no Dash strokes");
+
+        // Fills: 1 polygon-interior fill + N marker stamps. The first
+        // fill is the polygon interior in `blue`; the rest are
+        // markers in the stroke colour.
+        let fill_colors: Vec<crate::color::Color> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Fill {
+                    brush: crate::brush::Brush::Solid(c),
+                    ..
+                } => Some(*c),
+                _ => None,
+            })
+            .collect();
+        assert!(fill_colors.len() >= 2, "expected interior + markers");
+        assert_eq!(fill_colors[0], blue, "first fill = polygon interior");
+        for c in &fill_colors[1..] {
+            assert_eq!(
+                *c,
+                red(),
+                "marker fill defaults to stroke colour on closed shapes"
+            );
+        }
+
+        // Distributed walk: period = linewidth_px + gap_px ≈ 12 px;
+        // perimeter = 400 px → round(400/12) = 33 markers.
+        assert_eq!(
+            fill_colors.len() - 1,
+            33,
+            "got {} markers around perimeter",
+            fill_colors.len() - 1
+        );
     }
 }

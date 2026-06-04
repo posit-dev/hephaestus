@@ -47,6 +47,11 @@
 //!   tangents match the original segments. Use this for `wedge`,
 //!   `annular_wedge`, or any path whose edges include quads / cubics.
 //!
+//! **Path sampling:**
+//! - [`ArcLengthWalker`] — yields position + tangent samples at fixed
+//!   arc-length intervals along a path. Used by LineGeom's linetype
+//!   marker emission and by future text-on-path geoms.
+//!
 //! Corner rounding is an adaptive port of the algorithm from the
 //! [`boundaries`](https://github.com/thomasp85/boundaries) R package. Each
 //! eligible corner is replaced with a tangent-aware cubic Bezier — see
@@ -57,15 +62,21 @@ use crate::geometry::{Point, Rect, Vec2};
 use crate::path::{Path, PathEl};
 use kurbo::Shape;
 
+mod arc_length;
 mod corner;
 mod end_clip;
 mod offset;
 mod path_corner;
+mod ribbon;
 
+pub use arc_length::{ArcLengthWalker, ArcSample, PolylineSampler, TrailingPolicy};
 pub use corner::round_corners;
 pub use end_clip::{clip_polyline, EndClip};
 pub use offset::offset_polygon;
 pub use path_corner::round_path_corners;
+pub use ribbon::{
+    polyline_gradient, polyline_ribbon, polyline_ribbon_full, RibbonCap, RibbonJoin, RibbonOptions,
+};
 
 /// Path-approximation tolerance for curved primitives ([`circle`],
 /// [`ellipse`], [`rounded_rect`]). Smaller values produce more vertices.

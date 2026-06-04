@@ -16,20 +16,26 @@
 //! - `"stroke"`, `"stroke_opacity"`, `"linewidth"`, `"linetype"`,
 //!   `"dash_offset"`, `"cap"`, `"join"` — same styling set as
 //!   LineGeom / RectGeom.
+//! - `"fill"` — fill colour for markers in the linetype (per-row;
+//!   defaults to the resolved stroke colour when unset). The segment
+//!   itself is stroked, not filled — this channel only affects marker
+//!   interiors when the linetype contains `Marker` steps.
 //! - `"angle"` — rotation in **radians** around the segment midpoint,
 //!   mathematical CCW (positive rotates the segment counter-clockwise
 //!   in the rendered image). Default `0.0` (no rotation).
 
 use crate::brush::Brush;
 use crate::geometry::{Affine, Point};
-use crate::primitives::{clip_polyline, segment as segment_path, EndClip};
+use crate::primitives::{clip_polyline, segment as segment_path, EndClip, PolylineSampler};
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
 
+use super::linetype;
 use super::resolve::{
-    override_alpha, pt_to_px, resolve_angle_channel, resolve_cap_channel, resolve_color_channel,
-    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position,
+    build_stroke_for_pattern, draw_linetype_with_markers, override_alpha, pt_to_px,
+    resolve_angle_channel, resolve_cap_channel, resolve_color_channel, resolve_join_channel,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
+    resolve_position,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -56,6 +62,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("y_band", ExpectedOutput::Numbers),
     ("x2_band", ExpectedOutput::Numbers),
     ("y2_band", ExpectedOutput::Numbers),
+    ("fill", ExpectedOutput::Colors),
     ("stroke", ExpectedOutput::Colors),
     ("stroke_opacity", ExpectedOutput::Numbers),
     ("linewidth", ExpectedOutput::Numbers),
@@ -141,6 +148,7 @@ impl Geom for SegmentGeom {
         let y_band_scale = ctx.scale_for("y_band");
         let x2_band_scale = ctx.scale_for("x2_band");
         let y2_band_scale = ctx.scale_for("y2_band");
+        let fill_scale = ctx.scale_for("fill");
         let stroke_scale = ctx.scale_for("stroke");
         let stroke_opacity_scale = ctx.scale_for("stroke_opacity");
         let linewidth_scale = ctx.scale_for("linewidth");
@@ -183,6 +191,7 @@ impl Geom for SegmentGeom {
         let y_band_ch = channels.get("y_band");
         let x2_band_ch = channels.get("x2_band");
         let y2_band_ch = channels.get("y2_band");
+        let fill_ch = channels.get("fill");
         let stroke_ch = channels.get("stroke");
         let stroke_opacity_ch = channels.get("stroke_opacity");
         let linewidth_ch = channels.get("linewidth");
@@ -280,14 +289,6 @@ impl Geom for SegmentGeom {
             } else {
                 segment_path(Point::new(px, py), Point::new(px2, py2))
             };
-            let stroke_spec = build_stroke(
-                linewidth_px,
-                cap,
-                join,
-                &dash_pattern_pt,
-                dash_offset_pt,
-                ctx.dpi,
-            );
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
 
             // Rotation around the segment midpoint. Math CCW from the
@@ -301,35 +302,52 @@ impl Geom for SegmentGeom {
                 Affine::rotate_about(-angle, Point::new(mx, my))
             };
 
-            scene.stroke(
-                &stroke_spec,
-                xform,
-                &Brush::Solid(stroke_color),
-                None,
-                &path,
-                pick,
-            );
+            if linetype::is_marker_free(&dash_pattern_pt) {
+                let stroke_spec = build_stroke_for_pattern(
+                    linewidth_px,
+                    cap,
+                    join,
+                    &dash_pattern_pt,
+                    dash_offset_pt,
+                    linewidth_pt,
+                    ctx.dpi,
+                );
+                scene.stroke(
+                    &stroke_spec,
+                    xform,
+                    &Brush::Solid(stroke_color),
+                    None,
+                    &path,
+                    pick,
+                );
+            } else {
+                // Segment is open: no gap distribution. Marker fill
+                // comes from the `"fill"` channel, defaulting to the
+                // resolved stroke colour. Marker outlines use the
+                // stroke colour.
+                let marker_fill =
+                    resolve_color_channel(fill_ch, fill_scale, i).unwrap_or(stroke_color);
+                let samplers = PolylineSampler::from_path(&path, 0.5);
+                let solid_stroke_spec = Stroke::new(linewidth_px).with_caps(cap).with_join(join);
+                let dash_offset_px = pt_to_px(dash_offset_pt, ctx.dpi);
+                draw_linetype_with_markers(
+                    scene,
+                    &samplers,
+                    &dash_pattern_pt,
+                    dash_offset_px,
+                    linewidth_px,
+                    marker_fill,
+                    stroke_color,
+                    &solid_stroke_spec,
+                    xform,
+                    ctx.shapes,
+                    ctx.dpi,
+                    pick,
+                    /* distribute */ false,
+                );
+            }
         }
     }
-}
-
-// ─── Stroke construction ─────────────────────────────────────────────────────
-
-fn build_stroke(
-    width_px: f64,
-    cap: Cap,
-    join: Join,
-    pattern_pt: &[f64],
-    offset_pt: f64,
-    dpi: f64,
-) -> Stroke {
-    let mut s = Stroke::new(width_px).with_caps(cap).with_join(join);
-    if !pattern_pt.is_empty() {
-        let pattern_px: Vec<f64> = pattern_pt.iter().map(|p| pt_to_px(*p, dpi)).collect();
-        let offset_px = pt_to_px(offset_pt, dpi);
-        s = s.with_dashes(offset_px, pattern_px);
-    }
-    s
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -629,8 +647,9 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted);
-        // Sanity: no "fill" / "corner_radius" — segments don't fill.
-        assert!(!names.contains(&"fill"));
+        // Sanity: no "corner_radius" — segments don't round corners.
+        // `"fill"` is declared for marker interiors (see linetype
+        // markers) even though the segment itself isn't filled.
         assert!(!names.contains(&"corner_radius"));
     }
 

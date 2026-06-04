@@ -13,13 +13,22 @@
 
 use std::sync::Arc;
 
+use crate::brush::Brush;
 use crate::color::Color;
+use crate::geometry::Affine;
+use crate::path::{FillRule, Path};
 use crate::pick::PickId;
 use crate::plot::scale::Scale;
-use crate::plot::value::Value;
-use crate::stroke::{Cap, Join};
+use crate::plot::value::{LinetypeStep, Value};
+use crate::primitives::PolylineSampler;
+use crate::scene::SceneBuilder;
+use crate::shape::{Shape, ShapeRegistry, ShapeStyle};
+use crate::stroke::{Cap, Join, Stroke};
 
 use super::Channel;
+
+const DEFAULT_MARKER_OUTLINE_PT: f64 = 0.5;
+const MARKER_EPSILON: f64 = 1e-9;
 
 /// Maximum valid pick id — the 24-bit `PickId` encoding budget.
 pub(crate) const MAX_PICK_ID: u32 = 0xFF_FFFF;
@@ -112,17 +121,17 @@ pub(crate) fn resolve_angle_channel(
     resolve_number_channel(channel, scale, i).unwrap_or(0.0)
 }
 
-/// Resolve a linetype channel to an `Arc<[f64]>` of pt dash/gap lengths.
-/// Falls back to solid (empty array) when the channel is unset or the
-/// resolved value isn't a `Value::Linetype`.
+/// Resolve a linetype channel to a `LinetypeStep` pattern. Falls back
+/// to solid (empty array) when the channel is unset or the resolved
+/// value isn't a `Value::Linetype`.
 pub(crate) fn resolve_linetype_channel(
     channel: Option<&Channel>,
     scale: Option<&Scale>,
     i: usize,
-) -> Arc<[f64]> {
+) -> Arc<[LinetypeStep]> {
     match resolve_value(channel, scale, i) {
         Some(Value::Linetype(p)) => p,
-        _ => Arc::from(Vec::<f64>::new()),
+        _ => Arc::from(Vec::<LinetypeStep>::new()),
     }
 }
 
@@ -179,6 +188,40 @@ pub(crate) fn resolve_join_channel(
         Some("bevel") => Join::Bevel,
         _ => default,
     }
+}
+
+/// Build a kurbo [`Stroke`] from the resolved per-mark channels.
+///
+/// `pattern` is the resolved `LinetypeStep` slice. When the pattern
+/// contains [`LinetypeStep::Marker`] entries, the markers are silently
+/// treated as `Gap(linewidth_pt)` here — LineGeom is the only geom
+/// that **also** stamps the marker shapes; other stroked geoms use
+/// the dashing portion only via this helper. Empty pattern → solid.
+///
+/// `linewidth_pt` is used both for the stroke width (after pt→px
+/// conversion) and as the arc-length contribution per `Marker` step.
+pub(crate) fn build_stroke_for_pattern(
+    width_px: f64,
+    cap: Cap,
+    join: Join,
+    pattern: &[LinetypeStep],
+    offset_pt: f64,
+    linewidth_pt: f64,
+    dpi: f64,
+) -> Stroke {
+    let mut s = Stroke::new(width_px).with_caps(cap).with_join(join);
+    if !pattern.is_empty() {
+        let pattern_px: Vec<f64> = pattern
+            .iter()
+            .map(|step| match step {
+                LinetypeStep::Dash(p) | LinetypeStep::Gap(p) => pt_to_px(*p, dpi),
+                LinetypeStep::Marker(_) => pt_to_px(linewidth_pt, dpi),
+            })
+            .collect();
+        let offset_px = pt_to_px(offset_pt, dpi);
+        s = s.with_dashes(offset_px, pattern_px);
+    }
+    s
 }
 
 /// Override the alpha channel of `color` with `alpha` (in `0..=1`).
@@ -243,6 +286,256 @@ pub(crate) fn resolve_pick_id(
     } else {
         PickId::Id(id)
     }
+}
+
+/// Walk one or more [`PolylineSampler`]s through a linetype pattern,
+/// emitting `scene.stroke` for each `Dash` segment and
+/// `scene.fill` / `scene.stroke` for each `Marker` stamp. Advances the
+/// arc-length cursor by Dash / Marker (= `linewidth_px`) / Gap as the
+/// pattern dictates; the pattern loops when the cursor wraps.
+///
+/// **Mode**:
+/// - `distribute = false` — open polyline. Pattern starts at cursor
+///   `-dash_offset_px` and runs until the cursor reaches the end of
+///   each sampler. The trailing partial pattern run is silently
+///   truncated.
+/// - `distribute = true` — closed perimeter. Scale every `Gap` in the
+///   pattern by a uniform factor so an integer number of pattern runs
+///   exactly fits the sampler's total length. Dashes and marker widths
+///   are left untouched. The seam at distance 0 == total_length is
+///   invisible: the pattern wraps continuously. A pattern with zero
+///   total Gap length cannot stretch — the call falls back to the
+///   non-distribute walk.
+///
+/// `marker_fill` and `marker_stroke` are passed to filled / stroked
+/// subpaths of each marker shape respectively (mirroring PointGeom's
+/// emission convention). `solid_stroke_spec` is reused for every Dash
+/// sub-stroke and for any marker shape whose style is
+/// [`ShapeStyle::Stroke`] — the geom is responsible for setting
+/// `width / cap / join` correctly.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_linetype_with_markers(
+    scene: &mut dyn SceneBuilder,
+    samplers: &[PolylineSampler],
+    pattern_pt: &[LinetypeStep],
+    dash_offset_px: f64,
+    linewidth_px: f64,
+    marker_fill: Color,
+    marker_stroke: Color,
+    solid_stroke_spec: &Stroke,
+    xform: Affine,
+    shapes: &ShapeRegistry,
+    dpi: f64,
+    pick: PickId,
+    distribute: bool,
+) {
+    debug_assert!(
+        !pattern_pt.is_empty(),
+        "draw_linetype_with_markers: empty pattern"
+    );
+
+    for sampler in samplers {
+        let total = sampler.total_length();
+        if total <= 0.0 {
+            continue;
+        }
+
+        // Resolve a per-sampler pattern: when `distribute` is set,
+        // scale gaps to fit `total` exactly; otherwise use the pattern
+        // as-is.
+        let pattern_px = resolve_pattern_px(pattern_pt, linewidth_px, dpi, total, distribute);
+
+        let n_steps = pattern_px.len();
+        let mut cursor = if distribute { 0.0 } else { -dash_offset_px };
+        let mut step_idx = 0usize;
+        let mut safety = 0usize;
+        // Safety cap proportional to total / linewidth to catch
+        // malformed zero-advance patterns.
+        let max_iters: usize = (total / linewidth_px.max(1e-3))
+            .ceil()
+            .clamp(64.0, 1_000_000.0) as usize
+            * n_steps
+            + n_steps * 4;
+        while cursor < total - MARKER_EPSILON && safety < max_iters {
+            safety += 1;
+            let step = &pattern_px[step_idx];
+            step_idx = (step_idx + 1) % n_steps;
+            match step {
+                ResolvedStep::Dash(len_px) => {
+                    let len = *len_px;
+                    if len <= 0.0 {
+                        continue;
+                    }
+                    let start = cursor.max(0.0);
+                    let end = (cursor + len).min(total);
+                    if end > start + MARKER_EPSILON {
+                        let path = build_sub_polyline(sampler, start, end);
+                        if path.elements().len() >= 2 {
+                            scene.stroke(
+                                solid_stroke_spec,
+                                xform,
+                                &Brush::Solid(marker_stroke),
+                                None,
+                                &path,
+                                pick,
+                            );
+                        }
+                    }
+                    cursor += len;
+                }
+                ResolvedStep::Marker(name) => {
+                    let mid = cursor + 0.5 * linewidth_px;
+                    if mid >= 0.0 && mid <= total + MARKER_EPSILON {
+                        if let Some(shape) = shapes.get(name.as_ref()) {
+                            if let Some(sample) = sampler.sample_at(mid) {
+                                let bbox = shape.bounding_box();
+                                let local_h = bbox.height();
+                                let scale_factor = if local_h > 0.0 {
+                                    linewidth_px / local_h
+                                } else {
+                                    linewidth_px
+                                };
+                                let marker_xform = xform
+                                    * Affine::translate(sample.point.to_vec2())
+                                    * Affine::rotate(sample.tangent.atan2())
+                                    * Affine::scale(scale_factor);
+                                emit_marker_shape(
+                                    scene,
+                                    shape,
+                                    marker_xform,
+                                    marker_fill,
+                                    marker_stroke,
+                                    pt_to_px(DEFAULT_MARKER_OUTLINE_PT, dpi),
+                                    pick,
+                                );
+                            }
+                        }
+                    }
+                    cursor += linewidth_px;
+                }
+                ResolvedStep::Gap(len_px) => {
+                    cursor += *len_px;
+                }
+            }
+        }
+    }
+}
+
+/// Resolved pattern entry — pt converted to px and (for distribute
+/// mode) gaps scaled to fit the polyline total length.
+enum ResolvedStep {
+    Dash(f64),
+    Marker(Arc<str>),
+    Gap(f64),
+}
+
+/// Convert a pattern from pt → px, optionally distributing gaps so an
+/// integer number of pattern runs fits `total_px` exactly.
+fn resolve_pattern_px(
+    pattern_pt: &[LinetypeStep],
+    linewidth_px: f64,
+    dpi: f64,
+    total_px: f64,
+    distribute: bool,
+) -> Vec<ResolvedStep> {
+    // Pre-compute fixed and gap contributions per pattern run.
+    let mut fixed_px = 0.0;
+    let mut gap_px = 0.0;
+    for step in pattern_pt {
+        match step {
+            LinetypeStep::Dash(p) => fixed_px += pt_to_px(*p, dpi),
+            LinetypeStep::Marker(_) => fixed_px += linewidth_px,
+            LinetypeStep::Gap(p) => gap_px += pt_to_px(*p, dpi),
+        }
+    }
+    let period_px = fixed_px + gap_px;
+
+    let gap_scale = if distribute && gap_px > MARKER_EPSILON && period_px > MARKER_EPSILON {
+        let n = (total_px / period_px).round().max(1.0);
+        let target_gap = (total_px - n * fixed_px) / n;
+        // Disallow negative scale (happens when fixed >> total: the
+        // pattern's non-gap content alone already exceeds the
+        // perimeter). Fall back to 1.0 — the pattern will overflow
+        // visually, which matches what an unfittable closed pattern
+        // does anyway.
+        (target_gap / gap_px).max(0.0)
+    } else {
+        1.0
+    };
+
+    pattern_pt
+        .iter()
+        .map(|step| match step {
+            LinetypeStep::Dash(p) => ResolvedStep::Dash(pt_to_px(*p, dpi)),
+            LinetypeStep::Marker(name) => ResolvedStep::Marker(name.clone()),
+            LinetypeStep::Gap(p) => ResolvedStep::Gap(pt_to_px(*p, dpi) * gap_scale),
+        })
+        .collect()
+}
+
+/// Stamp one shape's subpaths at `xform`. Mirrors PointGeom's emission
+/// loop — fill subpaths take `marker_fill`; stroke subpaths take
+/// `marker_stroke`.
+fn emit_marker_shape(
+    scene: &mut dyn SceneBuilder,
+    shape: &Shape,
+    xform: Affine,
+    marker_fill: Color,
+    marker_stroke: Color,
+    outline_px: f64,
+    pick: PickId,
+) {
+    let outline_spec = Stroke::new(outline_px);
+    for sub in shape.paths() {
+        match shape.style() {
+            ShapeStyle::Fill => {
+                scene.fill(
+                    FillRule::NonZero,
+                    xform,
+                    &Brush::Solid(marker_fill),
+                    None,
+                    sub,
+                    pick,
+                );
+            }
+            ShapeStyle::Stroke => {
+                scene.stroke(
+                    &outline_spec,
+                    xform,
+                    &Brush::Solid(marker_stroke),
+                    None,
+                    sub,
+                    pick,
+                );
+            }
+        }
+    }
+}
+
+/// Build a sub-polyline from `sampler` spanning arc-length `[start,
+/// end]`. Includes interior original vertices that fall strictly
+/// between start and end, so straight runs stay one LineTo each.
+fn build_sub_polyline(sampler: &PolylineSampler, start: f64, end: f64) -> Path {
+    let mut path = Path::new();
+    let start = start.max(0.0);
+    let end = end.min(sampler.total_length());
+    if end <= start + MARKER_EPSILON {
+        return path;
+    }
+    let head = match sampler.sample_at(start) {
+        Some(s) => s.point,
+        None => return path,
+    };
+    path.move_to(head);
+    for d in sampler.segment_boundaries_between(start, end) {
+        if let Some(s) = sampler.sample_at(d) {
+            path.line_to(s.point);
+        }
+    }
+    if let Some(tail) = sampler.sample_at(end) {
+        path.line_to(tail.point);
+    }
+    path
 }
 
 /// Return the smallest non-zero value among two non-negative inputs.

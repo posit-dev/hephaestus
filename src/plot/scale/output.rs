@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use crate::color::Color;
+use crate::plot::value::LinetypeStep;
 
 /// The output range of a [`Scale`](super::Scale) — the set of visual
 /// values a domain entry can map to.
@@ -26,11 +27,11 @@ pub enum OutputRange {
     Strings(Vec<Arc<str>>),
     /// Color outputs (fill/stroke palettes).
     Colors(Vec<Color>),
-    /// Dash-pattern outputs (linetype palettes). Each entry is an
-    /// even-length pt array; empty array = solid. `Arc<[f64]>` so
-    /// palette entries can be shared across rows when a column maps
-    /// repeatedly to the same pattern.
-    Linetypes(Vec<Arc<[f64]>>),
+    /// Linetype outputs (linetype palettes). Each entry is an
+    /// even-length pattern of [`LinetypeStep`] entries; empty array =
+    /// solid. `Arc<[LinetypeStep]>` so palette entries can be shared
+    /// across rows when a column maps repeatedly to the same pattern.
+    Linetypes(Vec<Arc<[LinetypeStep]>>),
 }
 
 impl OutputRange {

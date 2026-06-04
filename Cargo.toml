@@ -119,6 +119,18 @@ name = "polyline_features"
 required-features = ["vello", "png", "text"]
 
 [[example]]
+name = "polyline_markers"
+required-features = ["vello", "png"]
+
+[[example]]
+name = "closed_shape_markers"
+required-features = ["vello", "png"]
+
+[[example]]
+name = "ribbon_gradient"
+required-features = ["vello", "png"]
+
+[[example]]
 name = "polygon_features"
 required-features = ["vello", "png", "text"]
 
@@ -132,6 +144,10 @@ required-features = ["vello", "png", "text"]
 
 [[test]]
 name = "smoke"
+required-features = ["vello"]
+
+[[test]]
+name = "mesh"
 required-features = ["vello"]
 
 [[test]]

@@ -167,6 +167,39 @@ impl Duration {
     }
 }
 
+// ─── Linetype steps ──────────────────────────────────────────────────────────
+
+/// One step in a linetype pattern.
+///
+/// Patterns are even-length sequences where even-indexed entries are
+/// `Dash` or `Marker` (something to draw at the cursor) and odd-indexed
+/// entries are `Gap` (an unconditional advance). See
+/// [`crate::plot::geom::linetype`] for constructors that enforce the
+/// alternation.
+///
+/// `PartialEq` follows f64's IEEE semantics for `Dash` / `Gap`
+/// (NaN ≠ NaN); use [`Value::key_eq`] / `key_hash` for the canonicalised
+/// diff-friendly comparison.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LinetypeStep {
+    /// Stroke a segment of this length (in pt) along the line, then
+    /// advance the cursor by the same amount.
+    Dash(f64),
+    /// Stamp the named shape at the current cursor. The marker is
+    /// assumed to occupy `linewidth` pt of arc length so the next gap
+    /// measures clear space starting from the marker's trailing edge.
+    Marker(Arc<str>),
+    /// Advance the cursor by this many pt without drawing.
+    Gap(f64),
+}
+
+impl LinetypeStep {
+    /// `true` if this is a `Marker` step.
+    pub fn is_marker(&self) -> bool {
+        matches!(self, LinetypeStep::Marker(_))
+    }
+}
+
 // ─── Value ───────────────────────────────────────────────────────────────────
 
 /// A tagged scalar — the lingua franca that scales, diffs, and tick
@@ -192,11 +225,13 @@ pub enum Value {
     Time(i64),
     Duration(i64),
 
-    /// A dash-pattern as an even-length pt array of alternating dash/gap
-    /// lengths. Empty array = solid (no dashing). Carried by `Arc<[f64]>`
-    /// so cloning is cheap when the same pattern repeats across many
-    /// rows (the common case under categorical scaling).
-    Linetype(Arc<[f64]>),
+    /// A linetype pattern — a sequence of [`LinetypeStep`] entries
+    /// (Dash / Marker / Gap). Even-length, with even-indexed entries =
+    /// Dash | Marker and odd-indexed = Gap; empty array = solid. Carried
+    /// by `Arc<[LinetypeStep]>` so cloning is cheap when the same
+    /// pattern repeats across many rows (the common case under
+    /// categorical scaling).
+    Linetype(Arc<[LinetypeStep]>),
 }
 
 impl Value {
@@ -266,9 +301,9 @@ impl Value {
         }
     }
 
-    /// Access the underlying dash pattern, if this value is a
+    /// Access the underlying linetype pattern, if this value is a
     /// `Value::Linetype`. Returns `None` for every other variant.
-    pub fn as_linetype(&self) -> Option<&[f64]> {
+    pub fn as_linetype(&self) -> Option<&[LinetypeStep]> {
         if let Value::Linetype(p) = self {
             Some(p)
         } else {
@@ -278,7 +313,8 @@ impl Value {
 
     /// Deterministic equality for diff/lookup keys. Two `Value::Number`
     /// NaNs compare equal; positive and negative zero compare equal.
-    /// `Value::Linetype` compares element-wise via [`canonical_f64_bits`].
+    /// `Value::Linetype` compares element-wise via
+    /// [`linetype_step_key_eq`].
     pub fn key_eq(&self, other: &Value) -> bool {
         use Value::*;
         match (self, other) {
@@ -295,7 +331,7 @@ impl Value {
                 a.len() == b.len()
                     && a.iter()
                         .zip(b.iter())
-                        .all(|(x, y)| canonical_f64_bits(*x) == canonical_f64_bits(*y))
+                        .all(|(x, y)| linetype_step_key_eq(x, y))
             }
             _ => false,
         }
@@ -326,11 +362,33 @@ impl Value {
             Value::Duration(us) => us.hash(state),
             Value::Linetype(p) => {
                 (p.len() as u64).hash(state);
-                for f in p.iter() {
-                    canonical_f64_bits(*f).hash(state);
+                for step in p.iter() {
+                    linetype_step_key_hash(step, state);
                 }
             }
         }
+    }
+}
+
+/// Element-wise equality for [`LinetypeStep`] entries. NaN-safe / -0
+/// canonicalised for the numeric variants; marker-name comparison is
+/// byte-exact via the `Arc<str>` payload.
+pub(crate) fn linetype_step_key_eq(a: &LinetypeStep, b: &LinetypeStep) -> bool {
+    use LinetypeStep::*;
+    match (a, b) {
+        (Dash(x), Dash(y)) | (Gap(x), Gap(y)) => canonical_f64_bits(*x) == canonical_f64_bits(*y),
+        (Marker(x), Marker(y)) => **x == **y,
+        _ => false,
+    }
+}
+
+/// Deterministic hash for one [`LinetypeStep`]. Mirrors
+/// [`linetype_step_key_eq`].
+pub(crate) fn linetype_step_key_hash<H: Hasher>(step: &LinetypeStep, state: &mut H) {
+    std::mem::discriminant(step).hash(state);
+    match step {
+        LinetypeStep::Dash(f) | LinetypeStep::Gap(f) => canonical_f64_bits(*f).hash(state),
+        LinetypeStep::Marker(s) => (**s).hash(state),
     }
 }
 
@@ -432,12 +490,12 @@ pub enum DataColumn {
     Time(Vec<i64>),
     Duration(Vec<i64>),
 
-    /// Column of dash-pattern arrays — one `Arc<[f64]>` per row.
+    /// Column of linetype patterns — one `Arc<[LinetypeStep]>` per row.
     /// Even-length per row; empty array = solid. The `Arc` lets distinct
     /// rows share a backing buffer when a column is constructed by
     /// replicating a small set of patterns (the typical case under
     /// categorical scaling).
-    Linetype(Vec<Arc<[f64]>>),
+    Linetype(Vec<Arc<[LinetypeStep]>>),
 }
 
 impl DataColumn {
@@ -534,7 +592,7 @@ impl DataColumn {
                     && pa
                         .iter()
                         .zip(pb.iter())
-                        .all(|(x, y)| canonical_f64_bits(*x) == canonical_f64_bits(*y))
+                        .all(|(x, y)| linetype_step_key_eq(x, y))
             }
             _ => false,
         }
@@ -624,13 +682,14 @@ impl From<std::ops::Range<i64>> for DataColumn {
     }
 }
 
-// `Vec<Arc<[f64]>>` -> DataColumn::Linetype. There is intentionally no
-// `From<Vec<f64>>` for the Linetype variant — that would collide with
-// the existing numeric column conversion. Callers construct linetype
-// columns either via the named helpers in `crate::plot::geom::linetype`
-// or by passing pre-built `Arc<[f64]>` entries.
-impl From<Vec<Arc<[f64]>>> for DataColumn {
-    fn from(v: Vec<Arc<[f64]>>) -> Self {
+// `Vec<Arc<[LinetypeStep]>>` -> DataColumn::Linetype. There is
+// intentionally no `From<Vec<f64>>` for the Linetype variant — that
+// would collide with the existing numeric column conversion. Callers
+// construct linetype columns either via the named helpers in
+// `crate::plot::geom::linetype` or by passing pre-built
+// `Arc<[LinetypeStep]>` entries.
+impl From<Vec<Arc<[LinetypeStep]>>> for DataColumn {
+    fn from(v: Vec<Arc<[LinetypeStep]>>) -> Self {
         DataColumn::Linetype(v)
     }
 }
@@ -977,11 +1036,18 @@ mod tests {
 
     // ── Linetype value / column ──
 
+    fn dash_gap(d: f64, g: f64) -> Arc<[LinetypeStep]> {
+        Arc::from(vec![LinetypeStep::Dash(d), LinetypeStep::Gap(g)])
+    }
+
     #[test]
     fn value_linetype_round_trip() {
-        let p: Arc<[f64]> = Arc::from(vec![8.0, 4.0]);
+        let p = dash_gap(8.0, 4.0);
         let v = Value::Linetype(p.clone());
-        assert_eq!(v.as_linetype(), Some(&[8.0, 4.0][..]));
+        let steps = v.as_linetype().expect("linetype");
+        assert_eq!(steps.len(), 2);
+        assert!(matches!(steps[0], LinetypeStep::Dash(d) if (d - 8.0).abs() < 1e-12));
+        assert!(matches!(steps[1], LinetypeStep::Gap(g) if (g - 4.0).abs() < 1e-12));
         assert!(v.as_number().is_none());
         assert!(v.as_color().is_none());
         assert!(v.as_str().is_none());
@@ -990,10 +1056,15 @@ mod tests {
 
     #[test]
     fn value_linetype_key_eq_element_wise() {
-        let a = Value::Linetype(Arc::from(vec![8.0, 4.0]));
-        let b = Value::Linetype(Arc::from(vec![8.0, 4.0]));
-        let c = Value::Linetype(Arc::from(vec![8.0, 4.0, 1.0, 2.0]));
-        let d = Value::Linetype(Arc::from(vec![6.0, 4.0]));
+        let a = Value::Linetype(dash_gap(8.0, 4.0));
+        let b = Value::Linetype(dash_gap(8.0, 4.0));
+        let c = Value::Linetype(Arc::from(vec![
+            LinetypeStep::Dash(8.0),
+            LinetypeStep::Gap(4.0),
+            LinetypeStep::Dash(1.0),
+            LinetypeStep::Gap(2.0),
+        ]));
+        let d = Value::Linetype(dash_gap(6.0, 4.0));
         assert!(a.key_eq(&b));
         assert!(!a.key_eq(&c));
         assert!(!a.key_eq(&d));
@@ -1001,33 +1072,47 @@ mod tests {
     }
 
     #[test]
+    fn value_linetype_marker_key_eq() {
+        let a = Value::Linetype(Arc::from(vec![
+            LinetypeStep::Marker(Arc::from("circle")),
+            LinetypeStep::Gap(5.0),
+        ]));
+        let b = Value::Linetype(Arc::from(vec![
+            LinetypeStep::Marker(Arc::from("circle")),
+            LinetypeStep::Gap(5.0),
+        ]));
+        let c = Value::Linetype(Arc::from(vec![
+            LinetypeStep::Marker(Arc::from("square")),
+            LinetypeStep::Gap(5.0),
+        ]));
+        assert!(a.key_eq(&b));
+        assert!(!a.key_eq(&c));
+        assert_eq!(hash_of(&a), hash_of(&b));
+    }
+
+    #[test]
     fn value_linetype_empty_is_solid() {
-        let solid = Value::Linetype(Arc::from(Vec::<f64>::new()));
+        let solid = Value::Linetype(Arc::from(Vec::<LinetypeStep>::new()));
         assert_eq!(solid.as_linetype().map(|p| p.len()), Some(0));
     }
 
     #[test]
     fn datacolumn_linetype_get() {
-        let col: DataColumn = vec![
-            Arc::<[f64]>::from(vec![8.0, 4.0]),
-            Arc::<[f64]>::from(Vec::<f64>::new()),
-        ]
-        .into();
+        let col: DataColumn =
+            vec![dash_gap(8.0, 4.0), Arc::from(Vec::<LinetypeStep>::new())].into();
         assert!(matches!(col, DataColumn::Linetype(_)));
         assert_eq!(col.len(), 2);
-        assert!(col
-            .get(0)
-            .key_eq(&Value::Linetype(Arc::from(vec![8.0, 4.0]))));
+        assert!(col.get(0).key_eq(&Value::Linetype(dash_gap(8.0, 4.0))));
         assert!(col
             .get(1)
-            .key_eq(&Value::Linetype(Arc::from(Vec::<f64>::new()))));
+            .key_eq(&Value::Linetype(Arc::from(Vec::<LinetypeStep>::new()))));
     }
 
     #[test]
     fn datacolumn_linetype_key_eq_at() {
-        let a: DataColumn = vec![Arc::<[f64]>::from(vec![8.0, 4.0])].into();
-        let b: DataColumn = vec![Arc::<[f64]>::from(vec![8.0, 4.0])].into();
-        let c: DataColumn = vec![Arc::<[f64]>::from(vec![2.0, 3.0])].into();
+        let a: DataColumn = vec![dash_gap(8.0, 4.0)].into();
+        let b: DataColumn = vec![dash_gap(8.0, 4.0)].into();
+        let c: DataColumn = vec![dash_gap(2.0, 3.0)].into();
         assert!(a.key_eq_at(0, &b, 0));
         assert!(!a.key_eq_at(0, &c, 0));
     }

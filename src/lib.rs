@@ -16,6 +16,7 @@ pub mod color;
 pub mod composition;
 pub mod geometry;
 pub mod layout;
+pub mod mesh;
 pub mod path;
 pub mod pick;
 pub mod plot;
@@ -38,6 +39,7 @@ pub use geometry::{Affine, Point, Rect, Size, Vec2};
 pub use layout::{
     Cell, CellId, Grid, Inset, Layout, Length, Measure, Node, Placement, Track, WidthHint,
 };
+pub use mesh::Mesh;
 pub use path::{FillRule, Path};
 pub use pick::PickId;
 pub use primitives::{

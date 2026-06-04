@@ -96,6 +96,21 @@ impl Shape {
     pub fn anchor(&self) -> Point {
         self.anchor
     }
+
+    /// Bounding box of the shape in its local frame — union of every
+    /// subpath's bounding box. Empty shape returns `Rect::ZERO`.
+    ///
+    /// Used by callers that need to size the shape against a known
+    /// extent (e.g. linetype markers scaling so the local y-extent
+    /// matches the line's linewidth).
+    pub fn bounding_box(&self) -> kurbo::Rect {
+        use kurbo::Shape as _;
+        let mut iter = self.paths.iter().map(|p| p.bounding_box());
+        match iter.next() {
+            None => kurbo::Rect::ZERO,
+            Some(first) => iter.fold(first, |acc, r| acc.union(r)),
+        }
+    }
 }
 
 /// In-memory map from name to [`Shape`].
@@ -748,5 +763,27 @@ mod tests {
                 assert!(matches!(first, PathEl::MoveTo(_)), "{name} missing MoveTo",);
             }
         }
+    }
+
+    #[test]
+    fn circle_bounding_box_has_expected_extent() {
+        // builtin circle is `kurbo::Circle::new(Point::ORIGIN, 0.8)` —
+        // bbox should be approximately (-0.8, -0.8) -> (0.8, 0.8),
+        // i.e. width = height = 1.6.
+        let r = ShapeRegistry::with_builtins();
+        let circle = r.get("circle").expect("circle");
+        let bbox = circle.bounding_box();
+        assert!((bbox.width() - 1.6).abs() < 0.05);
+        assert!((bbox.height() - 1.6).abs() < 0.05);
+    }
+
+    #[test]
+    fn square_bounding_box_has_expected_extent() {
+        // builtin square is half-side 0.71 → bbox 1.42 × 1.42.
+        let r = ShapeRegistry::with_builtins();
+        let square = r.get("square").expect("square");
+        let bbox = square.bounding_box();
+        assert!((bbox.width() - 1.42).abs() < 1e-9);
+        assert!((bbox.height() - 1.42).abs() < 1e-9);
     }
 }

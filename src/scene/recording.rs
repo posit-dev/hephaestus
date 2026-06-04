@@ -8,6 +8,7 @@ use super::{Glyph, GlyphRun, SceneBuilder};
 use crate::blend::BlendMode;
 use crate::brush::{Brush, Image, Sampling};
 use crate::geometry::Affine;
+use crate::mesh::Mesh;
 use crate::path::{FillRule, Path};
 use crate::pick::PickId;
 use crate::stroke::Stroke;
@@ -39,6 +40,11 @@ pub enum Op {
         pick_id: PickId,
     },
     DrawGlyphs(OwnedGlyphRun),
+    DrawMesh {
+        mesh: Mesh,
+        transform: Affine,
+        pick_id: PickId,
+    },
     PushLayer {
         blend: BlendMode,
         alpha: f32,
@@ -148,6 +154,14 @@ impl SceneBuilder for RecordingScene {
         }));
     }
 
+    fn draw_mesh(&mut self, mesh: &Mesh, transform: Affine, pick_id: PickId) {
+        self.ops.push(Op::DrawMesh {
+            mesh: mesh.clone(),
+            transform,
+            pick_id,
+        });
+    }
+
     fn push_layer(&mut self, blend: BlendMode, alpha: f32, transform: Affine, clip: &Path) {
         self.ops.push(Op::PushLayer {
             blend,
@@ -159,5 +173,46 @@ impl SceneBuilder for RecordingScene {
 
     fn pop_layer(&mut self) {
         self.ops.push(Op::PopLayer);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::color::Color;
+    use crate::geometry::Point;
+    use crate::mesh::Mesh;
+
+    #[test]
+    fn records_draw_mesh() {
+        let mesh = Mesh::new(
+            vec![
+                Point::new(0.0, 0.0),
+                Point::new(10.0, 0.0),
+                Point::new(0.0, 10.0),
+            ],
+            vec![
+                Color::new([1.0, 0.0, 0.0, 1.0]),
+                Color::new([0.0, 1.0, 0.0, 1.0]),
+                Color::new([0.0, 0.0, 1.0, 1.0]),
+            ],
+            vec![0, 1, 2],
+        );
+        let mut scene = RecordingScene::default();
+        scene.draw_mesh(&mesh, Affine::IDENTITY, PickId::Id(42));
+        assert_eq!(scene.ops.len(), 1);
+        match &scene.ops[0] {
+            Op::DrawMesh {
+                mesh: m,
+                transform,
+                pick_id,
+            } => {
+                assert_eq!(m.vertex_count(), 3);
+                assert_eq!(m.triangle_count(), 1);
+                assert_eq!(*transform, Affine::IDENTITY);
+                assert!(matches!(pick_id, PickId::Id(42)));
+            }
+            other => panic!("expected DrawMesh, got {other:?}"),
+        }
     }
 }

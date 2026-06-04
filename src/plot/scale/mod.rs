@@ -118,11 +118,15 @@ impl Scale {
         self
     }
 
-    /// Configure a linetype output range. Each entry is an even-length pt
-    /// array of alternating dash / gap lengths (empty = solid). Pairs
+    /// Configure a linetype output range. Each entry is a
+    /// [`LinetypeStep`](crate::plot::value::LinetypeStep) pattern
+    /// (alternating Dash|Marker and Gap; empty = solid). Pairs
     /// naturally with the named helpers in
     /// [`crate::plot::geom::linetype`].
-    pub fn range_linetypes(mut self, vs: impl IntoIterator<Item = Arc<[f64]>>) -> Self {
+    pub fn range_linetypes(
+        mut self,
+        vs: impl IntoIterator<Item = Arc<[crate::plot::value::LinetypeStep]>>,
+    ) -> Self {
         self.output_range = Some(OutputRange::Linetypes(vs.into_iter().collect()));
         self
     }
@@ -164,7 +168,7 @@ impl Scale {
         self.bump_generation();
     }
 
-    pub fn set_range_linetypes(&mut self, vs: Vec<Arc<[f64]>>) {
+    pub fn set_range_linetypes(&mut self, vs: Vec<Arc<[crate::plot::value::LinetypeStep]>>) {
         self.output_range = Some(OutputRange::Linetypes(vs));
         self.bump_generation();
     }
@@ -342,10 +346,18 @@ fn format_value(v: &Value) -> String {
             }
         }
         Value::Linetype(p) => {
+            use crate::plot::value::LinetypeStep;
             if p.is_empty() {
                 "solid".to_string()
             } else {
-                let parts: Vec<String> = p.iter().map(|f| format!("{f}")).collect();
+                let parts: Vec<String> = p
+                    .iter()
+                    .map(|s| match s {
+                        LinetypeStep::Dash(f) => format!("dash({f})"),
+                        LinetypeStep::Gap(f) => format!("gap({f})"),
+                        LinetypeStep::Marker(name) => format!("marker({name:?})"),
+                    })
+                    .collect();
                 format!("[{}]", parts.join(", "))
             }
         }
@@ -693,12 +705,21 @@ mod tests {
         assert_eq!(s.map(&Value::from("L")).as_number(), Some(12.0));
     }
 
+    fn lt_dash_gap(d: f64, g: f64) -> Arc<[crate::plot::value::LinetypeStep]> {
+        use crate::plot::value::LinetypeStep;
+        Arc::from(vec![LinetypeStep::Dash(d), LinetypeStep::Gap(g)])
+    }
+
+    fn lt_solid() -> Arc<[crate::plot::value::LinetypeStep]> {
+        Arc::from(Vec::<crate::plot::value::LinetypeStep>::new())
+    }
+
     #[test]
     fn discrete_with_linetype_range_steps_by_index() {
         // Three categories, three patterns — one-to-one mapping.
-        let solid = Arc::<[f64]>::from(Vec::<f64>::new());
-        let dashed = Arc::<[f64]>::from(vec![8.0, 4.0]);
-        let dotted = Arc::<[f64]>::from(vec![2.0, 3.0]);
+        let solid = lt_solid();
+        let dashed = lt_dash_gap(8.0, 4.0);
+        let dotted = lt_dash_gap(2.0, 3.0);
         let s = discrete(["A", "B", "C"].into_iter().map(Into::into)).range_linetypes([
             solid.clone(),
             dashed.clone(),
@@ -718,8 +739,8 @@ mod tests {
     fn ordinal_with_linetype_range_steps_by_nearest_index() {
         // 4 categories, 2 patterns. t values: 0, 1/3, 2/3, 1.
         // round(t * (n-1)) = round(t * 1) = 0, 0, 1, 1.
-        let solid = Arc::<[f64]>::from(Vec::<f64>::new());
-        let dashed = Arc::<[f64]>::from(vec![8.0, 4.0]);
+        let solid = lt_solid();
+        let dashed = lt_dash_gap(8.0, 4.0);
         let s = ordinal(["L1", "L2", "L3", "L4"]).range_linetypes([solid.clone(), dashed.clone()]);
         assert!(s
             .map(&Value::from("L1"))
@@ -734,9 +755,9 @@ mod tests {
     #[test]
     fn continuous_with_linetype_range_steps() {
         // Continuous scales step rather than interpolate Linetypes.
-        let solid = Arc::<[f64]>::from(Vec::<f64>::new());
-        let dashed = Arc::<[f64]>::from(vec![8.0, 4.0]);
-        let dotted = Arc::<[f64]>::from(vec![2.0, 3.0]);
+        let solid = lt_solid();
+        let dashed = lt_dash_gap(8.0, 4.0);
+        let dotted = lt_dash_gap(2.0, 3.0);
         let s =
             continuous(0.0..=10.0).range_linetypes([solid.clone(), dashed.clone(), dotted.clone()]);
         // t = 0.0 → idx round(0 * 2) = 0
