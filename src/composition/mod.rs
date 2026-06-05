@@ -1,7 +1,7 @@
 //! High-level plot composition layout.
 //!
 //! Stacks on top of [`crate::layout`] to provide a patchwork-style model
-//! where every plot is the same 11×14 anatomical grid (see [`anatomy::Slot`])
+//! where every plot is the same 13×16 anatomical grid (see [`anatomy::Slot`])
 //! and composed plots automatically align by anatomical position.
 //!
 //! Construction is id-addressed: every [`Patch`] is created with a string id,
@@ -26,7 +26,7 @@ const TABLE_ROWS_U16: u16 = TABLE_ROWS as u16;
 
 // ─── Patch ───────────────────────────────────────────────────────────────────
 
-/// A single plot's content laid out into the 11×14 anatomical grid.
+/// A single plot's content laid out into the 13×16 anatomical grid.
 ///
 /// Construct with [`Patch::new(id)`](Patch::new), drop content into named
 /// [`Slot`]s with [`Patch::slot`], or into custom positions with
@@ -763,7 +763,7 @@ fn build_composition_grid(
 /// outer wider chrome visually sits behind the narrower per-facet
 /// chrome at the same canonical row.
 ///
-/// Mirrors patchwork's `simplify_gt.gtable_patchwork`: a 16×13
+/// Mirrors patchwork's `simplify_gt.gtable_patchwork`: a 13×16
 /// canonical anatomy whose chrome cols/rows are shared between the
 /// wrapping annotation and the inner border facets.
 fn build_wrapped_composition(
