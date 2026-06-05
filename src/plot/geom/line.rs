@@ -1148,6 +1148,52 @@ mod tests {
     }
 
     #[test]
+    fn linetype_marker_glyph_shape_emits_draw_glyphs() {
+        // A glyph-shape linetype marker should walk the polyline and
+        // emit a DrawGlyphs op per stamp (instead of a Fill op).
+        let blob = peniko::Blob::new(std::sync::Arc::new(Vec::<u8>::new()));
+        let font = crate::scene::Font::new(blob, 0);
+        let em_bbox = crate::geometry::Rect::new(0.0, 0.0, 1.0, 1.0);
+        let em_origin = crate::geometry::Point::new(0.0, 0.8);
+        let glyph_shape =
+            crate::shape::Shape::glyph(font, 1, em_bbox, em_origin, crate::geometry::Point::ZERO);
+        let mut shapes = registry();
+        shapes.insert("glyph-stamp", glyph_shape);
+
+        let mut g = LineGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 100.0]))
+            .set("y", Raw(vec![50.0, 50.0]))
+            .set("stroke", red_solid())
+            .set("linewidth", 4.0_f64)
+            .set(
+                "linetype",
+                Value::Linetype(marker_pattern("glyph-stamp", 5.0)),
+            )
+            .build();
+        g.rebuild_diff_against_previous();
+        let scales = no_scales();
+        let c = ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales);
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &c);
+
+        let glyph_count = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::DrawGlyphs(_)))
+            .count();
+        let fill_count = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count();
+        assert!(
+            glyph_count >= 3,
+            "expected several glyph stamps, got {glyph_count}"
+        );
+        assert_eq!(fill_count, 0, "glyph marker path should not emit Fill ops");
+    }
+
+    #[test]
     fn linetype_marker_consumes_linewidth_of_arc() {
         // With linewidth = 4 pt and gap = 5 pt at 96 dpi:
         //   linewidth_px = 4 * 96/72 ≈ 5.333

@@ -32,10 +32,11 @@ use parley::{
 pub use parley::Alignment;
 
 use crate::brush::Brush;
-use crate::geometry::{Affine, Rect};
+use crate::geometry::{Affine, Point, Rect};
 use crate::layout::{Measure, WidthHint};
 use crate::pick::PickId;
 use crate::scene::{Font, Glyph, GlyphRun, SceneBuilder};
+use crate::shape::Shape;
 
 /// Placeholder brush type for parley — real brushes are passed at draw time.
 type B = ();
@@ -303,6 +304,82 @@ pub fn run_layout_glyphs(run: &TextRun) -> Vec<LaidGlyph> {
     out
 }
 
+// ─── Glyph markers ──────────────────────────────────────────────────────────
+
+/// Shape `text` with `style` and return a single-glyph [`Shape`]
+/// suitable for registering as a [`crate::shape::ShapeRegistry`] entry
+/// and using as a [`crate::plot::geom::PointGeom`] marker or
+/// linetype-pattern stamp.
+///
+/// Most callers pass a single character (letter, common symbol, single-
+/// codepoint emoji). Multi-codepoint sequences are also accepted —
+/// e.g. country-flag emoji like 🇩🇰 (regional indicator D + K) — as
+/// long as the resolved font ligates them into one composite glyph
+/// (Apple Color Emoji, Noto Color Emoji, … all do this for flags).
+/// Shaping happens once here; the draw path is a single
+/// `scene.draw_glyphs` call with no per-frame shaping cost.
+///
+/// The em-space bbox / glyph origin are computed via a fixed-size probe
+/// shaping (64 px) and divided back to em-units, so the returned shape
+/// is independent of the size at which it is eventually rendered.
+///
+/// The default anchor is `(-0.5, 0)` — back-edge convention, matching
+/// vector point shapes — so the marker drops into mode-B endpoint
+/// placement sensibly. Mode-A placements (PointGeom, linetype markers
+/// centred on the curve) ignore the anchor.
+///
+/// # Panics
+///
+/// Panics if shaping `text` produces zero or more than one glyph. A
+/// non-ligated multi-codepoint sequence (the font lacks the
+/// substitution, or the input is two separate characters like `"AB"`)
+/// will trip this — marker shapes are intentionally restricted to a
+/// single glyph.
+pub fn glyph_marker(text: &str, style: &TextStyle) -> Shape {
+    const PROBE_PX: f32 = 64.0;
+    let probe = TextStyle {
+        size_px: PROBE_PX,
+        family: style.family.clone(),
+        weight: style.weight,
+        italic: style.italic,
+    };
+    let run = TextRun::new(text, &probe);
+    let laid = run_layout_glyphs(&run);
+    assert_eq!(
+        laid.len(),
+        1,
+        "glyph_marker({text:?}): shaped to {} glyphs, but markers require exactly 1 \
+         (multi-codepoint inputs must ligate to a single composite glyph in the resolved font)",
+        laid.len()
+    );
+    let g = &laid[0];
+    let s = PROBE_PX as f64;
+    let em_origin = Point::new(g.x as f64 / s, g.y as f64 / s);
+    // em_bbox is `(0, _, advance, _)` horizontally and `(centre_y -
+    // h/2, centre_y + h/2)` vertically, with:
+    //  - `centre_y = natural_height / 2` — the layout middle, which
+    //    coincides with the visible centre for emoji whose bitmap is
+    //    positioned to span the full line (Apple Color Emoji and
+    //    similar). Latin caps end up slightly above this centre but
+    //    close enough for marker use.
+    //  - `h = ascender (= em_origin.y)` — gives a sizing reference that
+    //    matches the vector-shape convention: `linewidth_px /
+    //    bbox.height()` becomes `linewidth_px / ascender`, and
+    //    `GLYPH_BBOX_REFERENCE / bbox.height()` in PointGeom matches
+    //    vector circle's effective height. The extra ~1.18× boost
+    //    needed to make linetype glyphs fill the linewidth visually
+    //    (visible ink is ~85% of the ascender) is applied inside
+    //    `emit_marker_shape`'s glyph branch, so PointGeom stays at the
+    //    natural circle-matched size.
+    let advance_em = run.content_width() / s;
+    let natural_h_em = run.natural_height() / s;
+    let centre_y = natural_h_em / 2.0;
+    let h = em_origin.y;
+    let em_bbox = Rect::new(0.0, centre_y - h / 2.0, advance_em, centre_y + h / 2.0);
+    let anchor = Point::new(-0.5, 0.0);
+    Shape::glyph(g.font.clone(), g.id, em_bbox, em_origin, anchor)
+}
+
 // ─── Drawing ────────────────────────────────────────────────────────────────
 
 /// Draw `run` at `(x, y)` (top-left of the layout box) into `scene`,
@@ -467,5 +544,48 @@ mod tests {
             panel.x1 > panel.x0,
             "panel should still have positive width"
         );
+    }
+
+    #[test]
+    fn glyph_marker_returns_finite_em_metrics() {
+        use crate::shape::ShapeKind;
+        let style = TextStyle::new(16.0);
+        let shape = glyph_marker("A", &style);
+        match shape.kind() {
+            ShapeKind::Glyph {
+                glyph_id,
+                em_bbox,
+                em_origin,
+                ..
+            } => {
+                assert!(glyph_id > 0, "expected a non-zero glyph id for 'A'");
+                assert!(em_bbox.width() > 0.0 && em_bbox.width().is_finite());
+                assert!(em_bbox.height() > 0.0 && em_bbox.height().is_finite());
+                assert!(em_origin.x.is_finite() && em_origin.y.is_finite());
+                // The probe shapes 'A' at 64 px; em-space dimensions
+                // should be roughly < 2 ems (sane font metrics).
+                assert!(em_bbox.height() < 2.5, "em height = {}", em_bbox.height());
+            }
+            _ => panic!("expected glyph variant"),
+        }
+    }
+
+    #[test]
+    fn glyph_marker_anchor_default_is_back_edge() {
+        let style = TextStyle::new(16.0);
+        let shape = glyph_marker("A", &style);
+        let a = shape.anchor();
+        assert_eq!(a.x, -0.5);
+        assert_eq!(a.y, 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "shaped to 2 glyphs")]
+    fn glyph_marker_panics_on_non_ligated_sequence() {
+        let style = TextStyle::new(16.0);
+        // "AB" is two separate letters; no font ligates this. Should
+        // panic so the caller can't accidentally register a multi-glyph
+        // marker.
+        let _ = glyph_marker("AB", &style);
     }
 }

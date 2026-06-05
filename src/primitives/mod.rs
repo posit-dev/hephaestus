@@ -75,7 +75,8 @@ pub use end_clip::{clip_polyline, EndClip};
 pub use offset::offset_polygon;
 pub use path_corner::round_path_corners;
 pub use ribbon::{
-    polyline_gradient, polyline_ribbon, polyline_ribbon_full, RibbonCap, RibbonJoin, RibbonOptions,
+    polygon_gradient, polygon_ribbon, polygon_ribbon_full, polyline_gradient, polyline_ribbon,
+    polyline_ribbon_full, RibbonCap, RibbonJoin, RibbonOptions,
 };
 
 /// Path-approximation tolerance for curved primitives ([`circle`],

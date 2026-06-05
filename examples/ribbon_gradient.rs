@@ -1,6 +1,6 @@
-//! Polyline ribbons rendered via `SceneBuilder::draw_mesh`.
+//! Polyline and polygon ribbons rendered via `SceneBuilder::draw_mesh`.
 //!
-//! Four renders:
+//! Six renders:
 //! - `ribbon_1_gradient_along.png` — single polyline with a 5-stop
 //!   colour gradient along its length.
 //! - `ribbon_2_variable_width.png` — single polyline with width
@@ -8,6 +8,12 @@
 //! - `ribbon_3_full.png` — gradient + variable-width combined.
 //! - `ribbon_4_caps_joins.png` — 3×3 grid: rows = cap (butt / square
 //!   / round), columns = join (miter / bevel / round).
+//! - `ribbon_5_closed_rainbow.png` — regular dodecagon with a hue
+//!   cycle around the loop; the wrap segment closes the gradient
+//!   seamlessly (no visible discontinuity at the close).
+//! - `ribbon_6_closed_full.png` — five-lobed polar curve drawn as a
+//!   closed ribbon with both a hue-cycle gradient and a pulsing
+//!   variable width.
 
 use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
@@ -15,7 +21,8 @@ use hephaestus::geometry::Affine;
 use hephaestus::mesh::Mesh;
 use hephaestus::pick::PickId;
 use hephaestus::primitives::{
-    polyline_gradient, polyline_ribbon, polyline_ribbon_full, RibbonCap, RibbonJoin, RibbonOptions,
+    polygon_gradient, polygon_ribbon_full, polyline_gradient, polyline_ribbon,
+    polyline_ribbon_full, RibbonCap, RibbonJoin, RibbonOptions,
 };
 use hephaestus::scene::SceneBuilder;
 use hephaestus::{Point, Renderer};
@@ -227,6 +234,114 @@ fn main() {
             "examples/ribbon_4_caps_joins.png",
         );
     }
+
+    // ── Render 5: closed-loop rainbow ──────────────────────────────
+    // Regular dodecagon vertices, one full hue cycle around the
+    // loop. The wrap segment interpolates colors[n-1] → colors[0]
+    // (≈ magenta → red, a short hop on the colour wheel), which
+    // should be visually indistinguishable from the other segment
+    // transitions — i.e. no seam at the close.
+    {
+        let (w, h) = (700u32, 700u32);
+        let cx = 350.0;
+        let cy = 350.0;
+        let radius = 260.0;
+        let n = 12;
+        let points: Vec<Point> = (0..n)
+            .map(|i| {
+                let theta = i as f64 / n as f64 * std::f64::consts::TAU;
+                Point::new(cx + radius * theta.cos(), cy + radius * theta.sin())
+            })
+            .collect();
+        let colors: Vec<Color> = (0..n)
+            .map(|i| hsv_to_color(i as f64 / n as f64, 0.85, 0.95))
+            .collect();
+        let opts = RibbonOptions {
+            half_width: pt_to_px(28.0, dpi) * 0.5,
+            cap: RibbonCap::Butt,
+            join: RibbonJoin::Round,
+            miter_limit: 4.0,
+        };
+        let mesh = polygon_gradient(&points, &colors, &opts);
+        render_mesh(
+            &mut renderer,
+            &mesh,
+            w,
+            h,
+            dpi,
+            bg,
+            "examples/ribbon_5_closed_rainbow.png",
+        );
+    }
+
+    // ── Render 6: closed loop with gradient + variable width ───────
+    // Five-lobed polar curve r(θ) = R + a·sin(5θ) sampled at 240
+    // points. Colours cycle the full hue wheel once; widths pulse
+    // at twice the lobe frequency so the ribbon visibly fattens and
+    // narrows around the loop. Both pieces close seamlessly because
+    // `polygon_*` treats the n samples as one continuous ring.
+    {
+        let (w, h) = (900u32, 900u32);
+        let cx = 450.0;
+        let cy = 450.0;
+        let base_r = 280.0;
+        let amp_r = 70.0;
+        let lobes = 5.0;
+        let n = 240;
+        let points: Vec<Point> = (0..n)
+            .map(|i| {
+                let theta = i as f64 / n as f64 * std::f64::consts::TAU;
+                let r = base_r + amp_r * (lobes * theta).sin();
+                Point::new(cx + r * theta.cos(), cy + r * theta.sin())
+            })
+            .collect();
+        let colors: Vec<Color> = (0..n)
+            .map(|i| hsv_to_color(i as f64 / n as f64, 0.85, 0.95))
+            .collect();
+        let half_widths: Vec<f64> = (0..n)
+            .map(|i| {
+                let theta = i as f64 / n as f64 * std::f64::consts::TAU;
+                // Width pulses between ~4 pt and ~22 pt.
+                let pt = 13.0 + 9.0 * (2.0 * lobes * theta).sin();
+                pt_to_px(pt, dpi) * 0.5
+            })
+            .collect();
+        let opts = RibbonOptions {
+            half_width: 1.0,
+            cap: RibbonCap::Butt, // ignored by polygon_*
+            join: RibbonJoin::Round,
+            miter_limit: 4.0,
+        };
+        let mesh = polygon_ribbon_full(&points, Some(&colors), Some(&half_widths), &opts);
+        render_mesh(
+            &mut renderer,
+            &mesh,
+            w,
+            h,
+            dpi,
+            bg,
+            "examples/ribbon_6_closed_full.png",
+        );
+    }
+}
+
+/// HSV → linear RGB Color. Hue is in [0, 1); saturation and value
+/// are in [0, 1]. Hue wraps so callers can iterate `i / n` over a
+/// closed loop without special-casing the seam.
+fn hsv_to_color(h: f64, s: f64, v: f64) -> Color {
+    let h6 = (h.rem_euclid(1.0)) * 6.0;
+    let c = v * s;
+    let x = c * (1.0 - ((h6 % 2.0) - 1.0).abs());
+    let m = v - c;
+    let (r, g, b) = match h6 as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    Color::new([(r + m) as f32, (g + m) as f32, (b + m) as f32, 1.0])
 }
 
 fn pt_to_px(pt: f64, dpi: f64) -> f64 {

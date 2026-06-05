@@ -150,6 +150,10 @@ required-features = ["vello", "png", "text"]
 name = "text_path"
 required-features = ["vello", "png", "text"]
 
+[[example]]
+name = "glyph_markers"
+required-features = ["vello", "png", "text"]
+
 [[test]]
 name = "smoke"
 required-features = ["vello"]

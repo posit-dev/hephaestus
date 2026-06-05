@@ -21,8 +21,8 @@ use crate::pick::PickId;
 use crate::plot::scale::Scale;
 use crate::plot::value::{LinetypeStep, Value};
 use crate::primitives::PolylineSampler;
-use crate::scene::SceneBuilder;
-use crate::shape::{Shape, ShapeRegistry, ShapeStyle};
+use crate::scene::{Glyph, GlyphRun, SceneBuilder};
+use crate::shape::{Shape, ShapeKind, ShapeRegistry, ShapeStyle};
 use crate::stroke::{Cap, Join, Stroke};
 
 use super::Channel;
@@ -583,9 +583,17 @@ pub(crate) fn emit_endpoint_marker(
     );
 }
 
-/// Stamp one shape's subpaths at `xform`. Mirrors PointGeom's emission
-/// loop — fill subpaths take `marker_fill`; stroke subpaths take
-/// `marker_stroke`.
+/// Stamp one shape at `xform`. Mirrors PointGeom's emission loop.
+///
+/// - Path-backed shapes: fill subpaths take `marker_fill`; stroke subpaths
+///   take `marker_stroke`.
+/// - Glyph-backed shapes: a single `GlyphRun` is emitted with
+///   `brush = marker_fill`; `marker_stroke` is ignored (v1: glyph markers
+///   are fill-only). The em-space shift `em_origin - em_bbox.center()` is
+///   composed inside the caller's `xform` so the glyph's visual centre
+///   lands at the placement point. The caller's `xform` is expected to
+///   already carry the desired translate/rotate/scale; the scale factor
+///   becomes the glyph's effective font size in pixels.
 pub(crate) fn emit_marker_shape(
     scene: &mut dyn SceneBuilder,
     shape: &Shape,
@@ -595,29 +603,71 @@ pub(crate) fn emit_marker_shape(
     outline_px: f64,
     pick: PickId,
 ) {
-    let outline_spec = Stroke::new(outline_px);
-    for sub in shape.paths() {
-        match shape.style() {
-            ShapeStyle::Fill => {
-                scene.fill(
-                    FillRule::NonZero,
-                    xform,
-                    &Brush::Solid(marker_fill),
-                    None,
-                    sub,
-                    pick,
-                );
+    match shape.kind() {
+        ShapeKind::Paths { paths, style } => {
+            let outline_spec = Stroke::new(outline_px);
+            for sub in paths {
+                match style {
+                    ShapeStyle::Fill => {
+                        scene.fill(
+                            FillRule::NonZero,
+                            xform,
+                            &Brush::Solid(marker_fill),
+                            None,
+                            sub,
+                            pick,
+                        );
+                    }
+                    ShapeStyle::Stroke => {
+                        scene.stroke(
+                            &outline_spec,
+                            xform,
+                            &Brush::Solid(marker_stroke),
+                            None,
+                            sub,
+                            pick,
+                        );
+                    }
+                }
             }
-            ShapeStyle::Stroke => {
-                scene.stroke(
-                    &outline_spec,
-                    xform,
-                    &Brush::Solid(marker_stroke),
-                    None,
-                    sub,
-                    pick,
-                );
-            }
+        }
+        ShapeKind::Glyph {
+            font,
+            glyph_id,
+            em_bbox,
+            em_origin,
+        } => {
+            // Glyph linetype markers / arrow terminators: scale up so
+            // the visible ink approximately fills the surrounding
+            // linewidth track. The bbox height is the typographic
+            // ascender, but the visible ink of most glyphs only fills
+            // ~85% of that height (typical emoji padding within their
+            // em-square; Latin cap-to-baseline within ascender). The
+            // boost is composed inside the same transform as the
+            // centring shift, so the glyph stays centred while
+            // growing. PointGeom does *not* apply this boost — its
+            // sizing is anchored to the GLYPH_BBOX_REFERENCE
+            // convention, which already targets the vector-shape
+            // visual extent.
+            const INK_COVERAGE_BOOST: f64 = 1.0 / 0.85;
+            let centring = Affine::translate(em_origin.to_vec2() - em_bbox.center().to_vec2());
+            let glyphs = [Glyph {
+                id: glyph_id,
+                x: 0.0,
+                y: 0.0,
+            }];
+            let brush = Brush::Solid(marker_fill);
+            let run = GlyphRun {
+                font,
+                font_size: 1.0,
+                transform: xform * Affine::scale(INK_COVERAGE_BOOST) * centring,
+                glyph_transform: None,
+                brush: &brush,
+                brush_alpha: 1.0,
+                hint: false,
+                glyphs: &glyphs,
+            };
+            scene.draw_glyphs(&run, pick);
         }
     }
 }

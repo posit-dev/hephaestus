@@ -4,7 +4,7 @@
 
 use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
-use hephaestus::shape::{builtin, ShapeRegistry, ShapeStyle};
+use hephaestus::shape::{builtin, ShapeKind, ShapeRegistry, ShapeStyle};
 use hephaestus::stroke::{Cap, Join, Stroke};
 use hephaestus::{
     Affine, Brush, FillRule, PickId, Point, Rect, Renderer, SceneBuilder, Shape, Vec2,
@@ -39,9 +39,13 @@ fn draw_shape_centered(
     stroke_world_width: f64,
 ) {
     let xform = Affine::translate(center.to_vec2()) * Affine::scale(size);
-    match shape.style() {
+    let (paths, style) = match shape.kind() {
+        ShapeKind::Paths { paths, style } => (paths, style),
+        ShapeKind::Glyph { .. } => return,
+    };
+    match style {
         ShapeStyle::Fill => {
-            for sub in shape.paths() {
+            for sub in paths {
                 scene.fill(FillRule::NonZero, xform, brush, None, sub, PickId::Skip);
             }
         }
@@ -49,7 +53,7 @@ fn draw_shape_centered(
             let stroke = Stroke::new(stroke_world_width / size)
                 .with_caps(Cap::Round)
                 .with_join(Join::Round);
-            for sub in shape.paths() {
+            for sub in paths {
                 scene.stroke(&stroke, xform, brush, None, sub, PickId::Skip);
             }
         }
@@ -72,9 +76,13 @@ fn draw_shape_attached(
     let xform = Affine::translate(origin.to_vec2())
         * Affine::rotate(direction.atan2())
         * Affine::scale(size);
-    match shape.style() {
+    let (paths, style) = match shape.kind() {
+        ShapeKind::Paths { paths, style } => (paths, style),
+        ShapeKind::Glyph { .. } => return,
+    };
+    match style {
         ShapeStyle::Fill => {
-            for sub in shape.paths() {
+            for sub in paths {
                 scene.fill(FillRule::NonZero, xform, brush, None, sub, PickId::Skip);
             }
         }
@@ -82,7 +90,7 @@ fn draw_shape_attached(
             let stroke = Stroke::new(stroke_world_width / size)
                 .with_caps(Cap::Round)
                 .with_join(Join::Round);
-            for sub in shape.paths() {
+            for sub in paths {
                 scene.stroke(&stroke, xform, brush, None, sub, PickId::Skip);
             }
         }

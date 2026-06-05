@@ -37,6 +37,17 @@
 //!   5pt `"size"` default is unchanged, so callers wanting pure band
 //!   sizing also pass `size = 0`.
 //! - `"shape"` — registered shape name (optional; defaults to "circle").
+//!   Glyph-backed shapes (constructed via [`crate::shape::Shape::glyph`]
+//!   or the [`crate::text::glyph_marker`] convenience) are valid here and
+//!   render via `scene.draw_glyphs`. For glyph shapes, `"stroke"` has no
+//!   effect — the glyph is filled with the resolved `"fill"` colour.
+//!   Glyph height is normalised to the same bounding-box convention as
+//!   the built-in vector shapes (`~1.6` units across), so a vector
+//!   `"circle"` and a glyph `"letter-a"` at the same `"size"` render at
+//!   comparable extent. Visible glyph ink still occupies only ~70% of
+//!   its em-box (cap-height), so letters look slightly smaller than a
+//!   solid disc of the same `"size"` — bump `"size"` if you need exact
+//!   visual parity.
 //! - `"angle"` — rotation in **radians** around the placement point,
 //!   mathematical CCW (positive rotates the glyph counter-clockwise in
 //!   the rendered image). Default `0.0` (no rotation). Applies after
@@ -62,8 +73,8 @@ use crate::brush::Brush;
 use crate::geometry::Affine;
 use crate::path::FillRule;
 use crate::plot::value::Value;
-use crate::scene::SceneBuilder;
-use crate::shape::{Shape, ShapeStyle};
+use crate::scene::{Glyph, GlyphRun, SceneBuilder};
+use crate::shape::{Shape, ShapeKind, ShapeStyle};
 use crate::stroke::Stroke;
 
 use super::resolve::{
@@ -85,6 +96,14 @@ const DEFAULT_SIZE_PT: f64 = 5.0;
 const DEFAULT_SHAPE: &str = "circle";
 /// Default stroke linewidth in pt when stroking a glyph outline.
 const DEFAULT_STROKE_WIDTH_PT: f64 = 1.0;
+/// Reference local-bbox height for built-in vector shapes (circle:
+/// r=0.8 → bbox 1.6×1.6). The glyph branch scales font-size by
+/// `GLYPH_BBOX_REFERENCE / em_bbox.height()` so a glyph shape at a given
+/// `"size"` renders with a bounding-box height comparable to a vector
+/// shape at the same `"size"`. (Visible glyph ink remains ~70% of its
+/// em-box due to font cap-height; that residual mismatch is documented
+/// but not corrected — would require per-font metric reads.)
+const GLYPH_BBOX_REFERENCE: f64 = 1.6;
 
 /// Catalog of channels this geom recognises, with their expected scale
 /// output type. New channels: add an entry here + handle the resolved
@@ -289,30 +308,71 @@ impl Geom for PointGeom {
             };
 
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
-            for sub in shape.paths() {
-                match shape.style() {
-                    ShapeStyle::Fill => {
-                        if let Some(fc) = fill_color {
-                            scene.fill(
-                                FillRule::NonZero,
-                                xform,
-                                &Brush::Solid(fc),
-                                None,
-                                sub,
-                                pick,
-                            );
-                        }
-                        if let Some(sc) = stroke_color {
-                            let st = Stroke::new(pt_to_px(DEFAULT_STROKE_WIDTH_PT, ctx.dpi));
-                            scene.stroke(&st, xform, &Brush::Solid(sc), None, sub, pick);
+            match shape.kind() {
+                ShapeKind::Paths { paths, style } => {
+                    for sub in paths {
+                        match style {
+                            ShapeStyle::Fill => {
+                                if let Some(fc) = fill_color {
+                                    scene.fill(
+                                        FillRule::NonZero,
+                                        xform,
+                                        &Brush::Solid(fc),
+                                        None,
+                                        sub,
+                                        pick,
+                                    );
+                                }
+                                if let Some(sc) = stroke_color {
+                                    let st =
+                                        Stroke::new(pt_to_px(DEFAULT_STROKE_WIDTH_PT, ctx.dpi));
+                                    scene.stroke(&st, xform, &Brush::Solid(sc), None, sub, pick);
+                                }
+                            }
+                            ShapeStyle::Stroke => {
+                                if let Some(sc) = stroke_color {
+                                    let st =
+                                        Stroke::new(pt_to_px(DEFAULT_STROKE_WIDTH_PT, ctx.dpi));
+                                    scene.stroke(&st, xform, &Brush::Solid(sc), None, sub, pick);
+                                }
+                            }
                         }
                     }
-                    ShapeStyle::Stroke => {
-                        if let Some(sc) = stroke_color {
-                            let st = Stroke::new(pt_to_px(DEFAULT_STROKE_WIDTH_PT, ctx.dpi));
-                            scene.stroke(&st, xform, &Brush::Solid(sc), None, sub, pick);
-                        }
+                }
+                ShapeKind::Glyph {
+                    font,
+                    glyph_id,
+                    em_bbox,
+                    em_origin,
+                } => {
+                    let Some(fc) = fill_color else { continue };
+                    // Normalise glyph height to the vector-shape bbox
+                    // convention so vector and glyph markers at the same
+                    // "size" render at comparable visual extent.
+                    let h = em_bbox.height();
+                    if h <= 0.0 || !h.is_finite() {
+                        continue;
                     }
+                    let bbox_norm = GLYPH_BBOX_REFERENCE / h;
+                    let centring =
+                        Affine::translate(em_origin.to_vec2() - em_bbox.center().to_vec2());
+                    let glyphs = [Glyph {
+                        id: glyph_id,
+                        x: 0.0,
+                        y: 0.0,
+                    }];
+                    let brush = Brush::Solid(fc);
+                    let run = GlyphRun {
+                        font,
+                        font_size: 1.0,
+                        transform: xform * Affine::scale(bbox_norm) * centring,
+                        glyph_transform: None,
+                        brush: &brush,
+                        brush_alpha: 1.0,
+                        hint: false,
+                        glyphs: &glyphs,
+                    };
+                    scene.draw_glyphs(&run, pick);
                 }
             }
         }
@@ -474,6 +534,113 @@ mod tests {
             .filter(|op| matches!(op, Op::Fill { .. }))
             .count();
         assert_eq!(fills, 3);
+    }
+
+    fn synthetic_glyph_shape() -> crate::shape::Shape {
+        let blob = peniko::Blob::new(std::sync::Arc::new(Vec::<u8>::new()));
+        let font = crate::scene::Font::new(blob, 0);
+        let em_bbox = crate::geometry::Rect::new(0.0, 0.0, 0.6, 1.0);
+        let em_origin = crate::geometry::Point::new(0.05, 0.8);
+        let anchor = crate::geometry::Point::new(-0.5, 0.0);
+        crate::shape::Shape::glyph(font, 1, em_bbox, em_origin, anchor)
+    }
+
+    #[test]
+    fn glyph_shape_emits_draw_glyphs() {
+        let mut shapes = registry();
+        shapes.insert("synthetic-glyph", synthetic_glyph_shape());
+        let mut g = PointGeom::builder()
+            .set("x", vec![0.0_f64, 0.5, 1.0])
+            .set("y", vec![0.0_f64, 1.0, 0.0])
+            .set("fill", red_solid())
+            .set("shape", "synthetic-glyph")
+            .set("size", 14.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let scales = no_scales();
+        let c = ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales);
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &c);
+
+        let glyph_ops: Vec<_> = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::DrawGlyphs(_)))
+            .collect();
+        assert_eq!(glyph_ops.len(), 3, "one DrawGlyphs op per row");
+
+        // Fills/strokes from glyph rows: none.
+        let fills = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count();
+        let strokes = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .count();
+        assert_eq!(fills, 0);
+        assert_eq!(strokes, 0);
+    }
+
+    #[test]
+    fn glyph_shape_with_no_fill_emits_nothing() {
+        // Stroke channel is ignored for glyph shapes; without a fill,
+        // nothing should be emitted.
+        let mut shapes = registry();
+        shapes.insert("synthetic-glyph", synthetic_glyph_shape());
+        let mut g = PointGeom::builder()
+            .set("x", vec![0.0_f64])
+            .set("y", vec![0.0_f64])
+            .set("stroke", red_solid())
+            .set("shape", "synthetic-glyph")
+            .build();
+        g.rebuild_diff_against_previous();
+        let scales = no_scales();
+        let c = ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales);
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &c);
+        assert!(
+            scene.ops.is_empty(),
+            "glyph shape with stroke-only should emit nothing, got {:?}",
+            scene.ops
+        );
+    }
+
+    #[test]
+    fn mixed_path_and_glyph_shapes_both_render() {
+        // Per-row mix: half the rows use the vector "circle", half use a
+        // glyph shape. Recording should contain both Fill and DrawGlyphs.
+        let mut shapes = registry();
+        shapes.insert("synthetic-glyph", synthetic_glyph_shape());
+        let mut g = PointGeom::builder()
+            .set("x", vec![0.0_f64, 0.25, 0.5, 0.75])
+            .set("y", vec![0.5_f64, 0.5, 0.5, 0.5])
+            .set("fill", red_solid())
+            .set(
+                "shape",
+                vec!["circle", "circle", "synthetic-glyph", "synthetic-glyph"],
+            )
+            .build();
+        g.rebuild_diff_against_previous();
+        let scales = no_scales();
+        let c = ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales);
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &c);
+
+        let fills = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count();
+        let glyphs = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::DrawGlyphs(_)))
+            .count();
+        assert_eq!(fills, 2, "two vector-shape fills");
+        assert_eq!(glyphs, 2, "two glyph draws");
     }
 
     #[test]

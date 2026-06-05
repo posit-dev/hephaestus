@@ -1,9 +1,10 @@
-//! Polyline-as-ribbon tessellation.
+//! Polyline- and polygon-as-ribbon tessellation.
 //!
-//! A "ribbon" is a stroked polyline expressed as a triangle [`Mesh`]
-//! with per-vertex colour and per-vertex half-width. Drawing happens
-//! via [`SceneBuilder::draw_mesh`](crate::scene::SceneBuilder); the
-//! Vello backend decomposes the mesh into per-triangle linear-gradient
+//! A "ribbon" is a stroked open polyline or closed polygon expressed
+//! as a triangle [`Mesh`] with per-vertex colour and per-vertex
+//! half-width. Drawing happens via
+//! [`SceneBuilder::draw_mesh`](crate::scene::SceneBuilder); the Vello
+//! backend decomposes the mesh into per-triangle linear-gradient
 //! fills, which gives perfect Gouraud-equivalent colour blending
 //! along ribbon strips (because the two shoulders at each polyline
 //! vertex carry the same colour, so the gradient axis runs cleanly
@@ -11,14 +12,23 @@
 //!
 //! # Entry points
 //!
+//! Open polylines (with end caps):
 //! - [`polyline_ribbon`] — constant colour, constant half-width.
 //! - [`polyline_gradient`] — per-vertex colour, constant half-width.
 //! - [`polyline_ribbon_full`] — per-vertex colour and per-vertex
 //!   half-width.
 //!
-//! Caps: butt / square / round. Joins: miter (with auto-bevel
-//! fallback when the miter exceeds [`RibbonOptions::miter_limit`]),
-//! bevel, round.
+//! Closed polygons (no caps; the loop closes from `points[n - 1]`
+//! back to `points[0]` — do not repeat the first vertex):
+//! - [`polygon_ribbon`] — constant colour, constant half-width.
+//! - [`polygon_gradient`] — per-vertex colour, constant half-width.
+//! - [`polygon_ribbon_full`] — per-vertex colour and per-vertex
+//!   half-width.
+//!
+//! Caps: butt / square / round (open only — [`RibbonOptions::cap`]
+//! is ignored by the `polygon_*` entry points). Joins: miter (with
+//! auto-bevel fallback when the miter exceeds
+//! [`RibbonOptions::miter_limit`]), bevel, round.
 //!
 //! All distances are in **panel pixels**. Callers convert from pt at
 //! their own draw sites (`px = pt * dpi / 72.0`).
@@ -94,7 +104,7 @@ impl Default for RibbonOptions {
 /// Constant-colour, constant-width ribbon. Equivalent to a uniformly
 /// stroked polyline expressed as a mesh.
 pub fn polyline_ribbon(points: &[Point], color: Color, opts: &RibbonOptions) -> Mesh {
-    polyline_ribbon_inner(points, ColorSource::Constant(color), None, opts)
+    ribbon_inner(points, ColorSource::Constant(color), None, opts, false)
 }
 
 /// Per-vertex coloured, constant-width ribbon. `colors.len()` must
@@ -107,7 +117,7 @@ pub fn polyline_gradient(points: &[Point], colors: &[Color], opts: &RibbonOption
         points.len(),
         colors.len(),
     );
-    polyline_ribbon_inner(points, ColorSource::PerVertex(colors), None, opts)
+    ribbon_inner(points, ColorSource::PerVertex(colors), None, opts, false)
 }
 
 /// Full ribbon: optionally per-vertex coloured, optionally per-vertex
@@ -137,7 +147,63 @@ pub fn polyline_ribbon_full(
         Some(c) => ColorSource::PerVertex(c),
         None => ColorSource::Constant(Color::new([0.0, 0.0, 0.0, 1.0])),
     };
-    polyline_ribbon_inner(points, color_source, half_widths, opts)
+    ribbon_inner(points, color_source, half_widths, opts, false)
+}
+
+/// Constant-colour, constant-width closed-polygon ribbon. The loop
+/// closes from `points[n - 1]` back to `points[0]` — do **not**
+/// repeat the first vertex. [`RibbonOptions::cap`] is ignored (a
+/// closed loop has no endpoints to cap). Returns an empty mesh when
+/// `points.len() < 3`.
+pub fn polygon_ribbon(points: &[Point], color: Color, opts: &RibbonOptions) -> Mesh {
+    ribbon_inner(points, ColorSource::Constant(color), None, opts, true)
+}
+
+/// Per-vertex coloured, constant-width closed-polygon ribbon.
+/// `colors.len()` must equal `points.len()`. The wrap segment
+/// interpolates `colors[n - 1] → colors[0]` like any other segment,
+/// so the gradient closes seamlessly. See [`polygon_ribbon`] for the
+/// closure convention.
+pub fn polygon_gradient(points: &[Point], colors: &[Color], opts: &RibbonOptions) -> Mesh {
+    assert_eq!(
+        points.len(),
+        colors.len(),
+        "polygon_gradient: points.len() ({}) != colors.len() ({})",
+        points.len(),
+        colors.len(),
+    );
+    ribbon_inner(points, ColorSource::PerVertex(colors), None, opts, true)
+}
+
+/// Full closed-polygon ribbon: optionally per-vertex coloured,
+/// optionally per-vertex half-width. Either slice may be `None`; the
+/// defaults are taken from `opts`. See [`polygon_ribbon`] for the
+/// closure convention.
+pub fn polygon_ribbon_full(
+    points: &[Point],
+    colors: Option<&[Color]>,
+    half_widths: Option<&[f64]>,
+    opts: &RibbonOptions,
+) -> Mesh {
+    if let Some(c) = colors {
+        assert_eq!(
+            points.len(),
+            c.len(),
+            "polygon_ribbon_full: colors.len() must match points.len()"
+        );
+    }
+    if let Some(w) = half_widths {
+        assert_eq!(
+            points.len(),
+            w.len(),
+            "polygon_ribbon_full: half_widths.len() must match points.len()"
+        );
+    }
+    let color_source = match colors {
+        Some(c) => ColorSource::PerVertex(c),
+        None => ColorSource::Constant(Color::new([0.0, 0.0, 0.0, 1.0])),
+    };
+    ribbon_inner(points, color_source, half_widths, opts, true)
 }
 
 // ── Inner machinery ─────────────────────────────────────────────────────────
@@ -175,14 +241,18 @@ struct VertexLayout {
     bevel_outside_left: bool,
 }
 
-fn polyline_ribbon_inner(
+fn ribbon_inner(
     points: &[Point],
     colors: ColorSource<'_>,
     half_widths: Option<&[f64]>,
     opts: &RibbonOptions,
+    closed: bool,
 ) -> Mesh {
     let n = points.len();
-    if n < 2 {
+    // Open polylines need >= 2 points; closed polygons need >= 3
+    // (anything less is degenerate).
+    let min_pts = if closed { 3 } else { 2 };
+    if n < min_pts {
         return Mesh::new(Vec::new(), Vec::new(), Vec::new());
     }
 
@@ -194,11 +264,14 @@ fn polyline_ribbon_inner(
         }
     };
 
-    // Compute unit segment tangents. `segment_tangent[i]` is the
-    // tangent of segment (i, i+1). Length n-1.
-    let mut seg_tangent: Vec<Vec2> = Vec::with_capacity(n - 1);
-    for w in points.windows(2) {
-        let delta = w[1] - w[0];
+    // Compute unit segment tangents. `seg_tangent[i]` is the tangent
+    // of segment `points[i] → points[(i + 1) % n]`. Open polylines
+    // have n-1 segments; closed polygons have n (the last one wraps
+    // back to vertex 0).
+    let n_segs = if closed { n } else { n - 1 };
+    let mut seg_tangent: Vec<Vec2> = Vec::with_capacity(n_segs);
+    for i in 0..n_segs {
+        let delta = points[(i + 1) % n] - points[i];
         let len = delta.hypot();
         if len <= EPSILON {
             // Degenerate segment — re-use last tangent if any,
@@ -215,20 +288,33 @@ fn polyline_ribbon_inner(
     // Compute per-vertex layout.
     let mut layouts: Vec<VertexLayout> = Vec::with_capacity(n);
     for i in 0..n {
+        // For closed loops vertex 0's inbound segment is the wrap
+        // (seg_tangent[n - 1]), and vertex n-1's outbound is the same
+        // wrap. For open polylines the endpoint branch below picks
+        // whichever tangent it actually needs, so the dummy values
+        // here are unused.
         let t_in = if i == 0 {
-            seg_tangent[0]
+            if closed {
+                seg_tangent[n - 1]
+            } else {
+                seg_tangent[0]
+            }
         } else {
             seg_tangent[i - 1]
         };
         let t_out = if i + 1 == n {
-            seg_tangent[n - 2]
+            if closed {
+                seg_tangent[n - 1]
+            } else {
+                seg_tangent[n - 2]
+            }
         } else {
             seg_tangent[i]
         };
         let pi = points[i];
         let w = hw(i);
 
-        if i == 0 || i + 1 == n {
+        if !closed && (i == 0 || i + 1 == n) {
             // Endpoint: single perpendicular offset.
             let t = if i == 0 { t_out } else { t_in };
             let n_left = perp_left(t);
@@ -337,19 +423,22 @@ fn polyline_ribbon_inner(
     // bled, so cap geometry attaches at the natural shoulder
     // positions.
 
-    // 1. Start cap.
-    emit_cap(
-        &mut vertices,
-        &mut vcolors,
-        &mut indices,
-        points[0],
-        layouts[0].out_left,
-        layouts[0].out_right,
-        -seg_tangent[0],
-        colors.at(0),
-        opts.cap,
-        hw(0),
-    );
+    // 1. Start cap (open polylines only — closed polygons have no
+    //    endpoints to cap).
+    if !closed {
+        emit_cap(
+            &mut vertices,
+            &mut vcolors,
+            &mut indices,
+            points[0],
+            layouts[0].out_left,
+            layouts[0].out_right,
+            -seg_tangent[0],
+            colors.at(0),
+            opts.cap,
+            hw(0),
+        );
+    }
 
     // 2. Per-segment quads, interleaved with joins at the segment's
     //    *end* vertex (the start vertex of the next segment).
@@ -359,21 +448,27 @@ fn polyline_ribbon_inner(
     // the segment overlaps the cap's interior — eliminating the AA
     // seam between the segment quad and the cap polygon. For butt
     // caps there's no cap geometry, so the bleed would just extend
-    // the line by ε past its nominal endpoint — skip it.
+    // the line by ε past its nominal endpoint — skip it. For closed
+    // polygons every segment is interior, so the cap-bleed path is
+    // unused.
     let cap_bleed_amount = match opts.cap {
         RibbonCap::Butt => 0.0,
         RibbonCap::Square | RibbonCap::Round => SEAM_BLEED_PX,
     };
-    for i in 0..(n - 1) {
+    for i in 0..n_segs {
+        let i_next = (i + 1) % n;
         let ci = colors.at(i);
-        let cj = colors.at(i + 1);
+        let cj = colors.at(i_next);
         let t = seg_tangent[i];
-        let near_bleed_amount = if i > 0 {
+        // For closed loops every boundary is interior; for open
+        // polylines the segment's near boundary is the start cap when
+        // i == 0, and the far boundary is the end cap when i == n-2.
+        let near_bleed_amount = if closed || i > 0 {
             SEAM_BLEED_PX
         } else {
             cap_bleed_amount
         };
-        let far_bleed_amount = if i + 1 < n - 1 {
+        let far_bleed_amount = if closed || i + 1 < n - 1 {
             SEAM_BLEED_PX
         } else {
             cap_bleed_amount
@@ -382,43 +477,48 @@ fn polyline_ribbon_inner(
         let far_bleed = t * far_bleed_amount;
         let a_pos = layouts[i].out_left - near_bleed;
         let b_pos = layouts[i].out_right - near_bleed;
-        let c_pos = layouts[i + 1].in_right + far_bleed;
-        let d_pos = layouts[i + 1].in_left + far_bleed;
+        let c_pos = layouts[i_next].in_right + far_bleed;
+        let d_pos = layouts[i_next].in_left + far_bleed;
         let a = push_vertex(&mut vertices, &mut vcolors, a_pos, ci);
         let b = push_vertex(&mut vertices, &mut vcolors, b_pos, ci);
         let c = push_vertex(&mut vertices, &mut vcolors, c_pos, cj);
         let d = push_vertex(&mut vertices, &mut vcolors, d_pos, cj);
         indices.extend_from_slice(&[a, b, c, a, c, d]);
 
-        // Join at vertex i+1, if it's an interior bevel/round.
-        let vk = i + 1;
-        if vk < n - 1 && layouts[vk].is_bevel {
+        // Join at vertex i_next, if it's a bevel/round.
+        // Open: only interior vertices (vertex 0 and n-1 are caps).
+        // Closed: every vertex is interior, including the wrap-back
+        // to vertex 0 emitted by the last segment.
+        let is_interior_join = closed || i_next < n - 1;
+        if is_interior_join && layouts[i_next].is_bevel {
             emit_join_fill(
                 &mut vertices,
                 &mut vcolors,
                 &mut indices,
-                points[vk],
-                &layouts[vk],
-                colors.at(vk),
+                points[i_next],
+                &layouts[i_next],
+                colors.at(i_next),
                 opts.join,
             );
         }
     }
 
-    // 3. End cap.
-    let last = n - 1;
-    emit_cap(
-        &mut vertices,
-        &mut vcolors,
-        &mut indices,
-        points[last],
-        layouts[last].in_right,
-        layouts[last].in_left,
-        seg_tangent[n - 2],
-        colors.at(last),
-        opts.cap,
-        hw(last),
-    );
+    // 3. End cap (open polylines only).
+    if !closed {
+        let last = n - 1;
+        emit_cap(
+            &mut vertices,
+            &mut vcolors,
+            &mut indices,
+            points[last],
+            layouts[last].in_right,
+            layouts[last].in_left,
+            seg_tangent[n - 2],
+            colors.at(last),
+            opts.cap,
+            hw(last),
+        );
+    }
 
     Mesh::new(vertices, vcolors, indices)
 }
@@ -939,5 +1039,183 @@ mod tests {
         let pts = [pt(0.0, 0.0), pt(10.0, 0.0)];
         let cols = [red(), green(), blue()];
         let _ = polyline_gradient(&pts, &cols, &RibbonOptions::default());
+    }
+
+    // ── Closed-polygon ribbon ──────────────────────────────────────
+
+    #[test]
+    fn polygon_ribbon_equilateral_triangle_segment_count() {
+        // Interior angle 60°, turn angle 120°, miter_mag = 2 < 4 →
+        // mitre at every vertex, no bevel fills. 3 wrap segments × 2
+        // tris per segment = 6.
+        let pts = [pt(0.0, 0.0), pt(10.0, 0.0), pt(5.0, 8.66)];
+        let opts = RibbonOptions {
+            half_width: 1.0,
+            join: RibbonJoin::Miter,
+            ..RibbonOptions::default()
+        };
+        let mesh = polygon_ribbon(&pts, red(), &opts);
+        assert_eq!(mesh.triangle_count(), 6);
+    }
+
+    #[test]
+    fn polygon_ribbon_square_bevel_emits_four_extra_triangles() {
+        // 4 segments × 2 + one bevel fill at each of 4 corners
+        // (including the wrap-back to vertex 0).
+        let pts = [pt(0.0, 0.0), pt(10.0, 0.0), pt(10.0, 10.0), pt(0.0, 10.0)];
+        let opts = RibbonOptions {
+            half_width: 1.0,
+            join: RibbonJoin::Bevel,
+            ..RibbonOptions::default()
+        };
+        let mesh = polygon_ribbon(&pts, red(), &opts);
+        assert_eq!(mesh.triangle_count(), 12);
+    }
+
+    #[test]
+    fn polygon_ribbon_too_few_points_returns_empty() {
+        // < 3 points → empty mesh; a 2-point closed loop is degenerate.
+        for pts in [&[][..], &[pt(0.0, 0.0)], &[pt(0.0, 0.0), pt(10.0, 0.0)]] {
+            let mesh = polygon_ribbon(pts, red(), &RibbonOptions::default());
+            assert!(
+                mesh.is_empty(),
+                "expected empty mesh for {} points",
+                pts.len()
+            );
+        }
+    }
+
+    #[test]
+    fn polygon_ribbon_cap_setting_is_ignored() {
+        // Closed polygon has no endpoints — varying `cap` must not
+        // change the mesh.
+        let pts = [pt(0.0, 0.0), pt(10.0, 0.0), pt(5.0, 8.66)];
+        let make = |cap| {
+            let opts = RibbonOptions {
+                half_width: 1.0,
+                cap,
+                join: RibbonJoin::Miter,
+                ..RibbonOptions::default()
+            };
+            polygon_ribbon(&pts, red(), &opts).triangle_count()
+        };
+        let butt = make(RibbonCap::Butt);
+        assert_eq!(butt, make(RibbonCap::Square));
+        assert_eq!(butt, make(RibbonCap::Round));
+    }
+
+    #[test]
+    fn polygon_gradient_wrap_segment_closes_color_loop() {
+        // Triangle with vertex colours [red, green, blue]. The wrap
+        // segment (vertex 2 → vertex 0) must emit red shoulders at
+        // its far end, otherwise the loop wouldn't actually close.
+        let pts = [pt(0.0, 0.0), pt(10.0, 0.0), pt(5.0, 8.66)];
+        let cols = [red(), green(), blue()];
+        let opts = RibbonOptions {
+            half_width: 1.0,
+            join: RibbonJoin::Miter,
+            ..RibbonOptions::default()
+        };
+        let mesh = polygon_gradient(&pts, &cols, &opts);
+        let mut counts = [0_usize; 3];
+        for c in &mesh.colors {
+            if *c == red() {
+                counts[0] += 1;
+            } else if *c == green() {
+                counts[1] += 1;
+            } else if *c == blue() {
+                counts[2] += 1;
+            }
+        }
+        // Each colour should appear at multiple shoulder emissions
+        // (incoming AND outgoing segment at its vertex).
+        assert!(counts[0] >= 2, "expected red shoulders, got {counts:?}");
+        assert!(counts[1] >= 2, "expected green shoulders, got {counts:?}");
+        assert!(counts[2] >= 2, "expected blue shoulders, got {counts:?}");
+    }
+
+    #[test]
+    fn polygon_ribbon_full_variable_width_widens_with_width() {
+        // Square loop at two width settings: the bounding box should
+        // grow as the width grows. Exact equality is hard because the
+        // seam-bleed shifts shoulders along the local tangent (which
+        // for a square is the same axis as the bounding-box edge),
+        // but the *outward* extent must still scale with width.
+        let pts = [pt(0.0, 0.0), pt(10.0, 0.0), pt(10.0, 10.0), pt(0.0, 10.0)];
+        let opts = RibbonOptions {
+            half_width: 1.0,
+            join: RibbonJoin::Miter,
+            ..RibbonOptions::default()
+        };
+        let m_thin = polygon_ribbon_full(&pts, None, Some(&[1.0_f64; 4]), &opts);
+        let m_thick = polygon_ribbon_full(&pts, None, Some(&[5.0_f64; 4]), &opts);
+        let bb_thin = m_thin.bounding_box();
+        let bb_thick = m_thick.bounding_box();
+        // Outer extent grows by ~4 px on each side as w goes 1 → 5.
+        assert!(
+            bb_thick.x0 < bb_thin.x0 - 3.0,
+            "expected thicker x0 ({}) at least 3 px outside thin x0 ({})",
+            bb_thick.x0,
+            bb_thin.x0,
+        );
+        assert!(
+            bb_thick.x1 > bb_thin.x1 + 3.0,
+            "expected thicker x1 ({}) at least 3 px outside thin x1 ({})",
+            bb_thick.x1,
+            bb_thin.x1,
+        );
+        assert!(bb_thick.y0 < bb_thin.y0 - 3.0);
+        assert!(bb_thick.y1 > bb_thin.y1 + 3.0);
+    }
+
+    #[test]
+    fn polygon_ribbon_full_per_vertex_width_changes_shoulder_offsets() {
+        // Triangle with widths [1, 4, 1]. Vertex 1 (the wide one)
+        // should produce shoulder pairs farther from the polyline
+        // than vertex 0 or 2.
+        let pts = [pt(0.0, 0.0), pt(10.0, 0.0), pt(5.0, 8.66)];
+        let widths = [1.0_f64, 4.0, 1.0];
+        let opts = RibbonOptions {
+            half_width: 1.0,
+            join: RibbonJoin::Miter,
+            ..RibbonOptions::default()
+        };
+        let mesh = polygon_ribbon_full(&pts, None, Some(&widths), &opts);
+        // Find max shoulder offset from each vertex (taking shoulder
+        // as "any mesh vertex within ~3 px of the polyline vertex
+        // along the polyline" is too fragile, so just measure
+        // shoulder-vertex distance from polyline vertex and bucket
+        // by closest polyline vertex).
+        let mut max_offset = [0.0_f64; 3];
+        for v in &mesh.vertices {
+            let d = [
+                (*v - pts[0]).hypot(),
+                (*v - pts[1]).hypot(),
+                (*v - pts[2]).hypot(),
+            ];
+            let (idx, dist) = d
+                .iter()
+                .enumerate()
+                .min_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .unwrap();
+            if *dist > max_offset[idx] {
+                max_offset[idx] = *dist;
+            }
+        }
+        // Vertex 1 (width 4) should sit further from its vertex than
+        // vertices 0/2 (width 1).
+        assert!(
+            max_offset[1] > max_offset[0] + 2.0,
+            "max shoulder offsets per vertex: {max_offset:?}",
+        );
+        assert!(max_offset[1] > max_offset[2] + 2.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "colors.len()")]
+    fn polygon_gradient_panics_on_length_mismatch() {
+        let pts = [pt(0.0, 0.0), pt(10.0, 0.0), pt(5.0, 8.66)];
+        let cols = [red(), green()];
+        let _ = polygon_gradient(&pts, &cols, &RibbonOptions::default());
     }
 }

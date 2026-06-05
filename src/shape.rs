@@ -21,7 +21,12 @@
 //!
 //! ```ignore
 //! let xform = Affine::translate(center.to_vec2()) * Affine::scale(size);
-//! for sub in shape.paths() { sb.fill(rule, xform, &brush, None, sub, pick); }
+//! match shape.kind() {
+//!     ShapeKind::Paths { paths, .. } => for sub in paths {
+//!         sb.fill(rule, xform, &brush, None, sub, pick);
+//!     },
+//!     ShapeKind::Glyph { .. } => { /* emit a GlyphRun — see PointGeom */ }
+//! }
 //! ```
 //!
 //! **(B) Attached to a line endpoint** — e.g. an open arrowhead, or any shape
@@ -34,7 +39,7 @@
 //! let anchor_world = rot * (shape.anchor().to_vec2() * size);
 //! let origin       = placement - anchor_world;
 //! let xform        = Affine::translate(origin.to_vec2()) * rot * Affine::scale(size);
-//! for sub in shape.paths() { sb.fill(rule, xform, &brush, None, sub, pick); }
+//! match shape.kind() { /* same dispatch as (A) */ }
 //! ```
 //!
 //! Built-in anchors are chosen for mode (B): point shapes get a back-edge
@@ -45,8 +50,13 @@ use std::collections::HashMap;
 
 use crate::geometry::Point;
 use crate::path::Path;
+use crate::scene::Font;
 
-/// How a [`Shape`] is meant to be rendered.
+/// How a path-backed [`Shape`] is meant to be rendered.
+///
+/// Glyph-backed shapes (constructed via [`Shape::glyph`]) don't carry a
+/// `ShapeStyle` — they're always filled with the resolved fill colour;
+/// stroke channels have no effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShapeStyle {
     /// Open curves — only meaningful with a stroke. Subpaths are 2-point line
@@ -59,35 +69,114 @@ pub enum ShapeStyle {
     Fill,
 }
 
-/// A scale- and orientation-free glyph expressed as one or more subpaths.
+/// A scale- and orientation-free glyph expressed either as one or more
+/// subpaths or as a single font-glyph.
 ///
 /// See the [module documentation](self) for the two placement modes and the
-/// anchor convention.
+/// anchor convention. Path and glyph variants are exposed via
+/// [`Shape::kind`] returning a [`ShapeKind`].
 #[derive(Debug, Clone)]
 pub struct Shape {
-    paths: Vec<Path>,
-    style: ShapeStyle,
+    content: ShapeContent,
     anchor: Point,
 }
 
+#[derive(Debug, Clone)]
+enum ShapeContent {
+    Paths {
+        paths: Vec<Path>,
+        style: ShapeStyle,
+    },
+    Glyph {
+        font: Font,
+        glyph_id: u32,
+        em_bbox: kurbo::Rect,
+        em_origin: Point,
+    },
+}
+
+/// Borrowed view of a [`Shape`]'s contents — returned by [`Shape::kind`].
+///
+/// `Paths` is the classic case: a list of vector subpaths plus a fill/stroke
+/// hint. `Glyph` is a single positioned font glyph: caller emits a
+/// [`crate::scene::GlyphRun`] using `font` / `glyph_id` and centres the
+/// glyph at the placement point using `em_bbox` + `em_origin` (em-space;
+/// multiply by the desired font-size in pixels at draw time). Marker
+/// shapes are required to be a single glyph — multi-codepoint inputs
+/// (e.g. flag emoji like 🇩🇰) are accepted at construction so long as the
+/// resolved font ligates them to one composite glyph.
+#[derive(Debug, Clone, Copy)]
+pub enum ShapeKind<'a> {
+    Paths {
+        paths: &'a [Path],
+        style: ShapeStyle,
+    },
+    Glyph {
+        font: &'a Font,
+        glyph_id: u32,
+        em_bbox: kurbo::Rect,
+        em_origin: Point,
+    },
+}
+
 impl Shape {
-    /// Construct a shape from its subpaths, style hint, and anchor.
+    /// Construct a path-backed shape from its subpaths, style hint, and anchor.
     pub fn new(paths: Vec<Path>, style: ShapeStyle, anchor: Point) -> Self {
         Self {
-            paths,
-            style,
+            content: ShapeContent::Paths { paths, style },
             anchor,
         }
     }
 
-    /// The subpaths that make up the shape, in normalized local coordinates.
-    pub fn paths(&self) -> &[Path] {
-        &self.paths
+    /// Construct a glyph-backed shape from a resolved single glyph.
+    ///
+    /// `glyph_id` is the glyph index in `font`. `em_bbox` is the visual
+    /// bounding box at unit em size; the drawing code uses
+    /// `em_bbox.height()` for linetype-marker sizing
+    /// (`scale = linewidth_px / em_bbox.height()`) and `em_bbox.center()`
+    /// to centre the marker at the placement point. `em_origin` is the
+    /// glyph's parley origin in the same em-frame (typically near the
+    /// bottom-left for Latin glyphs because parley records the baseline
+    /// and advance origin); drawing logic applies
+    /// `translate(em_origin - em_bbox.center())` to centre the visible
+    /// extent on the placement point.
+    pub fn glyph(
+        font: Font,
+        glyph_id: u32,
+        em_bbox: kurbo::Rect,
+        em_origin: Point,
+        anchor: Point,
+    ) -> Self {
+        Self {
+            content: ShapeContent::Glyph {
+                font,
+                glyph_id,
+                em_bbox,
+                em_origin,
+            },
+            anchor,
+        }
     }
 
-    /// How the shape is meant to be rendered — caller may override.
-    pub fn style(&self) -> ShapeStyle {
-        self.style
+    /// Borrowed view of the shape's contents — match this in draw code.
+    pub fn kind(&self) -> ShapeKind<'_> {
+        match &self.content {
+            ShapeContent::Paths { paths, style } => ShapeKind::Paths {
+                paths,
+                style: *style,
+            },
+            ShapeContent::Glyph {
+                font,
+                glyph_id,
+                em_bbox,
+                em_origin,
+            } => ShapeKind::Glyph {
+                font,
+                glyph_id: *glyph_id,
+                em_bbox: *em_bbox,
+                em_origin: *em_origin,
+            },
+        }
     }
 
     /// Point in the shape's local frame that aligns with the placement point
@@ -97,18 +186,26 @@ impl Shape {
         self.anchor
     }
 
-    /// Bounding box of the shape in its local frame — union of every
-    /// subpath's bounding box. Empty shape returns `Rect::ZERO`.
+    /// Bounding box of the shape in its local frame.
     ///
-    /// Used by callers that need to size the shape against a known
-    /// extent (e.g. linetype markers scaling so the local y-extent
-    /// matches the line's linewidth).
+    /// For path-backed shapes this is the union of every subpath's bounding
+    /// box; for glyph-backed shapes it's the stored `em_bbox`. Empty path
+    /// shapes return `Rect::ZERO`.
+    ///
+    /// Used by callers that need to size the shape against a known extent
+    /// (e.g. linetype markers scaling so the local y-extent matches the
+    /// line's linewidth).
     pub fn bounding_box(&self) -> kurbo::Rect {
-        use kurbo::Shape as _;
-        let mut iter = self.paths.iter().map(|p| p.bounding_box());
-        match iter.next() {
-            None => kurbo::Rect::ZERO,
-            Some(first) => iter.fold(first, |acc, r| acc.union(r)),
+        match &self.content {
+            ShapeContent::Paths { paths, .. } => {
+                use kurbo::Shape as _;
+                let mut iter = paths.iter().map(|p| p.bounding_box());
+                match iter.next() {
+                    None => kurbo::Rect::ZERO,
+                    Some(first) => iter.fold(first, |acc, r| acc.union(r)),
+                }
+            }
+            ShapeContent::Glyph { em_bbox, .. } => *em_bbox,
         }
     }
 }
@@ -670,8 +767,11 @@ mod tests {
         ];
         for name in fill_names {
             let s = r.get(name).expect(name);
-            assert_eq!(s.style(), ShapeStyle::Fill, "{name}");
-            for sub in s.paths() {
+            let ShapeKind::Paths { paths, style } = s.kind() else {
+                panic!("{name}: expected Paths variant");
+            };
+            assert_eq!(style, ShapeStyle::Fill, "{name}");
+            for sub in paths {
                 let last = sub.elements().last().expect("non-empty path");
                 assert!(
                     matches!(last, PathEl::ClosePath),
@@ -700,8 +800,11 @@ mod tests {
         ];
         for name in stroke_names {
             let s = r.get(name).expect(name);
-            assert_eq!(s.style(), ShapeStyle::Stroke, "{name}");
-            for sub in s.paths() {
+            let ShapeKind::Paths { paths, style } = s.kind() else {
+                panic!("{name}: expected Paths variant");
+            };
+            assert_eq!(style, ShapeStyle::Stroke, "{name}");
+            for sub in paths {
                 let last = sub.elements().last().expect("non-empty path");
                 assert!(
                     !matches!(last, PathEl::ClosePath),
@@ -746,7 +849,10 @@ mod tests {
         assert!(r.contains("custom"));
         assert_eq!(r.len(), 1);
         let prev = r.insert("custom", builtin::square()).expect("prev shape");
-        assert_eq!(prev.style(), ShapeStyle::Fill);
+        let ShapeKind::Paths { style, .. } = prev.kind() else {
+            panic!("expected Paths variant");
+        };
+        assert_eq!(style, ShapeStyle::Fill);
         assert_eq!(r.len(), 1);
         assert!(r.remove("custom").is_some());
         assert!(r.is_empty());
@@ -758,10 +864,42 @@ mod tests {
         let r = ShapeRegistry::with_builtins();
         for name in builtin::NAMES {
             let s = r.get(name).expect(name);
-            for sub in s.paths() {
+            let ShapeKind::Paths { paths, .. } = s.kind() else {
+                panic!("{name}: expected Paths variant");
+            };
+            for sub in paths {
                 let first = sub.elements().first().expect("non-empty path");
                 assert!(matches!(first, PathEl::MoveTo(_)), "{name} missing MoveTo",);
             }
+        }
+    }
+
+    #[test]
+    fn glyph_shape_roundtrips_via_kind() {
+        // Construct a glyph shape with a synthetic font blob; the only thing
+        // we exercise here is the wrapping/unwrapping. Drawing semantics are
+        // tested in PointGeom / resolve.rs tests.
+        let blob = peniko::Blob::new(std::sync::Arc::new(Vec::<u8>::new()));
+        let font = Font::new(blob, 0);
+        let em_bbox = kurbo::Rect::new(0.0, 0.0, 0.6, 1.0);
+        let em_origin = Point::new(0.05, 0.8);
+        let anchor = Point::new(-0.5, 0.0);
+        let s = Shape::glyph(font, 42, em_bbox, em_origin, anchor);
+
+        assert_eq!(s.anchor(), anchor);
+        assert_eq!(s.bounding_box(), em_bbox);
+        match s.kind() {
+            ShapeKind::Glyph {
+                glyph_id,
+                em_bbox: b,
+                em_origin: o,
+                ..
+            } => {
+                assert_eq!(glyph_id, 42);
+                assert_eq!(b, em_bbox);
+                assert_eq!(o, em_origin);
+            }
+            _ => panic!("expected Glyph variant"),
         }
     }
 
