@@ -2,12 +2,12 @@
 //!
 //! Explicit only — no palette indirection (the user supplies the actual
 //! numbers / colors / strings). Variants line up with the corresponding
-//! [`Value`](crate::plot::value::Value) shapes.
+//! [`Value`](crate::scales::value::Value) shapes.
 
 use std::sync::Arc;
 
 use crate::color::Color;
-use crate::plot::value::LinetypeStep;
+use crate::scales::value::LinetypeStep;
 
 /// The output range of a [`Scale`](super::Scale) — the set of visual
 /// values a domain entry can map to.

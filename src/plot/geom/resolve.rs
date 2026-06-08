@@ -261,7 +261,7 @@ pub(crate) fn override_alpha(color: Option<Color>, alpha: Option<f64>) -> Option
 /// WedgeGeom's `radius_x_band`).
 pub(crate) fn band_width_at(scale: Option<&Scale>, raw: &Value) -> f64 {
     match scale {
-        Some(s) => s.scale_type().band_width_at(s, raw),
+        Some(s) => s.band_width_at(raw),
         None => 0.0,
     }
 }

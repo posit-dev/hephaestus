@@ -1,0 +1,380 @@
+//! Scale-type algorithms as free functions, one per kind.
+//!
+//! [`ScaleTypeKind`] tags the family; the per-kind functions
+//! ([`continuous_map`], [`discrete_map`], [`ordinal_map`], [`binned_map`],
+//! [`identity_map`], plus their `_breaks` / `_band_width` siblings) operate
+//! on plain inputs and return plain outputs. No traits, no `Arc<dyn>` —
+//! callers either dispatch on the kind themselves (see hephaestus's
+//! `Scale::map`) or call the per-kind function directly.
+
+use crate::color::Color;
+
+use super::breaks::extended_breaks;
+use super::input::InputRange;
+use super::output::OutputRange;
+use super::transform::Transform;
+use super::value::Value;
+
+/// Discriminator for the scale-type family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ScaleTypeKind {
+    /// Linear mapping over a numeric domain. Output range can be unset
+    /// (returns normalised `[0, 1]` fraction), `Numbers` (piecewise-linear
+    /// interpolation across stops), or `Colors` (piecewise-linear
+    /// componentwise interpolation).
+    #[default]
+    Continuous,
+    /// One-to-one lookup over an unordered set of values. Each domain
+    /// entry maps to exactly the output entry at the same index. Use this
+    /// when each category should pick a distinct visual (per-category
+    /// colors, sizes, strings, …).
+    Discrete,
+    /// **Ordered** domain with **continuous** output interpretation: each
+    /// domain entry's position `idx` is converted to a normalised
+    /// `t = idx / (n - 1)`, then interpolated through the output range
+    /// (same engine as Continuous). When the domain and output range
+    /// have the same length the result coincides with Discrete's
+    /// one-to-one lookup; when they differ, intermediate domain entries
+    /// fall on interpolated points along the gradient.
+    Ordinal,
+    /// Continuous domain pre-binned into discrete output bins by an
+    /// explicit list of break points.
+    Binned,
+    /// Pass-through. Input is returned untouched.
+    Identity,
+}
+
+impl ScaleTypeKind {
+    /// Stable name for diagnostics / serialisation.
+    pub fn name(self) -> &'static str {
+        match self {
+            ScaleTypeKind::Continuous => "continuous",
+            ScaleTypeKind::Discrete => "discrete",
+            ScaleTypeKind::Ordinal => "ordinal",
+            ScaleTypeKind::Binned => "binned",
+            ScaleTypeKind::Identity => "identity",
+        }
+    }
+}
+
+// ─── Continuous ──────────────────────────────────────────────────────────────
+
+/// Map a value through a continuous scale.
+///
+/// Applies the transform, normalises to `[0, 1]` against the input range,
+/// then interpolates through the output range (or returns the fraction
+/// directly when the output range is unset).
+///
+/// Returns `Value::Null` if `input` has no numeric projection or the input
+/// range is missing / not continuous.
+pub fn continuous_map(
+    input: &Value,
+    input_range: Option<&InputRange>,
+    output_range: Option<&OutputRange>,
+    transform: &Transform,
+) -> Value {
+    let v = match input.as_number() {
+        Some(n) => n,
+        None => return Value::Null,
+    };
+    let (d_min, d_max) = match input_range {
+        Some(InputRange::Continuous { min, max }) => (*min, *max),
+        _ => return Value::Null,
+    };
+    let v_t = transform.forward(v);
+    let dmin_t = transform.forward(d_min);
+    let dmax_t = transform.forward(d_max);
+    let t = if dmax_t == dmin_t {
+        0.0
+    } else {
+        (v_t - dmin_t) / (dmax_t - dmin_t)
+    };
+    interpolate_range(t, output_range)
+}
+
+/// Tick positions for a continuous scale, in input space, projected
+/// to `Value::Number` for the formatter to handle.
+pub fn continuous_breaks(
+    input_range: Option<&InputRange>,
+    _transform: &Transform,
+    n: usize,
+) -> Vec<Value> {
+    match input_range {
+        Some(InputRange::Continuous { min, max }) => extended_breaks(*min, *max, n)
+            .into_iter()
+            .map(Value::Number)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+// ─── Discrete ────────────────────────────────────────────────────────────────
+
+/// One-to-one lookup: returns the output-range entry at the same index as
+/// the matching domain entry. When the output range is unset, returns the
+/// band-centre fraction `(idx + 0.5) / n` (positional rendering on a
+/// discrete axis).
+pub fn discrete_map(
+    input: &Value,
+    input_range: Option<&InputRange>,
+    output_range: Option<&OutputRange>,
+) -> Value {
+    let domain = match input_range {
+        Some(InputRange::Discrete(d)) => d,
+        _ => return Value::Null,
+    };
+    let n = domain.len();
+    let idx = match domain.iter().position(|d| d.key_eq(input)) {
+        Some(i) => i,
+        None => return Value::Null,
+    };
+    match output_range {
+        None => {
+            if n == 0 {
+                Value::Null
+            } else {
+                Value::Number((idx as f64 + 0.5) / n as f64)
+            }
+        }
+        Some(OutputRange::Numbers(vs)) => vs
+            .get(idx)
+            .copied()
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        Some(OutputRange::Colors(vs)) => vs
+            .get(idx)
+            .copied()
+            .map(Value::Color)
+            .unwrap_or(Value::Null),
+        Some(OutputRange::Strings(vs)) => vs
+            .get(idx)
+            .cloned()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+        Some(OutputRange::Linetypes(vs)) => vs
+            .get(idx)
+            .cloned()
+            .map(Value::Linetype)
+            .unwrap_or(Value::Null),
+    }
+}
+
+// ─── Ordinal ─────────────────────────────────────────────────────────────────
+
+/// Ordered discrete domain mapped through a continuous output range.
+/// Each domain entry's normalised position `idx / (n - 1)` is
+/// interpolated through the output range (or returns the band-centre
+/// fraction when the output range is unset).
+pub fn ordinal_map(
+    input: &Value,
+    input_range: Option<&InputRange>,
+    output_range: Option<&OutputRange>,
+) -> Value {
+    let domain = match input_range {
+        Some(InputRange::Discrete(d)) => d,
+        _ => return Value::Null,
+    };
+    let n = domain.len();
+    let idx = match domain.iter().position(|d| d.key_eq(input)) {
+        Some(i) => i,
+        None => return Value::Null,
+    };
+    if n == 0 {
+        return Value::Null;
+    }
+    match output_range {
+        None => Value::Number((idx as f64 + 0.5) / n as f64),
+        Some(range) => {
+            let t = if n > 1 {
+                idx as f64 / (n - 1) as f64
+            } else {
+                0.0
+            };
+            interpolate_range(t, Some(range))
+        }
+    }
+}
+
+// ─── Discrete / Ordinal shared helpers ───────────────────────────────────────
+
+/// Break values for a discrete / ordinal scale — just the domain entries.
+pub fn discrete_breaks(input_range: Option<&InputRange>) -> Vec<Value> {
+    match input_range {
+        Some(InputRange::Discrete(d)) => d.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// Uniform band width for a discrete / ordinal scale: `1.0 / n_bands`.
+pub fn discrete_band_width(input_range: Option<&InputRange>) -> f64 {
+    match input_range {
+        Some(InputRange::Discrete(d)) if !d.is_empty() => 1.0 / d.len() as f64,
+        _ => 0.0,
+    }
+}
+
+// ─── Binned ──────────────────────────────────────────────────────────────────
+
+/// Map a value through a binned scale. Returns the bin's domain-space
+/// centre projected onto `[0, 1]`; out-of-range inputs return `Null`. For
+/// uneven-width bins the centre placement naturally widens the bin's
+/// panel slot, matching histogram conventions.
+pub fn binned_map(
+    input: &Value,
+    input_range: Option<&InputRange>,
+    output_range: Option<&OutputRange>,
+) -> Value {
+    let v = match input.as_number() {
+        Some(n) => n,
+        None => return Value::Null,
+    };
+    let (d_min, d_max) = match input_range {
+        Some(InputRange::Continuous { min, max }) => (*min, *max),
+        _ => return Value::Null,
+    };
+    let edges = match output_range {
+        Some(OutputRange::Numbers(vs)) if vs.len() >= 2 => vs,
+        _ => return Value::Null,
+    };
+    if !v.is_finite() || v < d_min || v > d_max {
+        return Value::Null;
+    }
+    let span = d_max - d_min;
+    if span <= 0.0 {
+        return Value::Number(0.0);
+    }
+    let bin = find_bin(v, edges);
+    let centre = (edges[bin] + edges[bin + 1]) * 0.5;
+    Value::Number((centre - d_min) / span)
+}
+
+/// Bin edges of a binned scale, as `Value::Number`.
+pub fn binned_breaks(output_range: Option<&OutputRange>) -> Vec<Value> {
+    match output_range {
+        Some(OutputRange::Numbers(vs)) => vs.iter().copied().map(Value::Number).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Uniform band width for a binned scale: `1.0 / n_bins`.
+pub fn binned_band_width(output_range: Option<&OutputRange>) -> f64 {
+    match output_range {
+        Some(OutputRange::Numbers(vs)) if vs.len() >= 2 => 1.0 / (vs.len() - 1) as f64,
+        _ => 0.0,
+    }
+}
+
+/// Per-bin band width — the proportional panel slot of the bin containing
+/// `input`. Lets [`Scale::map_with_offset`] (in `crate::plot::scale`) apply
+/// `*_band` channel offsets correctly across non-uniform bin widths.
+pub fn binned_band_width_at(
+    input: &Value,
+    input_range: Option<&InputRange>,
+    output_range: Option<&OutputRange>,
+) -> f64 {
+    let v = match input.as_number() {
+        Some(n) => n,
+        None => return 0.0,
+    };
+    let (d_min, d_max) = match input_range {
+        Some(InputRange::Continuous { min, max }) => (*min, *max),
+        _ => return 0.0,
+    };
+    let edges = match output_range {
+        Some(OutputRange::Numbers(vs)) if vs.len() >= 2 => vs,
+        _ => return 0.0,
+    };
+    let span = d_max - d_min;
+    if span <= 0.0 {
+        return 0.0;
+    }
+    let bin = find_bin(v, edges);
+    (edges[bin + 1] - edges[bin]) / span
+}
+
+// ─── Identity ────────────────────────────────────────────────────────────────
+
+/// Pass-through map — returns the input verbatim.
+pub fn identity_map(input: &Value) -> Value {
+    input.clone()
+}
+
+// ─── Interpolation helpers (shared by Continuous + Ordinal) ──────────────────
+
+/// Interpolate `t` (typically in `[0, 1]`, but unclamped — extrapolation
+/// is allowed; the user is responsible for domain conditioning) through
+/// an output range.
+///
+/// - `None` → `Value::Number(t)` (raw fraction; used by position channels
+///   with no explicit output range).
+/// - `Numbers(vs)` → piecewise-linear interpolation across `vs.len() - 1`
+///   segments. Empty vec returns `Null`; single-stop returns that stop.
+/// - `Colors(vs)` → piecewise-linear componentwise interpolation in sRGB
+///   space. Not perceptually uniform — a documented limitation.
+/// - `Strings(_)` → `Null` (strings can't be interpolated).
+fn interpolate_range(t: f64, range: Option<&OutputRange>) -> Value {
+    match range {
+        None => Value::Number(t),
+        Some(OutputRange::Numbers(vs)) => match vs.len() {
+            0 => Value::Null,
+            1 => Value::Number(vs[0]),
+            n => {
+                let (lo, frac) = pick_segment(t, n);
+                Value::Number(lerp_f64(vs[lo], vs[lo + 1], frac))
+            }
+        },
+        Some(OutputRange::Colors(vs)) => match vs.len() {
+            0 => Value::Null,
+            1 => Value::Color(vs[0]),
+            n => {
+                let (lo, frac) = pick_segment(t, n);
+                Value::Color(lerp_color(vs[lo], vs[lo + 1], frac as f32))
+            }
+        },
+        Some(OutputRange::Strings(_)) => Value::Null,
+        Some(OutputRange::Linetypes(vs)) => match vs.len() {
+            0 => Value::Null,
+            1 => Value::Linetype(vs[0].clone()),
+            n => {
+                let idx = (t * (n - 1) as f64).round() as isize;
+                let idx = idx.clamp(0, n as isize - 1) as usize;
+                Value::Linetype(vs[idx].clone())
+            }
+        },
+    }
+}
+
+fn pick_segment(t: f64, n: usize) -> (usize, f64) {
+    debug_assert!(n >= 2, "pick_segment requires n >= 2");
+    let segments = (n - 1) as f64;
+    let scaled = t * segments;
+    let raw_lo = scaled.floor();
+    let lo = (raw_lo as isize).clamp(0, n as isize - 2) as usize;
+    let frac = scaled - lo as f64;
+    (lo, frac)
+}
+
+fn lerp_f64(a: f64, b: f64, t: f64) -> f64 {
+    a + t * (b - a)
+}
+
+fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    let [ar, ag, ab, aa] = a.components;
+    let [br, bg, bb, ba] = b.components;
+    Color::new([
+        ar + t * (br - ar),
+        ag + t * (bg - ag),
+        ab + t * (bb - ab),
+        aa + t * (ba - aa),
+    ])
+}
+
+/// Find the bin index whose `[edges[i], edges[i+1])` bracket contains
+/// `v`. The last bin is closed on both sides so values at the upper
+/// boundary still land in the final bin rather than falling off.
+fn find_bin(v: f64, edges: &[f64]) -> usize {
+    let n_bins = edges.len() - 1;
+    (0..n_bins)
+        .find(|&i| v >= edges[i] && (v < edges[i + 1] || i == n_bins - 1))
+        .unwrap_or(n_bins - 1)
+}

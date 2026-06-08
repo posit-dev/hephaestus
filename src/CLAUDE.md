@@ -73,7 +73,8 @@ Folders (each with its own CLAUDE.md):
 - `layout/` — grid layout solver. Recursive grids, fr / auto tracks, `respect()`, `Measure` protocol.
 - `composition/` — patchwork-style plot composition. 13-col × 16-row anatomical grid; chrome alignment across nested compositions via `Length::TrackOf`.
 - `primitives/` — compound 2D primitives: path constructors (rect / circle / wedge / polyline / polygon / arc), composable vertex transforms (clip / offset / round corners), arc-length sampling, ribbon tessellation.
-- `plot/` — high-level plot API: `Plot`, runtime-typed `Value` / `DataColumn`, `PlotComposition` orchestrator, key-based diff for identity-preserving animation. Geoms in `plot/geom/`, scales in `plot/scale/`.
+- `plot/` — high-level plot API: `Plot`, `PlotComposition` orchestrator, key-based diff for identity-preserving animation. Geoms in `plot/geom/`; axis / legend rendering in `plot/chrome/`. Scales and values themselves live in [`crate::scales`] (see below).
+- `scales/` — leaf module: `Value`, `DataColumn`, `Scale`, scale types, transforms, break / tick algorithms. Backend-agnostic and plot-agnostic; nothing inside imports from `src/plot/`, `src/scene/`, etc. Intended to be lifted into its own crate once the API settles. Hephaestus's `plot/scale.rs` and `plot/value.rs` are thin re-export shims that preserve the historical `hephaestus::plot::scale::*` / `hephaestus::plot::value::*` paths.
 - `text/` — scaffolding parley-backed shaping. Gated on the `text` feature. Intended to be replaced by the host crate.
 
 Single-file modules (no CLAUDE.md, one-line descriptions here):

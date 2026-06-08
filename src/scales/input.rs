@@ -5,13 +5,13 @@
 //!
 //! Temporal data flows through `Continuous { min, max }` after projection
 //! to f64 (Date → days, DateTime/Time/Duration → microseconds — see the
-//! [`Value`](crate::plot::value::Value) docs). The `Scale` exposes
+//! [`Value`](crate::scales::value::Value) docs). The `Scale` exposes
 //! ergonomic constructors that build the f64 domain from
-//! [`Date`](crate::plot::value::Date) /
-//! [`DateTime`](crate::plot::value::DateTime) inputs so user code stays
+//! [`Date`](crate::scales::value::Date) /
+//! [`DateTime`](crate::scales::value::DateTime) inputs so user code stays
 //! calendar-native.
 
-use crate::plot::value::Value;
+use crate::scales::value::Value;
 
 /// The input range of a [`Scale`](super::Scale).
 #[derive(Clone, Debug)]

@@ -14,7 +14,7 @@ use crate::layout::{Measure, WidthHint};
 use crate::plot::scale::Scale;
 use crate::scene::SceneBuilder;
 
-use super::chrome::LegendSide;
+use crate::scales::chrome::LegendSide;
 
 /// Stub legend Measure — reports zero width / height.
 struct LegendStub;

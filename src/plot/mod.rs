@@ -22,6 +22,8 @@
 //! [`ScaleRegistry`]. See `Plot::wire` / `Plot::draw_chrome_into` /
 //! `Plot::draw_panel_into`.
 
+#[cfg(feature = "text")]
+pub mod chrome;
 pub mod composition;
 pub mod diff;
 pub mod geom;
@@ -41,7 +43,7 @@ pub use geom::{
 pub use geom::{TextFitGeom, TextGeom, TextPathGeom};
 pub use plot::{GeomId, Plot};
 pub use scale::{
-    AxisSide, InputRange, LegendSide, OutputRange, Scale, ScaleRegistry, ScaleType, ScaleTypeKind,
-    Transform, TransformKind,
+    AxisSide, InputRange, LegendSide, OutputRange, Scale, ScaleRegistry, ScaleTypeKind, Transform,
+    TransformKind,
 };
 pub use value::{DataColumn, Date, DateTime, Duration, LinetypeStep, Time, Value};

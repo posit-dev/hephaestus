@@ -23,15 +23,15 @@ use crate::geometry::{Affine, Point, Rect};
 use crate::layout::{Measure, WidthHint};
 use crate::path::Path;
 use crate::pick::PickId;
-use crate::plot::scale::breaks::DEFAULT_BREAK_COUNT;
 use crate::plot::scale::Scale;
-use crate::plot::value::Value;
+use crate::scales::breaks::DEFAULT_BREAK_COUNT;
+use crate::scales::value::Value;
 use crate::scene::SceneBuilder;
 use crate::stroke::Stroke;
 use crate::text::{draw_text, Alignment, TextRun, TextStyle};
 use kurbo::Shape;
 
-use super::chrome::AxisSide;
+use crate::scales::chrome::AxisSide;
 
 // ─── Style constants (pt) ────────────────────────────────────────────────────
 
@@ -338,7 +338,7 @@ fn _shape_in_scope() {
 mod tests {
     use super::*;
     use crate::plot::scale;
-    use crate::plot::value::Value;
+    use crate::scales::value::Value;
     use crate::scene::recording::{Op, RecordingScene};
 
     fn dpi_96() -> f64 {

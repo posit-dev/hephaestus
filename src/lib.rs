@@ -21,6 +21,7 @@ pub mod path;
 pub mod pick;
 pub mod plot;
 pub mod primitives;
+pub mod scales;
 pub mod scene;
 pub mod shape;
 pub mod stroke;

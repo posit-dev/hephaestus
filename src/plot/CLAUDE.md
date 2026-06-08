@@ -13,19 +13,24 @@ For tests and one-off renders, `Plot` is independently usable with a hand-built 
 ## Subdirectories
 
 - **`geom/`** — vectorised drawing primitives (`PointGeom`, `LineGeom`, `PolygonGeom`, `RectGeom`, `EllipseGeom`, `SegmentGeom`, `WedgeGeom`, plus `TextGeom` / `TextFitGeom` / `TextPathGeom` when the `text` feature is on). See `src/plot/geom/CLAUDE.md`.
-- **`scale/`** — named value mappers (Continuous / Discrete / Ordinal / Binned / Identity), axes, legends. See `src/plot/scale/CLAUDE.md`.
+- **`chrome/`** — axis and legend rendering. Feature-gated on `text`. The scale layer (in `crate::scales`) defines what to draw; this module draws it against `SceneBuilder`.
+
+## Re-export shims
+
+- **`scale.rs`** — re-exports `crate::scales::*` so legacy `crate::plot::scale::*` paths keep working.
+- **`value.rs`** — re-exports `crate::scales::value::*` so legacy `crate::plot::value::*` paths keep working.
+
+The canonical home for scales / values is [`crate::scales`]; see `src/scales/CLAUDE.md`.
 
 ## Core types (this folder, not in subdirectories)
 
 - **`PlotComposition`** (`composition.rs`) — the orchestrator. Construct with `PlotComposition::new(composition)`; register scales with `add_scale("name", scale)`; attach plots with `with_plot(plot)` / `attach_plot(plot)`. Mutations flow through closures (`view.update_scale("time", |s| ...)`, `view.update_plot("price", |p| ...)`) so dirty-tracking stays accurate. The dirty model is conservative: any mutation flips `layout_dirty` and the next `render` re-solves. Per-plot / per-scale dirty bits are plumbed but only used by v1.5+ partial-repaint heuristics.
 - **`Plot`** (`plot.rs`) — bound to a patch id. Stores channel → scale-name bindings, geom list (`Vec<(GeomId, Box<dyn Geom>)>`), chrome text (title / subtitle / caption / axis titles), and a `ShapeRegistry`. Three lifecycle methods used by the orchestrator: `wire(patch, registry, dpi)` (drop chrome cells + panel into named slots; full version is `text`-gated, `wire_panel` is always available), `draw_chrome_into(scene, layout)`, `draw_panel_into(scene, layout, registry)`.
 - **`GeomId`** — opaque handle returned by `Plot::add_geom`; used with `Plot::update_geom` / `remove_geom`.
-- **`Value`** (`value.rs`) — runtime-typed scalar. Variants: `Number(f64)`, `String(Arc<str>)`, `Color(Color)`, `Bool(bool)`, `Linetype(...)`, plus the temporal variants `Date`, `DateTime`, `Time`, `Duration`. Equality via `key_eq` (NaN canonicalises to a single class for diffing; ±0 distinguished).
-- **`DataColumn`** (`value.rs`) — typed columnar container (`Vec<T>` per variant). Geom channels use this; the hot draw loop matches the column variant once at the top, then reads typed slices directly so per-row code stays monomorphic.
-- **`Date`** / **`DateTime`** / **`Time`** / **`Duration`** — `repr(transparent)` temporal newtypes. Round-trip with Arrow semantics. Project to f64 (days / microseconds) when entering a continuous scale.
-- **`LinetypeStep`** — one step in a dash pattern; used by `OutputRange::Linetypes`.
 - **`KeyIndex`** / **`diff_columns`** / **`diff_positional`** (`diff.rs`) — key-based columnar diff producing `(enter: Vec<usize>, update: Vec<(prev_idx, new_idx)>, exit: Vec<Value>)` for identity-preserving animation.
 - **`ValidationIssue`** — issue returned by composition / plot validation.
+
+(`Value` / `DataColumn` / `Date` / `DateTime` / `Time` / `Duration` / `LinetypeStep` live in `crate::scales::value` — moved alongside `Scale` since they're the data the scales operate on.)
 
 ## diff.rs — semantics
 

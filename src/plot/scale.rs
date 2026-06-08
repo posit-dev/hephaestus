@@ -1,61 +1,56 @@
-//! Scale primitives and the concrete [`Scale`] mapper.
+//! Hephaestus's `Scale` bundle, `ScaleRegistry`, and the ggplot-style
+//! free-function constructors (`scale::continuous(...)`,
+//! `scale::ordinal(...)`, etc.).
 //!
-//! A [`Scale`] is a runtime-configurable value mapper composed of:
-//! - a [`ScaleType`] (Continuous / Discrete / Ordinal / Binned / Identity)
-//!   determining the mapping behaviour;
-//! - a [`Transform`] (Identity is the only one currently implemented)
-//!   applied inside continuous scales before linearisation;
-//! - an [`InputRange`] (continuous domain or discrete value list);
-//! - an optional [`OutputRange`] (the visual values to map into; left
-//!   unset for position channels, which return the normalised [0, 1]
-//!   fraction).
+//! The algorithms themselves (map, breaks, band width, transform forward
+//! / inverse) live in [`crate::scales`] as plain enums + free functions.
+//! `Scale` is a thin bundle that holds the configured pieces and exposes
+//! convenience methods that match on the enum tags and delegate.
 //!
-//! Construction uses chained builder methods on [`Scale`] (consuming
-//! `self`); mutation uses `set_*` methods that take `&mut self` and bump
-//! the internal [generation](Scale::generation) counter so downstream
-//! caches can detect changes without comparing values.
-//!
-//! Free-function constructors live in the [`scale`] sub-module re-exported
-//! here, providing terse ggplot-style call sites
-//! (`scale::continuous(0.0..=100.0)`, `scale::ordinal(...).range_colors(...)`,
-//! etc.). Constructors are scale-type-named only — output-type sugar is
-//! deliberately absent: a color scale is `ordinal(domain).range_colors(...)`,
-//! a size scale is `ordinal(domain).range_numbers(...)`, etc.
-
-pub mod breaks;
-pub mod chrome;
-pub mod input;
-pub mod output;
-pub mod scale_type;
-pub mod transform;
-
-#[cfg(feature = "text")]
-pub mod axis;
-#[cfg(feature = "text")]
-pub mod legend;
-
-pub use breaks::{extended_breaks, linear_breaks, DEFAULT_BREAK_COUNT};
-pub use chrome::{AxisSide, LegendSide};
-pub use input::InputRange;
-pub use output::OutputRange;
-pub use scale_type::{ScaleType, ScaleTypeKind, ScaleTypeTrait};
-pub use transform::{Transform, TransformKind, TransformTrait};
+//! This file is **hephaestus-only** — `Scale`, `ScaleRegistry`, and the
+//! constructors don't ship in the lift-ready scales crate. Consumers of
+//! that crate roll their own bundle and call the free functions
+//! directly.
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use crate::color::Color;
-use crate::plot::value::{DataColumn, Value};
+use crate::scales::value::{DataColumn, LinetypeStep, Value};
+
+// Re-export scales-crate items so legacy `crate::plot::scale::*` paths
+// continue to resolve. The submodules (`breaks`, `transform`, etc.) are
+// re-exported wholesale; selected free functions and types are pulled to
+// the top level.
+pub use crate::scales::{
+    binned_band_width, binned_band_width_at, binned_breaks, binned_map, breaks, chrome,
+    continuous_breaks, continuous_map, discrete_band_width, discrete_breaks, discrete_map,
+    extended_breaks, identity_map, input, linear_breaks, ordinal_map, output, scale_type,
+    transform, transform_allowed_domain, transform_forward, transform_inverse, value, AxisSide,
+    InputRange, LegendSide, OutputRange, ScaleTypeKind, Transform, TransformKind,
+    DEFAULT_BREAK_COUNT,
+};
+
+// Axis / legend chrome renderers live in src/plot/chrome/ — re-exported
+// here so legacy `crate::plot::scale::axis::*` paths keep working.
+#[cfg(feature = "text")]
+pub use crate::plot::chrome::{axis, legend};
 
 // ─── Scale ───────────────────────────────────────────────────────────────────
 
-/// A configurable value mapper. Combines a [`ScaleType`] with optional
+/// A configurable value mapper. Bundles a [`ScaleTypeKind`] with optional
 /// input/output ranges, a [`Transform`], and a monotonic generation
 /// counter for invalidating downstream caches.
+///
+/// `Scale` is hephaestus's aggregate — the lift-ready `scales` crate
+/// exposes only the underlying enums + free functions. The methods on
+/// `Scale` (`map`, `breaks`, `band_width`, …) match-dispatch on the
+/// scale type and delegate to those free functions.
 #[derive(Clone)]
 pub struct Scale {
-    scale_type: ScaleType,
+    scale_type: ScaleTypeKind,
     transform: Transform,
     input_range: Option<InputRange>,
     output_range: Option<OutputRange>,
@@ -67,7 +62,7 @@ pub struct Scale {
 impl Scale {
     /// Build a fresh scale of the given type. Domain and range are unset
     /// until configured via the builder methods.
-    pub fn new(scale_type: ScaleType) -> Self {
+    pub fn new(scale_type: ScaleTypeKind) -> Self {
         Scale {
             scale_type,
             transform: Transform::default(),
@@ -83,11 +78,13 @@ impl Scale {
     ///
     /// `T` is anything that converts into a [`Value`] whose `as_number()`
     /// projection yields a finite f64. That covers `f64`, `f32`, `i32`,
-    /// `i64`, and the temporal newtypes ([`Date`], [`DateTime`], [`Time`],
-    /// [`Duration`]) — each projects to its canonical unit (days /
-    /// microseconds). Non-numeric endpoints (`String`, `Bool`, `Color`,
-    /// `Null`) panic at the call site since they have no continuous
-    /// ordering.
+    /// `i64`, and the temporal newtypes ([`Date`](crate::scales::value::Date),
+    /// [`DateTime`](crate::scales::value::DateTime),
+    /// [`Time`](crate::scales::value::Time),
+    /// [`Duration`](crate::scales::value::Duration)) — each projects to
+    /// its canonical unit (days / microseconds). Non-numeric endpoints
+    /// (`String`, `Bool`, `Color`, `Null`) panic at the call site since
+    /// they have no continuous ordering.
     pub fn domain_continuous<T>(mut self, min: T, max: T) -> Self
     where
         T: Into<Value>,
@@ -99,7 +96,8 @@ impl Scale {
     }
 
     /// Configure a discrete domain — explicit ordered list of input
-    /// values. Used by [`ScaleType::Discrete`] and [`ScaleType::Ordinal`].
+    /// values. Used by [`ScaleTypeKind::Discrete`] and
+    /// [`ScaleTypeKind::Ordinal`].
     pub fn domain_discrete(mut self, values: impl IntoIterator<Item = Value>) -> Self {
         self.input_range = Some(InputRange::Discrete(values.into_iter().collect()));
         self
@@ -125,14 +123,10 @@ impl Scale {
     }
 
     /// Configure a linetype output range. Each entry is a
-    /// [`LinetypeStep`](crate::plot::value::LinetypeStep) pattern
-    /// (alternating Dash|Marker and Gap; empty = solid). Pairs
-    /// naturally with the named helpers in
+    /// [`LinetypeStep`] pattern (alternating Dash|Marker and Gap; empty =
+    /// solid). Pairs naturally with the named helpers in
     /// [`crate::plot::geom::linetype`].
-    pub fn range_linetypes(
-        mut self,
-        vs: impl IntoIterator<Item = Arc<[crate::plot::value::LinetypeStep]>>,
-    ) -> Self {
+    pub fn range_linetypes(mut self, vs: impl IntoIterator<Item = Arc<[LinetypeStep]>>) -> Self {
         self.output_range = Some(OutputRange::Linetypes(vs.into_iter().collect()));
         self
     }
@@ -188,7 +182,7 @@ impl Scale {
 
     /// Replace the linetype output range in place. Bumps the generation
     /// counter.
-    pub fn set_range_linetypes(&mut self, vs: Vec<Arc<[crate::plot::value::LinetypeStep]>>) {
+    pub fn set_range_linetypes(&mut self, vs: Vec<Arc<[LinetypeStep]>>) {
         self.output_range = Some(OutputRange::Linetypes(vs));
         self.bump_generation();
     }
@@ -199,22 +193,41 @@ impl Scale {
         self.bump_generation();
     }
 
-    fn bump_generation(&self) {
-        self.generation.set(self.generation.get().wrapping_add(1));
+    fn bump_generation(&mut self) {
+        self.generation.set(self.generation.get() + 1);
     }
 
     // ── Operations ──
 
-    /// Map an input value to its scaled output.
+    /// Map an input value to its scaled output. Dispatches on
+    /// [`Self::scale_type_kind`] into the matching free function from
+    /// [`crate::scales`].
     pub fn map(&self, input: &Value) -> Value {
-        self.scale_type.map(input, self)
+        match self.scale_type {
+            ScaleTypeKind::Continuous => continuous_map(
+                input,
+                self.input_range.as_ref(),
+                self.output_range.as_ref(),
+                &self.transform,
+            ),
+            ScaleTypeKind::Discrete => {
+                discrete_map(input, self.input_range.as_ref(), self.output_range.as_ref())
+            }
+            ScaleTypeKind::Ordinal => {
+                ordinal_map(input, self.input_range.as_ref(), self.output_range.as_ref())
+            }
+            ScaleTypeKind::Binned => {
+                binned_map(input, self.input_range.as_ref(), self.output_range.as_ref())
+            }
+            ScaleTypeKind::Identity => identity_map(input),
+        }
     }
 
     /// Like [`Self::map`] but additionally applies a band-fraction offset
     /// in the scale's band space. The offset is multiplied by the band
     /// width of the bin containing `input` (see
-    /// [`ScaleTypeTrait::band_width_at`]) before being added to the
-    /// nominal mapped fraction.
+    /// [`Self::band_width_at`]) before being added to the nominal mapped
+    /// fraction.
     ///
     /// - `band_offset` units: fraction of the input's own band width.
     ///   `0.0` is the band centre; `±0.5` reaches the band's left/right
@@ -224,20 +237,14 @@ impl Scale {
     ///   offset is a no-op there.
     /// - Non-numeric `map()` outputs (e.g. Color) ignore the offset and
     ///   pass through unchanged.
-    ///
-    /// This is the canonical entry point for geoms consuming `*_band`
-    /// channels — moving the combining into `Scale` keeps the output
-    /// resize-invariant (it's a panel fraction, not pixels) and lets
-    /// scales with non-uniform bands (e.g. [`ScaleTypeKind::Binned`]
-    /// with unequal-width bins) compute the correct width per row.
     pub fn map_with_offset(&self, input: &Value, band_offset: f64) -> Value {
-        let base = self.scale_type.map(input, self);
+        let base = self.map(input);
         if band_offset == 0.0 {
             return base;
         }
         match base {
             Value::Number(f) => {
-                let bw = self.scale_type.band_width_at(self, input);
+                let bw = self.band_width_at(input);
                 Value::Number(f + band_offset * bw)
             }
             other => other,
@@ -248,7 +255,16 @@ impl Scale {
     /// continuous scales; discrete / ordinal ignore it and return every
     /// domain entry.
     pub fn breaks(&self, n: usize) -> Vec<Value> {
-        self.scale_type.breaks(self, n)
+        match self.scale_type {
+            ScaleTypeKind::Continuous => {
+                continuous_breaks(self.input_range.as_ref(), &self.transform, n)
+            }
+            ScaleTypeKind::Discrete | ScaleTypeKind::Ordinal => {
+                discrete_breaks(self.input_range.as_ref())
+            }
+            ScaleTypeKind::Binned => binned_breaks(self.output_range.as_ref()),
+            ScaleTypeKind::Identity => Vec::new(),
+        }
     }
 
     /// Format a value as its tick label. Numeric values use
@@ -262,14 +278,34 @@ impl Scale {
     /// Band width as a fraction of the panel (in `[0, 1]`). Continuous
     /// scales return `0.0`; discrete-family scales return `1.0 / n_bands`.
     pub fn band_width(&self) -> f64 {
-        self.scale_type.band_width(self)
+        match self.scale_type {
+            ScaleTypeKind::Continuous => 0.0,
+            ScaleTypeKind::Discrete | ScaleTypeKind::Ordinal => {
+                discrete_band_width(self.input_range.as_ref())
+            }
+            ScaleTypeKind::Binned => binned_band_width(self.output_range.as_ref()),
+            ScaleTypeKind::Identity => 0.0,
+        }
+    }
+
+    /// Width (as panel fraction) of the band containing `input`. For
+    /// uniform-band scales this matches [`Self::band_width`]; for
+    /// [`ScaleTypeKind::Binned`] with non-uniform widths it returns the
+    /// specific bin's width. Used by [`Self::map_with_offset`].
+    pub fn band_width_at(&self, input: &Value) -> f64 {
+        match self.scale_type {
+            ScaleTypeKind::Binned => {
+                binned_band_width_at(input, self.input_range.as_ref(), self.output_range.as_ref())
+            }
+            _ => self.band_width(),
+        }
     }
 
     // ── Accessors ──
 
-    /// Borrow the [`ScaleType`].
-    pub fn scale_type(&self) -> &ScaleType {
-        &self.scale_type
+    /// Discriminator for this scale's family.
+    pub fn scale_type_kind(&self) -> ScaleTypeKind {
+        self.scale_type
     }
 
     /// Borrow the [`Transform`].
@@ -321,7 +357,7 @@ impl std::fmt::Debug for Scale {
 /// - `String(s)` → `s`.
 /// - Others → debug-formatted.
 fn format_value(v: &Value) -> String {
-    use crate::plot::value::Date as DateNew;
+    use crate::scales::value::Date;
     match v {
         Value::Number(n) => format!("{n}"),
         Value::String(s) => (**s).to_string(),
@@ -329,11 +365,11 @@ fn format_value(v: &Value) -> String {
         Value::Null => "NA".to_string(),
         Value::Color(c) => format!("{c:?}"),
         Value::Date(d) => {
-            let (y, m, dd) = DateNew::from_days(*d).to_ymd();
+            let (y, m, dd) = Date::from_days(*d).to_ymd();
             format!("{y:04}-{m:02}-{dd:02}")
         }
         Value::DateTime(us) => {
-            let dt = crate::plot::value::DateTime::from_micros(*us);
+            let dt = crate::scales::value::DateTime::from_micros(*us);
             let (date, time_us) = dt.split();
             let (y, m, dd) = date.to_ymd();
             let (h, mi, s, _us) = split_time_micros(time_us);
@@ -371,7 +407,6 @@ fn format_value(v: &Value) -> String {
             }
         }
         Value::Linetype(p) => {
-            use crate::plot::value::LinetypeStep;
             if p.is_empty() {
                 "solid".to_string()
             } else {
@@ -412,8 +447,6 @@ fn split_time_micros(us: i64) -> (u8, u8, u8, u32) {
 }
 
 // ─── ScaleRegistry ───────────────────────────────────────────────────────────
-
-use std::collections::HashMap;
 
 /// Named registry of scales — the single source of truth for scale state
 /// in a [`PlotComposition`](crate::plot) orchestrator. Plots reference
@@ -488,17 +521,12 @@ impl ScaleRegistry {
     }
 }
 
-// ─── Free-function constructors (re-exported as `plot::scale::*`) ────────────
+// ─── Free-function constructors ──────────────────────────────────────────────
 
 /// Continuous scale over a closed domain. `T` is anything that converts
 /// into a [`Value`] whose `as_number()` projection yields a finite f64 —
-/// `f64`, `f32`, `i32`, `i64`, and the temporal newtypes
-/// ([`Date`](crate::plot::value::Date),
-/// [`DateTime`](crate::plot::value::DateTime),
-/// [`Time`](crate::plot::value::Time),
-/// [`Duration`](crate::plot::value::Duration)). Temporal endpoints project
-/// to their canonical f64 unit (days / microseconds) and the tick
-/// formatter renders them in calendar form.
+/// `f64`, `f32`, `i32`, `i64`, and the temporal newtypes ([`Date`],
+/// [`DateTime`], [`Time`], [`Duration`]).
 ///
 /// ```ignore
 /// scale::continuous(0.0 ..= 100.0)
@@ -508,39 +536,35 @@ pub fn continuous<T>(domain: RangeInclusive<T>) -> Scale
 where
     T: Into<Value> + Copy,
 {
-    Scale::new(ScaleType::continuous()).domain_continuous(*domain.start(), *domain.end())
+    Scale::new(ScaleTypeKind::Continuous).domain_continuous(*domain.start(), *domain.end())
 }
 
 /// Discrete scale over an explicit list of category values.
 pub fn discrete(domain: impl IntoIterator<Item = Value>) -> Scale {
-    Scale::new(ScaleType::discrete()).domain_discrete(domain)
+    Scale::new(ScaleTypeKind::Discrete).domain_discrete(domain)
 }
 
-/// Binned continuous scale. `domain` is the overall range (numeric or
-/// temporal, same `T: Into<Value>` story as [`continuous`]); `edges` is
-/// the list of bin boundaries in the projected f64 space (must be
-/// strictly increasing, length ≥ 2). The bin count is `edges.len() - 1`.
+/// Binned continuous scale. `domain` is the overall range; `edges` is the
+/// list of bin boundaries (strictly increasing, length ≥ 2). The bin
+/// count is `edges.len() - 1`.
 pub fn binned<T>(domain: RangeInclusive<T>, edges: Vec<f64>) -> Scale
 where
     T: Into<Value> + Copy,
 {
-    Scale::new(ScaleType::binned())
+    Scale::new(ScaleTypeKind::Binned)
         .domain_continuous(*domain.start(), *domain.end())
         .range_numbers(edges)
 }
 
 /// Identity scale — input passes through unchanged.
 pub fn identity() -> Scale {
-    Scale::new(ScaleType::identity())
+    Scale::new(ScaleTypeKind::Identity)
 }
 
 /// Ordinal scale over an ordered category list. The output range is
-/// interpolated when set (see [`ScaleTypeKind::Ordinal`] for semantics) —
-/// numeric and color gradients both work via `.range_numbers(...)` /
-/// `.range_colors(...)`. Returns an unconfigured scale (no output range);
-/// chain `.range_*(…)` to define the gradient.
+/// interpolated when set (see [`ScaleTypeKind::Ordinal`] for semantics).
 pub fn ordinal(domain: impl IntoIterator<Item = impl Into<Value>>) -> Scale {
-    Scale::new(ScaleType::ordinal()).domain_discrete(domain.into_iter().map(Into::into))
+    Scale::new(ScaleTypeKind::Ordinal).domain_discrete(domain.into_iter().map(Into::into))
 }
 
 /// Convenience: build a continuous scale whose domain is set from the
@@ -550,7 +574,7 @@ pub fn ordinal(domain: impl IntoIterator<Item = impl Into<Value>>) -> Scale {
 /// Returns an unconfigured continuous scale if the column is non-numeric
 /// or empty.
 pub fn continuous_from_data(col: &DataColumn) -> Scale {
-    let scale = Scale::new(ScaleType::continuous());
+    let scale = Scale::new(ScaleTypeKind::Continuous);
     if col.is_empty() {
         return scale;
     }
@@ -576,6 +600,7 @@ pub fn continuous_from_data(col: &DataColumn) -> Scale {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scales::value::{Date, DateTime, Time};
 
     fn approx(a: f64, b: f64, tol: f64, msg: &str) {
         assert!((a - b).abs() < tol, "{msg}: {a} ≠ {b}");
@@ -586,7 +611,6 @@ mod tests {
     #[test]
     fn continuous_map_normalised() {
         let s = continuous(0.0..=10.0);
-        // No output range → returns [0, 1] fraction.
         approx(
             s.map(&Value::Number(0.0)).as_number().unwrap(),
             0.0,
@@ -609,7 +633,6 @@ mod tests {
 
     #[test]
     fn continuous_extrapolates_outside_domain() {
-        // No OOB strategy — input below/above domain extrapolates.
         let s = continuous(0.0..=10.0);
         approx(
             s.map(&Value::Number(-5.0)).as_number().unwrap(),
@@ -650,8 +673,6 @@ mod tests {
 
     #[test]
     fn continuous_with_degenerate_domain() {
-        // domain_continuous(5, 5) — span is zero. Should not divide by zero;
-        // map collapses to 0.0 (or the lower output bound, if a range is set).
         let s = continuous(5.0..=5.0);
         assert_eq!(s.map(&Value::Number(5.0)).as_number(), Some(0.0));
     }
@@ -667,7 +688,6 @@ mod tests {
     fn continuous_breaks_use_extended() {
         let s = continuous(0.0..=10.0);
         let bs = s.breaks(5);
-        // Same shape as extended_breaks(0, 10, 5).
         assert!(bs.len() >= 4 && bs.len() <= 7);
         assert!(bs.first().unwrap().key_eq(&Value::Number(0.0)));
         assert!(bs.last().unwrap().key_eq(&Value::Number(10.0)));
@@ -724,26 +744,23 @@ mod tests {
 
     #[test]
     fn ordinal_with_numeric_range_returns_pt() {
-        // No dedicated `ordinal_size` — users compose via the builder.
-        let s = Scale::new(ScaleType::ordinal())
+        let s = Scale::new(ScaleTypeKind::Ordinal)
             .domain_discrete(["S", "M", "L"].into_iter().map(Into::into))
             .range_numbers([4.0, 8.0, 12.0]);
         assert_eq!(s.map(&Value::from("S")).as_number(), Some(4.0));
         assert_eq!(s.map(&Value::from("L")).as_number(), Some(12.0));
     }
 
-    fn lt_dash_gap(d: f64, g: f64) -> Arc<[crate::plot::value::LinetypeStep]> {
-        use crate::plot::value::LinetypeStep;
+    fn lt_dash_gap(d: f64, g: f64) -> Arc<[LinetypeStep]> {
         Arc::from(vec![LinetypeStep::Dash(d), LinetypeStep::Gap(g)])
     }
 
-    fn lt_solid() -> Arc<[crate::plot::value::LinetypeStep]> {
-        Arc::from(Vec::<crate::plot::value::LinetypeStep>::new())
+    fn lt_solid() -> Arc<[LinetypeStep]> {
+        Arc::from(Vec::<LinetypeStep>::new())
     }
 
     #[test]
     fn discrete_with_linetype_range_steps_by_index() {
-        // Three categories, three patterns — one-to-one mapping.
         let solid = lt_solid();
         let dashed = lt_dash_gap(8.0, 4.0);
         let dotted = lt_dash_gap(2.0, 3.0);
@@ -764,8 +781,6 @@ mod tests {
 
     #[test]
     fn ordinal_with_linetype_range_steps_by_nearest_index() {
-        // 4 categories, 2 patterns. t values: 0, 1/3, 2/3, 1.
-        // round(t * (n-1)) = round(t * 1) = 0, 0, 1, 1.
         let solid = lt_solid();
         let dashed = lt_dash_gap(8.0, 4.0);
         let s = ordinal(["L1", "L2", "L3", "L4"]).range_linetypes([solid.clone(), dashed.clone()]);
@@ -781,38 +796,28 @@ mod tests {
 
     #[test]
     fn continuous_with_linetype_range_steps() {
-        // Continuous scales step rather than interpolate Linetypes.
         let solid = lt_solid();
         let dashed = lt_dash_gap(8.0, 4.0);
         let dotted = lt_dash_gap(2.0, 3.0);
         let s =
             continuous(0.0..=10.0).range_linetypes([solid.clone(), dashed.clone(), dotted.clone()]);
-        // t = 0.0 → idx round(0 * 2) = 0
         assert!(s
             .map(&Value::Number(0.0))
             .key_eq(&Value::Linetype(solid.clone())));
-        // t = 0.5 → idx round(0.5 * 2) = 1
         assert!(s.map(&Value::Number(5.0)).key_eq(&Value::Linetype(dashed)));
-        // t = 1.0 → idx round(1.0 * 2) = 2
         assert!(s.map(&Value::Number(10.0)).key_eq(&Value::Linetype(dotted)));
     }
 
     #[test]
     fn ordinal_color_interpolates_when_stops_lt_levels() {
-        // 4 ordered levels mapped through a 2-stop gradient → endpoints
-        // hit exactly; intermediate levels land at interpolated points.
         let red = Color::new([1.0, 0.0, 0.0, 1.0]);
         let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
         let s = ordinal(["L1", "L2", "L3", "L4"]).range_colors([red, blue]);
-        // L1 → t=0 → red
         assert_eq!(s.map(&Value::from("L1")).as_color(), Some(red));
-        // L4 → t=1 → blue
         assert_eq!(s.map(&Value::from("L4")).as_color(), Some(blue));
-        // L2 → t=1/3 → ~33% along red→blue gradient
         let c2 = s.map(&Value::from("L2")).as_color().unwrap();
         approx(c2.components[0] as f64, 2.0 / 3.0, 1e-5, "L2.r");
         approx(c2.components[2] as f64, 1.0 / 3.0, 1e-5, "L2.b");
-        // L3 → t=2/3 → ~67% along red→blue gradient
         let c3 = s.map(&Value::from("L3")).as_color().unwrap();
         approx(c3.components[0] as f64, 1.0 / 3.0, 1e-5, "L3.r");
         approx(c3.components[2] as f64, 2.0 / 3.0, 1e-5, "L3.b");
@@ -820,10 +825,9 @@ mod tests {
 
     #[test]
     fn ordinal_numeric_interpolates_when_stops_lt_levels() {
-        let s = Scale::new(ScaleType::ordinal())
+        let s = Scale::new(ScaleTypeKind::Ordinal)
             .domain_discrete(["A", "B", "C", "D", "E"].into_iter().map(Into::into))
             .range_numbers([2.0, 10.0]);
-        // 5 levels, 2 stops → A=2, B=4, C=6, D=8, E=10.
         approx(
             s.map(&Value::from("A")).as_number().unwrap(),
             2.0,
@@ -858,8 +862,6 @@ mod tests {
 
     #[test]
     fn continuous_with_color_range() {
-        // Continuous now supports color interpolation via the shared
-        // engine. (Previously this returned Null.)
         let red = Color::new([1.0, 0.0, 0.0, 1.0]);
         let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
         let s = continuous(0.0..=10.0).range_colors([red, blue]);
@@ -872,8 +874,6 @@ mod tests {
 
     #[test]
     fn continuous_piecewise_three_stops() {
-        // [2, 8, 12] with 3 stops → segment 0 is [2, 8] over t∈[0, 0.5];
-        // segment 1 is [8, 12] over t∈[0.5, 1].
         let s = continuous(0.0..=1.0).range_numbers([2.0, 8.0, 12.0]);
         approx(
             s.map(&Value::Number(0.0)).as_number().unwrap(),
@@ -909,9 +909,7 @@ mod tests {
 
     #[test]
     fn ordinal_with_matched_stops_is_one_to_one() {
-        // Domain and output range of the same length → ordinal coincides
-        // with discrete-style one-to-one mapping.
-        let s = Scale::new(ScaleType::ordinal())
+        let s = Scale::new(ScaleTypeKind::Ordinal)
             .domain_discrete(["S", "M", "L"].into_iter().map(Into::into))
             .range_numbers([4.0, 8.0, 12.0]);
         assert_eq!(s.map(&Value::from("S")).as_number(), Some(4.0));
@@ -931,13 +929,7 @@ mod tests {
     // ── Binned ──
 
     #[test]
-    fn binned_map() {
-        // Domain [0, 10] with edges [0, 2, 5, 10] → three bins of
-        // widths 2, 3, 5. Each value snaps to its bin's centre,
-        // projected proportionally onto the panel:
-        //   bin 0 centre = 1   → 1 / 10 = 0.1
-        //   bin 1 centre = 3.5 → 3.5 / 10 = 0.35
-        //   bin 2 centre = 7.5 → 7.5 / 10 = 0.75
+    fn binned_map_proportional() {
         let s = binned(0.0..=10.0, vec![0.0, 2.0, 5.0, 10.0]);
         approx(
             s.map(&Value::Number(1.0)).as_number().unwrap(),
@@ -957,14 +949,12 @@ mod tests {
             1e-12,
             "bin 2",
         );
-        // Boundary: 2.0 → bin 1 centre = 0.35.
         approx(
             s.map(&Value::Number(2.0)).as_number().unwrap(),
             0.35,
             1e-12,
             "boundary",
         );
-        // Top edge: 10.0 → bin 2 centre = 0.75 (right-closed).
         approx(
             s.map(&Value::Number(10.0)).as_number().unwrap(),
             0.75,
@@ -975,32 +965,14 @@ mod tests {
 
     #[test]
     fn binned_band_width_at_per_bin() {
-        // Edges [0, 2, 5, 10] → bin widths 2, 3, 5 → fractions 0.2, 0.3, 0.5.
         let s = binned(0.0..=10.0, vec![0.0, 2.0, 5.0, 10.0]);
-        approx(
-            s.scale_type().band_width_at(&s, &Value::Number(1.0)),
-            0.2,
-            1e-12,
-            "bin 0 width",
-        );
-        approx(
-            s.scale_type().band_width_at(&s, &Value::Number(3.0)),
-            0.3,
-            1e-12,
-            "bin 1 width",
-        );
-        approx(
-            s.scale_type().band_width_at(&s, &Value::Number(8.0)),
-            0.5,
-            1e-12,
-            "bin 2 width",
-        );
+        approx(s.band_width_at(&Value::Number(1.0)), 0.2, 1e-12, "bin 0");
+        approx(s.band_width_at(&Value::Number(3.0)), 0.3, 1e-12, "bin 1");
+        approx(s.band_width_at(&Value::Number(8.0)), 0.5, 1e-12, "bin 2");
     }
 
     #[test]
     fn binned_map_with_offset_uses_per_bin_width() {
-        // Bin 1 [2, 5] has centre 3.5 (frac 0.35) and width 3 (frac 0.3).
-        // Offset +0.5 → 0.35 + 0.5 * 0.3 = 0.5 (right edge of bin 1).
         let s = binned(0.0..=10.0, vec![0.0, 2.0, 5.0, 10.0]);
         approx(
             s.map_with_offset(&Value::Number(3.0), 0.5)
@@ -1010,8 +982,6 @@ mod tests {
             1e-12,
             "bin 1 right edge",
         );
-        // Bin 2 [5, 10] has centre 7.5 (frac 0.75) and width 5 (frac 0.5).
-        // Offset -0.5 → 0.75 + (-0.5) * 0.5 = 0.5 (left edge of bin 2).
         approx(
             s.map_with_offset(&Value::Number(8.0), -0.5)
                 .as_number()
@@ -1051,8 +1021,6 @@ mod tests {
 
     #[test]
     fn continuous_dates_maps_via_days() {
-        use crate::plot::value::Date;
-        // 2024-01-01 = day 19723; 2024-12-31 = day 20088. Range = 365 days.
         let s = continuous(Date::from_ymd(2024, 1, 1)..=Date::from_ymd(2024, 12, 31));
         let mid = Date::from_ymd(2024, 7, 1);
         let frac = s.map(&Value::Date(mid.to_days())).as_number().unwrap();
@@ -1061,7 +1029,6 @@ mod tests {
 
     #[test]
     fn temporal_format_dates() {
-        use crate::plot::value::Date;
         let s = continuous(Date::from_ymd(2024, 1, 1)..=Date::from_ymd(2024, 12, 31));
         assert_eq!(
             s.format(&Value::Date(Date::from_ymd(2024, 1, 15).to_days())),
@@ -1071,7 +1038,6 @@ mod tests {
 
     #[test]
     fn temporal_format_datetime() {
-        use crate::plot::value::DateTime;
         let s = continuous(
             DateTime::from_ymd_hms_micros(2024, 1, 1, 0, 0, 0, 0)
                 ..=DateTime::from_ymd_hms_micros(2024, 12, 31, 23, 59, 59, 0),
@@ -1085,7 +1051,6 @@ mod tests {
 
     #[test]
     fn temporal_format_time_sub_second() {
-        use crate::plot::value::Time;
         let s = continuous(
             Time::from_hms_micros(0, 0, 0, 0)..=Time::from_hms_micros(23, 59, 59, 999_999),
         );
@@ -1097,12 +1062,6 @@ mod tests {
 
     #[test]
     fn binned_accepts_temporal_domain() {
-        use crate::plot::value::Date;
-        // Bin year 2024 into quarters by day offset from the start.
-        // Quarters are NOT equal-width in days (90, 91, 92, 92 ish), so
-        // proportional Binned correctly puts each bin centre at the
-        // actual midpoint of its calendar range — not at 1/8, 3/8, 5/8,
-        // 7/8 of the year.
         let start = Date::from_ymd(2024, 1, 1);
         let end = Date::from_ymd(2024, 12, 31);
         let q1 = Date::from_ymd(2024, 4, 1).to_days() as f64;
@@ -1112,9 +1071,6 @@ mod tests {
             start..=end,
             vec![start.to_days() as f64, q1, q2, q3, end.to_days() as f64],
         );
-        // A January date lands in bin 0 [start, Apr 1). Expected output:
-        // (bin 0 centre - start) / (end - start). The centre is the
-        // midpoint between start and q1.
         let start_f = start.to_days() as f64;
         let end_f = end.to_days() as f64;
         let span = end_f - start_f;
@@ -1127,7 +1083,7 @@ mod tests {
 
     #[test]
     fn temporal_format_duration() {
-        let s = identity(); // format_value doesn't depend on the scale type
+        let s = identity();
         assert_eq!(
             s.format(&Value::Duration(
                 3 * 3600 * 1_000_000 + 25 * 60 * 1_000_000 + 12 * 1_000_000
@@ -1154,9 +1110,6 @@ mod tests {
 
     #[test]
     fn builder_chaining_does_not_bump_generation() {
-        // Builder methods consume self; they're construction, not
-        // mutation. The generation starts at 0 and stays 0 until a
-        // `set_*` is called.
         let s = continuous(0.0..=10.0)
             .range_numbers([0.0, 1.0])
             .with_transform(TransformKind::Identity);
