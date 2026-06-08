@@ -78,6 +78,7 @@ impl DateTime {
         DateTime(us)
     }
 
+    /// Microseconds since 1970-01-01T00:00:00Z.
     pub const fn to_micros(self) -> i64 {
         self.0
     }
@@ -127,10 +128,12 @@ impl DateTime {
 pub struct Time(pub i64);
 
 impl Time {
+    /// Wrap a raw microsecond-since-midnight count.
     pub const fn from_micros(us: i64) -> Self {
         Time(us)
     }
 
+    /// Microseconds since midnight.
     pub const fn to_micros(self) -> i64 {
         self.0
     }
@@ -152,10 +155,12 @@ impl Time {
 pub struct Duration(pub i64);
 
 impl Duration {
+    /// Wrap a raw signed-microsecond count.
     pub const fn from_micros(us: i64) -> Self {
         Duration(us)
     }
 
+    /// Microseconds — signed.
     pub const fn to_micros(self) -> i64 {
         self.0
     }
@@ -277,6 +282,7 @@ impl Value {
         self.as_number()
     }
 
+    /// Borrow as a [`Color`] if this is a [`Value::Color`]; else `None`.
     pub fn as_color(&self) -> Option<Color> {
         if let Value::Color(c) = *self {
             Some(c)
@@ -285,6 +291,7 @@ impl Value {
         }
     }
 
+    /// Borrow as a `&str` if this is a [`Value::String`]; else `None`.
     pub fn as_str(&self) -> Option<&str> {
         if let Value::String(s) = self {
             Some(s)
@@ -293,6 +300,7 @@ impl Value {
         }
     }
 
+    /// Read as a `bool` if this is a [`Value::Bool`]; else `None`.
     pub fn as_bool(&self) -> Option<bool> {
         if let Value::Bool(b) = *self {
             Some(b)

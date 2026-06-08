@@ -38,6 +38,11 @@ const DAMPING: f64 = 0.5;
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
+/// Solve `root` against a `viewport`-sized cell at `dpi`. Runs the
+/// width-major two-pass solver, wrapped in a damped fixed-point
+/// iteration when any cell signals [`WidthHint::NeedsHeight`] or any
+/// [`Length::TrackOf`] reference exists in the tree. See the module
+/// docs for the convergence properties.
 pub(super) fn solve(root: &GridNode, viewport: Size, dpi: f64) -> Layout {
     let root_cell = Rect::new(0.0, 0.0, viewport.width, viewport.height);
 
@@ -569,7 +574,7 @@ fn auto_col_sizes(
     for (i, (placement, child)) in node.children.iter().enumerate() {
         let span = placement.col_span.max(1);
         if span != 1 {
-            continue; // multi-span skipped in width pass (v1 limitation)
+            continue; // multi-span children are skipped in the width pass
         }
         let col_idx = placement.col.saturating_sub(1) as usize;
         if col_idx >= node.cols.len() {
@@ -618,8 +623,8 @@ fn child_min_width(
     l + inner + r
 }
 
-/// Recursive intrinsic min width of a grid: same shape as the v1 protocol,
-/// but now bottoms out at `Cell::width_hint` instead of empty leaves.
+/// Recursive intrinsic min width of a grid. Bottoms out at
+/// `Cell::width_hint` for leaves.
 fn grid_min_width(
     g: &GridNode,
     path: &mut Vec<usize>,

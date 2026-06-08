@@ -34,8 +34,8 @@ pub struct GeomState {
     pub(crate) prev_channels: HashMap<String, Channel>,
 
     /// Diff results from the most recent [`Self::rebuild_diff_against_previous`].
-    /// v1 stores but doesn't consume them; v1.6 animation reads enter /
-    /// update to interpolate.
+    /// Stored for the animation pass to interpolate along the update
+    /// edges; the draw loop itself snaps to the current state.
     pub(crate) enter: Vec<usize>,
     pub(crate) update: Vec<(usize, usize)>,
     pub(crate) exit: Vec<Value>,
@@ -78,6 +78,7 @@ impl GeomState {
         self.keys.len()
     }
 
+    /// True when the geom holds no rows.
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
     }
@@ -261,8 +262,8 @@ pub fn filter_declared(
 
 /// Snapshot of `channels` where every `Data` column is replaced by its
 /// length-0 counterpart and every `Constant` is preserved. Seeds the
-/// first-frame `prev_channels` so v1.6 animation has a stable "previous
-/// state" to interpolate from.
+/// first-frame `prev_channels` so the animation pass has a stable
+/// "previous state" to interpolate from on the first draw.
 fn empty_channels_like(channels: &HashMap<String, Channel>) -> HashMap<String, Channel> {
     channels
         .iter()
@@ -327,6 +328,7 @@ macro_rules! impl_geom_inherents {
                 self.state.len()
             }
 
+            /// True when the geom holds no rows.
             pub fn is_empty(&self) -> bool {
                 self.state.is_empty()
             }
@@ -385,18 +387,26 @@ macro_rules! impl_geom_inherents {
 macro_rules! impl_geom_inherents_grouped {
     ($ty:ident) => {
         impl $ty {
+            /// Entry point for construction. Returns an empty
+            /// `GeomBuilder<Self>`.
             pub fn builder() -> $crate::plot::GeomBuilder<Self> {
                 $crate::plot::GeomBuilder::new()
             }
 
+            /// Row count. All data columns + keys have this length.
             pub fn len(&self) -> usize {
                 self.state.len()
             }
 
+            /// True when the geom holds no rows.
             pub fn is_empty(&self) -> bool {
                 self.state.is_empty()
             }
 
+            /// Update a single channel in place. Length-validates data
+            /// columns against the current row count (mismatch panics)
+            /// and marks the geom dirty so diff rebuilds before the next
+            /// draw.
             pub fn set(
                 &mut self,
                 channel: impl Into<String>,
@@ -405,6 +415,11 @@ macro_rules! impl_geom_inherents_grouped {
                 self.state.set(channel, value);
             }
 
+            /// Atomic multi-channel / N-changing update. The closure
+            /// receives a `GeomBuilder` pre-populated with the geom's
+            /// current state; on return the builder is built and the
+            /// result atomically replaces the geom's state, rotating the
+            /// previous state into the diff snapshot.
             pub fn update(&mut self, f: impl FnOnce(&mut $crate::plot::GeomBuilder<Self>)) {
                 let carry_keys = match &self.state.keys {
                     $crate::plot::Keys::Explicit(col) => Some(col.clone()),

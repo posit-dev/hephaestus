@@ -28,6 +28,28 @@ cargo run --example hello                                # renders examples/hell
 
 **Always run `cargo fmt` after completing a coding task.** It's the last step before reporting work done, even when the diff looks cosmetically fine — rustfmt catches subtle layout drift (over-long lines, brace style, import ordering) that otherwise piles up across changes.
 
+## Comments
+
+This project **overrides** the usual "default to no comments" guidance. Specifically, for files under `src/`:
+
+- **Every `pub fn` / `pub(crate) fn` gets a doc comment.** Including trivial accessors (`len`, `is_empty`, `id`) — give them one short line.
+- **Trait method declarations** (`fn foo(&self);` inside `pub trait Foo`) get docs describing the contract callers can rely on.
+- **Trait method implementations** inherit from the trait declaration — don't add per-impl doc comments. Same for `From` / `Default` / `Display` / `Debug` impls unless the impl does something non-obvious.
+- **Private `fn`** gets a comment only when the purpose isn't obvious from the name. Lean conservative: a well-named helper is its own documentation.
+- **`pub struct` fields and `pub enum` variants** get docs when they're carrying non-obvious meaning.
+
+Style rules (apply everywhere, including comments in `tests/` and `examples/`):
+
+- **Describe purpose, not implementation.** `/// True when the geom holds no rows.` — not `/// Returns true if `self.keys.len() == 0`.`
+- **One concise sentence for most fns.** Two or three lines only when there's a non-obvious invariant or interaction with other code.
+- **No backwards-facing language.** No "Now", "Previously", "Was", "Used to" (in the historical sense), "no longer", "originally", "legacy", "deprecated". Describe current behavior only.
+- **No version markers** ("v1", "v1.5", "v1.6", etc.) in comments. If a planned future behavior is genuinely load-bearing it lives in an issue or planning doc, not the source.
+- **No references to current task, callers, PRs, or commit history.** That belongs in the PR description / git log.
+- **For builder methods that return `self`**, describe the field being set: `/// Set the patch's outer margin.` — not a restatement of the chaining pattern.
+- **Use `///` for items; `//!` for module-level docs.** Inline `//` only inside function bodies for non-obvious WHYs.
+
+`src/plot/geom/resolve.rs` is a good in-codebase template for the geom/resolve style.
+
 ## Cargo features
 
 - **`vello`** (default) — the GPU rasterising backend (wgpu + vello + pollster + futures-intrusive + bytemuck).

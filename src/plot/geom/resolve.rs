@@ -588,7 +588,7 @@ pub(crate) fn emit_endpoint_marker(
 /// - Path-backed shapes: fill subpaths take `marker_fill`; stroke subpaths
 ///   take `marker_stroke`.
 /// - Glyph-backed shapes: a single `GlyphRun` is emitted with
-///   `brush = marker_fill`; `marker_stroke` is ignored (v1: glyph markers
+///   `brush = marker_fill`; `marker_stroke` is ignored (glyph markers
 ///   are fill-only). The em-space shift `em_origin - em_bbox.center()` is
 ///   composed inside the caller's `xform` so the glyph's visual centre
 ///   lands at the placement point. The caller's `xform` is expected to

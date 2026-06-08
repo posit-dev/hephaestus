@@ -79,8 +79,8 @@ pub struct Plot {
 
     shapes: ShapeRegistry,
 
-    /// Tracked but unused in v1 — Phase 7 orchestrator surfaces it
-    /// for partial-repaint heuristics.
+    /// Tracked for the orchestrator's partial-repaint heuristics; not
+    /// currently consulted by the draw path.
     #[allow(dead_code)]
     dirty: bool,
 }
@@ -119,36 +119,43 @@ impl Plot {
 
     // ── Chaining (config) ──
 
+    /// Set the plot's title, rendered in the [`Slot::Title`] chrome slot.
     pub fn title(mut self, s: impl Into<String>) -> Self {
         self.title = Some(s.into());
         self
     }
 
+    /// Set the plot's subtitle, rendered in the [`Slot::Subtitle`] slot.
     pub fn subtitle(mut self, s: impl Into<String>) -> Self {
         self.subtitle = Some(s.into());
         self
     }
 
+    /// Set the plot's caption, rendered in the [`Slot::Caption`] slot.
     pub fn caption(mut self, s: impl Into<String>) -> Self {
         self.caption = Some(s.into());
         self
     }
 
+    /// Set the left axis title.
     pub fn axis_left_title(mut self, s: impl Into<String>) -> Self {
         self.axis_left_title = Some(s.into());
         self
     }
 
+    /// Set the bottom axis title.
     pub fn axis_bottom_title(mut self, s: impl Into<String>) -> Self {
         self.axis_bottom_title = Some(s.into());
         self
     }
 
+    /// Set the right axis title.
     pub fn axis_right_title(mut self, s: impl Into<String>) -> Self {
         self.axis_right_title = Some(s.into());
         self
     }
 
+    /// Set the top axis title.
     pub fn axis_top_title(mut self, s: impl Into<String>) -> Self {
         self.axis_top_title = Some(s.into());
         self
@@ -163,6 +170,8 @@ impl Plot {
         self
     }
 
+    /// Replace this plot's [`ShapeRegistry`]. Geoms use the registry to
+    /// look up marker / terminator shapes by name at draw time.
     pub fn shape_registry(mut self, r: ShapeRegistry) -> Self {
         self.shapes = r;
         self
@@ -170,21 +179,27 @@ impl Plot {
 
     // ── Mutators ──
 
+    /// Replace the title text. Flips the plot's dirty flag.
     pub fn set_title(&mut self, s: impl Into<String>) {
         self.title = Some(s.into());
         self.dirty = true;
     }
 
+    /// Clear the title. Flips the plot's dirty flag.
     pub fn clear_title(&mut self) {
         self.title = None;
         self.dirty = true;
     }
 
+    /// Install (or replace) a channel → scale-name binding. Flips the
+    /// plot's dirty flag.
     pub fn set_binding(&mut self, channel: impl Into<String>, scale_name: impl Into<String>) {
         self.bindings.insert(channel.into(), scale_name.into());
         self.dirty = true;
     }
 
+    /// Remove the binding for `channel`. Returns the previous scale name
+    /// if any. Flips the plot's dirty flag on removal.
     pub fn unbind(&mut self, channel: &str) -> Option<String> {
         let removed = self.bindings.remove(channel);
         if removed.is_some() {
@@ -193,16 +208,21 @@ impl Plot {
         removed
     }
 
+    /// Iterate over `(channel, scale_name)` pairs. Order is unspecified.
     pub fn bindings(&self) -> impl Iterator<Item = (&str, &str)> + '_ {
         self.bindings.iter().map(|(k, v)| (k.as_str(), v.as_str()))
     }
 
+    /// Look up the scale name bound to `channel`, if any.
     pub fn binding(&self, channel: &str) -> Option<&str> {
         self.bindings.get(channel).map(|s| s.as_str())
     }
 
     // ── Geom management ──
 
+    /// Append a geom to the plot's draw order. Returns a stable
+    /// [`GeomId`] for later [`Self::update_geom`] / [`Self::remove_geom`]
+    /// calls.
     pub fn add_geom<G: Geom>(&mut self, geom: G) -> GeomId {
         let id = GeomId(self.next_geom_id);
         self.next_geom_id = self.next_geom_id.wrapping_add(1);
@@ -211,6 +231,7 @@ impl Plot {
         id
     }
 
+    /// Remove and return the geom with the given id, if any.
     pub fn remove_geom(&mut self, id: GeomId) -> Option<Box<dyn Geom>> {
         let idx = self.geoms.iter().position(|(g, _)| *g == id)?;
         self.dirty = true;
@@ -232,6 +253,8 @@ impl Plot {
         }
     }
 
+    /// Iterate over the stable ids of every geom on this plot, in
+    /// draw order.
     pub fn geom_ids(&self) -> impl Iterator<Item = GeomId> + '_ {
         self.geoms.iter().map(|(id, _)| *id)
     }

@@ -89,6 +89,9 @@ pub trait SceneBuilder {
 pub struct Font(pub peniko::FontData);
 
 impl Font {
+    /// Wrap a font blob and face index. `data` is an Arc-backed byte
+    /// buffer carrying the font file; `index` selects a face within a
+    /// TrueType / OpenType collection (0 for the common single-face case).
     pub fn new(data: peniko::Blob<u8>, index: u32) -> Self {
         Self(peniko::FontData::new(data, index))
     }

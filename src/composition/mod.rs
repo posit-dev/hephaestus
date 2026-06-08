@@ -591,6 +591,7 @@ struct BuildState {
 }
 
 impl BuildState {
+    /// Fresh state with `next_id = 1` and no registered regions.
     fn new() -> Self {
         Self {
             next_id: 1,
@@ -598,12 +599,17 @@ impl BuildState {
         }
     }
 
+    /// Allocate the next monotonic [`CellId`] and bump the counter.
     fn alloc_id(&mut self) -> CellId {
         let id = CellId(self.next_id);
         self.next_id += 1;
         id
     }
 
+    /// Allocate a fresh [`CellId`] and register `(patch_id, region)` so
+    /// it can be looked up from the solved layout. Returns
+    /// [`CompositionError::DuplicateId`] if `(patch_id, region)` is
+    /// already registered.
     fn register_region(
         &mut self,
         patch_id: &Option<String>,
@@ -1338,6 +1344,7 @@ impl CompositionLayout {
 
 /// Anything that names a region for [`CompositionLayout::get`] lookups.
 pub trait Region {
+    /// The region's name as a `&str`. Used as the lookup key.
     fn name(&self) -> &str;
 }
 

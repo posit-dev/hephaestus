@@ -70,7 +70,7 @@ pub trait ScaleTypeTrait: Debug + Send + Sync {
     }
 
     /// Which [`TransformKind`]s are compatible with this scale type.
-    /// Default = `[Identity]` (the only transform v1 ships).
+    /// Default = `[Identity]` (the only implemented transform).
     fn allowed_transforms(&self) -> &'static [TransformKind] {
         const ID: &[TransformKind] = &[TransformKind::Identity];
         ID
@@ -112,50 +112,70 @@ pub trait ScaleTypeTrait: Debug + Send + Sync {
 pub struct ScaleType(Arc<dyn ScaleTypeTrait>);
 
 impl ScaleType {
+    /// Continuous scale — linear interpolation over a numeric domain.
     pub fn continuous() -> Self {
         ScaleType(Arc::new(Continuous))
     }
 
+    /// Discrete scale — one-to-one lookup `input[i] → output[i]`.
     pub fn discrete() -> Self {
         ScaleType(Arc::new(Discrete))
     }
 
+    /// Ordinal scale — ordered discrete domain with continuous output;
+    /// input position `idx / (n - 1)` interpolated through the output
+    /// range.
     pub fn ordinal() -> Self {
         ScaleType(Arc::new(Ordinal))
     }
 
+    /// Binned scale — continuous domain pre-binned by explicit breaks
+    /// into discrete output bins.
     pub fn binned() -> Self {
         ScaleType(Arc::new(Binned))
     }
 
+    /// Identity scale — input returned untouched.
     pub fn identity() -> Self {
         ScaleType(Arc::new(Identity))
     }
 
+    /// Discriminator. Lets callers match on the family without
+    /// downcasting.
     pub fn kind(&self) -> ScaleTypeKind {
         self.0.kind()
     }
 
+    /// Human-readable name of this scale type.
     pub fn name(&self) -> &'static str {
         self.0.name()
     }
 
+    /// Transforms this scale type accepts.
     pub fn allowed_transforms(&self) -> &'static [TransformKind] {
         self.0.allowed_transforms()
     }
 
+    /// Map a `Value` through this scale type's mapping logic.
     pub(crate) fn map(&self, input: &Value, scale: &Scale) -> Value {
         self.0.map(input, scale)
     }
 
+    /// Generate up to `n` tick `Value`s spanning the scale's input
+    /// range.
     pub(crate) fn breaks(&self, scale: &Scale, n: usize) -> Vec<Value> {
         self.0.breaks(scale, n)
     }
 
+    /// Uniform band width (output-space fraction in `[0, 1]`) for this
+    /// scale type at this scale's configuration. `0.0` for continuous;
+    /// `1.0 / n_bands` for discrete-family.
     pub(crate) fn band_width(&self, scale: &Scale) -> f64 {
         self.0.band_width(scale)
     }
 
+    /// Band width at a specific input. Falls back to the uniform
+    /// [`Self::band_width`] unless the scale type overrides it.
     pub(crate) fn band_width_at(&self, scale: &Scale, input: &Value) -> f64 {
         self.0.band_width_at(scale, input)
     }
@@ -192,7 +212,8 @@ impl ScaleTypeTrait for Continuous {
             Some(InputRange::Continuous { min, max }) => (*min, *max),
             _ => return Value::Null,
         };
-        // Apply transform (only Identity is wired in v1; future-proof).
+        // Apply transform. Only Identity is currently wired, but the
+        // path is in place for other transforms to drop in.
         let v_t = scale.transform().transform(v);
         let dmin_t = scale.transform().transform(d_min);
         let dmax_t = scale.transform().transform(d_max);
@@ -357,7 +378,7 @@ fn discrete_band_width(scale: &Scale) -> f64 {
 /// - `Numbers(vs)` → piecewise-linear interpolation across `vs.len() - 1`
 ///   segments. Empty vec returns `Null`; single-stop returns that stop.
 /// - `Colors(vs)` → piecewise-linear componentwise interpolation in sRGB
-///   space. Not perceptually uniform — a documented v1 limitation.
+///   space. Not perceptually uniform — a documented limitation.
 /// - `Strings(_)` → `Null` (strings can't be interpolated).
 fn interpolate_range(t: f64, range: Option<&OutputRange>) -> Value {
     match range {

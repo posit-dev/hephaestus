@@ -5,7 +5,7 @@
 //! Lifecycle:
 //!
 //! 1. User builds a `Composition` (the layout shape — named, empty
-//!    patches in v1) and hands it to `PlotComposition::new(comp)`.
+//!    patches) and hands it to `PlotComposition::new(comp)`.
 //!    The orchestrator captures a clone-friendly description of the
 //!    composition shape (placements + ids + tracks); the original
 //!    `Composition` value is consumed.
@@ -22,8 +22,7 @@
 //! `update_scale` / `update_plot` / `attach_plot` / `detach_plot` flips
 //! `layout_dirty` so the next render re-solves. Size / dpi changes
 //! implicitly invalidate too. Per-plot and per-scale dirty bits are
-//! plumbed but only consulted by partial-repaint heuristics (deferred
-//! to v1.5).
+//! plumbed but not yet consumed; every render re-draws every plot.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,12 +42,10 @@ use super::scale::{Scale, ScaleRegistry};
 /// `Cell` values) can be consumed once and rebuilt fresh on every
 /// render with each plot's chrome wired in.
 ///
-/// v1 limitation: captures placement metadata + patch ids only. Any
-/// chrome cells the user attached directly to a patch before passing
-/// the composition to `PlotComposition::new` are **dropped** — v1
-/// expects empty patches. v1.5 adds an introspection hook on
-/// `composition::Patch` to preserve user-attached chrome alongside
-/// orchestrator-supplied chrome.
+/// Captures placement metadata + patch ids only. Chrome cells attached
+/// directly to a patch before passing the composition to
+/// `PlotComposition::new` are **dropped** — the orchestrator expects
+/// empty patches and re-attaches chrome from each plot on every render.
 #[derive(Debug, Clone)]
 struct CompositionTemplate {
     rows: usize,
@@ -68,8 +65,8 @@ struct PlacementTemplate {
 
 #[derive(Debug, Clone)]
 enum ElementTemplate {
-    /// Named patch (rebuilt as `Patch::new(id)`). v1 ignores any
-    /// pre-attached chrome.
+    /// Named patch (rebuilt as `Patch::new(id)`). Any pre-attached chrome
+    /// is ignored.
     NamedPatch(String),
     /// Anonymous spacer.
     Spacer,
@@ -220,8 +217,8 @@ pub struct PlotComposition {
     template: CompositionTemplate,
     scales: ScaleRegistry,
     plots: HashMap<String, Plot>,
-    /// Per-plot dirty bits (consumed by partial-repaint heuristics in
-    /// v1.5; v1 always re-renders the whole table).
+    /// Per-plot dirty bits, plumbed for partial-repaint heuristics. Not
+    /// currently consumed — every render re-draws the full table.
     plot_dirty: HashMap<String, bool>,
     /// Per-scale dirty bits (same role as plot_dirty).
     scale_dirty: HashMap<String, bool>,
@@ -262,6 +259,8 @@ impl PlotComposition {
         self
     }
 
+    /// Insert a scale under `name`, replacing any previous entry. Flags
+    /// the scale dirty, every plot that binds to it, and the layout.
     pub fn insert_scale(&mut self, name: impl Into<String>, scale: Scale) {
         let name = name.into();
         self.scale_dirty.insert(name.clone(), true);
@@ -270,6 +269,8 @@ impl PlotComposition {
         self.layout_dirty = true;
     }
 
+    /// Remove the scale registered under `name`. Returns the removed
+    /// scale. Flags dependent plots and the layout dirty.
     pub fn remove_scale(&mut self, name: &str) -> Option<Scale> {
         let removed = self.scales.remove(name);
         if removed.is_some() {
@@ -280,10 +281,12 @@ impl PlotComposition {
         removed
     }
 
+    /// Borrow the scale registered under `name`, if any.
     pub fn scale(&self, name: &str) -> Option<&Scale> {
         self.scales.get(name)
     }
 
+    /// Borrow the underlying scale registry.
     pub fn scales(&self) -> &ScaleRegistry {
         &self.scales
     }
@@ -308,11 +311,14 @@ impl PlotComposition {
 
     // ── Plot management ───────────────────────────────────────────────
 
+    /// Attach a plot. Chainable builder form of [`Self::attach_plot`].
     pub fn with_plot(mut self, plot: Plot) -> Self {
         self.attach_plot(plot);
         self
     }
 
+    /// Attach a plot bound to its patch id. Replaces any previous plot
+    /// at the same patch id. Flips the layout's dirty flag.
     pub fn attach_plot(&mut self, plot: Plot) {
         let id = plot.patch_id().to_string();
         self.plot_dirty.insert(id.clone(), true);
@@ -320,6 +326,8 @@ impl PlotComposition {
         self.layout_dirty = true;
     }
 
+    /// Detach and return the plot bound to `patch_id`, if any. Flips the
+    /// layout's dirty flag.
     pub fn detach_plot(&mut self, patch_id: &str) -> Option<Plot> {
         let removed = self.plots.remove(patch_id);
         if removed.is_some() {
@@ -329,10 +337,12 @@ impl PlotComposition {
         removed
     }
 
+    /// Borrow the plot bound to `patch_id`, if any.
     pub fn plot(&self, patch_id: &str) -> Option<&Plot> {
         self.plots.get(patch_id)
     }
 
+    /// Iterate over `(patch_id, plot)` pairs. Order is unspecified.
     pub fn plots(&self) -> impl Iterator<Item = (&str, &Plot)> + '_ {
         self.plots.iter().map(|(k, v)| (k.as_str(), v))
     }
@@ -445,14 +455,13 @@ impl PlotComposition {
                     continue;
                 }
                 // Output-type cross-check happens when a geom expects a
-                // specific output kind for that channel. For v1 the
-                // canonical channel→output map is:
+                // specific output kind for that channel. Canonical
+                // channel→output map:
                 //   x, y, size, *_offset, *_band, *_opacity → Numbers
                 //   fill, stroke                            → Colors
                 //   shape                                   → Strings
-                // We use this static map rather than iterating the
-                // geom's declared_channels (which would require
-                // exposing the geom itself; out of scope for v1).
+                // The static map avoids exposing the geom itself in this
+                // path.
                 let expected = expected_output_for_channel(channel);
                 if let (Some(expected), Some(s)) = (expected, scale) {
                     if let Some(found) = output_type_name(s) {
@@ -474,7 +483,8 @@ impl PlotComposition {
 
     /// Internal: flag every plot that binds `scale_name` (any channel)
     /// as dirty. Called from scale insert/remove/update so partial
-    /// repaint can target only affected plots in v1.5.
+    /// repaint can target only affected plots once partial-repaint
+    /// heuristics consume the dirty bits.
     fn flag_plots_referencing(&mut self, scale_name: &str) {
         let target: Arc<str> = Arc::from(scale_name);
         for (pid, plot) in &self.plots {

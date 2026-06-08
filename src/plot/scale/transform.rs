@@ -1,42 +1,42 @@
 //! Value transforms (Identity, Log, Sqrt, …) applied **inside** a scale
 //! before linearisation.
 //!
-//! v1 ships [`TransformKind::Identity`] only. The other variants are
-//! declared so future scales (log axes, asinh-scaled position, …) drop in
-//! as additional [`TransformTrait`] impls without touching the `Scale`
-//! struct or its mapping code.
+//! Only [`TransformKind::Identity`] is currently implemented. The other
+//! variants are declared so additional [`TransformTrait`] impls can drop
+//! in without touching the `Scale` struct or its mapping code;
+//! constructing them via [`Transform::of`] panics until they're wired.
 
 use std::fmt::Debug;
 use std::sync::Arc;
 
 /// Discriminator for the family of value transforms supported by scales.
 ///
-/// v1 wires only [`TransformKind::Identity`]; the other variants exist so
-/// the type compiles against all callers, but constructing them via the
-/// public [`Transform`] constructors panics until they're implemented.
+/// Only [`TransformKind::Identity`] is implemented; the other variants
+/// exist so the type compiles against all callers, but constructing them
+/// via [`Transform::of`] panics until they're wired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TransformKind {
-    /// `y = x`. The only variant implemented in v1.
+    /// `y = x`. The only implemented variant.
     Identity,
-    /// `y = log10(x)`. Deferred to v1.5+.
+    /// `y = log10(x)`. Not implemented.
     Log10,
-    /// `y = log2(x)`. Deferred to v1.5+.
+    /// `y = log2(x)`. Not implemented.
     Log2,
-    /// `y = ln(x)`. Deferred to v1.5+.
+    /// `y = ln(x)`. Not implemented.
     Log,
-    /// `y = sqrt(x)`. Deferred to v1.5+.
+    /// `y = sqrt(x)`. Not implemented.
     Sqrt,
-    /// `y = x²`. Deferred to v1.5+.
+    /// `y = x²`. Not implemented.
     Square,
-    /// `y = 10^x`. Deferred to v1.5+.
+    /// `y = 10^x`. Not implemented.
     Exp10,
-    /// `y = 2^x`. Deferred to v1.5+.
+    /// `y = 2^x`. Not implemented.
     Exp2,
-    /// `y = e^x`. Deferred to v1.5+.
+    /// `y = e^x`. Not implemented.
     Exp,
-    /// `y = asinh(x)`. Like log but handles zero / negatives. Deferred.
+    /// `y = asinh(x)`. Like log but handles zero / negatives. Not implemented.
     Asinh,
-    /// Pseudo-log: linear near zero, log far away. Deferred.
+    /// Pseudo-log: linear near zero, log far away. Not implemented.
     PseudoLog,
 }
 
@@ -66,19 +66,18 @@ pub trait TransformTrait: Debug + Send + Sync {
 pub struct Transform(Arc<dyn TransformTrait>);
 
 impl Transform {
-    /// The identity transform — the only one shipped in v1.
+    /// The identity transform.
     pub fn identity() -> Self {
         Transform(Arc::new(Identity))
     }
 
     /// Construct from a [`TransformKind`]. Returns the [`Identity`]
-    /// instance for [`TransformKind::Identity`]; **panics** for all other
-    /// variants in v1 — they're declared on the enum so the type
-    /// surface is complete but the implementations land in v1.5+.
+    /// instance for [`TransformKind::Identity`]; **panics** for any other
+    /// variant — only Identity is implemented.
     pub fn of(kind: TransformKind) -> Self {
         match kind {
             TransformKind::Identity => Self::identity(),
-            other => panic!("Transform::{other:?} not implemented in v1 — only Identity is wired"),
+            other => panic!("Transform::{other:?} not implemented — only Identity is wired"),
         }
     }
 
@@ -181,14 +180,14 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not implemented in v1")]
-    fn of_log10_panics_in_v1() {
+    #[should_panic(expected = "not implemented")]
+    fn of_log10_panics_when_unimplemented() {
         let _ = Transform::of(TransformKind::Log10);
     }
 
     #[test]
-    #[should_panic(expected = "not implemented in v1")]
-    fn of_sqrt_panics_in_v1() {
+    #[should_panic(expected = "not implemented")]
+    fn of_sqrt_panics_when_unimplemented() {
         let _ = Transform::of(TransformKind::Sqrt);
     }
 

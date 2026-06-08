@@ -12,7 +12,7 @@
 //! `Rgba8Unorm` texture with alpha forced to 255, which round-trips cleanly
 //! through default SrcOver compositing without any per-draw blend-mode plumbing.
 //!
-//! # v1 limitation: alpha-insensitive picking
+//! # Limitation: alpha-insensitive picking
 //!
 //! Picking ignores display alpha. A semi-transparent layer or image fully
 //! occludes picks of content beneath it, even though the same content remains
@@ -57,6 +57,9 @@ pub(crate) fn id_to_color(id: u32) -> Color {
 /// Decode a u32 pixel sampled from the hitmap into the originating id, or
 /// `None` for the no-hit sentinel. The alpha byte is discarded; only the
 /// low 24 bits carry id payload.
+/// Decode a u32 pixel sampled from the hitmap into the originating id,
+/// or `None` for the no-hit sentinel (`id == 0`). The alpha byte is
+/// discarded; only the low 24 bits carry the id payload.
 #[cfg(feature = "vello")]
 pub(crate) fn decode(px: u32) -> Option<u32> {
     let id = px & 0x00FF_FFFF;

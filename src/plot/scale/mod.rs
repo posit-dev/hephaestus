@@ -3,8 +3,8 @@
 //! A [`Scale`] is a runtime-configurable value mapper composed of:
 //! - a [`ScaleType`] (Continuous / Discrete / Ordinal / Binned / Identity)
 //!   determining the mapping behaviour;
-//! - a [`Transform`] (Identity in v1) applied inside continuous scales
-//!   before linearisation;
+//! - a [`Transform`] (Identity is the only one currently implemented)
+//!   applied inside continuous scales before linearisation;
 //! - an [`InputRange`] (continuous domain or discrete value list);
 //! - an optional [`OutputRange`] (the visual values to map into; left
 //!   unset for position channels, which return the normalised [0, 1]
@@ -12,8 +12,8 @@
 //!
 //! Construction uses chained builder methods on [`Scale`] (consuming
 //! `self`); mutation uses `set_*` methods that take `&mut self` and bump
-//! the internal [generation](Scale::generation) counter so v1.5
-//! scaled-output caching can detect changes without comparing values.
+//! the internal [generation](Scale::generation) counter so downstream
+//! caches can detect changes without comparing values.
 //!
 //! Free-function constructors live in the [`scale`] sub-module re-exported
 //! here, providing terse ggplot-style call sites
@@ -59,8 +59,8 @@ pub struct Scale {
     transform: Transform,
     input_range: Option<InputRange>,
     output_range: Option<OutputRange>,
-    /// Bumped on every mutation. Used by future per-channel cache
-    /// invalidation (v1.5); v1 plumbs the counter but doesn't consult it.
+    /// Bumped on every mutation. Plumbed for per-channel cache
+    /// invalidation; not currently consulted by the draw path.
     generation: Cell<u64>,
 }
 
@@ -98,21 +98,27 @@ impl Scale {
         self
     }
 
+    /// Configure a discrete domain — explicit ordered list of input
+    /// values. Used by [`ScaleType::Discrete`] and [`ScaleType::Ordinal`].
     pub fn domain_discrete(mut self, values: impl IntoIterator<Item = Value>) -> Self {
         self.input_range = Some(InputRange::Discrete(values.into_iter().collect()));
         self
     }
 
+    /// Configure a numeric output range (pt for absolute sizes;
+    /// unitless otherwise).
     pub fn range_numbers(mut self, vs: impl IntoIterator<Item = f64>) -> Self {
         self.output_range = Some(OutputRange::Numbers(vs.into_iter().collect()));
         self
     }
 
+    /// Configure a colour output range.
     pub fn range_colors(mut self, vs: impl IntoIterator<Item = Color>) -> Self {
         self.output_range = Some(OutputRange::Colors(vs.into_iter().collect()));
         self
     }
 
+    /// Configure a string output range.
     pub fn range_strings(mut self, vs: impl IntoIterator<Item = Arc<str>>) -> Self {
         self.output_range = Some(OutputRange::Strings(vs.into_iter().collect()));
         self
@@ -131,6 +137,8 @@ impl Scale {
         self
     }
 
+    /// Configure the scale's [`Transform`]. Currently only
+    /// [`TransformKind::Identity`] is implemented.
     pub fn with_transform(mut self, t: TransformKind) -> Self {
         self.transform = Transform::of(t);
         self
@@ -138,6 +146,8 @@ impl Scale {
 
     // ── Mutators (`&mut self`; bump generation) ──
 
+    /// Replace the continuous domain in place. Bumps the generation
+    /// counter.
     pub fn set_domain_continuous<T>(&mut self, min: T, max: T)
     where
         T: Into<Value>,
@@ -148,31 +158,42 @@ impl Scale {
         self.bump_generation();
     }
 
+    /// Replace the discrete domain in place. Bumps the generation
+    /// counter.
     pub fn set_domain_discrete(&mut self, values: Vec<Value>) {
         self.input_range = Some(InputRange::Discrete(values));
         self.bump_generation();
     }
 
+    /// Replace the numeric output range in place. Bumps the generation
+    /// counter.
     pub fn set_range_numbers(&mut self, vs: Vec<f64>) {
         self.output_range = Some(OutputRange::Numbers(vs));
         self.bump_generation();
     }
 
+    /// Replace the colour output range in place. Bumps the generation
+    /// counter.
     pub fn set_range_colors(&mut self, vs: Vec<Color>) {
         self.output_range = Some(OutputRange::Colors(vs));
         self.bump_generation();
     }
 
+    /// Replace the string output range in place. Bumps the generation
+    /// counter.
     pub fn set_range_strings(&mut self, vs: Vec<Arc<str>>) {
         self.output_range = Some(OutputRange::Strings(vs));
         self.bump_generation();
     }
 
+    /// Replace the linetype output range in place. Bumps the generation
+    /// counter.
     pub fn set_range_linetypes(&mut self, vs: Vec<Arc<[crate::plot::value::LinetypeStep]>>) {
         self.output_range = Some(OutputRange::Linetypes(vs));
         self.bump_generation();
     }
 
+    /// Replace the transform in place. Bumps the generation counter.
     pub fn set_transform(&mut self, t: TransformKind) {
         self.transform = Transform::of(t);
         self.bump_generation();
@@ -246,26 +267,30 @@ impl Scale {
 
     // ── Accessors ──
 
+    /// Borrow the [`ScaleType`].
     pub fn scale_type(&self) -> &ScaleType {
         &self.scale_type
     }
 
+    /// Borrow the [`Transform`].
     pub fn transform(&self) -> &Transform {
         &self.transform
     }
 
+    /// Borrow the configured input domain, if any.
     pub fn input_range(&self) -> Option<&InputRange> {
         self.input_range.as_ref()
     }
 
+    /// Borrow the configured output range, if any.
     pub fn output_range(&self) -> Option<&OutputRange> {
         self.output_range.as_ref()
     }
 
-    /// Monotonic counter incremented on every mutation. Used by v1.5
-    /// scaled-output caching to invalidate per-channel caches; v1
-    /// increments it but doesn't consult it.
-    #[allow(dead_code)] // wired through builder/mutators; consumed in v1.5
+    /// Monotonic counter incremented on every mutation. Plumbed for
+    /// downstream scaled-output caching to invalidate per-channel
+    /// caches without comparing values; not currently consulted.
+    #[allow(dead_code)] // wired through builder/mutators; consumers TBD
     pub(crate) fn generation(&self) -> u64 {
         self.generation.get()
     }
@@ -395,18 +420,17 @@ use std::collections::HashMap;
 /// scales by name through their channel bindings; the registry owns the
 /// `Scale` instances.
 ///
-/// In v1 this is a thin `HashMap` wrapper; v1.5 will add per-scale
-/// generation-tracking helpers for cache invalidation. The orchestrator
-/// (Phase 7) owns the registry and exposes mutators that flip dirty
-/// flags; v1 callers building one by hand (e.g. for tests or
-/// orchestrator-free renders) can use the [`Self::insert`] /
-/// [`Self::remove`] surface directly.
+/// A thin `HashMap` wrapper. The orchestrator owns the registry and
+/// exposes mutators that flip dirty flags; callers building one by hand
+/// (e.g. for tests or orchestrator-free renders) can use the
+/// [`Self::insert`] / [`Self::remove`] surface directly.
 #[derive(Default, Clone, Debug)]
 pub struct ScaleRegistry {
     scales: HashMap<String, Scale>,
 }
 
 impl ScaleRegistry {
+    /// Empty registry — no scales registered.
     pub fn new() -> Self {
         Self::default()
     }
@@ -448,14 +472,17 @@ impl ScaleRegistry {
         self.scales.keys().map(|s| s.as_str())
     }
 
+    /// True if a scale with `name` is registered.
     pub fn contains(&self, name: &str) -> bool {
         self.scales.contains_key(name)
     }
 
+    /// Number of registered scales.
     pub fn len(&self) -> usize {
         self.scales.len()
     }
 
+    /// True when no scales are registered.
     pub fn is_empty(&self) -> bool {
         self.scales.is_empty()
     }
@@ -582,7 +609,7 @@ mod tests {
 
     #[test]
     fn continuous_extrapolates_outside_domain() {
-        // No OOB strategy in v1 — input below/above domain extrapolates.
+        // No OOB strategy — input below/above domain extrapolates.
         let s = continuous(0.0..=10.0);
         approx(
             s.map(&Value::Number(-5.0)).as_number().unwrap(),

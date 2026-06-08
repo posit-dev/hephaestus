@@ -336,6 +336,8 @@ struct HeadlessTarget {
 }
 
 impl HeadlessTarget {
+    /// Allocate a storage texture and a `width`-row-padded readback
+    /// buffer at the given dimensions.
     fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
         let bytes_per_row = width * 4;
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -462,6 +464,8 @@ impl VelloRenderer {
         })
     }
 
+    /// Re-allocate the display (and, if picking is on, pick) headless
+    /// target when the requested dimensions don't match the cached ones.
     fn ensure_targets(&mut self, width: u32, height: u32) {
         let need_new = match &self.target {
             None => true,
@@ -481,7 +485,7 @@ impl VelloRenderer {
     /// sentinel (uncovered or [`PickId::Block`]).
     ///
     /// Note: picking does not respect display alpha; see the [`crate::pick`]
-    /// module docs for the v1 limitation.
+    /// module docs for the alpha-insensitive picking limitation.
     pub fn pick_at(&self, x: u32, y: u32) -> Option<u32> {
         let (w, h) = self.hitmap_dims?;
         if x >= w || y >= h {
@@ -549,7 +553,7 @@ impl Renderer for VelloRenderer {
             // Use AaConfig::Area (the only mode our AaSupport opted into).
             // Edge pixels of solid fills will be partially blended toward the
             // background — fine for picking interior regions, with a small
-            // ambiguity zone at borders that v1 does not try to eliminate.
+            // ambiguity zone at borders the renderer does not try to eliminate.
             self.renderer
                 .render_to_texture(
                     &self.device,
@@ -720,7 +724,7 @@ fn triangle_path(pts: &[Point; 3]) -> Path {
 ///   the max-colour-distance pair. The third vertex gets an
 ///   interpolated colour at its perpendicular-projection position,
 ///   which produces a small visible discontinuity along the edge
-///   between the picked pair and the third vertex — a documented v1
+///   between the picked pair and the third vertex — a documented
 ///   limitation.
 fn triangle_gradient_brush(pts: &[Point; 3], colors: &[Color; 3]) -> Brush {
     let eq01 = colors_eq(&colors[0], &colors[1]);

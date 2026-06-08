@@ -75,10 +75,12 @@ pub struct RecordingScene {
 }
 
 impl RecordingScene {
+    /// Construct an empty recording scene.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Drop every recorded op.
     pub fn clear(&mut self) {
         self.ops.clear();
     }

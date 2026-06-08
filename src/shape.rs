@@ -691,6 +691,8 @@ pub mod builtin {
         "arrow-diamond",
     ];
 
+    /// Construct the built-in shape registered under `name`. Returns
+    /// `None` if `name` doesn't match any entry in [`NAMES`].
     pub(super) fn lookup(name: &str) -> Option<Shape> {
         Some(match name {
             "circle" => circle(),

@@ -8,8 +8,9 @@
 use crate::geometry::{Point, Rect};
 use crate::path::Path;
 
-/// A shape used to clip a polyline endpoint. All variants are axis-aligned in
-/// v1; rotated ellipses or arbitrary kurbo shapes are out of scope.
+/// A shape used to clip a polyline endpoint. All variants are
+/// axis-aligned; rotated ellipses or arbitrary kurbo shapes are out of
+/// scope.
 #[derive(Debug, Clone, Copy)]
 pub enum EndClip {
     /// Closed disk centered at `center` with radius `radius`.

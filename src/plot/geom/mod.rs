@@ -10,8 +10,8 @@
 //! A geom doesn't store its scales directly. Instead it declares the
 //! channel names it consumes ([`Geom::declared_channels`]) and, at draw
 //! time, asks the [`GeomContext`] to resolve each channel name to a
-//! [`Scale`]. The context plumbs through a [`ScaleResolver`] — in v1.5+
-//! this is the orchestrator's binding map + scale registry; in tests it
+//! [`Scale`]. The context plumbs through a [`ScaleResolver`]: in the
+//! orchestrator this is the binding map + scale registry; in tests it
 //! can be a hand-built [`DirectScaleResolver`].
 //!
 //! ### Channel data
@@ -323,14 +323,15 @@ pub trait ScaleResolver {
     fn scale_for(&self, channel: &str) -> Option<&Scale>;
 }
 
-/// A direct channel-name → `&Scale` map. Used in Phase 5 stand-alone
-/// tests; Phase 6 wires the orchestrator's binding-lookup path through
-/// the same [`ScaleResolver`] trait.
+/// A direct channel-name → `&Scale` map. Used in stand-alone tests; the
+/// orchestrator's binding-lookup path also implements [`ScaleResolver`].
 pub struct DirectScaleResolver<'a> {
     scales: HashMap<&'static str, &'a Scale>,
 }
 
 impl<'a> DirectScaleResolver<'a> {
+    /// Empty resolver — no channels bound. Build it up with
+    /// [`Self::with`].
     pub fn new() -> Self {
         Self {
             scales: HashMap::new(),
@@ -377,6 +378,7 @@ pub struct GeomContext<'a> {
 }
 
 impl<'a> GeomContext<'a> {
+    /// Construct a per-draw context.
     pub fn new(
         panel_rect: Rect,
         dpi: f64,
@@ -391,6 +393,7 @@ impl<'a> GeomContext<'a> {
         }
     }
 
+    /// Resolve a channel name to a scale, if one is bound.
     pub fn scale_for(&self, channel: &str) -> Option<&Scale> {
         self.scales.scale_for(channel)
     }
@@ -423,6 +426,8 @@ pub enum Keys {
 }
 
 impl Keys {
+    /// Number of rows the keys cover. `n` for `Positional(n)`; the
+    /// underlying column's length for `Explicit`.
     pub fn len(&self) -> usize {
         match self {
             Keys::Positional(n) => *n,
@@ -430,6 +435,7 @@ impl Keys {
         }
     }
 
+    /// True when no rows are present.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

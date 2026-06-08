@@ -52,6 +52,7 @@ pub struct BlendMode {
 }
 
 impl BlendMode {
+    /// Combine a [`Mix`] function with a [`Compose`] operator.
     pub const fn new(mix: Mix, compose: Compose) -> Self {
         Self { mix, compose }
     }

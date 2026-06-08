@@ -1135,7 +1135,7 @@ mod tests {
         // path (no Dash entries). Every stroke op present comes from
         // the marker's own outline (the "circle" shape registers as
         // Fill-style, so no marker outlines unless we add a default
-        // thin stroke — which we don't in v1).
+        // thin stroke — which we don't).
         assert!(fills >= 6, "expected several marker fills, got {fills}");
         // No kurbo dash pattern in any emitted stroke (we walked
         // the pattern manually).

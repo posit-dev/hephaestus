@@ -7,14 +7,13 @@
 //! [`chrome`](super::chrome)) but [`Scale::axis_measure`] /
 //! [`Scale::draw_axis`] are unavailable.
 //!
-//! v1 conventions:
+//! Conventions:
 //!
-//! - All tick labels are horizontal (no rotation). Tick label rotation is
-//!   a v1.5 enhancement; for now wide labels on a vertical axis just
-//!   grow the axis chrome column.
+//! - All tick labels are horizontal (no rotation). Wide labels on a
+//!   vertical axis grow the axis chrome column.
 //! - Tick mark length, label gap, and font size are fixed pt constants
-//!   below. Per-scale theming is a v1.5 concern.
-//! - Tick label spans use the scale's own [`Scale::format`] which renders
+//!   defined below; not per-scale themable.
+//! - Tick labels use the scale's own [`Scale::format`], which renders
 //!   numeric values via `{n}` Display and temporal values in calendar
 //!   form (YYYY-MM-DD etc.).
 
@@ -45,7 +44,7 @@ const LABEL_GAP_PT: f64 = 2.0;
 const LABEL_FONT_SIZE_PT: f32 = 10.0;
 /// Axis baseline + tick stroke width, pt.
 const STROKE_WIDTH_PT: f64 = 1.0;
-/// Black ink for axis chrome. Theming is a v1.5 concern.
+/// Black ink for axis chrome. Not currently themable.
 fn axis_ink() -> Color {
     rgb(0.0, 0.0, 0.0)
 }

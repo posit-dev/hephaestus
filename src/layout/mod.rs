@@ -351,8 +351,19 @@ pub struct CellId(pub u64);
 /// [`WidthHint::NeedsHeight`]. The default returns 0, which is correct for
 /// content that uses [`WidthHint::Min`].
 pub trait Measure {
+    /// Report this leaf's intrinsic width — either a stable minimum
+    /// ([`WidthHint::Min`]) or a height-dependent value that opts the
+    /// leaf into iteration ([`WidthHint::NeedsHeight`]).
     fn width_hint(&self, dpi: f64) -> WidthHint;
+
+    /// Report this leaf's intrinsic height when allocated `width`
+    /// pixels.
     fn height_at(&self, width: f64, dpi: f64) -> f64;
+
+    /// Report a width given a resolved height. Consulted only during
+    /// iteration for cells that returned [`WidthHint::NeedsHeight`].
+    /// Default `0.0` is correct for content that uses
+    /// [`WidthHint::Min`].
     fn width_at(&self, _height: f64, _dpi: f64) -> f64 {
         0.0
     }
@@ -677,26 +688,32 @@ pub struct Inset {
 }
 
 impl Inset {
+    /// Set the left edge offset from the cell area.
     pub fn left(mut self, l: Length) -> Self {
         self.left = Some(l);
         self
     }
+    /// Set the right edge offset from the cell area.
     pub fn right(mut self, l: Length) -> Self {
         self.right = Some(l);
         self
     }
+    /// Set the top edge offset from the cell area.
     pub fn top(mut self, l: Length) -> Self {
         self.top = Some(l);
         self
     }
+    /// Set the bottom edge offset from the cell area.
     pub fn bottom(mut self, l: Length) -> Self {
         self.bottom = Some(l);
         self
     }
+    /// Set an explicit width; the unset horizontal edge anchors the child.
     pub fn width(mut self, l: Length) -> Self {
         self.width = Some(l);
         self
     }
+    /// Set an explicit height; the unset vertical edge anchors the child.
     pub fn height(mut self, l: Length) -> Self {
         self.height = Some(l);
         self
@@ -1005,7 +1022,7 @@ mod tests {
     #[test]
     fn auto_multi_span_skipped() {
         // Two Auto cols, one child spanning both with width 100 → contributes
-        // 0 to both cols (multi-span skipped in v1).
+        // 0 to both cols (multi-span children are skipped in the width pass).
         let mut root = Grid::new([Track::Auto, Track::Auto], [Track::Fr(1.0)]).id(CellId(0));
         root.place(
             Placement::at(1, 1)

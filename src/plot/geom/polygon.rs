@@ -81,9 +81,8 @@ const DEFAULT_LINEWIDTH_PT: f64 = 1.0;
 const DEFAULT_CAP: Cap = Cap::Butt;
 const DEFAULT_JOIN: Join = Join::Miter;
 /// Miter clamp ratio passed to Clipper2 for `"expand"` offsets. Matches
-/// SVG's default `stroke-miterlimit`. Not user-configurable in v1.5; drop
-/// to `primitives::offset_polygon` directly if a different clamp is
-/// needed.
+/// SVG's default `stroke-miterlimit`. Not user-configurable; drop to
+/// `primitives::offset_polygon` directly if a different clamp is needed.
 const MITER_LIMIT: f64 = 4.0;
 
 const CHANNELS: &[(&str, ExpectedOutput)] = &[

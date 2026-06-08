@@ -66,6 +66,8 @@ pub struct TextStyle {
 }
 
 impl TextStyle {
+    /// Construct a style with the given pixel size, default family,
+    /// weight `400`, and italic `false`.
     pub fn new(size_px: f32) -> Self {
         Self {
             size_px,
@@ -75,16 +77,19 @@ impl TextStyle {
         }
     }
 
+    /// Set the preferred font family.
     pub fn family(mut self, name: impl Into<String>) -> Self {
         self.family = Some(name.into());
         self
     }
 
+    /// Set the CSS-style font weight (400 = normal, 700 = bold).
     pub fn weight(mut self, w: u16) -> Self {
         self.weight = w;
         self
     }
 
+    /// Toggle italic.
     pub fn italic(mut self, yes: bool) -> Self {
         self.italic = yes;
         self
@@ -275,9 +280,8 @@ pub struct LaidGlyph {
 }
 
 /// Walk `run`'s laid-out lines and yield every glyph as a [`LaidGlyph`].
-/// Caller is responsible for skipping inline boxes — none are produced
-/// by [`TextRun::new`] in v1 but the iteration accepts whatever parley
-/// emits, ignoring non-glyph items.
+/// [`TextRun::new`] does not currently produce inline boxes, but the
+/// iteration accepts whatever parley emits, ignoring non-glyph items.
 pub fn run_layout_glyphs(run: &TextRun) -> Vec<LaidGlyph> {
     let layout = run.layout.borrow();
     let mut out = Vec::new();
@@ -411,7 +415,7 @@ pub fn draw_text<S: SceneBuilder + ?Sized>(
     for line in layout.lines() {
         for item in line.items() {
             let PositionedLayoutItem::GlyphRun(gr) = item else {
-                continue; // inline boxes — unsupported in v1
+                continue; // inline boxes — unsupported
             };
             let prun = gr.run();
             let font = Font(prun.font().clone());

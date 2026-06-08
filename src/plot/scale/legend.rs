@@ -1,17 +1,13 @@
-//! Legend rendering — **v1 stub**.
+//! Legend rendering stub.
 //!
 //! The trait surface ([`Scale::legend_measure`] / [`Scale::draw_legend`])
-//! is in place so callers (the [`Plot`](crate::plot) orchestrator, future
-//! geom legend collectors) can wire legend slots into a
+//! lets callers (the [`Plot`](crate::plot) orchestrator, geom legend
+//! collectors) wire legend slots into a
 //! [`composition::Patch`](crate::composition::Patch) without conditional
-//! compilation.
+//! compilation. Both methods are no-ops: `legend_measure` returns a
+//! zero-sized cell and `draw_legend` emits nothing.
 //!
-//! In v1 both methods are no-ops: `legend_measure` returns a zero-sized
-//! cell and `draw_legend` emits nothing. v1.5 fills these in with real
-//! swatch + label rendering against the scale's domain and output range.
-//!
-//! Gated behind `feature = "text"` to match [`super::axis`], which is the
-//! only consumer that needs a shaper today.
+//! Gated behind `feature = "text"` to match [`super::axis`].
 
 use crate::geometry::Rect;
 use crate::layout::{Measure, WidthHint};
@@ -34,13 +30,12 @@ impl Measure for LegendStub {
 }
 
 impl Scale {
-    /// Stub legend measure cell. Returns zero size in v1. v1.5 will
-    /// pre-shape swatches and labels and report their natural dimensions.
+    /// Legend-cell measure. Returns a zero-sized stub.
     pub fn legend_measure(&self, _side: LegendSide, _dpi: f64) -> Box<dyn Measure> {
         Box::new(LegendStub)
     }
 
-    /// Stub legend drawer. No-op in v1.
+    /// Legend drawer. No-op.
     pub fn draw_legend(
         &self,
         _scene: &mut dyn SceneBuilder,
@@ -48,7 +43,6 @@ impl Scale {
         _side: LegendSide,
         _dpi: f64,
     ) {
-        // v1: no legend rendering.
     }
 }
 

@@ -1,9 +1,10 @@
 //! Key-based diff for typed columnar key columns.
 //!
 //! Geoms keep a snapshot of their previous-frame key column and rebuild
-//! a `(enter, update, exit)` triple before each draw. v1 ignores the
-//! triple (snaps to current state); v1.5 interpolates between previous
-//! and current values along the `update` edges for animation.
+//! a `(enter, update, exit)` triple before each draw. The draw loop
+//! snaps to the current state; the animation pass (when enabled)
+//! interpolates between previous and current values along the `update`
+//! edges.
 //!
 //! Semantics:
 //!
@@ -73,6 +74,7 @@ impl KeyIndex {
         self.len
     }
 
+    /// True when no rows are indexed.
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }

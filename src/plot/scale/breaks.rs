@@ -200,9 +200,9 @@ pub fn linear_breaks(min: f64, max: f64, n: usize) -> Vec<f64> {
 
 // ─── Simple fallback ─────────────────────────────────────────────────────────
 
-/// Legacy "nice numbers" algorithm — picks step ∈ `{1, 2, 5, 10} × 10^k`
-/// closest to the raw step. Kept as a fallback for `wilkinson_extended`
-/// when the search produces nothing (degenerate inputs).
+/// "Nice numbers" algorithm — picks step ∈ `{1, 2, 5, 10} × 10^k` closest
+/// to the raw step. Used as a fallback when `wilkinson_extended` produces
+/// nothing (degenerate inputs).
 fn pretty_breaks_simple(min: f64, max: f64, n: usize) -> Vec<f64> {
     if n == 0 || min >= max {
         return Vec::new();

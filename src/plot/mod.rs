@@ -1,7 +1,7 @@
 //! High-level, plot-centric API layered on top of the low-level
 //! [`SceneBuilder`](crate::scene::SceneBuilder) + [`composition`](crate::composition)
-//! surfaces. v1 ships **point geom only**; the surrounding architecture is
-//! shaped so other geoms / scales / projections drop in additively.
+//! surfaces. The architecture is shaped so new geoms / scales /
+//! projections drop in additively.
 //!
 //! The canonical user-facing surface is
 //! [`PlotComposition`](composition::PlotComposition). It owns a

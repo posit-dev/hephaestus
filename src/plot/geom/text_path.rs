@@ -6,10 +6,10 @@
 //! carries the string. Each glyph is stamped at the per-glyph arc-length
 //! advance along the curve via [`PolylineSampler::sample_at`].
 //!
-//! v1 limitations:
+//! Limitations:
 //!
 //! - Single line only. No `max_width` / wrapping; multi-line text on a
-//!   curve is deferred.
+//!   curve is not supported.
 //! - Glyphs whose computed arc-length distance falls outside the
 //!   `[0, total_length]` range are dropped (no partial stamping).
 //! - The mark must contribute at least two finite vertices; otherwise
@@ -36,7 +36,7 @@
 //!   (optional; default `0.0`; per mark). `0.0` = text starts at the
 //!   offset point, `0.5` = centred, `1.0` = text ends at the offset
 //!   point plus the path length. Values outside `[0, 1]` are honoured
-//!   literally — out-of-range glyphs are dropped per the v1 policy.
+//!   literally — out-of-range glyphs are dropped per the limitation above.
 //! - `"upright"` — boolean (optional; default false; per mark). When
 //!   true, the layout checks whether the majority of glyph tangents
 //!   point into the left half-plane (i.e., the text would render
@@ -119,6 +119,8 @@ pub struct TextPathGeom {
 crate::impl_geom_inherents_grouped!(TextPathGeom);
 
 impl TextPathGeom {
+    /// Build the per-mark slot index from the current keys. Each
+    /// contiguous run of equal keys becomes one mark.
     pub(crate) fn build_marks(&self) -> Vec<MarkSlot> {
         super::marks::build_marks(&self.state.keys)
     }
@@ -334,8 +336,8 @@ impl Geom for TextPathGeom {
             // Parley's `g.y` includes the line's baseline offset from the
             // layout's top. For text-on-path we want `vjust = 0` to mean
             // "glyph baseline sits on the curve", so subtract the line
-            // baseline (taken from the first glyph, which for v1's
-            // single-line single-style text matches every glyph's y).
+            // baseline (taken from the first glyph; with single-line
+            // single-style text every glyph's y matches).
             let baseline_ref = glyphs[0].y as f64;
             // Body metrics for the upright-flip baseline shift.
             // The body extends from y = -ascent (top) to y = +descent
@@ -403,8 +405,8 @@ impl Geom for TextPathGeom {
             //    local -ascent to world +ascent). Rendered upright,
             //    the body extends "upward" from baseline. To put the
             //    flipped body in the same world bounding box, shift
-            //    the baseline by `(ascent - descent)` toward where
-            //    the upside-down body used to be.
+            //    the baseline by `(ascent - descent)` toward the
+            //    region the upside-down body would occupy.
             //
             // The combined adjustment is
             // `effective = -vjust + (ascent - descent)`.

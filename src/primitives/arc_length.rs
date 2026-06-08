@@ -93,16 +93,23 @@ impl ArcLengthWalker {
         }
     }
 
+    /// Set the path-flattening tolerance used to convert quads / cubics
+    /// to piecewise-linear segments before walking. Smaller is more
+    /// accurate but produces more intermediate segments.
     pub fn with_tolerance(mut self, tolerance: f64) -> Self {
         self.tolerance = tolerance;
         self
     }
 
+    /// Set how the walker handles the final partial interval (the
+    /// stretch shorter than `step` at the end of each subpath).
     pub fn with_trailing(mut self, trailing: TrailingPolicy) -> Self {
         self.trailing = trailing;
         self
     }
 
+    /// Toggle whether the first sample (at arc-length 0) is emitted.
+    /// Defaults to `true`.
     pub fn with_include_start(mut self, include_start: bool) -> Self {
         self.include_start = include_start;
         self
