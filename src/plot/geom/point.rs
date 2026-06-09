@@ -254,8 +254,11 @@ impl Geom for PointGeom {
             if !px_frac.is_finite() || !py_frac.is_finite() {
                 continue;
             }
-            let mut px = panel.x0 + px_frac * panel_w;
-            let mut py = panel.y1 - py_frac * panel_h; // y flips
+            let (px0, py0) = ctx
+                .projection
+                .project_to_panel_px(panel, &[px_frac, py_frac]);
+            let mut px = px0;
+            let mut py = py0;
 
             if let Some(off) = resolve_number_channel(x_offset_ch, x_offset_scale, i) {
                 px += pt_to_px(off, ctx.dpi);

@@ -439,9 +439,17 @@ impl Geom for PolygonGeom {
             );
 
             // First pass: build vertex sequences for every ring.
+            // Under non-linear projections, edges between consecutive
+            // vertices are densified so polygon outlines follow the
+            // projected geodesic. Closes the ring too (last → first
+            // edge gets densified just like the others).
+            let is_linear = ctx.projection.is_linear();
+            let mut interior: Vec<(f64, f64)> = Vec::new();
             let mut rings_pts: Vec<Vec<Point>> = Vec::with_capacity(mark.rings.len());
             for ring in &mark.rings {
                 let mut points: Vec<Point> = Vec::with_capacity(ring.len());
+                let mut prev_channels: Option<[f64; 2]> = None;
+                let mut first_channels: Option<[f64; 2]> = None;
                 for &i in ring {
                     let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
                     let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
@@ -450,8 +458,24 @@ impl Geom for PolygonGeom {
                     if !x_frac.is_finite() || !y_frac.is_finite() {
                         continue;
                     }
-                    let mut px = panel.x0 + x_frac * panel_w;
-                    let mut py = panel.y1 - y_frac * panel_h;
+                    let curr_channels = [x_frac, y_frac];
+                    if !is_linear {
+                        if let Some(prev) = prev_channels {
+                            interior.clear();
+                            ctx.projection.interpolate_segment(
+                                panel,
+                                &prev,
+                                &curr_channels,
+                                &mut interior,
+                            );
+                            for (ipx, ipy) in &interior {
+                                points.push(Point::new(*ipx, *ipy));
+                            }
+                        }
+                    }
+                    let (px0, py0) = ctx.projection.project_to_panel_px(panel, &curr_channels);
+                    let mut px = px0;
+                    let mut py = py0;
                     if let Some(off) = resolve_number_channel(x_offset_ch, x_offset_scale, i) {
                         px += pt_to_px(off, ctx.dpi);
                     }
@@ -459,6 +483,23 @@ impl Geom for PolygonGeom {
                         py -= pt_to_px(off, ctx.dpi);
                     }
                     points.push(Point::new(px, py));
+                    if first_channels.is_none() {
+                        first_channels = Some(curr_channels);
+                    }
+                    prev_channels = Some(curr_channels);
+                }
+                // Densify the closing edge (last vertex back to first).
+                if !is_linear {
+                    if let (Some(prev), Some(first)) = (prev_channels, first_channels) {
+                        if prev != first {
+                            interior.clear();
+                            ctx.projection
+                                .interpolate_segment(panel, &prev, &first, &mut interior);
+                            for (ipx, ipy) in &interior {
+                                points.push(Point::new(*ipx, *ipy));
+                            }
+                        }
+                    }
                 }
                 if points.len() >= 3 {
                     rings_pts.push(points);

@@ -302,6 +302,13 @@ impl Geom for TextPathGeom {
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
 
             // ── Build polyline in panel pixel space. ──
+            // Under non-linear projections, edges are densified so the
+            // text follows the projected geodesic rather than chords
+            // between sample vertices. Cartesian's `interpolate_segment`
+            // is a no-op so `points` is identical to the per-row build.
+            let is_linear = ctx.projection.is_linear();
+            let mut interior: Vec<(f64, f64)> = Vec::new();
+            let mut prev_channels: Option<[f64; 2]> = None;
             let mut points: Vec<Point> = Vec::with_capacity(mark.rows.len());
             for &i in &mark.rows {
                 let x_frac = resolve_position(x_col.get(i), x_scale, 0.0);
@@ -309,9 +316,24 @@ impl Geom for TextPathGeom {
                 if !x_frac.is_finite() || !y_frac.is_finite() {
                     continue;
                 }
-                let px = panel.x0 + x_frac * panel_w;
-                let py = panel.y1 - y_frac * panel_h;
+                let curr_channels = [x_frac, y_frac];
+                if !is_linear {
+                    if let Some(prev) = prev_channels {
+                        interior.clear();
+                        ctx.projection.interpolate_segment(
+                            panel,
+                            &prev,
+                            &curr_channels,
+                            &mut interior,
+                        );
+                        for (ipx, ipy) in &interior {
+                            points.push(Point::new(*ipx, *ipy));
+                        }
+                    }
+                }
+                let (px, py) = ctx.projection.project_to_panel_px(panel, &curr_channels);
                 points.push(Point::new(px, py));
+                prev_channels = Some(curr_channels);
             }
             if points.len() < 2 {
                 continue;

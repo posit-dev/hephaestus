@@ -79,6 +79,11 @@ pub struct Plot {
 
     shapes: ShapeRegistry,
 
+    /// Coordinate projection. v1 ships `Cartesian` only — geom output
+    /// is unchanged from the pre-projection era. E.3b introduces
+    /// `Polar` for partial-arc / gauge layouts.
+    projection: crate::plot::projection::Projection,
+
     /// Tracked for the orchestrator's partial-repaint heuristics; not
     /// currently consulted by the draw path.
     #[allow(dead_code)]
@@ -108,6 +113,7 @@ impl Plot {
             axis_right_title: None,
             axis_top_title: None,
             shapes: ShapeRegistry::with_builtins(),
+            projection: crate::plot::projection::Projection::Cartesian,
             dirty: true,
         }
     }
@@ -115,6 +121,21 @@ impl Plot {
     /// Read accessor for the bound patch id.
     pub fn patch_id(&self) -> &str {
         &self.patch_id
+    }
+
+    /// Borrow the coordinate projection. Defaults to
+    /// [`Projection::Cartesian`](crate::plot::projection::Projection);
+    /// override via [`Self::projection`].
+    pub fn projection_ref(&self) -> &crate::plot::projection::Projection {
+        &self.projection
+    }
+
+    /// Set the coordinate projection (consumes self; builder-style).
+    /// v1 ships only `Cartesian` (default) — output is unchanged from
+    /// the pre-projection era. E.3b introduces `Polar`.
+    pub fn projection(mut self, p: crate::plot::projection::Projection) -> Self {
+        self.projection = p;
+        self
     }
 
     // ── Chaining (config) ──
@@ -327,7 +348,8 @@ impl Plot {
             bindings: &self.bindings,
             registry,
         };
-        let ctx = GeomContext::new(panel, dpi, &self.shapes, &resolver);
+        let ctx =
+            GeomContext::with_projection(panel, dpi, &self.shapes, &resolver, &self.projection);
         for (_, geom) in self.geoms.iter() {
             geom.draw(scene, &ctx);
         }

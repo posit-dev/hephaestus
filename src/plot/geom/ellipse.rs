@@ -235,10 +235,14 @@ impl Geom for EllipseGeom {
                 continue;
             }
 
-            let mut cx = panel.x0 + x_frac * panel_w;
-            let mut x2_px = panel.x0 + x2_frac * panel_w;
-            let mut cy = panel.y1 - y_frac * panel_h;
-            let mut y2_px = panel.y1 - y2_frac * panel_h;
+            let (cx0, cy0) = ctx.projection.project_to_panel_px(panel, &[x_frac, y_frac]);
+            let (x2_px0, y2_px0) = ctx
+                .projection
+                .project_to_panel_px(panel, &[x2_frac, y2_frac]);
+            let mut cx = cx0;
+            let mut x2_px = x2_px0;
+            let mut cy = cy0;
+            let mut y2_px = y2_px0;
 
             if let Some(off) = resolve_number_channel(x_offset_ch, x_offset_scale, i) {
                 cx += pt_to_px(off, ctx.dpi);

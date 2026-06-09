@@ -283,10 +283,14 @@ impl Geom for TextFitGeom {
                 continue;
             }
 
-            let mut px = panel.x0 + x_frac * panel_w;
-            let mut px2 = panel.x0 + x2_frac * panel_w;
-            let mut py = panel.y1 - y_frac * panel_h;
-            let mut py2 = panel.y1 - y2_frac * panel_h;
+            let (px0, py0) = ctx.projection.project_to_panel_px(panel, &[x_frac, y_frac]);
+            let (px20, py20) = ctx
+                .projection
+                .project_to_panel_px(panel, &[x2_frac, y2_frac]);
+            let mut px = px0;
+            let mut px2 = px20;
+            let mut py = py0;
+            let mut py2 = py20;
             if let Some(off) = resolve_number_channel(x_offset_ch, x_offset_scale, i) {
                 px += pt_to_px(off, ctx.dpi);
             }

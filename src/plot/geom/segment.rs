@@ -26,7 +26,10 @@
 
 use crate::brush::Brush;
 use crate::geometry::{Affine, Point};
-use crate::primitives::{clip_polyline, segment as segment_path, EndClip, PolylineSampler};
+use crate::primitives::{
+    clip_polyline, polyline as polyline_path, segment as segment_path, EndClip, PolylineOptions,
+    PolylineSampler,
+};
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
 
@@ -255,10 +258,14 @@ impl Geom for SegmentGeom {
                 continue;
             }
 
-            let mut px = panel.x0 + x_frac * panel_w;
-            let mut px2 = panel.x0 + x2_frac * panel_w;
-            let mut py = panel.y1 - y_frac * panel_h;
-            let mut py2 = panel.y1 - y2_frac * panel_h;
+            let (px0, py0) = ctx.projection.project_to_panel_px(panel, &[x_frac, y_frac]);
+            let (px20, py20) = ctx
+                .projection
+                .project_to_panel_px(panel, &[x2_frac, y2_frac]);
+            let mut px = px0;
+            let mut px2 = px20;
+            let mut py = py0;
+            let mut py2 = py20;
 
             if let Some(off) = resolve_number_channel(x_offset_ch, x_offset_scale, i) {
                 px += pt_to_px(off, ctx.dpi);
@@ -297,6 +304,30 @@ impl Geom for SegmentGeom {
             let p0 = Point::new(px, py);
             let p1 = Point::new(px2, py2);
             let original = [p0, p1];
+
+            // Under non-linear projections, insert interior sample
+            // points along the channel-space segment so the stroked
+            // segment follows the projected geodesic instead of cutting
+            // across as a chord. Cartesian's `interpolate_segment` is
+            // a no-op; `pre_clip` ends up as `[p0, p1]` and the path
+            // collapses to the same `segment_path` as before.
+            let is_linear = ctx.projection.is_linear();
+            let mut pre_clip: Vec<Point> = Vec::with_capacity(2);
+            pre_clip.push(p0);
+            if !is_linear {
+                let mut interior: Vec<(f64, f64)> = Vec::new();
+                ctx.projection.interpolate_segment(
+                    panel,
+                    &[x_frac, y_frac],
+                    &[x2_frac, y2_frac],
+                    &mut interior,
+                );
+                for (ipx, ipy) in &interior {
+                    pre_clip.push(Point::new(*ipx, *ipy));
+                }
+            }
+            pre_clip.push(p1);
+
             let was_clipped = clip_start_pt > 0.0 || clip_end_pt > 0.0;
             let pts: Vec<Point> = if was_clipped {
                 let start = (clip_start_pt > 0.0).then(|| EndClip::Circle {
@@ -307,14 +338,22 @@ impl Geom for SegmentGeom {
                     center: p1,
                     radius: pt_to_px(clip_end_pt, ctx.dpi),
                 });
-                clip_polyline(&[p0, p1], start, end)
+                clip_polyline(&pre_clip, start, end)
             } else {
-                vec![p0, p1]
+                pre_clip
             };
             if pts.len() < 2 {
                 continue;
             }
-            let path = segment_path(pts[0], pts[1]);
+            // Two-point fast path keeps Cartesian (and clipped-to-line
+            // segments) on the simpler `segment_path` primitive. Three
+            // or more points (only reachable under non-linear projections)
+            // build a polyline.
+            let path = if pts.len() == 2 {
+                segment_path(pts[0], pts[1])
+            } else {
+                polyline_path(&pts, PolylineOptions::default())
+            };
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
 
             // Rotation around the segment midpoint. Math CCW from the

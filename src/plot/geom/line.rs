@@ -410,6 +410,20 @@ impl Geom for LineGeom {
             let has_markers = !linetype::is_marker_free(&dash_pattern_pt);
 
             // ── Per-vertex positions for this mark. ──
+            //
+            // Under non-linear projections (polar, future ternary) the
+            // channel-space line between two vertices doesn't project
+            // to a straight pixel-space segment — it follows the
+            // projection's geodesic (an arc, a curve, etc.). We ask
+            // the projection to insert interior sample points between
+            // consecutive vertices so the rendered polyline tracks the
+            // geodesic instead of cutting across as a chord. For
+            // Cartesian `interpolate_segment` is a no-op and `points`
+            // ends up identical to the pre-projection-densification
+            // build.
+            let is_linear = ctx.projection.is_linear();
+            let mut interior: Vec<(f64, f64)> = Vec::new();
+            let mut prev_channels: Option<[f64; 2]> = None;
             let mut points: Vec<Point> = Vec::with_capacity(mark.rows.len());
             for &i in &mark.rows {
                 let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
@@ -419,8 +433,24 @@ impl Geom for LineGeom {
                 if !px_frac.is_finite() || !py_frac.is_finite() {
                     continue;
                 }
-                let mut px = panel.x0 + px_frac * panel_w;
-                let mut py = panel.y1 - py_frac * panel_h;
+                let curr_channels = [px_frac, py_frac];
+                if !is_linear {
+                    if let Some(prev) = prev_channels {
+                        interior.clear();
+                        ctx.projection.interpolate_segment(
+                            panel,
+                            &prev,
+                            &curr_channels,
+                            &mut interior,
+                        );
+                        for (ipx, ipy) in &interior {
+                            points.push(Point::new(*ipx, *ipy));
+                        }
+                    }
+                }
+                let (px0, py0) = ctx.projection.project_to_panel_px(panel, &curr_channels);
+                let mut px = px0;
+                let mut py = py0;
                 if let Some(off) = resolve_number_channel(x_offset_ch, x_offset_scale, i) {
                     px += pt_to_px(off, ctx.dpi);
                 }
@@ -428,6 +458,7 @@ impl Geom for LineGeom {
                     py -= pt_to_px(off, ctx.dpi);
                 }
                 points.push(Point::new(px, py));
+                prev_channels = Some(curr_channels);
             }
             if points.len() < 2 {
                 continue;

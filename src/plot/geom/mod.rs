@@ -375,10 +375,17 @@ pub struct GeomContext<'a> {
     pub dpi: f64,
     pub shapes: &'a ShapeRegistry,
     pub scales: &'a dyn ScaleResolver,
+    /// Coordinate projection. Geoms route their final fraction→pixel
+    /// conversion through [`Projection::project_to_panel_px`] so
+    /// non-Cartesian variants (polar, future ternary) drop in without
+    /// touching geom code. Defaults to `Projection::Cartesian` for
+    /// callers that construct a context via [`Self::new`].
+    pub projection: &'a crate::plot::projection::Projection,
 }
 
 impl<'a> GeomContext<'a> {
-    /// Construct a per-draw context.
+    /// Construct a per-draw context with the default Cartesian
+    /// projection. Use [`Self::with_projection`] to override.
     pub fn new(
         panel_rect: Rect,
         dpi: f64,
@@ -390,6 +397,26 @@ impl<'a> GeomContext<'a> {
             dpi,
             shapes,
             scales,
+            projection: &crate::plot::projection::Projection::Cartesian,
+        }
+    }
+
+    /// Construct a per-draw context with an explicit projection. Used
+    /// by the orchestrator (`Plot::draw_panel_into`) so the plot's
+    /// configured projection threads to every geom.
+    pub fn with_projection(
+        panel_rect: Rect,
+        dpi: f64,
+        shapes: &'a ShapeRegistry,
+        scales: &'a dyn ScaleResolver,
+        projection: &'a crate::plot::projection::Projection,
+    ) -> Self {
+        Self {
+            panel_rect,
+            dpi,
+            shapes,
+            scales,
+            projection,
         }
     }
 

@@ -291,8 +291,9 @@ impl Geom for TextGeom {
             if !x_frac.is_finite() || !y_frac.is_finite() {
                 continue;
             }
-            let mut anchor_px = panel.x0 + x_frac * panel_w;
-            let mut anchor_py = panel.y1 - y_frac * panel_h;
+            let (apx0, apy0) = ctx.projection.project_to_panel_px(panel, &[x_frac, y_frac]);
+            let mut anchor_px = apx0;
+            let mut anchor_py = apy0;
             if let Some(off) = resolve_number_channel(x_offset_ch, x_offset_scale, i) {
                 anchor_px += pt_to_px(off, ctx.dpi);
             }

@@ -34,6 +34,19 @@
 //!
 //! Stroke is drawn around the rect outline. Fill and stroke are
 //! independent — set one, the other, or both.
+//!
+//! ## Non-linear projections (Polar / Ternary)
+//!
+//! `RectGeom` currently renders as an **axis-aligned panel-space rect**
+//! built from the projected diagonal corners. Under non-linear
+//! projections (E.3b's Polar; deferred Ternary) this is incorrect —
+//! a "rect" in channel space should become an annular wedge / sector
+//! and its four edges should be densified to follow the projected
+//! geodesic. The polygon-fallback path that handles this lands in E.3b
+//! when polar's visual semantics are concrete enough to test against.
+//! For now, drawing a `RectGeom` through a non-linear projection
+//! produces a kurbo `Rect` between the two projected corners — the
+//! visual is wrong but the code path is stable and doesn't panic.
 
 use crate::brush::Brush;
 use crate::geometry::{Affine, Point, Rect};
@@ -247,10 +260,14 @@ impl Geom for RectGeom {
                 continue;
             }
 
-            let mut px = panel.x0 + x_frac * panel_w;
-            let mut px2 = panel.x0 + x2_frac * panel_w;
-            let mut py = panel.y1 - y_frac * panel_h; // y flips
-            let mut py2 = panel.y1 - y2_frac * panel_h;
+            let (px0, py0) = ctx.projection.project_to_panel_px(panel, &[x_frac, y_frac]);
+            let (px20, py20) = ctx
+                .projection
+                .project_to_panel_px(panel, &[x2_frac, y2_frac]);
+            let mut px = px0;
+            let mut px2 = px20;
+            let mut py = py0;
+            let mut py2 = py20;
 
             if let Some(off) = resolve_number_channel(x_offset_ch, x_offset_scale, i) {
                 px += pt_to_px(off, ctx.dpi);
