@@ -239,6 +239,207 @@ fn pretty_breaks_simple(min: f64, max: f64, n: usize) -> Vec<f64> {
     out
 }
 
+// ─── Log breaks (1-2-5 across decades; powers-only when many decades) ───────
+
+/// "Pretty" log-spaced major breaks: powers of `base` with optional
+/// 1 / 2 / 5 multipliers when the span is ≤ a few decades. Used for
+/// log-transformed continuous scales.
+///
+/// - `min` / `max`: the data range in **input** space (must be > 0).
+/// - `n_target`: target number of breaks (informational; the algorithm
+///   chooses a multiplier set that fits the span).
+/// - `base`: log base (10, 2, or `e` typical).
+///
+/// Returns the breaks in input space, sorted, all within `[min, max]`.
+/// Empty for non-positive / non-finite / degenerate inputs.
+pub fn log_pretty_breaks(min: f64, max: f64, n_target: usize, base: f64) -> Vec<f64> {
+    if !min.is_finite() || !max.is_finite() || min <= 0.0 || max <= 0.0 || min >= max || base <= 1.0
+    {
+        return Vec::new();
+    }
+    let log_min = min.log(base);
+    let log_max = max.log(base);
+    let n_decades = log_max - log_min;
+
+    // For wide spans, just powers of base. For narrow spans, expand with
+    // 1 / 2 / 5 sub-decade stops. Threshold is loose; tweakable.
+    let mults: &[f64] = if n_decades > 4.0 {
+        &[1.0]
+    } else if n_decades > 1.5 || n_target <= 5 {
+        &[1.0, 2.0, 5.0]
+    } else {
+        &[1.0, 2.0, 3.0, 5.0, 7.0]
+    };
+
+    let lo_decade = log_min.floor() as i32;
+    let hi_decade = log_max.ceil() as i32;
+
+    let mut result = Vec::new();
+    for d in lo_decade..=hi_decade {
+        let base_d = base.powi(d);
+        for m in mults {
+            let v = m * base_d;
+            if v >= min && v <= max {
+                result.push(v);
+            }
+        }
+    }
+    result.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    result.dedup_by(|a, b| (*a - *b).abs() < (*b).abs() * 1e-9);
+    result
+}
+
+/// Geometric minor breaks between consecutive powers of `base`. Emits
+/// `k * base^d` for `k ∈ {2, 3, …, ⌊base⌋ - 1}` and each integer decade
+/// `d` overlapping `[min, max]`. The canonical log-axis "subticks
+/// between decades" look.
+///
+/// For base = 10 this produces `2, 3, 4, 5, 6, 7, 8, 9` between each
+/// pair of decade powers.
+pub fn log_minor_breaks(min: f64, max: f64, base: f64) -> Vec<f64> {
+    if !min.is_finite() || !max.is_finite() || min <= 0.0 || max <= 0.0 || min >= max || base <= 1.0
+    {
+        return Vec::new();
+    }
+    let base_int = base.round() as i32;
+    if base_int < 3 {
+        // base = 2 has no integer multipliers in (1, base) — no minors.
+        return Vec::new();
+    }
+    let log_min = min.log(base);
+    let log_max = max.log(base);
+    let lo_decade = log_min.floor() as i32;
+    let hi_decade = log_max.ceil() as i32;
+
+    let mut result = Vec::new();
+    for d in lo_decade..=hi_decade {
+        let base_d = base.powi(d);
+        for k in 2..base_int {
+            let v = k as f64 * base_d;
+            if v >= min && v <= max {
+                result.push(v);
+            }
+        }
+    }
+    result
+}
+
+// ─── Sqrt breaks ─────────────────────────────────────────────────────────────
+
+/// Major breaks for a sqrt-transformed scale: Wilkinson-Extended on
+/// the sqrt domain, squared back. Produces visually-even spacing in
+/// transformed space and clean numbers when squared.
+///
+/// `min` must be ≥ 0 (sqrt's allowed domain); otherwise returns empty.
+pub fn sqrt_breaks(min: f64, max: f64, n: usize) -> Vec<f64> {
+    if !min.is_finite() || !max.is_finite() || min < 0.0 || min >= max {
+        return Vec::new();
+    }
+    let sqrt_min = min.sqrt();
+    let sqrt_max = max.sqrt();
+    extended_breaks(sqrt_min, sqrt_max, n)
+        .into_iter()
+        .map(|v| v * v)
+        .filter(|v| *v >= min && *v <= max)
+        .collect()
+}
+
+// ─── Symlog / asinh / pseudo-log breaks ─────────────────────────────────────
+
+/// Major breaks for a symmetric-log-like transform (Asinh / PseudoLog).
+/// Handles domains that straddle zero by running [`log_pretty_breaks`] on
+/// the positive and negative branches independently and stitching with a
+/// zero break in the middle.
+///
+/// `base` is the log base for the positive / negative branches
+/// (typically `e` for Asinh, or 2 / 10 for PseudoLog2 / PseudoLog10).
+pub fn symlog_breaks(min: f64, max: f64, n: usize, base: f64) -> Vec<f64> {
+    if !min.is_finite() || !max.is_finite() || min >= max || base <= 1.0 {
+        return Vec::new();
+    }
+
+    if min >= 0.0 {
+        // All non-negative.
+        let lo = if min == 0.0 { f64::MIN_POSITIVE } else { min };
+        let mut out = log_pretty_breaks(lo, max, n, base);
+        if min == 0.0 {
+            out.insert(0, 0.0);
+        }
+        return out;
+    }
+    if max <= 0.0 {
+        // All non-positive: mirror the positive branch.
+        let lo = if max == 0.0 { f64::MIN_POSITIVE } else { -max };
+        let mut pos = log_pretty_breaks(lo, -min, n, base);
+        // pos is ascending in magnitude; reverse so that negating
+        // produces an ascending sequence in the negative branch.
+        pos.reverse();
+        let mut out: Vec<f64> = pos.into_iter().map(|v| -v).collect();
+        if max == 0.0 {
+            out.push(0.0);
+        }
+        return out;
+    }
+    // Straddles zero.
+    let n_each = (n / 2).max(2);
+    let neg = log_pretty_breaks(f64::MIN_POSITIVE, -min, n_each, base);
+    let pos = log_pretty_breaks(f64::MIN_POSITIVE, max, n_each, base);
+    let mut out: Vec<f64> = neg.into_iter().rev().map(|v| -v).collect();
+    out.push(0.0);
+    out.extend(pos);
+    out
+}
+
+/// Minor breaks for a symmetric-log-like transform. Mirrors
+/// [`log_minor_breaks`] on each branch and stitches.
+pub fn symlog_minor_breaks(min: f64, max: f64, base: f64) -> Vec<f64> {
+    if !min.is_finite() || !max.is_finite() || min >= max || base <= 1.0 {
+        return Vec::new();
+    }
+    if min >= 0.0 {
+        let lo = if min == 0.0 { f64::MIN_POSITIVE } else { min };
+        return log_minor_breaks(lo, max, base);
+    }
+    if max <= 0.0 {
+        let lo = if max == 0.0 { f64::MIN_POSITIVE } else { -max };
+        let pos = log_minor_breaks(lo, -min, base);
+        // pos ascends in magnitude; reverse + negate to ascend in
+        // negative-branch values.
+        return pos.into_iter().rev().map(|v| -v).collect();
+    }
+    let neg = log_minor_breaks(f64::MIN_POSITIVE, -min, base);
+    let pos = log_minor_breaks(f64::MIN_POSITIVE, max, base);
+    let mut out: Vec<f64> = neg.into_iter().rev().map(|v| -v).collect();
+    out.extend(pos);
+    out
+}
+
+// ─── Default linear minor breaks ────────────────────────────────────────────
+
+/// Default minor-break algorithm: `n_per_interval` evenly-spaced points
+/// between each consecutive pair of majors, exclusive of the endpoints.
+/// For `n_per_interval = 1` this places a single minor at each interval
+/// midpoint.
+///
+/// Used by transforms that don't provide a custom minor algorithm
+/// (Identity, Square, Exp*, Sqrt — sqrt is already nice-spaced in input
+/// units, so linear subdivision works well).
+pub fn linear_minor_breaks_between(majors: &[f64], n_per_interval: usize) -> Vec<f64> {
+    if majors.len() < 2 || n_per_interval == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity((majors.len() - 1) * n_per_interval);
+    for w in majors.windows(2) {
+        let a = w[0];
+        let b = w[1];
+        for i in 1..=n_per_interval {
+            let t = i as f64 / (n_per_interval + 1) as f64;
+            out.push(a + t * (b - a));
+        }
+    }
+    out
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -459,5 +660,132 @@ mod tests {
         let with_ext = coverage_score(0.0, 10.0, 0.0, 20.0);
         assert!(with_ext < no_ext);
         assert!(with_ext >= 0.0);
+    }
+
+    // ── log_pretty_breaks ──
+
+    #[test]
+    fn log10_pretty_one_decade_includes_powers_of_ten() {
+        let b = log_pretty_breaks(1.0, 10.0, 5, 10.0);
+        assert!(b.contains(&1.0), "{b:?} missing 1");
+        assert!(b.contains(&10.0), "{b:?} missing 10");
+    }
+
+    #[test]
+    fn log10_pretty_two_decades_has_1_2_5_pattern() {
+        let b = log_pretty_breaks(1.0, 100.0, 6, 10.0);
+        // Expect the 1, 2, 5, 10, 20, 50, 100 set (a subset suffices —
+        // the algorithm may drop the very-narrow stops).
+        for v in [1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0] {
+            assert!(b.contains(&v), "{b:?} missing {v}");
+        }
+    }
+
+    #[test]
+    fn log10_pretty_wide_span_collapses_to_powers() {
+        // 6 decades → just powers of 10.
+        let b = log_pretty_breaks(1.0, 1_000_000.0, 6, 10.0);
+        for v in [1.0, 10.0, 100.0, 1_000.0, 10_000.0, 100_000.0, 1_000_000.0] {
+            assert!(b.contains(&v), "{b:?} missing {v}");
+        }
+        // Should not include 2 or 5 multiples for very wide spans.
+        assert!(!b.contains(&2.0));
+        assert!(!b.contains(&50_000.0));
+    }
+
+    #[test]
+    fn log_pretty_invalid_inputs_return_empty() {
+        assert!(log_pretty_breaks(0.0, 10.0, 5, 10.0).is_empty());
+        assert!(log_pretty_breaks(-1.0, 10.0, 5, 10.0).is_empty());
+        assert!(log_pretty_breaks(10.0, 1.0, 5, 10.0).is_empty());
+        assert!(log_pretty_breaks(1.0, 10.0, 5, 1.0).is_empty());
+        assert!(log_pretty_breaks(f64::NAN, 10.0, 5, 10.0).is_empty());
+    }
+
+    // ── log_minor_breaks ──
+
+    #[test]
+    fn log10_minor_2_to_9_between_decades() {
+        let m = log_minor_breaks(1.0, 100.0, 10.0);
+        // 2..9 in the [1, 10] decade, 20..90 in the [10, 100] decade.
+        for v in [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0] {
+            assert!(m.contains(&v), "{m:?} missing {v}");
+        }
+        for v in [20.0, 30.0, 90.0] {
+            assert!(m.contains(&v), "{m:?} missing {v}");
+        }
+    }
+
+    #[test]
+    fn log2_minor_empty_no_integer_multipliers_in_band() {
+        // base 2 has no integers in (1, 2) so log_minor_breaks is empty.
+        assert!(log_minor_breaks(1.0, 8.0, 2.0).is_empty());
+    }
+
+    // ── sqrt_breaks ──
+
+    #[test]
+    fn sqrt_breaks_squares_back_to_data_space() {
+        let b = sqrt_breaks(0.0, 100.0, 5);
+        // Expect breaks at squares of evenly-spaced sqrt values.
+        // sqrt(0)=0, sqrt(100)=10; Wilkinson over [0, 10] → [0, 2.5, 5, 7.5, 10] ish.
+        assert!(!b.is_empty());
+        assert!(b.iter().all(|v| (0.0..=100.0).contains(v)));
+        // The smallest non-zero should be < 25 (sqrt-evenly-spaced).
+        let smallest_nonzero = b.iter().copied().find(|v| *v > 0.0).unwrap();
+        assert!(
+            smallest_nonzero < 30.0,
+            "sqrt breaks should pack tighter at the bottom: {b:?}"
+        );
+    }
+
+    #[test]
+    fn sqrt_breaks_rejects_negative_min() {
+        assert!(sqrt_breaks(-1.0, 100.0, 5).is_empty());
+    }
+
+    // ── symlog_breaks ──
+
+    #[test]
+    fn symlog_positive_branch_only() {
+        let b = symlog_breaks(1.0, 100.0, 5, 10.0);
+        assert!(!b.is_empty());
+        assert!(b.iter().all(|v| *v > 0.0));
+    }
+
+    #[test]
+    fn symlog_straddles_zero_includes_zero() {
+        let b = symlog_breaks(-100.0, 100.0, 6, 10.0);
+        assert!(b.contains(&0.0), "{b:?} missing 0");
+        assert!(b.iter().any(|v| *v < 0.0), "{b:?} missing negative");
+        assert!(b.iter().any(|v| *v > 0.0), "{b:?} missing positive");
+    }
+
+    #[test]
+    fn symlog_all_negative_branch_mirrors() {
+        let b = symlog_breaks(-100.0, -1.0, 5, 10.0);
+        assert!(!b.is_empty());
+        assert!(b.iter().all(|v| *v < 0.0));
+    }
+
+    // ── linear_minor_breaks_between ──
+
+    #[test]
+    fn linear_minor_one_per_interval_is_midpoint() {
+        let m = linear_minor_breaks_between(&[0.0, 1.0, 2.0], 1);
+        approx_slice(&m, &[0.5, 1.5], 1e-12);
+    }
+
+    #[test]
+    fn linear_minor_three_per_interval_evenly_spaced() {
+        let m = linear_minor_breaks_between(&[0.0, 4.0], 3);
+        approx_slice(&m, &[1.0, 2.0, 3.0], 1e-12);
+    }
+
+    #[test]
+    fn linear_minor_empty_for_short_input() {
+        assert!(linear_minor_breaks_between(&[], 1).is_empty());
+        assert!(linear_minor_breaks_between(&[1.0], 1).is_empty());
+        assert!(linear_minor_breaks_between(&[1.0, 2.0], 0).is_empty());
     }
 }

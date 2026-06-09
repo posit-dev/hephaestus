@@ -38,6 +38,8 @@ use crate::scales::chrome::AxisSide;
 /// Tick mark length, pt. Strokes from the panel edge outward into the
 /// axis chrome.
 const TICK_LENGTH_PT: f64 = 4.0;
+/// Minor tick length, pt. Shorter than major; unlabelled.
+const MINOR_TICK_LENGTH_PT: f64 = 2.0;
 /// Gap between the tick label and the tick mark / panel edge, pt.
 const LABEL_GAP_PT: f64 = 2.0;
 /// Tick label font size, pt.
@@ -198,6 +200,50 @@ impl Scale {
             &baseline,
             PickId::Skip,
         );
+
+        // Minor ticks — short, unlabelled. Drawn before majors so the
+        // major tick line draws on top if they happen to coincide.
+        let minor_tick_px = pt_to_px(MINOR_TICK_LENGTH_PT, dpi);
+        for minor_val in self.minor_breaks(DEFAULT_BREAK_COUNT) {
+            if matches!(minor_val, Value::Null) {
+                continue;
+            }
+            let frac = match self.map(&minor_val).as_number() {
+                Some(f) if f.is_finite() && (0.0..=1.0).contains(&f) => f,
+                _ => continue,
+            };
+            let (p0, p1) = match side {
+                AxisSide::Bottom => {
+                    let x = panel_rect.x0 + frac * panel_w;
+                    (
+                        Point::new(x, slot_rect.y0),
+                        Point::new(x, slot_rect.y0 + minor_tick_px),
+                    )
+                }
+                AxisSide::Top => {
+                    let x = panel_rect.x0 + frac * panel_w;
+                    (
+                        Point::new(x, slot_rect.y1),
+                        Point::new(x, slot_rect.y1 - minor_tick_px),
+                    )
+                }
+                AxisSide::Left => {
+                    let y = panel_rect.y1 - frac * panel_h;
+                    (
+                        Point::new(slot_rect.x1, y),
+                        Point::new(slot_rect.x1 - minor_tick_px, y),
+                    )
+                }
+                AxisSide::Right => {
+                    let y = panel_rect.y1 - frac * panel_h;
+                    (
+                        Point::new(slot_rect.x0, y),
+                        Point::new(slot_rect.x0 + minor_tick_px, y),
+                    )
+                }
+            };
+            stroke_line(scene, &stroke, &brush, p0, p1);
+        }
 
         for break_val in &breaks {
             if matches!(break_val, Value::Null) {
@@ -427,17 +473,18 @@ mod tests {
 
         let (strokes, glyphs) = count_strokes_and_glyph_runs(&scene);
         let breaks = s.breaks(DEFAULT_BREAK_COUNT);
-        // 1 baseline + 1 stroke per non-null tick.
-        let expected_strokes = 1 + breaks.iter().filter(|v| !matches!(v, Value::Null)).count();
+        let minors = s.minor_breaks(DEFAULT_BREAK_COUNT);
+        let n_majors = breaks.iter().filter(|v| !matches!(v, Value::Null)).count();
+        let n_minors = minors.iter().filter(|v| !matches!(v, Value::Null)).count();
+        // 1 baseline + 1 stroke per major + 1 per minor.
+        let expected_strokes = 1 + n_majors + n_minors;
         assert_eq!(
-            strokes,
-            expected_strokes,
-            "expected {expected_strokes} strokes (1 baseline + {} ticks); got {strokes}",
-            expected_strokes - 1
+            strokes, expected_strokes,
+            "expected {expected_strokes} strokes (1 baseline + {n_majors} majors + {n_minors} minors); got {strokes}"
         );
         assert!(
-            glyphs >= breaks.len(),
-            "expected at least one glyph-run per label"
+            glyphs >= n_majors,
+            "expected at least one glyph-run per major label"
         );
     }
 
@@ -457,9 +504,12 @@ mod tests {
 
         let (strokes, glyphs) = count_strokes_and_glyph_runs(&scene);
         let breaks = s.breaks(DEFAULT_BREAK_COUNT);
-        let expected_strokes = 1 + breaks.iter().filter(|v| !matches!(v, Value::Null)).count();
+        let minors = s.minor_breaks(DEFAULT_BREAK_COUNT);
+        let n_majors = breaks.iter().filter(|v| !matches!(v, Value::Null)).count();
+        let n_minors = minors.iter().filter(|v| !matches!(v, Value::Null)).count();
+        let expected_strokes = 1 + n_majors + n_minors;
         assert_eq!(strokes, expected_strokes);
-        assert!(glyphs >= breaks.len());
+        assert!(glyphs >= n_majors);
     }
 
     #[test]

@@ -1,53 +1,48 @@
-//! Value transforms (Identity, Log, Sqrt, …) applied **inside** a scale
-//! before linearisation.
+//! Value transforms applied **inside** a continuous scale before
+//! linearisation.
 //!
-//! Only [`TransformKind::Identity`] is currently implemented. The other
-//! variants are declared so callers can match on them exhaustively; the
-//! free functions [`transform_forward`], [`transform_inverse`], and
-//! [`transform_allowed_domain`] panic for any non-Identity variant until
-//! it is wired in.
+//! Identity / Log10 / Log2 / Log / Sqrt / Square / Exp10 / Exp2 / Exp /
+//! Asinh / PseudoLog / PseudoLog2 / PseudoLog10 are all wired. The
+//! PseudoLog family follows ggsql's convention: `asinh(x/2) / ln(base)`,
+//! a symmetric "linear near zero, log far away" mapping. Square's inverse
+//! takes the non-negative branch.
 
 /// Discriminator for the family of value transforms supported by scales.
-///
-/// Only [`TransformKind::Identity`] is implemented; the other variants
-/// exist so callers can match on them exhaustively. The dispatch
-/// functions ([`transform_forward`] etc.) panic for any unwired variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TransformKind {
-    /// `y = x`. The only implemented variant.
+    /// `y = x`.
     Identity,
-    /// `y = log10(x)`. Not implemented.
+    /// `y = log10(x)`. Domain `(0, +∞)`.
     Log10,
-    /// `y = log2(x)`. Not implemented.
+    /// `y = log2(x)`. Domain `(0, +∞)`.
     Log2,
-    /// `y = ln(x)`. Not implemented.
+    /// `y = ln(x)`. Domain `(0, +∞)`.
     Log,
-    /// `y = sqrt(x)`. Not implemented.
+    /// `y = sqrt(x)`. Domain `[0, +∞)`.
     Sqrt,
-    /// `y = x²`. Not implemented.
+    /// `y = x²`. Inverse takes the non-negative branch.
     Square,
-    /// `y = 10^x`. Not implemented.
+    /// `y = 10^x`.
     Exp10,
-    /// `y = 2^x`. Not implemented.
+    /// `y = 2^x`.
     Exp2,
-    /// `y = e^x`. Not implemented.
+    /// `y = e^x`.
     Exp,
-    /// `y = asinh(x)`. Like log but handles zero / negatives. Not implemented.
+    /// `y = asinh(x)`. Symmetric log alternative defined on the full
+    /// real line; sigma is hardcoded at 1 (no parameter).
     Asinh,
-    /// Pseudo-log: linear near zero, log far away. Not implemented.
+    /// Pseudo-log with natural-log base: `y = asinh(x/2) / ln(e) =
+    /// asinh(x/2)`. Linear near zero, log far away. Sigma is hardcoded
+    /// at 0.5 (the `/2`), matching ggsql's `pseudo_log`.
     PseudoLog,
+    /// Pseudo-log with base-2: `y = asinh(x/2) / ln(2)`.
+    PseudoLog2,
+    /// Pseudo-log with base-10: `y = asinh(x/2) / ln(10)`.
+    PseudoLog10,
 }
 
-/// Configured value transform. A plain POD bundle of the discriminator
-/// plus future per-kind parameters. Cheap to clone (`Copy`).
-///
-/// Construct via [`Transform::identity`] or [`Transform::of`]. The latter
-/// panics for any non-Identity variant until it's wired.
-///
-/// The thin convenience methods ([`Self::forward`], [`Self::inverse`])
-/// delegate to the free functions [`transform_forward`] and
-/// [`transform_inverse`]; downstream consumers that prefer the free-fn
-/// API can ignore the methods.
+/// Configured value transform. POD bundle of the discriminator plus
+/// future per-kind parameters. Cheap to clone (`Copy`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Transform {
     /// Which family this transform belongs to.
@@ -62,14 +57,9 @@ impl Transform {
         }
     }
 
-    /// Construct from a [`TransformKind`]. Returns the identity instance
-    /// for [`TransformKind::Identity`]; **panics** for any other variant
-    /// — only Identity is implemented.
-    pub fn of(kind: TransformKind) -> Self {
-        match kind {
-            TransformKind::Identity => Self::identity(),
-            other => panic!("Transform::{other:?} not implemented — only Identity is wired"),
-        }
+    /// Construct from a [`TransformKind`].
+    pub const fn of(kind: TransformKind) -> Self {
+        Transform { kind }
     }
 
     /// Discriminator.
@@ -103,32 +93,60 @@ impl Default for Transform {
 // ─── Free-function dispatch ──────────────────────────────────────────────────
 
 /// Forward transform: domain value → transformed value. Behaviour at
-/// boundaries is transform-specific (e.g. `Log10(0)` is `-∞`).
-///
-/// Currently only [`TransformKind::Identity`] is wired; any other variant
-/// panics. New transforms wire in by extending this `match` and the
-/// matching arms in [`transform_inverse`] / [`transform_allowed_domain`].
+/// boundaries is transform-specific (e.g. `Log10(0)` returns `-∞`,
+/// `Sqrt(-1)` returns `NaN`).
 pub fn transform_forward(v: f64, kind: TransformKind) -> f64 {
     match kind {
         TransformKind::Identity => v,
-        other => panic!("transform_forward::{other:?} not implemented"),
+        TransformKind::Log10 => v.log10(),
+        TransformKind::Log2 => v.log2(),
+        TransformKind::Log => v.ln(),
+        TransformKind::Sqrt => v.sqrt(),
+        TransformKind::Square => v * v,
+        TransformKind::Exp10 => 10f64.powf(v),
+        TransformKind::Exp2 => 2f64.powf(v),
+        TransformKind::Exp => v.exp(),
+        TransformKind::Asinh => v.asinh(),
+        TransformKind::PseudoLog => (v * 0.5).asinh(),
+        TransformKind::PseudoLog2 => (v * 0.5).asinh() / 2f64.ln(),
+        TransformKind::PseudoLog10 => (v * 0.5).asinh() / 10f64.ln(),
     }
 }
 
-/// Inverse transform: transformed value → domain value.
+/// Inverse transform: transformed value → domain value. For `Square`,
+/// inverse picks the non-negative branch (i.e. `sqrt(|v|)`).
 pub fn transform_inverse(v: f64, kind: TransformKind) -> f64 {
     match kind {
         TransformKind::Identity => v,
-        other => panic!("transform_inverse::{other:?} not implemented"),
+        TransformKind::Log10 => 10f64.powf(v),
+        TransformKind::Log2 => 2f64.powf(v),
+        TransformKind::Log => v.exp(),
+        TransformKind::Sqrt => v * v,
+        TransformKind::Square => v.abs().sqrt(),
+        TransformKind::Exp10 => v.log10(),
+        TransformKind::Exp2 => v.log2(),
+        TransformKind::Exp => v.ln(),
+        TransformKind::Asinh => v.sinh(),
+        TransformKind::PseudoLog => v.sinh() * 2.0,
+        TransformKind::PseudoLog2 => (v * 2f64.ln()).sinh() * 2.0,
+        TransformKind::PseudoLog10 => (v * 10f64.ln()).sinh() * 2.0,
     }
 }
 
-/// The numeric domain on which this transform is defined. Identity
-/// covers the full f64 range; Log10 / Log2 / Log return `(0, +∞)`; etc.
+/// The numeric domain on which this transform is defined.
 pub fn transform_allowed_domain(kind: TransformKind) -> (f64, f64) {
     match kind {
-        TransformKind::Identity => (f64::NEG_INFINITY, f64::INFINITY),
-        other => panic!("transform_allowed_domain::{other:?} not implemented"),
+        TransformKind::Log10 | TransformKind::Log2 | TransformKind::Log => (0.0, f64::INFINITY),
+        TransformKind::Sqrt => (0.0, f64::INFINITY),
+        TransformKind::Identity
+        | TransformKind::Square
+        | TransformKind::Exp10
+        | TransformKind::Exp2
+        | TransformKind::Exp
+        | TransformKind::Asinh
+        | TransformKind::PseudoLog
+        | TransformKind::PseudoLog2
+        | TransformKind::PseudoLog10 => (f64::NEG_INFINITY, f64::INFINITY),
     }
 }
 
@@ -138,33 +156,148 @@ pub fn transform_allowed_domain(kind: TransformKind) -> (f64, f64) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn identity_kind() {
-        let t = Transform::identity();
-        assert_eq!(t.kind(), TransformKind::Identity);
+    fn approx(a: f64, b: f64, tol: f64) {
+        assert!((a - b).abs() < tol, "{a} ≠ {b} (tol={tol})");
     }
 
     #[test]
-    fn identity_round_trips_values() {
-        let t = Transform::identity();
-        for v in [-1e9, -1.5, -1.0, 0.0, 1.0, 42.0, 1e9] {
-            assert_eq!(t.forward(v), v);
-            assert_eq!(t.inverse(v), v);
+    fn identity_round_trips() {
+        for v in [-1e9, -1.5, 0.0, 1.0, 42.0, 1e9] {
+            approx(transform_forward(v, TransformKind::Identity), v, 1e-12);
+            approx(transform_inverse(v, TransformKind::Identity), v, 1e-12);
         }
     }
 
     #[test]
-    fn identity_allowed_domain_is_full() {
-        let (lo, hi) = Transform::identity().allowed_domain();
-        assert_eq!(lo, f64::NEG_INFINITY);
+    fn log10_round_trip() {
+        for v in [0.5, 1.0, 2.0, 5.0, 10.0, 100.0, 1e6] {
+            let f = transform_forward(v, TransformKind::Log10);
+            let inv = transform_inverse(f, TransformKind::Log10);
+            approx(inv, v, 1e-9);
+        }
+        approx(transform_forward(10.0, TransformKind::Log10), 1.0, 1e-12);
+        approx(transform_forward(100.0, TransformKind::Log10), 2.0, 1e-12);
+    }
+
+    #[test]
+    fn log2_round_trip() {
+        for v in [0.5, 1.0, 2.0, 4.0, 16.0] {
+            let f = transform_forward(v, TransformKind::Log2);
+            let inv = transform_inverse(f, TransformKind::Log2);
+            approx(inv, v, 1e-9);
+        }
+        approx(transform_forward(8.0, TransformKind::Log2), 3.0, 1e-12);
+    }
+
+    #[test]
+    fn log_natural_round_trip() {
+        for v in [0.5, 1.0, std::f64::consts::E, 100.0] {
+            let f = transform_forward(v, TransformKind::Log);
+            let inv = transform_inverse(f, TransformKind::Log);
+            approx(inv, v, 1e-9);
+        }
+        approx(
+            transform_forward(std::f64::consts::E, TransformKind::Log),
+            1.0,
+            1e-12,
+        );
+    }
+
+    #[test]
+    fn sqrt_round_trip() {
+        for v in [0.0, 0.25, 1.0, 4.0, 100.0] {
+            let f = transform_forward(v, TransformKind::Sqrt);
+            let inv = transform_inverse(f, TransformKind::Sqrt);
+            approx(inv, v, 1e-9);
+        }
+    }
+
+    #[test]
+    fn square_inverse_is_non_negative_branch() {
+        // Square is non-injective; inverse takes the |v| branch.
+        approx(transform_forward(3.0, TransformKind::Square), 9.0, 1e-12);
+        approx(transform_inverse(9.0, TransformKind::Square), 3.0, 1e-12);
+        approx(transform_inverse(-9.0, TransformKind::Square), 3.0, 1e-12);
+    }
+
+    #[test]
+    fn exp_round_trips() {
+        for kind in [
+            TransformKind::Exp10,
+            TransformKind::Exp2,
+            TransformKind::Exp,
+        ] {
+            for v in [0.0, 1.0, 2.5, -1.0] {
+                let f = transform_forward(v, kind);
+                let inv = transform_inverse(f, kind);
+                approx(inv, v, 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn asinh_round_trip() {
+        for v in [-100.0, -1.0, 0.0, 1.0, 100.0] {
+            let f = transform_forward(v, TransformKind::Asinh);
+            let inv = transform_inverse(f, TransformKind::Asinh);
+            approx(inv, v, 1e-9);
+        }
+    }
+
+    #[test]
+    fn pseudo_log_round_trips_all_bases() {
+        for kind in [
+            TransformKind::PseudoLog,
+            TransformKind::PseudoLog2,
+            TransformKind::PseudoLog10,
+        ] {
+            for v in [-1000.0, -1.0, 0.0, 1.0, 1000.0] {
+                let f = transform_forward(v, kind);
+                let inv = transform_inverse(f, kind);
+                approx(inv, v, 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn pseudo_log_linear_near_zero() {
+        // For small |x|, asinh(x/2) ≈ x/2 so PseudoLog ≈ x/2.
+        let f = transform_forward(0.01, TransformKind::PseudoLog);
+        approx(f, 0.005, 1e-4);
+    }
+
+    #[test]
+    fn pseudo_log_far_from_zero_is_log_like() {
+        // For large |x|, asinh(x/2) ≈ ln(x), so PseudoLog10(x) ≈ log10(x).
+        let f = transform_forward(1000.0, TransformKind::PseudoLog10);
+        let log10_1000 = 1000f64.log10();
+        // Within ~5% — pseudo-log diverges from log10 by a constant
+        // offset (ln 2 / ln 10).
+        assert!(
+            (f - log10_1000).abs() < 0.5,
+            "pseudolog10(1000) = {f}, log10(1000) = {log10_1000}"
+        );
+    }
+
+    #[test]
+    fn allowed_domain_log_is_positive() {
+        let (lo, hi) = transform_allowed_domain(TransformKind::Log10);
+        assert_eq!(lo, 0.0);
         assert_eq!(hi, f64::INFINITY);
     }
 
     #[test]
-    fn of_identity_matches_identity_constructor() {
-        let a = Transform::identity();
-        let b = Transform::of(TransformKind::Identity);
-        assert_eq!(a.kind(), b.kind());
+    fn allowed_domain_sqrt_is_non_negative() {
+        let (lo, hi) = transform_allowed_domain(TransformKind::Sqrt);
+        assert_eq!(lo, 0.0);
+        assert_eq!(hi, f64::INFINITY);
+    }
+
+    #[test]
+    fn allowed_domain_asinh_is_full() {
+        let (lo, hi) = transform_allowed_domain(TransformKind::Asinh);
+        assert_eq!(lo, f64::NEG_INFINITY);
+        assert_eq!(hi, f64::INFINITY);
     }
 
     #[test]
@@ -174,30 +307,25 @@ mod tests {
     }
 
     #[test]
-    fn free_fn_forward_matches_method() {
-        assert_eq!(transform_forward(3.5, TransformKind::Identity), 3.5);
-    }
-
-    #[test]
-    fn free_fn_inverse_matches_method() {
-        assert_eq!(transform_inverse(3.5, TransformKind::Identity), 3.5);
-    }
-
-    #[test]
-    #[should_panic(expected = "not implemented")]
-    fn of_log10_panics_when_unimplemented() {
-        let _ = Transform::of(TransformKind::Log10);
-    }
-
-    #[test]
-    #[should_panic(expected = "not implemented")]
-    fn of_sqrt_panics_when_unimplemented() {
-        let _ = Transform::of(TransformKind::Sqrt);
-    }
-
-    #[test]
-    #[should_panic(expected = "not implemented")]
-    fn forward_log10_panics_when_unimplemented() {
-        let _ = transform_forward(1.0, TransformKind::Log10);
+    fn of_constructs_all_variants() {
+        // Previously panicked for non-Identity; now all wired.
+        for kind in [
+            TransformKind::Identity,
+            TransformKind::Log10,
+            TransformKind::Log2,
+            TransformKind::Log,
+            TransformKind::Sqrt,
+            TransformKind::Square,
+            TransformKind::Exp10,
+            TransformKind::Exp2,
+            TransformKind::Exp,
+            TransformKind::Asinh,
+            TransformKind::PseudoLog,
+            TransformKind::PseudoLog2,
+            TransformKind::PseudoLog10,
+        ] {
+            let t = Transform::of(kind);
+            assert_eq!(t.kind(), kind);
+        }
     }
 }

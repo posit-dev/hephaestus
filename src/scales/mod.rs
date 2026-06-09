@@ -43,14 +43,17 @@ pub mod scale_type;
 pub mod transform;
 pub mod value;
 
-pub use breaks::{extended_breaks, linear_breaks, DEFAULT_BREAK_COUNT};
+pub use breaks::{
+    extended_breaks, linear_breaks, linear_minor_breaks_between, log_minor_breaks,
+    log_pretty_breaks, sqrt_breaks, symlog_breaks, symlog_minor_breaks, DEFAULT_BREAK_COUNT,
+};
 pub use chrome::{AxisSide, LegendSide};
 pub use input::InputRange;
 pub use output::OutputRange;
 pub use scale_type::{
     binned_band_width, binned_band_width_at, binned_breaks, binned_map, continuous_breaks,
-    continuous_map, discrete_band_width, discrete_breaks, discrete_map, identity_map, ordinal_map,
-    ScaleTypeKind,
+    continuous_map, continuous_minor_breaks, discrete_band_width, discrete_breaks, discrete_map,
+    identity_map, ordinal_map, ScaleTypeKind,
 };
 pub use transform::{
     transform_allowed_domain, transform_forward, transform_inverse, Transform, TransformKind,

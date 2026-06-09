@@ -26,11 +26,12 @@ use crate::scales::value::{DataColumn, LinetypeStep, Value};
 // the top level.
 pub use crate::scales::{
     binned_band_width, binned_band_width_at, binned_breaks, binned_map, breaks, chrome,
-    continuous_breaks, continuous_map, discrete_band_width, discrete_breaks, discrete_map,
-    extended_breaks, identity_map, input, linear_breaks, ordinal_map, output, scale_type,
-    transform, transform_allowed_domain, transform_forward, transform_inverse, value, AxisSide,
-    InputRange, LegendSide, OutputRange, ScaleTypeKind, Transform, TransformKind,
-    DEFAULT_BREAK_COUNT,
+    continuous_breaks, continuous_map, continuous_minor_breaks, discrete_band_width,
+    discrete_breaks, discrete_map, extended_breaks, identity_map, input, linear_breaks,
+    linear_minor_breaks_between, log_minor_breaks, log_pretty_breaks, ordinal_map, output,
+    scale_type, sqrt_breaks, symlog_breaks, symlog_minor_breaks, transform,
+    transform_allowed_domain, transform_forward, transform_inverse, value, AxisSide, InputRange,
+    LegendSide, OutputRange, ScaleTypeKind, Transform, TransformKind, DEFAULT_BREAK_COUNT,
 };
 
 // Axis / legend chrome renderers live in src/plot/chrome/ — re-exported
@@ -264,6 +265,20 @@ impl Scale {
             }
             ScaleTypeKind::Binned => binned_breaks(self.output_range.as_ref()),
             ScaleTypeKind::Identity => Vec::new(),
+        }
+    }
+
+    /// Minor (sub-tick) positions in input space. Empty for non-continuous
+    /// scale types. For continuous scales the algorithm is transform-
+    /// aware: log scales emit geometric 2..9 between decades; sqrt /
+    /// identity / etc. emit one midpoint between consecutive majors.
+    pub fn minor_breaks(&self, n: usize) -> Vec<Value> {
+        match self.scale_type {
+            ScaleTypeKind::Continuous => {
+                let majors = self.breaks(n);
+                continuous_minor_breaks(self.input_range.as_ref(), &self.transform, &majors)
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -1136,5 +1151,134 @@ mod tests {
         let col: DataColumn = DataColumn::F64(vec![]);
         let s = continuous_from_data(&col);
         assert!(s.input_range().is_none());
+    }
+
+    // ── Transform-aware breaks (E.1) ──
+
+    #[test]
+    fn log10_scale_breaks_emit_decade_powers() {
+        let s = continuous(1.0..=1000.0).with_transform(TransformKind::Log10);
+        let bs = s.breaks(5);
+        let nums: Vec<f64> = bs.iter().filter_map(|v| v.as_number()).collect();
+        for v in [1.0, 10.0, 100.0, 1000.0] {
+            assert!(nums.contains(&v), "{nums:?} missing {v}");
+        }
+    }
+
+    #[test]
+    fn log10_scale_minor_breaks_emit_2_to_9() {
+        let s = continuous(1.0..=10.0).with_transform(TransformKind::Log10);
+        let m = s.minor_breaks(5);
+        let nums: Vec<f64> = m.iter().filter_map(|v| v.as_number()).collect();
+        for v in [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0] {
+            assert!(nums.contains(&v), "{nums:?} missing {v}");
+        }
+    }
+
+    #[test]
+    fn log10_scale_maps_decade_to_normalised_third() {
+        // Log10 maps 1, 10, 100, 1000 to 0, 1/3, 2/3, 1 in normalised
+        // panel space.
+        let s = continuous(1.0..=1000.0).with_transform(TransformKind::Log10);
+        approx(
+            s.map(&Value::Number(1.0)).as_number().unwrap(),
+            0.0,
+            1e-9,
+            "1",
+        );
+        approx(
+            s.map(&Value::Number(10.0)).as_number().unwrap(),
+            1.0 / 3.0,
+            1e-9,
+            "10",
+        );
+        approx(
+            s.map(&Value::Number(100.0)).as_number().unwrap(),
+            2.0 / 3.0,
+            1e-9,
+            "100",
+        );
+        approx(
+            s.map(&Value::Number(1000.0)).as_number().unwrap(),
+            1.0,
+            1e-9,
+            "1000",
+        );
+    }
+
+    #[test]
+    fn sqrt_scale_compresses_high_values() {
+        let s = continuous(0.0..=100.0).with_transform(TransformKind::Sqrt);
+        // Sqrt(50) / Sqrt(100) ≈ 0.707, not 0.5 like linear.
+        approx(
+            s.map(&Value::Number(50.0)).as_number().unwrap(),
+            (50f64.sqrt()) / 10.0,
+            1e-9,
+            "50",
+        );
+    }
+
+    #[test]
+    fn sqrt_scale_minor_breaks_are_linear_midpoints() {
+        let s = continuous(0.0..=100.0).with_transform(TransformKind::Sqrt);
+        let m = s.minor_breaks(5);
+        // Identity / sqrt / other use the linear midpoint algorithm: one
+        // minor per consecutive-major interval.
+        let majors = s.breaks(5);
+        if majors.len() >= 2 {
+            assert_eq!(m.len(), majors.len() - 1);
+        }
+    }
+
+    #[test]
+    fn identity_transform_breaks_match_extended() {
+        // Default transform (Identity) on a continuous scale still uses
+        // the Wilkinson Extended algorithm — no behavioural change from
+        // E.0.
+        let s = continuous(0.0..=10.0);
+        let bs = s.breaks(5);
+        let nums: Vec<f64> = bs.iter().filter_map(|v| v.as_number()).collect();
+        // Should include 0 and 10, with evenly-spaced steps in between.
+        assert!(nums.first() == Some(&0.0));
+        assert!(nums.last() == Some(&10.0));
+    }
+
+    #[test]
+    fn identity_transform_minor_breaks_are_midpoints() {
+        let s = continuous(0.0..=10.0);
+        let majors = s.breaks(5);
+        let minors = s.minor_breaks(5);
+        if majors.len() >= 2 {
+            assert_eq!(minors.len(), majors.len() - 1);
+        }
+    }
+
+    #[test]
+    fn asinh_scale_handles_negative_domain() {
+        let s = continuous(-10.0..=10.0).with_transform(TransformKind::Asinh);
+        // map(0) should be the midpoint.
+        approx(
+            s.map(&Value::Number(0.0)).as_number().unwrap(),
+            0.5,
+            1e-9,
+            "asinh midpoint",
+        );
+        // Negative values map to fractions < 0.5; positive > 0.5.
+        assert!(s.map(&Value::Number(-1.0)).as_number().unwrap() < 0.5);
+        assert!(s.map(&Value::Number(1.0)).as_number().unwrap() > 0.5);
+    }
+
+    #[test]
+    fn discrete_scale_has_no_minor_breaks() {
+        let s = discrete(["a", "b", "c"].into_iter().map(Into::into));
+        assert!(s.minor_breaks(5).is_empty());
+    }
+
+    #[test]
+    fn pseudo_log10_can_be_constructed() {
+        // Previously panicked.
+        let s = continuous(0.1..=1000.0).with_transform(TransformKind::PseudoLog10);
+        let bs = s.breaks(5);
+        assert!(!bs.is_empty());
     }
 }

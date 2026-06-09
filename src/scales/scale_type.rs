@@ -9,10 +9,13 @@
 
 use crate::color::Color;
 
-use super::breaks::extended_breaks;
+use super::breaks::{
+    extended_breaks, linear_minor_breaks_between, log_minor_breaks, log_pretty_breaks, sqrt_breaks,
+    symlog_breaks, symlog_minor_breaks,
+};
 use super::input::InputRange;
 use super::output::OutputRange;
-use super::transform::Transform;
+use super::transform::{Transform, TransformKind};
 use super::value::Value;
 
 /// Discriminator for the scale-type family.
@@ -93,18 +96,84 @@ pub fn continuous_map(
 }
 
 /// Tick positions for a continuous scale, in input space, projected
-/// to `Value::Number` for the formatter to handle.
+/// to `Value::Number` for the formatter to handle. Transform-aware:
+/// log scales emit the 1-2-5 pattern across decades; sqrt scales emit
+/// Wilkinson-Extended in sqrt space; symmetric-log scales (Asinh /
+/// PseudoLog) emit log breaks on each branch around zero.
 pub fn continuous_breaks(
     input_range: Option<&InputRange>,
-    _transform: &Transform,
+    transform: &Transform,
     n: usize,
 ) -> Vec<Value> {
-    match input_range {
-        Some(InputRange::Continuous { min, max }) => extended_breaks(*min, *max, n)
-            .into_iter()
-            .map(Value::Number)
-            .collect(),
-        _ => Vec::new(),
+    let (min, max) = match input_range {
+        Some(InputRange::Continuous { min, max }) => (*min, *max),
+        _ => return Vec::new(),
+    };
+    transform_breaks(min, max, n, transform.kind)
+        .into_iter()
+        .map(Value::Number)
+        .collect()
+}
+
+/// Minor (sub-tick) positions for a continuous scale. Per-transform:
+/// log scales emit geometric 2..9 between decades; sqrt / linear /
+/// other scales emit one evenly-spaced minor between each pair of
+/// majors; symmetric-log scales mirror log on each branch.
+pub fn continuous_minor_breaks(
+    input_range: Option<&InputRange>,
+    transform: &Transform,
+    majors: &[Value],
+) -> Vec<Value> {
+    let (min, max) = match input_range {
+        Some(InputRange::Continuous { min, max }) => (*min, *max),
+        _ => return Vec::new(),
+    };
+    transform_minor_breaks(min, max, transform.kind, majors)
+        .into_iter()
+        .map(Value::Number)
+        .collect()
+}
+
+/// Dispatch major break generation by [`TransformKind`].
+fn transform_breaks(min: f64, max: f64, n: usize, kind: TransformKind) -> Vec<f64> {
+    match kind {
+        TransformKind::Identity
+        | TransformKind::Square
+        | TransformKind::Exp10
+        | TransformKind::Exp2
+        | TransformKind::Exp => extended_breaks(min, max, n),
+        TransformKind::Log10 => log_pretty_breaks(min, max, n, 10.0),
+        TransformKind::Log2 => log_pretty_breaks(min, max, n, 2.0),
+        TransformKind::Log => log_pretty_breaks(min, max, n, std::f64::consts::E),
+        TransformKind::Sqrt => sqrt_breaks(min, max, n),
+        TransformKind::Asinh | TransformKind::PseudoLog => {
+            symlog_breaks(min, max, n, std::f64::consts::E)
+        }
+        TransformKind::PseudoLog2 => symlog_breaks(min, max, n, 2.0),
+        TransformKind::PseudoLog10 => symlog_breaks(min, max, n, 10.0),
+    }
+}
+
+/// Dispatch minor break generation by [`TransformKind`]. `majors` are
+/// the major breaks (in input space) — needed for transforms that
+/// subdivide between majors (linear default); ignored by transforms
+/// that compute minors directly from the domain (log family, symlog).
+fn transform_minor_breaks(min: f64, max: f64, kind: TransformKind, majors: &[Value]) -> Vec<f64> {
+    match kind {
+        TransformKind::Log10 => log_minor_breaks(min, max, 10.0),
+        TransformKind::Log2 => log_minor_breaks(min, max, 2.0),
+        TransformKind::Log => log_minor_breaks(min, max, std::f64::consts::E),
+        TransformKind::Asinh | TransformKind::PseudoLog => {
+            symlog_minor_breaks(min, max, std::f64::consts::E)
+        }
+        TransformKind::PseudoLog2 => symlog_minor_breaks(min, max, 2.0),
+        TransformKind::PseudoLog10 => symlog_minor_breaks(min, max, 10.0),
+        // Identity / Square / Exp* / Sqrt: linear subdivision between
+        // majors, one minor per interval.
+        _ => {
+            let m: Vec<f64> = majors.iter().filter_map(|v| v.as_number()).collect();
+            linear_minor_breaks_between(&m, 1)
+        }
     }
 }
 

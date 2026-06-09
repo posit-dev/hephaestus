@@ -154,6 +154,10 @@ required-features = ["vello", "png", "text"]
 name = "glyph_markers"
 required-features = ["vello", "png", "text"]
 
+[[example]]
+name = "log_scale"
+required-features = ["vello", "png", "text"]
+
 [[test]]
 name = "smoke"
 required-features = ["vello"]
