@@ -29,9 +29,10 @@ pub use crate::scales::{
     continuous_breaks, continuous_map, continuous_minor_breaks, discrete_band_width,
     discrete_breaks, discrete_map, extended_breaks, identity_map, input, linear_breaks,
     linear_minor_breaks_between, log_minor_breaks, log_pretty_breaks, ordinal_map, output,
-    scale_type, sqrt_breaks, symlog_breaks, symlog_minor_breaks, transform,
-    transform_allowed_domain, transform_forward, transform_inverse, value, AxisSide, InputRange,
-    LegendSide, OutputRange, ScaleTypeKind, Transform, TransformKind, DEFAULT_BREAK_COUNT,
+    scale_type, sqrt_breaks, symlog_breaks, symlog_minor_breaks, temporal_breaks,
+    temporal_minor_breaks, transform, transform_allowed_domain, transform_forward,
+    transform_inverse, value, AxisSide, InputRange, LegendSide, OutputRange, ScaleTypeKind,
+    TemporalUnit, Transform, TransformKind, DEFAULT_BREAK_COUNT,
 };
 
 // Axis / legend chrome renderers live in src/plot/chrome/ — re-exported
@@ -205,7 +206,7 @@ impl Scale {
     /// [`crate::scales`].
     pub fn map(&self, input: &Value) -> Value {
         match self.scale_type {
-            ScaleTypeKind::Continuous => continuous_map(
+            ScaleTypeKind::Continuous | ScaleTypeKind::Temporal(_) => continuous_map(
                 input,
                 self.input_range.as_ref(),
                 self.output_range.as_ref(),
@@ -260,6 +261,7 @@ impl Scale {
             ScaleTypeKind::Continuous => {
                 continuous_breaks(self.input_range.as_ref(), &self.transform, n)
             }
+            ScaleTypeKind::Temporal(unit) => temporal_breaks(self.input_range.as_ref(), unit, n),
             ScaleTypeKind::Discrete | ScaleTypeKind::Ordinal => {
                 discrete_breaks(self.input_range.as_ref())
             }
@@ -272,11 +274,17 @@ impl Scale {
     /// scale types. For continuous scales the algorithm is transform-
     /// aware: log scales emit geometric 2..9 between decades; sqrt /
     /// identity / etc. emit one midpoint between consecutive majors.
+    /// For temporal scales it emits sub-unit calendar ticks (year →
+    /// quarter, month → week, …).
     pub fn minor_breaks(&self, n: usize) -> Vec<Value> {
         match self.scale_type {
             ScaleTypeKind::Continuous => {
                 let majors = self.breaks(n);
                 continuous_minor_breaks(self.input_range.as_ref(), &self.transform, &majors)
+            }
+            ScaleTypeKind::Temporal(unit) => {
+                let majors = self.breaks(n);
+                temporal_minor_breaks(self.input_range.as_ref(), unit, &majors, n)
             }
             _ => Vec::new(),
         }
@@ -294,7 +302,7 @@ impl Scale {
     /// scales return `0.0`; discrete-family scales return `1.0 / n_bands`.
     pub fn band_width(&self) -> f64 {
         match self.scale_type {
-            ScaleTypeKind::Continuous => 0.0,
+            ScaleTypeKind::Continuous | ScaleTypeKind::Temporal(_) => 0.0,
             ScaleTypeKind::Discrete | ScaleTypeKind::Ordinal => {
                 discrete_band_width(self.input_range.as_ref())
             }
@@ -390,12 +398,12 @@ fn format_value(v: &Value) -> String {
             let (h, mi, s, _us) = split_time_micros(time_us);
             format!("{y:04}-{m:02}-{dd:02} {h:02}:{mi:02}:{s:02}")
         }
-        Value::Time(us) => {
-            let (h, mi, s, sub) = split_time_micros(*us);
-            if sub == 0 {
+        Value::Time(ns) => {
+            let (h, mi, s, sub_ns) = split_time_nanos(*ns);
+            if sub_ns == 0 {
                 format!("{h:02}:{mi:02}:{s:02}")
             } else {
-                let millis = sub / 1000;
+                let millis = sub_ns / 1_000_000;
                 format!("{h:02}:{mi:02}:{s:02}.{millis:03}")
             }
         }
@@ -450,6 +458,8 @@ fn endpoint_to_f64(v: Value, ctx: &str) -> f64 {
 }
 
 /// Split microseconds-since-midnight into (hour, minute, second, sub_us).
+/// Used by the DateTime formatter (DateTime stays μs even though Time
+/// switched to ns).
 fn split_time_micros(us: i64) -> (u8, u8, u8, u32) {
     let us = us.rem_euclid(86_400_000_000);
     let micros_of_sec = (us % 1_000_000) as u32;
@@ -459,6 +469,19 @@ fn split_time_micros(us: i64) -> (u8, u8, u8, u32) {
     let mi = (total_mins % 60) as u8;
     let h = ((total_mins / 60) % 24) as u8;
     (h, mi, s, micros_of_sec)
+}
+
+/// Split nanoseconds-since-midnight into (hour, minute, second, sub_ns).
+/// Used by the Time formatter.
+fn split_time_nanos(ns: i64) -> (u8, u8, u8, u32) {
+    let ns = ns.rem_euclid(86_400_000_000_000);
+    let nanos_of_sec = (ns % 1_000_000_000) as u32;
+    let total_secs = ns / 1_000_000_000;
+    let s = (total_secs % 60) as u8;
+    let total_mins = total_secs / 60;
+    let mi = (total_mins % 60) as u8;
+    let h = ((total_mins / 60) % 24) as u8;
+    (h, mi, s, nanos_of_sec)
 }
 
 // ─── ScaleRegistry ───────────────────────────────────────────────────────────
@@ -574,6 +597,45 @@ where
 /// Identity scale — input passes through unchanged.
 pub fn identity() -> Scale {
     Scale::new(ScaleTypeKind::Identity)
+}
+
+/// Calendar-aware temporal scale. `T` must convert to a temporal
+/// [`Value`] variant ([`Date`](crate::scales::value::Date),
+/// [`DateTime`](crate::scales::value::DateTime),
+/// [`Time`](crate::scales::value::Time), or
+/// [`Duration`](crate::scales::value::Duration)) — the variant of the
+/// `domain.start()` value selects the calendar unit. Endpoints project
+/// to f64 days / microseconds for storage; breaks come back as
+/// `Value::Date / Value::DateTime / Value::Time / Value::Duration`
+/// aligned to year / quarter / month / week / day / hour / minute /
+/// second boundaries.
+///
+/// Use `scale::continuous(date_start..=date_end)` for the legacy
+/// behaviour (numeric breaks); `scale::temporal(...)` is the opt-in for
+/// calendar awareness.
+///
+/// ```ignore
+/// scale::temporal(Date::from_ymd(2024, 1, 1) ..= Date::from_ymd(2024, 12, 31))
+/// scale::temporal(DateTime::from_ymd_hms_micros(2024, 1, 1, 0, 0, 0, 0)
+///     ..= DateTime::from_ymd_hms_micros(2025, 1, 1, 0, 0, 0, 0))
+/// ```
+///
+/// Panics if `domain.start()` is not a temporal value.
+pub fn temporal<T>(domain: RangeInclusive<T>) -> Scale
+where
+    T: Into<Value> + Copy,
+{
+    let start: Value = (*domain.start()).into();
+    let unit = match &start {
+        Value::Date(_) => TemporalUnit::Date,
+        Value::DateTime(_) => TemporalUnit::DateTime,
+        Value::Time(_) => TemporalUnit::Time,
+        Value::Duration(_) => TemporalUnit::Duration,
+        other => panic!(
+            "scale::temporal: expected a temporal value (Date / DateTime / Time / Duration), got {other:?}"
+        ),
+    };
+    Scale::new(ScaleTypeKind::Temporal(unit)).domain_continuous(*domain.start(), *domain.end())
 }
 
 /// Ordinal scale over an ordered category list. The output range is
@@ -1066,13 +1128,20 @@ mod tests {
 
     #[test]
     fn temporal_format_time_sub_second() {
+        // Time is now stored as nanoseconds; Value::Time(ns) is the raw
+        // ns count. `from_hms_micros` is a μs-input convenience that
+        // promotes to ns internally.
         let s = continuous(
             Time::from_hms_micros(0, 0, 0, 0)..=Time::from_hms_micros(23, 59, 59, 999_999),
         );
         let t = Time::from_hms_micros(7, 8, 9, 123_000);
-        assert_eq!(s.format(&Value::Time(t.to_micros())), "07:08:09.123");
+        assert_eq!(s.format(&Value::Time(t.to_nanos())), "07:08:09.123");
         let t_exact = Time::from_hms_micros(7, 8, 9, 0);
-        assert_eq!(s.format(&Value::Time(t_exact.to_micros())), "07:08:09");
+        assert_eq!(s.format(&Value::Time(t_exact.to_nanos())), "07:08:09");
+
+        // ns-input constructor: 7:08:09 + 456 ns sub-second.
+        let t_ns = Time::from_hms_nanos(7, 8, 9, 456_000_000);
+        assert_eq!(s.format(&Value::Time(t_ns.to_nanos())), "07:08:09.456");
     }
 
     #[test]
@@ -1280,5 +1349,149 @@ mod tests {
         let s = continuous(0.1..=1000.0).with_transform(TransformKind::PseudoLog10);
         let bs = s.breaks(5);
         assert!(!bs.is_empty());
+    }
+
+    // ── Calendar-aware temporal (E.2) ──
+
+    #[test]
+    fn temporal_date_year_span_emits_year_starts() {
+        // 5-year span → ticks at Jan 1 of each year.
+        let s = temporal(Date::from_ymd(2020, 1, 1)..=Date::from_ymd(2024, 12, 31));
+        let bs = s.breaks(5);
+        let dates: Vec<(i32, u8, u8)> = bs
+            .iter()
+            .filter_map(|v| {
+                if let Value::Date(d) = v {
+                    Some(Date::from_days(*d).to_ymd())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        // All ticks should be Jan 1 of some year inside the span.
+        for (_, m, d) in &dates {
+            assert_eq!(*m, 1, "month != 1: {dates:?}");
+            assert_eq!(*d, 1, "day != 1: {dates:?}");
+        }
+        // Should include at least 2021-01-01 and 2024-01-01.
+        assert!(dates.iter().any(|(y, _, _)| *y == 2021));
+        assert!(dates.iter().any(|(y, _, _)| *y == 2024));
+    }
+
+    #[test]
+    fn temporal_date_six_month_span_emits_month_starts() {
+        let s = temporal(Date::from_ymd(2024, 3, 15)..=Date::from_ymd(2024, 9, 15));
+        let bs = s.breaks(5);
+        let dates: Vec<(i32, u8, u8)> = bs
+            .iter()
+            .filter_map(|v| match v {
+                Value::Date(d) => Some(Date::from_days(*d).to_ymd()),
+                _ => None,
+            })
+            .collect();
+        assert!(!dates.is_empty());
+        // All ticks should be on day 1 of some month.
+        for (_, _, d) in &dates {
+            assert_eq!(*d, 1, "month-start tick has day {d}: {dates:?}");
+        }
+    }
+
+    #[test]
+    fn temporal_date_ten_day_span_emits_day_ticks() {
+        let s = temporal(Date::from_ymd(2024, 6, 1)..=Date::from_ymd(2024, 6, 10));
+        let bs = s.breaks(5);
+        // 10 days → expect every day (Day-level enumeration) or at
+        // least multiple unique day ticks.
+        assert!(bs.len() >= 5, "expected ~10 day ticks, got {}", bs.len());
+        // All variants should be Value::Date.
+        assert!(bs.iter().all(|v| matches!(v, Value::Date(_))));
+    }
+
+    #[test]
+    fn temporal_breaks_return_date_variant_not_number() {
+        // The formatter relies on the Date variant to render as
+        // YYYY-MM-DD; if breaks come back as Value::Number the labels
+        // render as raw day numbers.
+        let s = temporal(Date::from_ymd(2024, 1, 1)..=Date::from_ymd(2024, 12, 31));
+        for v in s.breaks(5) {
+            assert!(matches!(v, Value::Date(_)), "{v:?} is not Date");
+        }
+    }
+
+    #[test]
+    fn temporal_minor_breaks_subdivide_majors() {
+        // Year-spaced majors → quarter-spaced minors.
+        let s = temporal(Date::from_ymd(2020, 1, 1)..=Date::from_ymd(2024, 12, 31));
+        let minors = s.minor_breaks(5);
+        let minor_dates: Vec<(i32, u8, u8)> = minors
+            .iter()
+            .filter_map(|v| match v {
+                Value::Date(d) => Some(Date::from_days(*d).to_ymd()),
+                _ => None,
+            })
+            .collect();
+        // Quarter starts are Jan, Apr, Jul, Oct.
+        for (_, m, d) in &minor_dates {
+            assert_eq!(*d, 1, "quarter minor has day {d}: {minor_dates:?}");
+            assert!(
+                [1, 4, 7, 10].contains(m),
+                "month {m} not a quarter start: {minor_dates:?}"
+            );
+        }
+        // Minor ticks should NOT coincide with the major Jan-1 ticks.
+        // (Quarter minors at Apr/Jul/Oct only — Jan is already a major.)
+        for (_, m, _) in &minor_dates {
+            assert_ne!(*m, 1, "minor coincides with major Jan 1");
+        }
+    }
+
+    #[test]
+    fn temporal_datetime_year_span_emits_year_starts() {
+        let start = DateTime::from_ymd_hms_micros(2020, 1, 1, 0, 0, 0, 0);
+        let end = DateTime::from_ymd_hms_micros(2024, 12, 31, 23, 59, 59, 0);
+        let s = temporal(start..=end);
+        let bs = s.breaks(5);
+        assert!(!bs.is_empty());
+        // All variants should be Value::DateTime.
+        assert!(bs.iter().all(|v| matches!(v, Value::DateTime(_))));
+        // Each tick should be at midnight UTC (so the sub-day μs are
+        // multiples of DAY_US).
+        for v in &bs {
+            if let Value::DateTime(us) = v {
+                let day_us = 86_400_000_000_i64;
+                assert_eq!(us % day_us, 0, "tick not at midnight: {us}");
+            }
+        }
+    }
+
+    #[test]
+    fn temporal_continuous_with_date_endpoints_still_works_numerically() {
+        // The legacy path: scale::continuous(Date..=Date) — keeps
+        // numeric breaks (Value::Number containing days).
+        let s = continuous(Date::from_ymd(2024, 1, 1)..=Date::from_ymd(2024, 12, 31));
+        let bs = s.breaks(5);
+        // Expect Value::Number, not Value::Date.
+        assert!(
+            bs.iter().all(|v| matches!(v, Value::Number(_))),
+            "legacy continuous-with-date-endpoints should produce numeric breaks: {bs:?}"
+        );
+    }
+
+    #[test]
+    fn temporal_scale_map_is_continuous_linear() {
+        let s = temporal(Date::from_ymd(2024, 1, 1)..=Date::from_ymd(2024, 12, 31));
+        // Midpoint should land near 0.5.
+        let mid = Date::from_ymd(2024, 7, 2);
+        let frac = s.map(&Value::Date(mid.to_days())).as_number().unwrap();
+        assert!((0.4..=0.6).contains(&frac), "frac was {frac}");
+    }
+
+    #[test]
+    fn temporal_panics_on_non_temporal_endpoint() {
+        let result = std::panic::catch_unwind(|| {
+            // f64 isn't temporal — should panic.
+            let _ = temporal(0.0_f64..=10.0_f64);
+        });
+        assert!(result.is_err(), "expected panic on non-temporal endpoint");
     }
 }

@@ -11,12 +11,34 @@ use crate::color::Color;
 
 use super::breaks::{
     extended_breaks, linear_minor_breaks_between, log_minor_breaks, log_pretty_breaks, sqrt_breaks,
-    symlog_breaks, symlog_minor_breaks,
+    symlog_breaks, symlog_minor_breaks, temporal_breaks_from_f64, temporal_minor_breaks_from_f64,
 };
 use super::input::InputRange;
 use super::output::OutputRange;
 use super::transform::{Transform, TransformKind};
 use super::value::Value;
+
+/// Temporal scales know which calendar unit their f64 domain represents
+/// — needed to emit calendar-aligned ticks (year/month/week/day/hour
+/// boundaries rather than mid-domain numeric ticks).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TemporalUnit {
+    /// Domain f64 = days since 1970-01-01. Tick values come back as
+    /// [`Value::Date`].
+    Date,
+    /// Domain f64 = microseconds since 1970-01-01T00:00:00Z. Tick
+    /// values come back as [`Value::DateTime`].
+    DateTime,
+    /// Domain f64 = nanoseconds since midnight (matches `Time(i64)`'s
+    /// Arrow `Time64(Nanosecond)` storage). Tick values come back as
+    /// [`Value::Time`]. Calendar-unit selection only emits sub-day
+    /// units (Hour / Minute / Second).
+    Time,
+    /// Domain f64 = signed microseconds. Tick values come back as
+    /// [`Value::Duration`]. Calendar-unit selection emits Day /
+    /// Hour / Minute / Second.
+    Duration,
+}
 
 /// Discriminator for the scale-type family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -45,6 +67,12 @@ pub enum ScaleTypeKind {
     Binned,
     /// Pass-through. Input is returned untouched.
     Identity,
+    /// Continuous domain interpreted as a calendar quantity (date /
+    /// datetime / time-of-day / duration). Mapping is linear like
+    /// [`Self::Continuous`]; breaks are calendar-aligned
+    /// (year / quarter / month / week / day / hour / minute / second
+    /// boundaries instead of Wilkinson "nice numbers").
+    Temporal(TemporalUnit),
 }
 
 impl ScaleTypeKind {
@@ -56,6 +84,7 @@ impl ScaleTypeKind {
             ScaleTypeKind::Ordinal => "ordinal",
             ScaleTypeKind::Binned => "binned",
             ScaleTypeKind::Identity => "identity",
+            ScaleTypeKind::Temporal(_) => "temporal",
         }
     }
 }
@@ -174,6 +203,65 @@ fn transform_minor_breaks(min: f64, max: f64, kind: TransformKind, majors: &[Val
             let m: Vec<f64> = majors.iter().filter_map(|v| v.as_number()).collect();
             linear_minor_breaks_between(&m, 1)
         }
+    }
+}
+
+// ─── Temporal ────────────────────────────────────────────────────────────────
+
+/// Calendar-aligned major breaks for a temporal scale. Picks a
+/// calendar unit (year / quarter / month / week / day / hour / minute /
+/// second) sized to fit the target tick count, then enumerates that
+/// unit's boundaries inside the domain.
+///
+/// Returns `Vec<Value>` whose variant matches `unit`:
+/// - [`TemporalUnit::Date`] → `Value::Date(days)`
+/// - [`TemporalUnit::DateTime`] → `Value::DateTime(μs)`
+/// - [`TemporalUnit::Time`] → `Value::Time(ns)`
+/// - [`TemporalUnit::Duration`] → `Value::Duration(μs)`
+///
+/// The tick label formatter ([`Scale::format`] in `crate::plot::scale`)
+/// renders each variant in calendar form (`YYYY-MM-DD`, etc.).
+pub fn temporal_breaks(
+    input_range: Option<&InputRange>,
+    unit: TemporalUnit,
+    n: usize,
+) -> Vec<Value> {
+    let (min, max) = match input_range {
+        Some(InputRange::Continuous { min, max }) => (*min, *max),
+        _ => return Vec::new(),
+    };
+    temporal_breaks_from_f64(min, max, unit, n)
+        .into_iter()
+        .map(|raw| wrap_temporal_value(raw, unit))
+        .collect()
+}
+
+/// Calendar-aligned minor breaks for a temporal scale. Subdivides each
+/// major-unit interval by a sensible sub-unit: year → quarter, quarter
+/// → month, month → week, week → day, day → 6-hour, hour → 15-minute,
+/// minute → 15-second.
+pub fn temporal_minor_breaks(
+    input_range: Option<&InputRange>,
+    unit: TemporalUnit,
+    _majors: &[Value],
+    n: usize,
+) -> Vec<Value> {
+    let (min, max) = match input_range {
+        Some(InputRange::Continuous { min, max }) => (*min, *max),
+        _ => return Vec::new(),
+    };
+    temporal_minor_breaks_from_f64(min, max, unit, n)
+        .into_iter()
+        .map(|raw| wrap_temporal_value(raw, unit))
+        .collect()
+}
+
+fn wrap_temporal_value(raw: f64, unit: TemporalUnit) -> Value {
+    match unit {
+        TemporalUnit::Date => Value::Date(raw as i32),
+        TemporalUnit::DateTime => Value::DateTime(raw as i64),
+        TemporalUnit::Time => Value::Time(raw as i64),
+        TemporalUnit::Duration => Value::Duration(raw as i64),
     }
 }
 

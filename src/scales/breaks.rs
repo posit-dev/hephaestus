@@ -440,6 +440,690 @@ pub fn linear_minor_breaks_between(majors: &[f64], n_per_interval: usize) -> Vec
     out
 }
 
+// ─── Calendar-aware temporal breaks (ported from ggsql) ─────────────────────
+//
+// The four `temporal_breaks_*` / `temporal_minor_breaks_*` primitives below
+// are a direct port of ggsql's `src/plot/scale/breaks.rs` (lines
+// 700–1530). Differences from ggsql:
+//
+// - Inputs / outputs are raw integer counts (`i32` days, `i64`
+//   microseconds), not ISO strings. Hephaestus's tick formatter handles
+//   the string rendering at the chrome layer.
+// - `CalendarUnit` is named distinctly from our own `TemporalUnit`
+//   (which tags the data *kind*: Date / DateTime / Time / Duration).
+//   ggsql calls our `CalendarUnit` `TemporalUnit` — when this code is
+//   lifted into a shared crate one of the two names will need to win.
+// - Time uses microseconds since midnight, matching our Time(i64); ggsql
+//   uses nanoseconds. The algorithm is otherwise identical.
+// - No chrono dep: arithmetic uses our `Date::add_months / start_of_*`
+//   helpers (which use the same proleptic Gregorian rules chrono does).
+//
+// The `pick_temporal_interval` picker is hephaestus-only — ggsql's
+// public API takes a `TemporalInterval` from the user; we infer one
+// from (span, target_tick_count) for the axis use case.
+
+use super::scale_type::TemporalUnit;
+use super::value::Date;
+
+/// Calendar unit tag. Ported from ggsql's `TemporalUnit` (renamed here
+/// to avoid clashing with our own [`TemporalUnit`] which tags the data
+/// kind).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalendarUnit {
+    Second,
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+    Year,
+}
+
+/// A count of a calendar unit (e.g. `2 months`, `15 minutes`). Ported
+/// from ggsql's `TemporalInterval`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TemporalInterval {
+    pub count: u32,
+    pub unit: CalendarUnit,
+}
+
+impl TemporalInterval {
+    /// Construct a [`TemporalInterval`].
+    pub const fn new(count: u32, unit: CalendarUnit) -> Self {
+        TemporalInterval { count, unit }
+    }
+}
+
+const DAY_US: i64 = 86_400_000_000;
+const HOUR_US: i64 = 3_600_000_000;
+const MIN_US: i64 = 60_000_000;
+const SEC_US: i64 = 1_000_000;
+
+// Time-of-day (Value::Time) is stored as nanoseconds; needs its own
+// constant ladder for the ns-typed primitives.
+const DAY_NS: i64 = 86_400_000_000_000;
+const HOUR_NS: i64 = 3_600_000_000_000;
+const MIN_NS: i64 = 60_000_000_000;
+const SEC_NS: i64 = 1_000_000_000;
+
+/// Auto-derive a minor interval for the given major. Ported from
+/// ggsql's `derive_minor_interval` (the `MinorBreakSpec::Auto` path).
+///
+/// | major          | minor       |
+/// |----------------|-------------|
+/// | year           | 3 months    |
+/// | quarter (≥3mo) | month       |
+/// | month          | week        |
+/// | week           | day         |
+/// | day            | 6 hours     |
+/// | hour           | 15 minutes  |
+/// | minute         | 15 seconds  |
+/// | second         | (no minor)  |
+pub fn derive_minor_interval(major: TemporalInterval) -> Option<TemporalInterval> {
+    use CalendarUnit::*;
+    Some(match major {
+        TemporalInterval { unit: Year, .. } => TemporalInterval::new(3, Month),
+        TemporalInterval {
+            unit: Month, count, ..
+        } if count >= 3 => TemporalInterval::new(1, Month),
+        TemporalInterval { unit: Month, .. } => TemporalInterval::new(1, Week),
+        TemporalInterval { unit: Week, .. } => TemporalInterval::new(1, Day),
+        TemporalInterval { unit: Day, .. } => TemporalInterval::new(6, Hour),
+        TemporalInterval { unit: Hour, .. } => TemporalInterval::new(15, Minute),
+        TemporalInterval { unit: Minute, .. } => TemporalInterval::new(15, Second),
+        TemporalInterval { unit: Second, .. } => return None,
+    })
+}
+
+// ─── Date primitives (days since epoch) ─────────────────────────────────────
+
+/// Align a date down to the previous interval boundary. Ported from
+/// ggsql's `align_date_to_interval`.
+pub fn align_date_to_interval(days: i32, interval: TemporalInterval) -> i32 {
+    use CalendarUnit::*;
+    let d = Date::from_days(days);
+    match interval.unit {
+        Day => days,
+        Week => d.start_of_week().to_days(),
+        Month => d.start_of_month().to_days(),
+        Year => d.start_of_year().to_days(),
+        // Sub-day units don't change a Date.
+        Hour | Minute | Second => days,
+    }
+}
+
+/// Advance a date by `interval`. Ported from ggsql's
+/// `advance_date_by_interval`.
+pub fn advance_date_by_interval(days: i32, interval: TemporalInterval) -> i32 {
+    use CalendarUnit::*;
+    let d = Date::from_days(days);
+    let count = interval.count as i32;
+    match interval.unit {
+        Day => d.add_days(count).to_days(),
+        Week => d.add_days(7 * count).to_days(),
+        Month => {
+            // Match ggsql: align to month-start then advance N months.
+            let aligned = d.start_of_month();
+            aligned.add_months(count).to_days()
+        }
+        Year => {
+            let (y, _, _) = d.to_ymd();
+            Date::from_ymd(y + count, 1, 1).to_days()
+        }
+        Hour | Minute | Second => d.add_days(count).to_days(),
+    }
+}
+
+/// Retreat a date by `interval`. Ported from ggsql's
+/// `retreat_date_by_interval`.
+pub fn retreat_date_by_interval(days: i32, interval: TemporalInterval) -> i32 {
+    use CalendarUnit::*;
+    let d = Date::from_days(days);
+    let count = interval.count as i32;
+    match interval.unit {
+        Day => d.add_days(-count).to_days(),
+        Week => d.add_days(-7 * count).to_days(),
+        Month => {
+            let aligned = d.start_of_month();
+            aligned.add_months(-count).to_days()
+        }
+        Year => {
+            let (y, _, _) = d.to_ymd();
+            Date::from_ymd(y - count, 1, 1).to_days()
+        }
+        Hour | Minute | Second => d.add_days(-count).to_days(),
+    }
+}
+
+/// Major calendar breaks for a Date scale. Ported from ggsql's
+/// `temporal_breaks_date`. Faithfully includes the terminal break
+/// AFTER `max_days` to close the last bin — axis-tick consumers filter
+/// that out when integrating (see [`temporal_breaks_from_f64`]).
+pub fn temporal_breaks_date(min_days: i32, max_days: i32, interval: TemporalInterval) -> Vec<i32> {
+    let mut out = Vec::new();
+    let mut current = align_date_to_interval(min_days, interval);
+    while current <= max_days {
+        out.push(current);
+        current = advance_date_by_interval(current, interval);
+    }
+    if !out.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+/// Minor calendar breaks for a Date scale. Ported from ggsql's
+/// `temporal_minor_breaks_date` with `MinorBreakSpec::Auto`.
+pub fn temporal_minor_breaks_date(
+    majors: &[i32],
+    major_interval: TemporalInterval,
+    range: Option<(i32, i32)>,
+) -> Vec<i32> {
+    if majors.len() < 2 {
+        return Vec::new();
+    }
+    let minor = match derive_minor_interval(major_interval) {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    let mut out = Vec::new();
+
+    if let Some((min_day, _)) = range {
+        let first = majors[0];
+        let mut current = retreat_date_by_interval(first, minor);
+        while current >= min_day && current < first {
+            out.push(current);
+            current = retreat_date_by_interval(current, minor);
+        }
+    }
+
+    for w in majors.windows(2) {
+        let start = w[0];
+        let end = w[1];
+        let mut current = advance_date_by_interval(start, minor);
+        while current < end {
+            out.push(current);
+            current = advance_date_by_interval(current, minor);
+        }
+    }
+
+    if let Some((_, max_day)) = range {
+        let last = *majors.last().unwrap();
+        let mut current = advance_date_by_interval(last, minor);
+        while current <= max_day {
+            out.push(current);
+            current = advance_date_by_interval(current, minor);
+        }
+    }
+
+    out.sort();
+    out
+}
+
+// ─── DateTime primitives (μs since UTC epoch) ───────────────────────────────
+
+/// Align a datetime down to the previous interval boundary. Ported from
+/// ggsql's `align_datetime_to_interval`.
+pub fn align_datetime_to_interval(micros: i64, interval: TemporalInterval) -> i64 {
+    use CalendarUnit::*;
+    match interval.unit {
+        Second => (micros.div_euclid(SEC_US)) * SEC_US,
+        Minute => (micros.div_euclid(MIN_US)) * MIN_US,
+        Hour => (micros.div_euclid(HOUR_US)) * HOUR_US,
+        Day => (micros.div_euclid(DAY_US)) * DAY_US,
+        Week => {
+            let day = micros.div_euclid(DAY_US) as i32;
+            (Date::from_days(day).start_of_week().to_days() as i64) * DAY_US
+        }
+        Month => {
+            let day = micros.div_euclid(DAY_US) as i32;
+            (Date::from_days(day).start_of_month().to_days() as i64) * DAY_US
+        }
+        Year => {
+            let day = micros.div_euclid(DAY_US) as i32;
+            (Date::from_days(day).start_of_year().to_days() as i64) * DAY_US
+        }
+    }
+}
+
+/// Advance a datetime by `interval`. Ported from ggsql's
+/// `advance_datetime_by_interval`. For Month / Year, ggsql clamps
+/// `day-of-month` to `28` to avoid invalid dates (e.g. Jan 31 + 1 month
+/// would otherwise need to materialise Feb 31). We match.
+pub fn advance_datetime_by_interval(micros: i64, interval: TemporalInterval) -> i64 {
+    use CalendarUnit::*;
+    let count = interval.count as i64;
+    match interval.unit {
+        Second => micros + SEC_US * count,
+        Minute => micros + MIN_US * count,
+        Hour => micros + HOUR_US * count,
+        Day => micros + DAY_US * count,
+        Week => micros + DAY_US * 7 * count,
+        Month => {
+            let (date, time_us) = split_datetime(micros);
+            let (y, m, day) = date.to_ymd();
+            let total_months = (y as i64) * 12 + (m as i64 - 1) + count;
+            let new_y = total_months.div_euclid(12) as i32;
+            let new_m = (total_months.rem_euclid(12) + 1) as u8;
+            let new_d = day.min(28);
+            (Date::from_ymd(new_y, new_m, new_d).to_days() as i64) * DAY_US + time_us
+        }
+        Year => {
+            let (date, time_us) = split_datetime(micros);
+            let (y, m, day) = date.to_ymd();
+            let new_y = y + count as i32;
+            let new_d = day.min(28);
+            (Date::from_ymd(new_y, m, new_d).to_days() as i64) * DAY_US + time_us
+        }
+    }
+}
+
+/// Retreat a datetime by `interval`. Ported from ggsql's
+/// `retreat_datetime_by_interval`.
+pub fn retreat_datetime_by_interval(micros: i64, interval: TemporalInterval) -> i64 {
+    use CalendarUnit::*;
+    let count = interval.count as i64;
+    match interval.unit {
+        Second => micros - SEC_US * count,
+        Minute => micros - MIN_US * count,
+        Hour => micros - HOUR_US * count,
+        Day => micros - DAY_US * count,
+        Week => micros - DAY_US * 7 * count,
+        Month => {
+            let (date, time_us) = split_datetime(micros);
+            let (y, m, day) = date.to_ymd();
+            let total_months = (y as i64) * 12 + (m as i64 - 1) - count;
+            let new_y = total_months.div_euclid(12) as i32;
+            let new_m = (total_months.rem_euclid(12) + 1) as u8;
+            let new_d = day.min(28);
+            (Date::from_ymd(new_y, new_m, new_d).to_days() as i64) * DAY_US + time_us
+        }
+        Year => {
+            let (date, time_us) = split_datetime(micros);
+            let (y, m, day) = date.to_ymd();
+            let new_y = y - count as i32;
+            let new_d = day.min(28);
+            (Date::from_ymd(new_y, m, new_d).to_days() as i64) * DAY_US + time_us
+        }
+    }
+}
+
+fn split_datetime(micros: i64) -> (Date, i64) {
+    let day = micros.div_euclid(DAY_US);
+    let time_us = micros.rem_euclid(DAY_US);
+    (Date::from_days(day as i32), time_us)
+}
+
+/// Major calendar breaks for a DateTime scale. Ported from ggsql's
+/// `temporal_breaks_datetime`. Includes the terminal break past `max_us`.
+pub fn temporal_breaks_datetime(min_us: i64, max_us: i64, interval: TemporalInterval) -> Vec<i64> {
+    let mut out = Vec::new();
+    let mut current = align_datetime_to_interval(min_us, interval);
+    while current <= max_us {
+        out.push(current);
+        current = advance_datetime_by_interval(current, interval);
+    }
+    if !out.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+/// Minor calendar breaks for a DateTime scale. Ported from ggsql's
+/// `temporal_minor_breaks_datetime` (Auto spec).
+pub fn temporal_minor_breaks_datetime(
+    majors: &[i64],
+    major_interval: TemporalInterval,
+    range: Option<(i64, i64)>,
+) -> Vec<i64> {
+    if majors.len() < 2 {
+        return Vec::new();
+    }
+    let minor = match derive_minor_interval(major_interval) {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    let mut out = Vec::new();
+
+    if let Some((min_us, _)) = range {
+        let first = majors[0];
+        let mut current = retreat_datetime_by_interval(first, minor);
+        while current >= min_us && current < first {
+            out.push(current);
+            current = retreat_datetime_by_interval(current, minor);
+        }
+    }
+
+    for w in majors.windows(2) {
+        let start = w[0];
+        let end = w[1];
+        let mut current = advance_datetime_by_interval(start, minor);
+        while current < end {
+            out.push(current);
+            current = advance_datetime_by_interval(current, minor);
+        }
+    }
+
+    if let Some((_, max_us)) = range {
+        let last = *majors.last().unwrap();
+        let mut current = advance_datetime_by_interval(last, minor);
+        while current <= max_us {
+            out.push(current);
+            current = advance_datetime_by_interval(current, minor);
+        }
+    }
+
+    out.sort();
+    out
+}
+
+// ─── Time-of-day primitives (ns since midnight; wraps at 24h) ──────────────
+//
+// Time uses nanoseconds (matching ggsql's `temporal_breaks_time` and our
+// `Time(i64)` ns storage). DateTime / Duration stay in μs.
+
+/// Align a time down to the previous interval boundary. Ported from
+/// ggsql's `align_time_to_interval`.
+pub fn align_time_to_interval(nanos: i64, interval: TemporalInterval) -> i64 {
+    use CalendarUnit::*;
+    match interval.unit {
+        Second => (nanos.div_euclid(SEC_NS)) * SEC_NS,
+        Minute => (nanos.div_euclid(MIN_NS)) * MIN_NS,
+        Hour => (nanos.div_euclid(HOUR_NS)) * HOUR_NS,
+        // Day/Week/Month/Year don't apply to Time-of-day.
+        _ => nanos,
+    }
+}
+
+/// Advance a time-of-day. Returns `None` when the result would overflow
+/// past 24h (matches ggsql's wrap-detect via `with_*` returning None).
+pub fn advance_time_by_interval(nanos: i64, interval: TemporalInterval) -> Option<i64> {
+    use CalendarUnit::*;
+    let count = interval.count as i64;
+    let next = match interval.unit {
+        Second => nanos + SEC_NS * count,
+        Minute => nanos + MIN_NS * count,
+        Hour => nanos + HOUR_NS * count,
+        _ => return Some(nanos),
+    };
+    if (0..DAY_NS).contains(&next) {
+        Some(next)
+    } else {
+        None
+    }
+}
+
+/// Retreat a time-of-day. Returns `None` when the result would underflow
+/// past midnight.
+pub fn retreat_time_by_interval(nanos: i64, interval: TemporalInterval) -> Option<i64> {
+    use CalendarUnit::*;
+    let count = interval.count as i64;
+    let prev = match interval.unit {
+        Second => nanos - SEC_NS * count,
+        Minute => nanos - MIN_NS * count,
+        Hour => nanos - HOUR_NS * count,
+        _ => return Some(nanos),
+    };
+    if prev >= 0 {
+        Some(prev)
+    } else {
+        None
+    }
+}
+
+/// Major calendar breaks for a Time scale (ns since midnight). Ported
+/// from ggsql's `temporal_breaks_time`.
+pub fn temporal_breaks_time(min_ns: i64, max_ns: i64, interval: TemporalInterval) -> Vec<i64> {
+    let mut out = Vec::new();
+    let mut current = align_time_to_interval(min_ns, interval);
+    while current <= max_ns {
+        out.push(current);
+        current = match advance_time_by_interval(current, interval) {
+            Some(t) if t > current => t,
+            _ => break,
+        };
+    }
+    if !out.is_empty() {
+        if let Some(last) = out.last().copied() {
+            if let Some(next) = advance_time_by_interval(last, interval) {
+                if next > max_ns {
+                    out.push(next);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Minor calendar breaks for a Time scale. Ported from ggsql's
+/// `temporal_minor_breaks_time` (Auto spec).
+pub fn temporal_minor_breaks_time(
+    majors: &[i64],
+    major_interval: TemporalInterval,
+    range: Option<(i64, i64)>,
+) -> Vec<i64> {
+    if majors.len() < 2 {
+        return Vec::new();
+    }
+    let minor = match derive_minor_interval(major_interval) {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    let mut out = Vec::new();
+
+    if let Some((min_ns, _)) = range {
+        let first = majors[0];
+        if let Some(mut current) = retreat_time_by_interval(first, minor) {
+            while current >= min_ns && current < first {
+                out.push(current);
+                match retreat_time_by_interval(current, minor) {
+                    Some(prev) if prev < current => current = prev,
+                    _ => break,
+                }
+            }
+        }
+    }
+
+    for w in majors.windows(2) {
+        let start = w[0];
+        let end = w[1];
+        if let Some(mut current) = advance_time_by_interval(start, minor) {
+            while current < end {
+                out.push(current);
+                match advance_time_by_interval(current, minor) {
+                    Some(next) if next > current => current = next,
+                    _ => break,
+                }
+            }
+        }
+    }
+
+    if let Some((_, max_ns)) = range {
+        let last = *majors.last().unwrap();
+        if let Some(mut current) = advance_time_by_interval(last, minor) {
+            while current <= max_ns && current > last {
+                out.push(current);
+                match advance_time_by_interval(current, minor) {
+                    Some(next) if next > current => current = next,
+                    _ => break,
+                }
+            }
+        }
+    }
+
+    out.sort();
+    out
+}
+
+// ─── Hephaestus-specific picker (not in ggsql breaks.rs) ────────────────────
+
+/// Select a major [`TemporalInterval`] for an axis with the given
+/// `target` tick count over `span`. `span` is in the unit's canonical
+/// units (days for [`TemporalUnit::Date`], μs for the others).
+///
+/// **Not in ggsql.** ggsql's public API takes the interval directly
+/// from the user; hephaestus infers it from (span, target) to drive its
+/// `Scale::breaks(n)` axis-tick surface. When this code is lifted into
+/// a shared crate the picker stays in the hephaestus-side layer.
+pub fn pick_temporal_interval(span: f64, target: f64, unit: TemporalUnit) -> TemporalInterval {
+    use CalendarUnit::*;
+    let threshold = (target * 0.5).max(2.0);
+    let is_time_only = matches!(unit, TemporalUnit::Time);
+
+    // For Date: span is already in days. DateTime / Duration: μs → days.
+    // Time: ns → days.
+    let day_count = match unit {
+        TemporalUnit::Date => span,
+        TemporalUnit::DateTime | TemporalUnit::Duration => span / DAY_US as f64,
+        TemporalUnit::Time => -1.0,
+    };
+
+    if !is_time_only {
+        let year_count = day_count / 365.25;
+        if year_count >= threshold {
+            return TemporalInterval::new(year_stride(year_count, target) as u32, Year);
+        }
+        let quarter_count = day_count / 91.31;
+        if quarter_count >= threshold {
+            // ggsql convention: a quarter is `Month(count=3)`.
+            return TemporalInterval::new(3, Month);
+        }
+        let month_count = day_count / 30.44;
+        if month_count >= threshold {
+            return TemporalInterval::new(1, Month);
+        }
+        let week_count = day_count / 7.0;
+        if week_count >= threshold {
+            return TemporalInterval::new(1, Week);
+        }
+        if day_count >= threshold {
+            return TemporalInterval::new(1, Day);
+        }
+    }
+
+    // Sub-day fallthrough. DateTime / Duration are in μs; Time is in
+    // ns. Pick the per-unit constants accordingly.
+    let (hour_size, min_size, sec_size) = match unit {
+        TemporalUnit::Time => (HOUR_NS as f64, MIN_NS as f64, SEC_NS as f64),
+        _ => (HOUR_US as f64, MIN_US as f64, SEC_US as f64),
+    };
+    let sub_day_span = match unit {
+        TemporalUnit::Date => span * DAY_US as f64,
+        _ => span,
+    };
+    let hour_count = sub_day_span / hour_size;
+    if hour_count >= threshold {
+        return TemporalInterval::new(
+            nice_stride(hour_count, target, &[1, 2, 3, 4, 6, 12]) as u32,
+            Hour,
+        );
+    }
+    let min_count = sub_day_span / min_size;
+    if min_count >= threshold {
+        return TemporalInterval::new(
+            nice_stride(min_count, target, &[1, 2, 5, 10, 15, 30]) as u32,
+            Minute,
+        );
+    }
+    let sec_count = sub_day_span / sec_size;
+    TemporalInterval::new(
+        nice_stride(sec_count, target, &[1, 2, 5, 10, 15, 30]) as u32,
+        Second,
+    )
+}
+
+fn year_stride(year_count: f64, target: f64) -> i32 {
+    let raw = (year_count / target).ceil() as i32;
+    for s in [1, 2, 5, 10, 25, 50, 100, 200, 500, 1000] {
+        if raw <= s {
+            return s;
+        }
+    }
+    raw.max(1)
+}
+
+fn nice_stride(count: f64, target: f64, ladder: &[i32]) -> i32 {
+    let raw = (count / target).ceil() as i32;
+    for &s in ladder {
+        if raw <= s {
+            return s;
+        }
+    }
+    *ladder.last().unwrap_or(&1)
+}
+
+// ─── Integration wrappers (used by scale_type.rs) ───────────────────────────
+
+/// Major temporal breaks from f64-typed input range. Picks the
+/// interval, calls the ported `temporal_breaks_*`, then filters to the
+/// visible range (drops ggsql's terminal-bin break past `max`).
+pub fn temporal_breaks_from_f64(min: f64, max: f64, unit: TemporalUnit, n: usize) -> Vec<f64> {
+    if !min.is_finite() || !max.is_finite() || min >= max {
+        return Vec::new();
+    }
+    let target = (n.max(2)) as f64;
+    let interval = pick_temporal_interval(max - min, target, unit);
+    match unit {
+        TemporalUnit::Date => temporal_breaks_date(min as i32, max as i32, interval)
+            .into_iter()
+            .filter(|d| (*d as f64) >= min && (*d as f64) <= max)
+            .map(|d| d as f64)
+            .collect(),
+        TemporalUnit::DateTime | TemporalUnit::Duration => {
+            temporal_breaks_datetime(min as i64, max as i64, interval)
+                .into_iter()
+                .filter(|us| (*us as f64) >= min && (*us as f64) <= max)
+                .map(|us| us as f64)
+                .collect()
+        }
+        TemporalUnit::Time => temporal_breaks_time(min as i64, max as i64, interval)
+            .into_iter()
+            .filter(|us| (*us as f64) >= min && (*us as f64) <= max)
+            .map(|us| us as f64)
+            .collect(),
+    }
+}
+
+/// Minor temporal breaks from f64-typed input range.
+pub fn temporal_minor_breaks_from_f64(
+    min: f64,
+    max: f64,
+    unit: TemporalUnit,
+    n: usize,
+) -> Vec<f64> {
+    if !min.is_finite() || !max.is_finite() || min >= max {
+        return Vec::new();
+    }
+    let target = (n.max(2)) as f64;
+    let interval = pick_temporal_interval(max - min, target, unit);
+    match unit {
+        TemporalUnit::Date => {
+            let majors = temporal_breaks_date(min as i32, max as i32, interval);
+            temporal_minor_breaks_date(&majors, interval, Some((min as i32, max as i32)))
+                .into_iter()
+                .filter(|d| (*d as f64) >= min && (*d as f64) <= max)
+                .map(|d| d as f64)
+                .collect()
+        }
+        TemporalUnit::DateTime | TemporalUnit::Duration => {
+            let majors = temporal_breaks_datetime(min as i64, max as i64, interval);
+            temporal_minor_breaks_datetime(&majors, interval, Some((min as i64, max as i64)))
+                .into_iter()
+                .filter(|us| (*us as f64) >= min && (*us as f64) <= max)
+                .map(|us| us as f64)
+                .collect()
+        }
+        TemporalUnit::Time => {
+            let majors = temporal_breaks_time(min as i64, max as i64, interval);
+            temporal_minor_breaks_time(&majors, interval, Some((min as i64, max as i64)))
+                .into_iter()
+                .filter(|us| (*us as f64) >= min && (*us as f64) <= max)
+                .map(|us| us as f64)
+                .collect()
+        }
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -787,5 +1471,195 @@ mod tests {
         assert!(linear_minor_breaks_between(&[], 1).is_empty());
         assert!(linear_minor_breaks_between(&[1.0], 1).is_empty());
         assert!(linear_minor_breaks_between(&[1.0, 2.0], 0).is_empty());
+    }
+
+    // ── Ported temporal primitives (ggsql equivalence) ──
+
+    #[test]
+    fn derive_minor_year_is_three_months() {
+        let m = derive_minor_interval(TemporalInterval::new(1, CalendarUnit::Year)).unwrap();
+        assert_eq!(m, TemporalInterval::new(3, CalendarUnit::Month));
+    }
+
+    #[test]
+    fn derive_minor_quarter_is_month() {
+        // ggsql: quarter == Month(count=3) → minor = month.
+        let m = derive_minor_interval(TemporalInterval::new(3, CalendarUnit::Month)).unwrap();
+        assert_eq!(m, TemporalInterval::new(1, CalendarUnit::Month));
+    }
+
+    #[test]
+    fn derive_minor_month_is_week() {
+        let m = derive_minor_interval(TemporalInterval::new(1, CalendarUnit::Month)).unwrap();
+        assert_eq!(m, TemporalInterval::new(1, CalendarUnit::Week));
+    }
+
+    #[test]
+    fn derive_minor_week_is_day() {
+        let m = derive_minor_interval(TemporalInterval::new(1, CalendarUnit::Week)).unwrap();
+        assert_eq!(m, TemporalInterval::new(1, CalendarUnit::Day));
+    }
+
+    #[test]
+    fn derive_minor_day_is_six_hours() {
+        let m = derive_minor_interval(TemporalInterval::new(1, CalendarUnit::Day)).unwrap();
+        assert_eq!(m, TemporalInterval::new(6, CalendarUnit::Hour));
+    }
+
+    #[test]
+    fn derive_minor_hour_is_fifteen_minutes() {
+        let m = derive_minor_interval(TemporalInterval::new(1, CalendarUnit::Hour)).unwrap();
+        assert_eq!(m, TemporalInterval::new(15, CalendarUnit::Minute));
+    }
+
+    #[test]
+    fn derive_minor_minute_is_fifteen_seconds() {
+        let m = derive_minor_interval(TemporalInterval::new(1, CalendarUnit::Minute)).unwrap();
+        assert_eq!(m, TemporalInterval::new(15, CalendarUnit::Second));
+    }
+
+    #[test]
+    fn derive_minor_second_is_none() {
+        assert!(derive_minor_interval(TemporalInterval::new(1, CalendarUnit::Second)).is_none());
+    }
+
+    #[test]
+    fn temporal_breaks_date_monthly_matches_ggsql_test() {
+        // ggsql/breaks.rs::test_temporal_breaks_date_various_intervals — monthly
+        // 19738 = 2024-01-15, 19828 = 2024-04-15. Expected: aligns to
+        // 2024-01-01 then advances monthly, plus a terminal break.
+        let bs = temporal_breaks_date(19738, 19828, TemporalInterval::new(1, CalendarUnit::Month));
+        // Convert back to YMD for verification.
+        let ymds: Vec<(i32, u8, u8)> = bs.iter().map(|d| Date::from_days(*d).to_ymd()).collect();
+        assert_eq!(ymds[0], (2024, 1, 1), "first aligned break: {ymds:?}");
+        for expected in &[(2024, 2, 1), (2024, 3, 1), (2024, 4, 1)] {
+            assert!(ymds.contains(expected), "expected {expected:?} in {ymds:?}");
+        }
+        // Last break is terminal — past max_days.
+        let last = *ymds.last().unwrap();
+        assert!(
+            Date::from_ymd(last.0, last.1, last.2).to_days() > 19828,
+            "terminal break {last:?} should be past max"
+        );
+    }
+
+    #[test]
+    fn temporal_breaks_date_bimonthly_skips_odd_months() {
+        // ggsql/breaks.rs::test_temporal_breaks_date_various_intervals — bimonthly
+        let bs = temporal_breaks_date(19724, 19907, TemporalInterval::new(2, CalendarUnit::Month));
+        let ymds: Vec<(i32, u8, u8)> = bs.iter().map(|d| Date::from_days(*d).to_ymd()).collect();
+        assert!(ymds.contains(&(2024, 3, 1)), "{ymds:?}");
+        assert!(
+            !ymds.contains(&(2024, 2, 1)),
+            "bimonthly should skip Feb: {ymds:?}"
+        );
+    }
+
+    #[test]
+    fn temporal_breaks_date_yearly_matches_ggsql_test() {
+        // ggsql/breaks.rs::test_temporal_breaks_date_various_intervals — yearly
+        let bs = temporal_breaks_date(18993, 20089, TemporalInterval::new(1, CalendarUnit::Year));
+        let ymds: Vec<(i32, u8, u8)> = bs.iter().map(|d| Date::from_days(*d).to_ymd()).collect();
+        for expected in &[(2022, 1, 1), (2023, 1, 1), (2024, 1, 1)] {
+            assert!(ymds.contains(expected), "expected {expected:?} in {ymds:?}");
+        }
+    }
+
+    #[test]
+    fn temporal_breaks_date_weekly_aligns_to_monday() {
+        let bs = temporal_breaks_date(19724, 19754, TemporalInterval::new(1, CalendarUnit::Week));
+        // ggsql test asserts at least 4 weekly breaks for ~30 days.
+        assert!(bs.len() >= 4, "expected ≥4 weekly breaks, got {}", bs.len());
+        // All weekly breaks should be Mondays.
+        for d in &bs {
+            let dow = Date::from_days(*d).day_of_week();
+            assert_eq!(dow, 0, "weekly break {d} is not a Monday (dow={dow})");
+        }
+    }
+
+    #[test]
+    fn align_date_to_month_lands_on_first() {
+        // 2024-03-17 → 2024-03-01 under Month alignment.
+        let mid = Date::from_ymd(2024, 3, 17).to_days();
+        let aligned = align_date_to_interval(mid, TemporalInterval::new(1, CalendarUnit::Month));
+        assert_eq!(Date::from_days(aligned).to_ymd(), (2024, 3, 1));
+    }
+
+    #[test]
+    fn align_date_to_year_lands_on_jan_1() {
+        let mid = Date::from_ymd(2024, 8, 22).to_days();
+        let aligned = align_date_to_interval(mid, TemporalInterval::new(1, CalendarUnit::Year));
+        assert_eq!(Date::from_days(aligned).to_ymd(), (2024, 1, 1));
+    }
+
+    #[test]
+    fn advance_date_by_month_handles_year_boundary() {
+        // Dec 1 + 2 months → Feb 1 next year.
+        let dec1 = Date::from_ymd(2024, 12, 1).to_days();
+        let two_mo = advance_date_by_interval(dec1, TemporalInterval::new(2, CalendarUnit::Month));
+        assert_eq!(Date::from_days(two_mo).to_ymd(), (2025, 2, 1));
+    }
+
+    #[test]
+    fn retreat_date_by_month_handles_year_boundary() {
+        // Feb 1 - 2 months → Dec 1 previous year.
+        let feb1 = Date::from_ymd(2025, 2, 1).to_days();
+        let neg_two = retreat_date_by_interval(feb1, TemporalInterval::new(2, CalendarUnit::Month));
+        assert_eq!(Date::from_days(neg_two).to_ymd(), (2024, 12, 1));
+    }
+
+    #[test]
+    fn temporal_minor_breaks_date_subdivides_between_majors() {
+        // 4 monthly majors → weekly minors between them.
+        let majors = vec![
+            Date::from_ymd(2024, 1, 1).to_days(),
+            Date::from_ymd(2024, 2, 1).to_days(),
+            Date::from_ymd(2024, 3, 1).to_days(),
+        ];
+        let minors = temporal_minor_breaks_date(
+            &majors,
+            TemporalInterval::new(1, CalendarUnit::Month),
+            None,
+        );
+        // Each minor should be a Monday (week-aligned via advance_date).
+        assert!(!minors.is_empty(), "expected weekly minors");
+        for d in &minors {
+            // Minors must lie strictly between majors.
+            assert!(
+                *d > majors[0] && *d < *majors.last().unwrap(),
+                "minor {d} not between majors {:?}",
+                majors
+            );
+        }
+    }
+
+    #[test]
+    fn pick_temporal_interval_5_year_span_picks_year() {
+        // The original failing case before the threshold fix.
+        let span_days = Date::from_ymd(2024, 12, 31).to_days() as f64
+            - Date::from_ymd(2020, 1, 1).to_days() as f64;
+        let interval = pick_temporal_interval(span_days, 5.0, TemporalUnit::Date);
+        assert_eq!(interval.unit, CalendarUnit::Year);
+        assert_eq!(interval.count, 1);
+    }
+
+    #[test]
+    fn pick_temporal_interval_6_month_span_picks_month() {
+        let span_days = Date::from_ymd(2024, 9, 15).to_days() as f64
+            - Date::from_ymd(2024, 3, 15).to_days() as f64;
+        let interval = pick_temporal_interval(span_days, 5.0, TemporalUnit::Date);
+        assert_eq!(interval.unit, CalendarUnit::Month);
+        assert_eq!(interval.count, 1);
+    }
+
+    #[test]
+    fn pick_temporal_interval_100_year_span_picks_year_stride_25() {
+        let span_days = 100.0 * 365.25;
+        let interval = pick_temporal_interval(span_days, 5.0, TemporalUnit::Date);
+        assert_eq!(interval.unit, CalendarUnit::Year);
+        assert!(
+            interval.count >= 20,
+            "expected stride ≥20 for 100-year span: {interval:?}"
+        );
     }
 }

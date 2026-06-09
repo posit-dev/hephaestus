@@ -64,6 +64,76 @@ impl Date {
     pub fn to_ymd(self) -> (i32, u8, u8) {
         civil_from_days(self.0)
     }
+
+    /// Add `n` whole days (signed). Wraps around the i32 range without
+    /// checked arithmetic — assumes the result is within the proleptic
+    /// Gregorian range covered by [`from_days`](Self::from_days).
+    pub const fn add_days(self, n: i32) -> Self {
+        Date(self.0.wrapping_add(n))
+    }
+
+    /// Add `n` whole calendar months (signed). End-of-month days clamp
+    /// to the last day of the target month (e.g. Jan 31 + 1 month →
+    /// Feb 28 or 29).
+    pub fn add_months(self, n: i32) -> Self {
+        let (y, m, d) = self.to_ymd();
+        // Compute total months from year 0, add, then split.
+        let total = (y as i64) * 12 + (m as i64 - 1) + n as i64;
+        let new_year = total.div_euclid(12) as i32;
+        let new_month = (total.rem_euclid(12) + 1) as u8;
+        // Clamp day to the new month's length.
+        let dom = days_in_month(new_year, new_month);
+        let new_day = d.min(dom);
+        Date::from_ymd(new_year, new_month, new_day)
+    }
+
+    /// First of the current month.
+    pub fn start_of_month(self) -> Self {
+        let (y, m, _) = self.to_ymd();
+        Date::from_ymd(y, m, 1)
+    }
+
+    /// First Jan-or-Apr-or-Jul-or-Oct on or before this date.
+    pub fn start_of_quarter(self) -> Self {
+        let (y, m, _) = self.to_ymd();
+        let qm = (((m - 1) / 3) * 3) + 1;
+        Date::from_ymd(y, qm, 1)
+    }
+
+    /// Jan 1 of the current year.
+    pub fn start_of_year(self) -> Self {
+        let (y, _, _) = self.to_ymd();
+        Date::from_ymd(y, 1, 1)
+    }
+
+    /// Day of the week as ISO ordinal: `0` = Monday, …, `6` = Sunday.
+    pub fn day_of_week(self) -> u8 {
+        // 1970-01-01 was a Thursday → ISO weekday 3 (Mon = 0).
+        ((self.0.rem_euclid(7) + 3) % 7) as u8
+    }
+
+    /// Most recent Monday on or before this date.
+    pub fn start_of_week(self) -> Self {
+        Date(self.0 - self.day_of_week() as i32)
+    }
+}
+
+/// Calendar days in (`year`, `month`). Handles leap years via the
+/// proleptic Gregorian rule.
+fn days_in_month(year: i32, month: u8) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+        _ => panic!("days_in_month: month {month} out of 1..=12"),
+    }
 }
 
 /// A timestamp — microseconds since 1970-01-01T00:00:00Z (UTC), Arrow
@@ -119,33 +189,55 @@ impl DateTime {
     }
 }
 
-/// A time-of-day — microseconds since midnight (Arrow Time64(Microsecond)).
+/// A time-of-day — **nanoseconds** since midnight (Arrow
+/// `Time64(Nanosecond)`). Matches ggsql's `Time` storage; gives 1 ns
+/// sub-second resolution at the cost of standing out from the rest of
+/// the temporal family (DateTime / Duration are microseconds).
 ///
-/// Values are conventionally in `0..86_400_000_000` but the type itself is
-/// not range-restricted.
+/// Values are conventionally in `0..86_400_000_000_000` but the type
+/// itself is not range-restricted.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct Time(pub i64);
 
 impl Time {
-    /// Wrap a raw microsecond-since-midnight count.
-    pub const fn from_micros(us: i64) -> Self {
-        Time(us)
+    /// Wrap a raw nanosecond-since-midnight count.
+    pub const fn from_nanos(ns: i64) -> Self {
+        Time(ns)
     }
 
-    /// Microseconds since midnight.
-    pub const fn to_micros(self) -> i64 {
+    /// Nanoseconds since midnight.
+    pub const fn to_nanos(self) -> i64 {
         self.0
     }
 
-    /// Construct from hour/minute/second/microsecond components.
-    pub fn from_hms_micros(hour: u8, minute: u8, second: u8, micros: u32) -> Self {
+    /// Wrap a microsecond-since-midnight count. Convenience wrapper for
+    /// callers that prefer μs-precision input — converts to ns
+    /// internally.
+    pub const fn from_micros(us: i64) -> Self {
+        Time(us * 1_000)
+    }
+
+    /// Microseconds since midnight. Convenience accessor for μs-only
+    /// callers (rounds down via i64 division).
+    pub const fn to_micros(self) -> i64 {
+        self.0 / 1_000
+    }
+
+    /// Construct from hour/minute/second/nanosecond components.
+    pub fn from_hms_nanos(hour: u8, minute: u8, second: u8, nanos: u32) -> Self {
         Time(
-            (hour as i64) * 3_600_000_000
-                + (minute as i64) * 60_000_000
-                + (second as i64) * 1_000_000
-                + (micros as i64),
+            (hour as i64) * 3_600_000_000_000
+                + (minute as i64) * 60_000_000_000
+                + (second as i64) * 1_000_000_000
+                + (nanos as i64),
         )
+    }
+
+    /// Construct from hour/minute/second/microsecond components. Sugar
+    /// for `from_hms_nanos(h, m, s, μs * 1000)`.
+    pub fn from_hms_micros(hour: u8, minute: u8, second: u8, micros: u32) -> Self {
+        Self::from_hms_nanos(hour, minute, second, micros.saturating_mul(1_000))
     }
 }
 

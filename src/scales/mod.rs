@@ -43,9 +43,28 @@ pub mod scale_type;
 pub mod transform;
 pub mod value;
 
+// ─── Optional datetime-library interop ───────────────────────────────────────
+//
+// Each gated module supplies bidirectional `From` impls between our
+// temporal newtypes and the matching types in the named library. All
+// three default off — with no feature enabled the scales crate has zero
+// datetime dependencies.
+#[cfg(feature = "chrono")]
+pub mod interop_chrono;
+#[cfg(feature = "jiff")]
+pub mod interop_jiff;
+#[cfg(feature = "time")]
+pub mod interop_time;
+
 pub use breaks::{
-    extended_breaks, linear_breaks, linear_minor_breaks_between, log_minor_breaks,
-    log_pretty_breaks, sqrt_breaks, symlog_breaks, symlog_minor_breaks, DEFAULT_BREAK_COUNT,
+    advance_date_by_interval, advance_datetime_by_interval, advance_time_by_interval,
+    align_date_to_interval, align_datetime_to_interval, align_time_to_interval,
+    derive_minor_interval, extended_breaks, linear_breaks, linear_minor_breaks_between,
+    log_minor_breaks, log_pretty_breaks, pick_temporal_interval, retreat_date_by_interval,
+    retreat_datetime_by_interval, retreat_time_by_interval, sqrt_breaks, symlog_breaks,
+    symlog_minor_breaks, temporal_breaks_date, temporal_breaks_datetime, temporal_breaks_time,
+    temporal_minor_breaks_date, temporal_minor_breaks_datetime, temporal_minor_breaks_time,
+    CalendarUnit, TemporalInterval, DEFAULT_BREAK_COUNT,
 };
 pub use chrome::{AxisSide, LegendSide};
 pub use input::InputRange;
@@ -53,7 +72,7 @@ pub use output::OutputRange;
 pub use scale_type::{
     binned_band_width, binned_band_width_at, binned_breaks, binned_map, continuous_breaks,
     continuous_map, continuous_minor_breaks, discrete_band_width, discrete_breaks, discrete_map,
-    identity_map, ordinal_map, ScaleTypeKind,
+    identity_map, ordinal_map, temporal_breaks, temporal_minor_breaks, ScaleTypeKind, TemporalUnit,
 };
 pub use transform::{
     transform_allowed_domain, transform_forward, transform_inverse, Transform, TransformKind,
