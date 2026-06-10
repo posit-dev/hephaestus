@@ -344,6 +344,34 @@ impl Plot {
             &panel_path,
         );
 
+        // In-panel chrome: background, minor + major grid lines,
+        // panel outline. Shared across all projections — the
+        // projection contributes the boundary path and per-channel
+        // grid-line geometry. Drawn before the geoms so they paint
+        // on top.
+        #[cfg(feature = "text")]
+        {
+            let channels = self.projection.consume_channels();
+            let channel_0 = channels
+                .first()
+                .and_then(|name| self.bindings.get(*name))
+                .and_then(|scale_name| registry.get(scale_name));
+            let channel_1 = channels
+                .get(1)
+                .and_then(|name| self.bindings.get(*name))
+                .and_then(|scale_name| registry.get(scale_name));
+            crate::plot::chrome::panel::draw_panel_chrome(
+                scene,
+                &self.projection,
+                panel,
+                crate::plot::chrome::panel::PanelScales {
+                    channel_0,
+                    channel_1,
+                },
+                dpi,
+            );
+        }
+
         let resolver = PlotScaleResolver {
             bindings: &self.bindings,
             registry,
@@ -409,17 +437,26 @@ impl Plot {
         // Axes — wire the scale bound to "x" into AxisBottom and the
         // scale bound to "y" into AxisLeft. Unbound or unknown-scale
         // channels skip their slot.
-        if let Some(s) = self.resolved_scale("x", registry) {
-            patch = patch.slot(
-                Slot::AxisBottom,
-                Cell::measured(BoxMeasure::new(s.axis_measure(AxisSide::Bottom, dpi))),
-            );
-        }
-        if let Some(s) = self.resolved_scale("y", registry) {
-            patch = patch.slot(
-                Slot::AxisLeft,
-                Cell::measured(BoxMeasure::new(s.axis_measure(AxisSide::Left, dpi))),
-            );
+        //
+        // Polar / future Ternary draw chrome inside the panel (their
+        // `chrome_strategy()` returns `InsidePanel`); skip the axis
+        // slot population entirely. Labels may extend beyond the
+        // inscribed disk; reserving bleed strips around the panel for
+        // them is a follow-up (see `ChromeStrategy::InsidePanel` doc).
+        if self.projection.chrome_strategy() == crate::plot::projection::ChromeStrategy::PatchSlots
+        {
+            if let Some(s) = self.resolved_scale("x", registry) {
+                patch = patch.slot(
+                    Slot::AxisBottom,
+                    Cell::measured(BoxMeasure::new(s.axis_measure(AxisSide::Bottom, dpi))),
+                );
+            }
+            if let Some(s) = self.resolved_scale("y", registry) {
+                patch = patch.slot(
+                    Slot::AxisLeft,
+                    Cell::measured(BoxMeasure::new(s.axis_measure(AxisSide::Left, dpi))),
+                );
+            }
         }
 
         // Panel is always present (the geom panel lives here).
@@ -441,16 +478,34 @@ impl Plot {
         use crate::text::{draw_text_in_rect, TextRun, TextStyle};
         type StyleFn = fn() -> TextStyle;
 
-        // Axes — bottom (x binding) and left (y binding).
+        // Axes / polar chrome.
         let panel = layout.get(&self.patch_id, Slot::Panel);
-        if let (Some(panel), Some(scale)) = (panel, self.resolved_scale("x", registry)) {
-            if let Some(slot) = layout.get(&self.patch_id, Slot::AxisBottom) {
-                scale.draw_axis(scene, slot, panel, AxisSide::Bottom, dpi);
+        match self.projection.chrome_strategy() {
+            crate::plot::projection::ChromeStrategy::PatchSlots => {
+                if let (Some(panel), Some(scale)) = (panel, self.resolved_scale("x", registry)) {
+                    if let Some(slot) = layout.get(&self.patch_id, Slot::AxisBottom) {
+                        scale.draw_axis(scene, slot, panel, AxisSide::Bottom, dpi);
+                    }
+                }
+                if let (Some(panel), Some(scale)) = (panel, self.resolved_scale("y", registry)) {
+                    if let Some(slot) = layout.get(&self.patch_id, Slot::AxisLeft) {
+                        scale.draw_axis(scene, slot, panel, AxisSide::Left, dpi);
+                    }
+                }
             }
-        }
-        if let (Some(panel), Some(scale)) = (panel, self.resolved_scale("y", registry)) {
-            if let Some(slot) = layout.get(&self.patch_id, Slot::AxisLeft) {
-                scale.draw_axis(scene, slot, panel, AxisSide::Left, dpi);
+            crate::plot::projection::ChromeStrategy::InsidePanel => {
+                if let (Some(panel), Some(polar)) = (panel, self.projection.as_polar()) {
+                    let angle_scale = self.resolved_scale(&polar.angle_channel, registry);
+                    let radius_scale = self.resolved_scale(&polar.radius_channel, registry);
+                    crate::plot::chrome::polar::draw_polar_chrome(
+                        scene,
+                        panel,
+                        polar,
+                        angle_scale,
+                        radius_scale,
+                        dpi,
+                    );
+                }
             }
         }
 

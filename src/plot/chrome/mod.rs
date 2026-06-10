@@ -9,3 +9,9 @@
 pub mod axis;
 #[cfg(feature = "text")]
 pub mod legend;
+#[cfg(feature = "text")]
+pub(crate) mod linear_axis;
+#[cfg(feature = "text")]
+pub mod panel;
+#[cfg(feature = "text")]
+pub mod polar;

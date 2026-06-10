@@ -17,45 +17,19 @@
 //!   numeric values via `{n}` Display and temporal values in calendar
 //!   form (YYYY-MM-DD etc.).
 
-use crate::brush::Brush;
-use crate::color::{rgb, Color};
-use crate::geometry::{Affine, Point, Rect};
+use crate::geometry::{Point, Rect};
 use crate::layout::{Measure, WidthHint};
-use crate::path::Path;
-use crate::pick::PickId;
+use crate::plot::chrome::linear_axis::{
+    draw_linear_axis_at, pt_to_px, LABEL_FONT_SIZE_PT, LABEL_GAP_PT, TICK_LENGTH_PT,
+};
 use crate::plot::scale::Scale;
 use crate::scales::breaks::DEFAULT_BREAK_COUNT;
 use crate::scales::value::Value;
 use crate::scene::SceneBuilder;
-use crate::stroke::Stroke;
-use crate::text::{draw_text, Alignment, TextRun, TextStyle};
+use crate::text::{Alignment, TextRun, TextStyle};
 use kurbo::Shape;
 
 use crate::scales::chrome::AxisSide;
-
-// ─── Style constants (pt) ────────────────────────────────────────────────────
-
-/// Tick mark length, pt. Strokes from the panel edge outward into the
-/// axis chrome.
-const TICK_LENGTH_PT: f64 = 4.0;
-/// Minor tick length, pt. Shorter than major; unlabelled.
-const MINOR_TICK_LENGTH_PT: f64 = 2.0;
-/// Gap between the tick label and the tick mark / panel edge, pt.
-const LABEL_GAP_PT: f64 = 2.0;
-/// Tick label font size, pt.
-const LABEL_FONT_SIZE_PT: f32 = 10.0;
-/// Axis baseline + tick stroke width, pt.
-const STROKE_WIDTH_PT: f64 = 1.0;
-/// Black ink for axis chrome. Not currently themable.
-fn axis_ink() -> Color {
-    rgb(0.0, 0.0, 0.0)
-}
-
-// ─── pt → px ─────────────────────────────────────────────────────────────────
-
-fn pt_to_px(pt: f64, dpi: f64) -> f64 {
-    pt * dpi / 72.0
-}
 
 // ─── AxisMeasure ─────────────────────────────────────────────────────────────
 
@@ -183,192 +157,49 @@ impl Scale {
             return;
         }
 
-        let tick_px = pt_to_px(TICK_LENGTH_PT, dpi);
-        let gap_px = pt_to_px(LABEL_GAP_PT, dpi);
-        let stroke_px = pt_to_px(STROKE_WIDTH_PT, dpi);
-        let brush = Brush::Solid(axis_ink());
-        let stroke = Stroke::new(stroke_px);
-        let style = TextStyle::new(LABEL_FONT_SIZE_PT);
+        // Translate the side + slot/panel layout into the linear-axis
+        // primitives: baseline endpoints and the perpendicular tick
+        // direction. `frac=0` corresponds to `start`; `frac=1` to
+        // `end`. y axes flip so `frac=0` is at the panel BOTTOM.
+        let (start, end, tick_direction) = match side {
+            AxisSide::Bottom => (
+                Point::new(panel_rect.x0, slot_rect.y0),
+                Point::new(panel_rect.x1, slot_rect.y0),
+                (0.0, 1.0),
+            ),
+            AxisSide::Top => (
+                Point::new(panel_rect.x0, slot_rect.y1),
+                Point::new(panel_rect.x1, slot_rect.y1),
+                (0.0, -1.0),
+            ),
+            AxisSide::Left => (
+                Point::new(slot_rect.x1, panel_rect.y1),
+                Point::new(slot_rect.x1, panel_rect.y0),
+                (-1.0, 0.0),
+            ),
+            AxisSide::Right => (
+                Point::new(slot_rect.x0, panel_rect.y1),
+                Point::new(slot_rect.x0, panel_rect.y0),
+                (1.0, 0.0),
+            ),
+        };
 
-        // Axis baseline along the panel-adjacent edge of the slot.
-        let baseline = baseline_path(side, slot_rect, panel_rect);
-        scene.stroke(
-            &stroke,
-            Affine::IDENTITY,
-            &brush,
-            None,
-            &baseline,
-            PickId::Skip,
-        );
+        let majors: Vec<(f64, String)> = breaks
+            .iter()
+            .filter(|v| !matches!(v, Value::Null))
+            .filter_map(|v| self.map(v).as_number().map(|f| (f, self.format(v))))
+            .filter(|(f, _)| f.is_finite())
+            .collect();
+        let minors: Vec<f64> = self
+            .minor_breaks(DEFAULT_BREAK_COUNT)
+            .into_iter()
+            .filter(|v| !matches!(v, Value::Null))
+            .filter_map(|v| self.map(&v).as_number())
+            .filter(|f| f.is_finite())
+            .collect();
 
-        // Minor ticks — short, unlabelled. Drawn before majors so the
-        // major tick line draws on top if they happen to coincide.
-        let minor_tick_px = pt_to_px(MINOR_TICK_LENGTH_PT, dpi);
-        for minor_val in self.minor_breaks(DEFAULT_BREAK_COUNT) {
-            if matches!(minor_val, Value::Null) {
-                continue;
-            }
-            let frac = match self.map(&minor_val).as_number() {
-                Some(f) if f.is_finite() && (0.0..=1.0).contains(&f) => f,
-                _ => continue,
-            };
-            let (p0, p1) = match side {
-                AxisSide::Bottom => {
-                    let x = panel_rect.x0 + frac * panel_w;
-                    (
-                        Point::new(x, slot_rect.y0),
-                        Point::new(x, slot_rect.y0 + minor_tick_px),
-                    )
-                }
-                AxisSide::Top => {
-                    let x = panel_rect.x0 + frac * panel_w;
-                    (
-                        Point::new(x, slot_rect.y1),
-                        Point::new(x, slot_rect.y1 - minor_tick_px),
-                    )
-                }
-                AxisSide::Left => {
-                    let y = panel_rect.y1 - frac * panel_h;
-                    (
-                        Point::new(slot_rect.x1, y),
-                        Point::new(slot_rect.x1 - minor_tick_px, y),
-                    )
-                }
-                AxisSide::Right => {
-                    let y = panel_rect.y1 - frac * panel_h;
-                    (
-                        Point::new(slot_rect.x0, y),
-                        Point::new(slot_rect.x0 + minor_tick_px, y),
-                    )
-                }
-            };
-            stroke_line(scene, &stroke, &brush, p0, p1);
-        }
-
-        for break_val in &breaks {
-            if matches!(break_val, Value::Null) {
-                continue;
-            }
-            let frac = match self.map(break_val).as_number() {
-                Some(f) if f.is_finite() => f,
-                _ => continue,
-            };
-
-            let label = self.format(break_val);
-            let run = TextRun::new(&label, &style);
-            // Lay out unconstrained to get the single-line glyph runs at
-            // their natural width.
-            let label_h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
-            let label_w = match run.width_hint(dpi) {
-                WidthHint::Min(w) => w,
-                WidthHint::NeedsHeight { seed } => seed,
-            };
-
-            match side {
-                AxisSide::Bottom => {
-                    let x = panel_rect.x0 + frac * panel_w;
-                    // Tick stroke: from panel edge (top of slot) down to tick_px.
-                    let p0 = Point::new(x, slot_rect.y0);
-                    let p1 = Point::new(x, slot_rect.y0 + tick_px);
-                    stroke_line(scene, &stroke, &brush, p0, p1);
-                    // Label: centred horizontally on the tick, top edge
-                    // gap_px below the tick.
-                    let label_x = x - label_w / 2.0;
-                    let label_y = slot_rect.y0 + tick_px + gap_px;
-                    draw_text(
-                        scene,
-                        &run,
-                        label_x,
-                        label_y,
-                        &brush,
-                        Affine::IDENTITY,
-                        PickId::Skip,
-                    );
-                }
-                AxisSide::Top => {
-                    let x = panel_rect.x0 + frac * panel_w;
-                    let p0 = Point::new(x, slot_rect.y1);
-                    let p1 = Point::new(x, slot_rect.y1 - tick_px);
-                    stroke_line(scene, &stroke, &brush, p0, p1);
-                    // Label sits above the tick: its bottom edge is
-                    // gap_px above the tick top (which is at y1 - tick).
-                    let label_x = x - label_w / 2.0;
-                    let label_y = slot_rect.y1 - tick_px - gap_px - label_h;
-                    draw_text(
-                        scene,
-                        &run,
-                        label_x,
-                        label_y,
-                        &brush,
-                        Affine::IDENTITY,
-                        PickId::Skip,
-                    );
-                }
-                AxisSide::Left => {
-                    // Y axes flip: frac=0 is at the bottom of the panel.
-                    let y = panel_rect.y1 - frac * panel_h;
-                    let p0 = Point::new(slot_rect.x1, y);
-                    let p1 = Point::new(slot_rect.x1 - tick_px, y);
-                    stroke_line(scene, &stroke, &brush, p0, p1);
-                    // Label: right-aligned at slot_rect.x1 - tick - gap;
-                    // vertically centred on the tick.
-                    let label_x = slot_rect.x1 - tick_px - gap_px - label_w;
-                    let label_y = y - label_h / 2.0;
-                    draw_text(
-                        scene,
-                        &run,
-                        label_x,
-                        label_y,
-                        &brush,
-                        Affine::IDENTITY,
-                        PickId::Skip,
-                    );
-                }
-                AxisSide::Right => {
-                    let y = panel_rect.y1 - frac * panel_h;
-                    let p0 = Point::new(slot_rect.x0, y);
-                    let p1 = Point::new(slot_rect.x0 + tick_px, y);
-                    stroke_line(scene, &stroke, &brush, p0, p1);
-                    let label_x = slot_rect.x0 + tick_px + gap_px;
-                    let label_y = y - label_h / 2.0;
-                    draw_text(
-                        scene,
-                        &run,
-                        label_x,
-                        label_y,
-                        &brush,
-                        Affine::IDENTITY,
-                        PickId::Skip,
-                    );
-                }
-            }
-        }
+        draw_linear_axis_at(scene, start, end, tick_direction, &majors, &minors, dpi);
     }
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/// Path along the panel-adjacent edge of the axis slot.
-fn baseline_path(side: AxisSide, slot: Rect, panel: Rect) -> Path {
-    let (p0, p1) = match side {
-        AxisSide::Bottom => (Point::new(panel.x0, slot.y0), Point::new(panel.x1, slot.y0)),
-        AxisSide::Top => (Point::new(panel.x0, slot.y1), Point::new(panel.x1, slot.y1)),
-        AxisSide::Left => (Point::new(slot.x1, panel.y0), Point::new(slot.x1, panel.y1)),
-        AxisSide::Right => (Point::new(slot.x0, panel.y0), Point::new(slot.x0, panel.y1)),
-    };
-    line_path(p0, p1)
-}
-
-fn line_path(p0: Point, p1: Point) -> Path {
-    let mut p = Path::new();
-    p.move_to(p0);
-    p.line_to(p1);
-    p
-}
-
-fn stroke_line(scene: &mut dyn SceneBuilder, stroke: &Stroke, brush: &Brush, p0: Point, p1: Point) {
-    let path = line_path(p0, p1);
-    scene.stroke(stroke, Affine::IDENTITY, brush, None, &path, PickId::Skip);
 }
 
 // Make sure `kurbo::Shape` is in scope for any future `to_path` calls on

@@ -175,6 +175,14 @@ required-features = ["vello", "png", "text"]
 name = "temporal"
 required-features = ["vello", "png", "text"]
 
+[[example]]
+name = "polar"
+required-features = ["vello", "png", "text"]
+
+[[example]]
+name = "radar"
+required-features = ["vello", "png", "text"]
+
 [[test]]
 name = "smoke"
 required-features = ["vello"]

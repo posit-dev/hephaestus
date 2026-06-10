@@ -35,23 +35,36 @@
 //! Stroke is drawn around the rect outline. Fill and stroke are
 //! independent — set one, the other, or both.
 //!
-//! ## Non-linear projections (Polar / Ternary)
+//! ## Non-linear projections (Polar / future Ternary)
 //!
-//! `RectGeom` currently renders as an **axis-aligned panel-space rect**
-//! built from the projected diagonal corners. Under non-linear
-//! projections (E.3b's Polar; deferred Ternary) this is incorrect —
-//! a "rect" in channel space should become an annular wedge / sector
-//! and its four edges should be densified to follow the projected
-//! geodesic. The polygon-fallback path that handles this lands in E.3b
-//! when polar's visual semantics are concrete enough to test against.
-//! For now, drawing a `RectGeom` through a non-linear projection
-//! produces a kurbo `Rect` between the two projected corners — the
-//! visual is wrong but the code path is stable and doesn't panic.
+//! Under non-linear projections the geom switches to a **polygon
+//! fallback path**: walks the four channel-space corners
+//! `(x, y)` / `(x2, y)` / `(x2, y2)` / `(x, y2)` in CCW order,
+//! projects each, and densifies each edge via
+//! [`Projection::interpolate_segment`] so the polygon outline follows
+//! the projected geodesic. Under polar this turns a "rect" into the
+//! correct annular wedge or sector.
+//!
+//! Limitations under non-linear projections:
+//!
+//! - `"corner_radius"` is ignored (sharp corners on the resulting
+//!   polygon).
+//! - `"expand"` is ignored — an arbitrary polygon has no single
+//!   "outward" direction without a polygon-offset pass.
+//! - Rotation pivots on the densified polygon's centroid rather than
+//!   the user-rect centre.
+//!
+//! For typical use cases (bar charts in polar, annular sectors) the
+//! limitations don't bite. Plotting code that needs full fidelity
+//! under non-linear projections should reach for `PolygonGeom`
+//! directly.
 
 use crate::brush::Brush;
 use crate::geometry::{Affine, Point, Rect};
 use crate::path::FillRule;
-use crate::primitives::{rect as rect_path, rounded_rect, PolylineSampler};
+use crate::primitives::{
+    polygon as polygon_path, rect as rect_path, rounded_rect, PolygonOptions, PolylineSampler,
+};
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
 
@@ -260,35 +273,49 @@ impl Geom for RectGeom {
                 continue;
             }
 
+            // Per-corner pixel offsets — same logic in both linear and
+            // non-linear paths. Y is subtracted because screen y is
+            // down while the user's offset convention is positive-up.
+            let x_off_px = resolve_number_channel(x_offset_ch, x_offset_scale, i)
+                .map(|o| pt_to_px(o, ctx.dpi))
+                .unwrap_or(0.0);
+            let x2_off_px = resolve_number_channel(x2_offset_ch, x2_offset_scale, i)
+                .map(|o| pt_to_px(o, ctx.dpi))
+                .unwrap_or(0.0);
+            let y_off_px = resolve_number_channel(y_offset_ch, y_offset_scale, i)
+                .map(|o| pt_to_px(o, ctx.dpi))
+                .unwrap_or(0.0);
+            let y2_off_px = resolve_number_channel(y2_offset_ch, y2_offset_scale, i)
+                .map(|o| pt_to_px(o, ctx.dpi))
+                .unwrap_or(0.0);
+
+            // Project the two diagonal corners. Always needed: the
+            // linear path uses these directly for the axis-aligned
+            // rect; the non-linear path uses them as two of the four
+            // polygon vertices.
             let (px0, py0) = ctx.projection.project_to_panel_px(panel, &[x_frac, y_frac]);
             let (px20, py20) = ctx
                 .projection
                 .project_to_panel_px(panel, &[x2_frac, y2_frac]);
-            let mut px = px0;
-            let mut px2 = px20;
-            let mut py = py0;
-            let mut py2 = py20;
+            let px = px0 + x_off_px;
+            let py = py0 - y_off_px;
+            let px2 = px20 + x2_off_px;
+            let py2 = py20 - y2_off_px;
 
-            if let Some(off) = resolve_number_channel(x_offset_ch, x_offset_scale, i) {
-                px += pt_to_px(off, ctx.dpi);
-            }
-            if let Some(off) = resolve_number_channel(x2_offset_ch, x2_offset_scale, i) {
-                px2 += pt_to_px(off, ctx.dpi);
-            }
-            if let Some(off) = resolve_number_channel(y_offset_ch, y_offset_scale, i) {
-                py -= pt_to_px(off, ctx.dpi);
-            }
-            if let Some(off) = resolve_number_channel(y2_offset_ch, y2_offset_scale, i) {
-                py2 -= pt_to_px(off, ctx.dpi);
-            }
-
-            // Build a normalised rect — robust to corner ordering and y axis flip.
-            // `expand` grows the rect outward (positive) / shrinks inward
-            // (negative) on every side by the same pt amount.
+            // `expand` (pt → px) inflates the linear axis-aligned rect.
+            // Under non-linear projections this knob is ignored — an
+            // arbitrary polygon has no single "outward" direction
+            // without a polygon-offset pass (clipper2).
             let expand_px = pt_to_px(
                 resolve_number_channel_or(expand_ch, expand_scale, i, 0.0),
                 ctx.dpi,
             );
+
+            // Build the normalised linear rect (robust to corner
+            // ordering and y axis flip). Reused by both branches: the
+            // linear path uses it as the path; the non-linear path
+            // uses its centre as a fallback rotation pivot if the
+            // polygon centroid degenerates.
             let x0 = px.min(px2) - expand_px;
             let y0 = py.min(py2) - expand_px;
             let x1 = px.max(px2) + expand_px;
@@ -297,6 +324,8 @@ impl Geom for RectGeom {
             if !r.is_finite() || r.width() <= 0.0 || r.height() <= 0.0 {
                 continue;
             }
+
+            let is_linear = ctx.projection.is_linear();
 
             // ── Resolve styling. ──
             let fill_color = override_alpha(
@@ -320,25 +349,68 @@ impl Geom for RectGeom {
             let join = resolve_join_channel(join_ch, join_scale, i, DEFAULT_JOIN);
 
             // ── Build the path. ──
-            let path = if corner_radius_px > 0.0 {
-                rounded_rect(r, corner_radius_px)
+            //
+            // Linear projection (Cartesian): axis-aligned kurbo rect,
+            // honouring corner_radius. The fast path.
+            //
+            // Non-linear projection (Polar / future Ternary): walk the
+            // four channel-space corners, project each, densify each
+            // edge via `interpolate_segment`, and build a closed
+            // polygon. `corner_radius_px` is ignored in this path
+            // (sharp corners on the resulting polygon); `expand_px`
+            // was likewise ignored above.
+            let (path, rotation_centre) = if is_linear {
+                let p = if corner_radius_px > 0.0 {
+                    rounded_rect(r, corner_radius_px)
+                } else {
+                    rect_path(r)
+                };
+                let centre = Point::new(0.5 * (x0 + x1), 0.5 * (y0 + y1));
+                (p, centre)
             } else {
-                rect_path(r)
+                // Four corners in channel space, in CCW order, plus
+                // the per-corner offsets that apply to each.
+                let corners: [([f64; 2], f64, f64); 4] = [
+                    ([x_frac, y_frac], x_off_px, y_off_px),
+                    ([x2_frac, y_frac], x2_off_px, y_off_px),
+                    ([x2_frac, y2_frac], x2_off_px, y2_off_px),
+                    ([x_frac, y2_frac], x_off_px, y2_off_px),
+                ];
+                let mut pts: Vec<Point> = Vec::with_capacity(16);
+                let mut interior: Vec<(f64, f64)> = Vec::new();
+                for k in 0..4 {
+                    let (curr, x_off, y_off) = corners[k];
+                    let next_channels = corners[(k + 1) % 4].0;
+                    let (cpx, cpy) = ctx.projection.project_to_panel_px(panel, &curr);
+                    pts.push(Point::new(cpx + x_off, cpy - y_off));
+                    // Densify the edge to the next corner. Interior
+                    // points sit on the un-offset geodesic — matches
+                    // the policy in LineGeom / PolygonGeom.
+                    interior.clear();
+                    ctx.projection
+                        .interpolate_segment(panel, &curr, &next_channels, &mut interior);
+                    for (ipx, ipy) in &interior {
+                        pts.push(Point::new(*ipx, *ipy));
+                    }
+                }
+                let n_pts = pts.len() as f64;
+                let cx = pts.iter().map(|p| p.x).sum::<f64>() / n_pts;
+                let cy = pts.iter().map(|p| p.y).sum::<f64>() / n_pts;
+                let p = polygon_path(&[&pts], PolygonOptions::default());
+                (p, Point::new(cx, cy))
             };
 
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
 
-            // Rotation around the rect centre. Math CCW from the user
-            // → negate for kurbo (screen y-down). Identity when angle
-            // == 0 keeps the recording byte-identical for unrotated
-            // rects.
+            // Rotation around the rect centre (linear) / polygon
+            // centroid (non-linear). Math CCW from the user → negate
+            // for kurbo (screen y-down). Identity when angle == 0
+            // keeps the recording byte-identical for unrotated rects.
             let angle = resolve_angle_channel(angle_ch, angle_scale, i);
             let xform = if angle == 0.0 {
                 Affine::IDENTITY
             } else {
-                let cx = 0.5 * (x0 + x1);
-                let cy = 0.5 * (y0 + y1);
-                Affine::rotate_about(-angle, Point::new(cx, cy))
+                Affine::rotate_about(-angle, rotation_centre)
             };
 
             if let Some(fc) = fill_color {

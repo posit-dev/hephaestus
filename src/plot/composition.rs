@@ -400,21 +400,28 @@ impl PlotComposition {
             .as_ref()
             .expect("layout must be cached by this point");
 
-        // Draw chrome under panels. Order across plots is map iteration
-        // order — stable within a render but unspecified across renders
-        // (HashMap iteration). For visual layering this is fine: chrome
-        // never overlaps geom content of a different plot.
-        #[cfg(feature = "text")]
-        for plot in self.plots.values() {
-            plot.draw_chrome_into(scene, layout, &self.scales, dpi);
-        }
-
-        // Then panels. Picking is opt-in per geom via the `"pick_id"`
+        // Panels first — they include the in-panel chrome (background,
+        // grid, outline) plus the geoms, all clipped to the panel
+        // rect. Picking is opt-in per geom via the `"pick_id"`
         // channel — the orchestrator does no ticket allocation; the
         // raw value reported by `VelloRenderer::pick_at` is the
         // user-supplied id directly.
         for plot in self.plots.values_mut() {
             plot.draw_panel_into(scene, layout, &self.scales, dpi);
+        }
+
+        // Chrome on top. For cartesian this draws into axis slots
+        // outside the panel; for polar it draws the radius / angular
+        // axes inside the panel without the panel clip, so the axis
+        // labels can bleed beyond the inscribed disk and the axis
+        // lines / ticks paint over the panel background fill.
+        // Order across plots is map iteration order — stable within
+        // a render but unspecified across renders. For visual
+        // layering this is fine: chrome never overlaps geom content
+        // of a different plot.
+        #[cfg(feature = "text")]
+        for plot in self.plots.values() {
+            plot.draw_chrome_into(scene, layout, &self.scales, dpi);
         }
 
         // Clear dirty bits after a successful render.
