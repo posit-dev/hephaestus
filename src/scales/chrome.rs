@@ -31,12 +31,50 @@ impl AxisSide {
 }
 
 /// Where a legend is drawn relative to the panel rect.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// The four cardinal variants route the legend to the corresponding
+/// anatomical chrome slot (one of `LegendLeft` / `LegendRight` /
+/// `LegendTop` / `LegendBottom`), shrinking the panel to make room.
+/// [`Self::InPanel`] places the legend *inside* the panel rect against
+/// the chosen [`Anchor`] without consuming any chrome space — the
+/// legend overlays data marks. `inset_pt` is the gap from the panel
+/// boundary on both axes.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LegendSide {
     Left,
     Right,
     Top,
     Bottom,
+    InPanel { anchor: Anchor, inset_pt: f64 },
+}
+
+impl Eq for LegendSide {}
+
+impl std::hash::Hash for LegendSide {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        if let LegendSide::InPanel { anchor, inset_pt } = self {
+            anchor.hash(state);
+            inset_pt.to_bits().hash(state);
+        }
+    }
+}
+
+/// Nine reference points used by [`LegendSide::InPanel`] placement.
+/// The named corner of the legend's bbox pins to the matching corner /
+/// edge midpoint / centre of the panel rect, offset by the side's
+/// `inset_pt`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Anchor {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    CenterLeft,
+    Center,
+    CenterRight,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
 }
 
 #[cfg(test)]

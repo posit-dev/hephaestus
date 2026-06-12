@@ -133,14 +133,16 @@ fn main() {
             .set("size", 6.0_f64)
             .build(),
     );
-    p_scatter.add_axis(Axis::rail(
-        "theta_full",
-        AxisPlacement::PolarAngular(PolarRing::Outer),
-    ));
-    p_scatter.add_axis(Axis::rail(
-        "radius_unit",
-        AxisPlacement::PolarRadius { theta_frac: 0.0 },
-    ));
+    p_scatter.add_axis(
+        Axis::rail("theta_full", AxisPlacement::PolarAngular(PolarRing::Outer)).title("Theta"),
+    );
+    p_scatter.add_axis(
+        Axis::rail(
+            "radius_unit",
+            AxisPlacement::PolarRadius { theta_frac: 0.0 },
+        )
+        .title("Radius"),
+    );
     view.attach_plot(p_scatter);
 
     // ── Rose: annular-wedge bars via RectGeom (its 4 edges densify

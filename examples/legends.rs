@@ -26,7 +26,7 @@ use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::chrome::legend::{Legend, LegendKeySpec};
 use hephaestus::plot::geom::linetype::{dashed, dotted, solid};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom};
-use hephaestus::scales::chrome::{AxisSide, LegendSide};
+use hephaestus::scales::chrome::{Anchor, AxisSide, LegendSide};
 use hephaestus::scales::value::Value;
 use hephaestus::shape::ShapeRegistry;
 use hephaestus::text::{glyph_marker, TextStyle};
@@ -142,7 +142,8 @@ fn main() {
         Legend::colorbar("gradient_scale")
             .side(LegendSide::Bottom)
             .title("Steps")
-            .binned(),
+            .binned()
+            .open_upper(),
     );
 
     // ── Bottom side, legend #4: a **binned stack** that varies
@@ -162,6 +163,7 @@ fn main() {
             .side(LegendSide::Bottom)
             .title("Bins")
             .binned()
+            .equal_bins()
             .key(
                 LegendKeySpec::point()
                     .scaled("shape", "bin_shape")
@@ -186,6 +188,23 @@ fn main() {
             .side(LegendSide::Bottom)
             .title("Colour")
             .key(LegendKeySpec::rect().scaled("fill", "category_color")),
+    );
+
+    // ── In-panel overlay: a compact category legend pinned to the
+    // top-right corner of the panel area. Reserves no chrome space —
+    // the data marks beneath continue to occupy the full panel rect.
+    p.add_legend(
+        Legend::new("category_color")
+            .side(LegendSide::InPanel {
+                anchor: Anchor::TopRight,
+                inset_pt: 8.0,
+            })
+            .title("Overlay")
+            .key(
+                LegendKeySpec::point()
+                    .scaled("fill", "category_color")
+                    .fixed("size", 6.0_f64),
+            ),
     );
 
     let cat_values: Vec<Value> = cats.iter().map(|s| Value::String(Arc::from(*s))).collect();

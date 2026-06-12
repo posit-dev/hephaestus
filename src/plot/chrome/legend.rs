@@ -32,7 +32,137 @@ use crate::plot::chrome::linear_axis::{
 use crate::plot::scale::ScaleRegistry;
 use crate::primitives::{circle, segment};
 use crate::scales::breaks::DEFAULT_BREAK_COUNT;
-use crate::scales::chrome::LegendSide;
+use crate::scales::chrome::{Anchor, LegendSide};
+
+/// Map a [`LegendSide`] to the cardinal direction the legend renders
+/// against. The four anatomical-slot variants pass through; the
+/// [`LegendSide::InPanel`] overlay variant renders with Right-style
+/// vertical layout against its synthetic panel-anchored rect.
+fn cardinal_side(side: LegendSide) -> LegendSide {
+    match side {
+        LegendSide::Left => LegendSide::Left,
+        LegendSide::Right => LegendSide::Right,
+        LegendSide::Top => LegendSide::Top,
+        LegendSide::Bottom => LegendSide::Bottom,
+        LegendSide::InPanel { .. } => LegendSide::Right,
+    }
+}
+
+/// Compute the title's `(x, y)` baseline against the slot rect for a
+/// cardinal-side legend body. `block_h` is the legend's total primary
+/// extent (so `Top` legends can anchor their title at the bottom of
+/// the slot); `anchor_width` is whatever the body uses as its primary
+/// reference (row width for stack legends, swatch dim for binned
+/// stacks, bar thickness for colorbars).
+fn title_anchor(
+    side: LegendSide,
+    slot_rect: Rect,
+    padding: f64,
+    block_h: f64,
+    title_w_px: f64,
+    anchor_width: f64,
+) -> (f64, f64) {
+    let y = match side {
+        LegendSide::Top => slot_rect.y1 - block_h + padding,
+        _ => slot_rect.y0 + padding,
+    };
+    let x = match side {
+        LegendSide::Left => slot_rect.x1 - padding - title_w_px.max(anchor_width),
+        _ => slot_rect.x0 + padding,
+    };
+    (x, y)
+}
+
+/// Pick the axis baseline (start, end, outward tick direction) for a
+/// tick rail running along the panel-facing long edge of `bar_rect`.
+/// Shared by binned stacks and colorbars — both lay a rail along the
+/// bar's long edge with ticks pointing away from the panel.
+fn axis_baseline(side: LegendSide, bar_rect: Rect) -> (Point, Point, (f64, f64)) {
+    match side {
+        LegendSide::Right => (
+            Point::new(bar_rect.x1, bar_rect.y1),
+            Point::new(bar_rect.x1, bar_rect.y0),
+            (1.0, 0.0),
+        ),
+        LegendSide::Left => (
+            Point::new(bar_rect.x0, bar_rect.y1),
+            Point::new(bar_rect.x0, bar_rect.y0),
+            (-1.0, 0.0),
+        ),
+        LegendSide::Top => (
+            Point::new(bar_rect.x0, bar_rect.y0),
+            Point::new(bar_rect.x1, bar_rect.y0),
+            (0.0, -1.0),
+        ),
+        LegendSide::Bottom => (
+            Point::new(bar_rect.x0, bar_rect.y1),
+            Point::new(bar_rect.x1, bar_rect.y1),
+            (0.0, 1.0),
+        ),
+        LegendSide::InPanel { .. } => unreachable!("cardinal_side flattens InPanel"),
+    }
+}
+
+/// Pin a `size` rectangle inside `panel` at `anchor`, offset from the
+/// matching panel edge by `inset_px` on both axes. Centre anchors
+/// receive no inset along their centred axis.
+pub fn resolve_anchor(panel: Rect, anchor: Anchor, inset_px: f64, size: (f64, f64)) -> Rect {
+    let (w, h) = size;
+    let (x0, y0) = match anchor {
+        Anchor::TopLeft => (panel.x0 + inset_px, panel.y0 + inset_px),
+        Anchor::TopCenter => (
+            panel.x0 + (panel.x1 - panel.x0 - w) * 0.5,
+            panel.y0 + inset_px,
+        ),
+        Anchor::TopRight => (panel.x1 - w - inset_px, panel.y0 + inset_px),
+        Anchor::CenterLeft => (
+            panel.x0 + inset_px,
+            panel.y0 + (panel.y1 - panel.y0 - h) * 0.5,
+        ),
+        Anchor::Center => (
+            panel.x0 + (panel.x1 - panel.x0 - w) * 0.5,
+            panel.y0 + (panel.y1 - panel.y0 - h) * 0.5,
+        ),
+        Anchor::CenterRight => (
+            panel.x1 - w - inset_px,
+            panel.y0 + (panel.y1 - panel.y0 - h) * 0.5,
+        ),
+        Anchor::BottomLeft => (panel.x0 + inset_px, panel.y1 - h - inset_px),
+        Anchor::BottomCenter => (
+            panel.x0 + (panel.x1 - panel.x0 - w) * 0.5,
+            panel.y1 - h - inset_px,
+        ),
+        Anchor::BottomRight => (panel.x1 - w - inset_px, panel.y1 - h - inset_px),
+    };
+    Rect::new(x0, y0, x0 + w, y0 + h)
+}
+
+/// Combined primary + cross extent of a stack of in-panel legends.
+/// In-panel legends use Right-style layout: primary = column width,
+/// cross = stacked row heights + inter-legend gaps. Returns `(w, h)`
+/// in pixels.
+pub fn legend_stack_natural_size(
+    legends: &[&Legend],
+    registry: &ScaleRegistry,
+    dpi: f64,
+) -> (f64, f64) {
+    let measures: Vec<LegendMeasure> = legends
+        .iter()
+        .map(|l| LegendMeasure::new(l, registry, dpi))
+        .filter(|m| !m.is_empty())
+        .collect();
+    if measures.is_empty() {
+        return (0.0, 0.0);
+    }
+    let gap_px = pt_to_px(LEGEND_GAP_PT, dpi);
+    let primary = measures
+        .iter()
+        .map(|m| m.primary_dim_px(dpi))
+        .fold(0.0_f64, f64::max);
+    let cross: f64 = measures.iter().map(|m| m.cross_dim_px(dpi)).sum::<f64>()
+        + gap_px * (measures.len() as f64 - 1.0).max(0.0);
+    (primary, cross)
+}
 use crate::scales::value::{LinetypeStep, Value};
 use crate::scene::{Glyph, GlyphRun, SceneBuilder};
 use crate::shape::{ShapeKind, ShapeRegistry, ShapeStyle};
@@ -175,6 +305,32 @@ pub struct Legend {
     /// positions.
     pub domain_scale: String,
     pub body: LegendBody,
+    /// Suppress the first tick + label on the legend's rail to
+    /// communicate an unbounded bottom bin (the swatch still renders
+    /// full-size). Honoured by binned-stack and stepped-colorbar
+    /// bodies; ignored on continuous colorbars and non-binned stacks.
+    pub open_lower: bool,
+    /// Suppress the last tick + label on the legend's rail to
+    /// communicate an unbounded top bin. Mirrors `open_lower`.
+    pub open_upper: bool,
+    /// Whether binned bodies size each bin proportionally to its
+    /// break span (the default) or give every bin the same extent
+    /// along the bar.
+    pub bin_spacing: BinSpacing,
+}
+
+/// How a binned legend distributes its bins along the bar.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BinSpacing {
+    /// Each bin's extent is `(break_i+1 − break_i) / (max − min)` of
+    /// the bar — bins map to their data-axis position one-to-one.
+    #[default]
+    Proportional,
+    /// Every bin gets exactly `1 / n_bins` of the bar. Tick labels
+    /// still report the underlying break values; the rail loses its
+    /// to-scale relationship with the data axis in exchange for
+    /// equal-weight colour cues.
+    Equal,
 }
 
 /// What a legend looks like.
@@ -272,6 +428,9 @@ impl Legend {
                 keys: Vec::new(),
                 binned: false,
             }),
+            open_lower: false,
+            open_upper: false,
+            bin_spacing: BinSpacing::Proportional,
         }
     }
     /// Continuous colorbar legend: gradient bar sampled from
@@ -283,6 +442,9 @@ impl Legend {
             title: None,
             domain_scale: domain_scale.into(),
             body: LegendBody::Colorbar(ColorbarSpec::default()),
+            open_lower: false,
+            open_upper: false,
+            bin_spacing: BinSpacing::Proportional,
         }
     }
     /// Override the side (default `Right`).
@@ -317,6 +479,31 @@ impl Legend {
             LegendBody::Stack(stack) => stack.binned = true,
             LegendBody::Colorbar(spec) => spec.stepped = true,
         }
+        self
+    }
+    /// Mark the bottom bin as open-ended: the rail's first tick + label
+    /// are suppressed, signalling an unbounded outer bin (the swatch /
+    /// gradient block still renders full-size). Applies to binned-stack
+    /// and stepped-colorbar bodies; ignored elsewhere.
+    pub fn open_lower(mut self) -> Self {
+        self.open_lower = true;
+        self
+    }
+    /// Mark the top bin as open-ended. Mirrors [`Self::open_lower`].
+    pub fn open_upper(mut self) -> Self {
+        self.open_upper = true;
+        self
+    }
+    /// Switch the legend to equal-width bins. Shorthand for
+    /// `bin_spacing(BinSpacing::Equal)`.
+    pub fn equal_bins(mut self) -> Self {
+        self.bin_spacing = BinSpacing::Equal;
+        self
+    }
+    /// Set the bin spacing mode (proportional or equal). Applies to
+    /// binned-stack and stepped-colorbar bodies; ignored elsewhere.
+    pub fn bin_spacing(mut self, spacing: BinSpacing) -> Self {
+        self.bin_spacing = spacing;
         self
     }
     /// Set the colorbar's bar thickness (pt). No-op on stack legends.
@@ -363,6 +550,9 @@ impl Legend {
         if self.domain_scale != other.domain_scale
             || self.side != other.side
             || self.title != other.title
+            || self.open_lower != other.open_lower
+            || self.open_upper != other.open_upper
+            || self.bin_spacing != other.bin_spacing
         {
             return false;
         }
@@ -456,7 +646,10 @@ pub fn legend_stack_measure(
         .iter()
         .map(|l| LegendMeasure::new(l, registry, dpi))
         .collect();
-    Box::new(LegendStackMeasure { side, children })
+    Box::new(LegendStackMeasure {
+        side: cardinal_side(side),
+        children,
+    })
 }
 
 /// Draw a stack of same-side legends into `slot_rect`. Children
@@ -559,6 +752,7 @@ fn render_stack_body(
     scene: &mut dyn SceneBuilder,
     dpi: f64,
 ) {
+    let side = cardinal_side(legend.side);
     let domain = match registry.get(&legend.domain_scale) {
         Some(s) => s,
         None => return,
@@ -590,16 +784,10 @@ fn render_stack_body(
     let row_w = swatch_dim_px + swatch_label_gap + measure.max_label_w_px;
     let block_h = measure.primary_dim_px(dpi);
 
-    let title_y = match legend.side {
-        LegendSide::Top => slot_rect.y1 - block_h + padding,
-        _ => slot_rect.y0 + padding,
-    };
+    let (title_x, title_y) =
+        title_anchor(side, slot_rect, padding, block_h, measure.title_w_px, row_w);
     let entries_y = title_y + measure.title_h_px + title_gap;
-    let title_x = match legend.side {
-        LegendSide::Left => slot_rect.x1 - padding - measure.title_w_px.max(row_w),
-        _ => slot_rect.x0 + padding,
-    };
-    let entries_x = match legend.side {
+    let entries_x = match side {
         LegendSide::Left => slot_rect.x1 - padding - row_w,
         _ => slot_rect.x0 + padding,
     };
@@ -648,9 +836,10 @@ fn render_stack_body(
             dpi,
         );
 
-        match legend.side {
+        match side {
             LegendSide::Right | LegendSide::Left => cursor_y += row_h + row_gap,
             LegendSide::Top | LegendSide::Bottom => cursor_x += row_w + row_gap,
+            LegendSide::InPanel { .. } => unreachable!("cardinal_side flattens InPanel"),
         }
     }
 }
@@ -675,6 +864,7 @@ fn render_binned_stack_body(
         Some(s) => s,
         None => return,
     };
+    let side = cardinal_side(legend.side);
     let swatch_dim_px = match measure.body {
         BodyMeasure::Stack { swatch_dim_px, .. } => swatch_dim_px,
         _ => return,
@@ -707,14 +897,14 @@ fn render_binned_stack_body(
     let bar_len = n_bins as f64 * swatch_dim_px;
 
     // Anchor the legend block to the panel-facing slot edge.
-    let title_y = match legend.side {
-        LegendSide::Top => slot_rect.y1 - block_h + padding,
-        _ => slot_rect.y0 + padding,
-    };
-    let title_x = match legend.side {
-        LegendSide::Left => slot_rect.x1 - padding - measure.title_w_px.max(swatch_dim_px),
-        _ => slot_rect.x0 + padding,
-    };
+    let (title_x, title_y) = title_anchor(
+        side,
+        slot_rect,
+        padding,
+        block_h,
+        measure.title_w_px,
+        swatch_dim_px,
+    );
     if let Some(title) = &legend.title {
         let run = TextRun::new(title, &title_style);
         let _ = run.set_max_width(f32::INFINITY, Alignment::Start);
@@ -731,7 +921,7 @@ fn render_binned_stack_body(
 
     // Bar rect = the stack of touching swatches. Long axis runs
     // along the slot's cross direction; short axis = swatch_dim_px.
-    let bar_rect = match legend.side {
+    let bar_rect = match side {
         LegendSide::Right => Rect::new(
             slot_rect.x0 + padding,
             title_y + measure.title_h_px + title_gap,
@@ -756,18 +946,23 @@ fn render_binned_stack_body(
             slot_rect.x0 + padding + bar_len,
             title_y + measure.title_h_px + title_gap + swatch_dim_px,
         ),
+        LegendSide::InPanel { .. } => unreachable!("cardinal_side flattens InPanel"),
     };
-    let horizontal = matches!(legend.side, LegendSide::Top | LegendSide::Bottom);
+    let horizontal = matches!(side, LegendSide::Top | LegendSide::Bottom);
 
     // For Right/Left the bar runs BOTTOM (low frac) to TOP (high
     // frac) — matches the cartesian y convention. For Top/Bottom
     // it's left → right.
+    let equal_bins = legend.bin_spacing == BinSpacing::Equal;
     for i in 0..n_bins {
         let (lo, hi) = (breaks[i], breaks[i + 1]);
         let midpoint = Value::Number((lo + hi) * 0.5);
+        let (lo_t, hi_t) = if equal_bins {
+            (i as f64 / n_bins as f64, (i + 1) as f64 / n_bins as f64)
+        } else {
+            ((lo - min) / span, (hi - min) / span)
+        };
         let cell = if horizontal {
-            let lo_t = (lo - min) / span;
-            let hi_t = (hi - min) / span;
             Rect::new(
                 bar_rect.x0 + lo_t * (bar_rect.x1 - bar_rect.x0),
                 bar_rect.y0,
@@ -775,8 +970,6 @@ fn render_binned_stack_body(
                 bar_rect.y1,
             )
         } else {
-            let lo_t = (lo - min) / span;
-            let hi_t = (hi - min) / span;
             // Flip so low_frac → bottom of bar (high y).
             Rect::new(
                 bar_rect.x0,
@@ -794,35 +987,20 @@ fn render_binned_stack_body(
     // Axis along the bar's long edge (away from the panel) with
     // ticks at each break boundary. Reuse `draw_linear_axis_at` so
     // the rail matches the cartesian / colorbar axes pixel-for-pixel.
-    let (axis_start, axis_end, tick_direction) = match legend.side {
-        LegendSide::Right => (
-            Point::new(bar_rect.x1, bar_rect.y1),
-            Point::new(bar_rect.x1, bar_rect.y0),
-            (1.0, 0.0),
-        ),
-        LegendSide::Left => (
-            Point::new(bar_rect.x0, bar_rect.y1),
-            Point::new(bar_rect.x0, bar_rect.y0),
-            (-1.0, 0.0),
-        ),
-        LegendSide::Top => (
-            Point::new(bar_rect.x0, bar_rect.y0),
-            Point::new(bar_rect.x1, bar_rect.y0),
-            (0.0, -1.0),
-        ),
-        LegendSide::Bottom => (
-            Point::new(bar_rect.x0, bar_rect.y1),
-            Point::new(bar_rect.x1, bar_rect.y1),
-            (0.0, 1.0),
-        ),
+    let (axis_start, axis_end, tick_direction) = axis_baseline(side, bar_rect);
+    let majors_owned = colorbar_majors(domain);
+    let majors_owned = if legend.bin_spacing == BinSpacing::Equal {
+        colorbar_majors_remap_equal(&majors_owned)
+    } else {
+        majors_owned
     };
-    let majors = colorbar_majors(domain);
+    let majors = open_end_trim(&majors_owned, legend.open_lower, legend.open_upper);
     crate::plot::chrome::linear_axis::draw_linear_axis_at(
         scene,
         axis_start,
         axis_end,
         tick_direction,
-        &majors,
+        majors,
         &[],
         dpi,
     );
@@ -846,6 +1024,7 @@ fn render_colorbar_body(
         Some(s) => s,
         None => return,
     };
+    let side = cardinal_side(legend.side);
     let (bar_thickness_px, samples) = match measure.body {
         BodyMeasure::Colorbar {
             bar_thickness_px,
@@ -865,14 +1044,14 @@ fn render_colorbar_body(
     let block_h = measure.primary_dim_px(dpi);
 
     // Anchor the colorbar block to the panel-facing slot edge.
-    let title_y = match legend.side {
-        LegendSide::Top => slot_rect.y1 - block_h + padding,
-        _ => slot_rect.y0 + padding,
-    };
-    let title_x = match legend.side {
-        LegendSide::Left => slot_rect.x1 - padding - measure.title_w_px.max(bar_thickness_px),
-        _ => slot_rect.x0 + padding,
-    };
+    let (title_x, title_y) = title_anchor(
+        side,
+        slot_rect,
+        padding,
+        block_h,
+        measure.title_w_px,
+        bar_thickness_px,
+    );
 
     if let Some(title) = &legend.title {
         let run = TextRun::new(title, &title_style);
@@ -891,7 +1070,7 @@ fn render_colorbar_body(
     // The bar's body rect. Long axis lies along the slot's cross
     // direction; short axis is `bar_thickness_px`.
     let cross_dim_px = measure.cross_dim_px(dpi);
-    let bar_rect = match legend.side {
+    let bar_rect = match side {
         LegendSide::Right => Rect::new(
             slot_rect.x0 + padding,
             title_y + measure.title_h_px + title_gap,
@@ -922,14 +1101,16 @@ fn render_colorbar_body(
             slot_rect.x0 + padding + (cross_dim_px - 2.0 * padding),
             title_y + measure.title_h_px + title_gap + bar_thickness_px,
         ),
+        LegendSide::InPanel { .. } => unreachable!("cardinal_side flattens InPanel"),
     };
     draw_gradient_bar(
         &legend.domain_scale,
         domain,
         spec,
+        legend.bin_spacing,
         registry,
         &bar_rect,
-        legend.side,
+        side,
         scene,
     );
     let _ = samples; // sample count carried on the spec, used inside draw_gradient_bar
@@ -937,45 +1118,63 @@ fn render_colorbar_body(
     // Axis along the bar's long edge — uses the shared linear-axis
     // function so ticks and labels match the cartesian / polar
     // radius axes pixel-for-pixel.
-    let (axis_start, axis_end, tick_direction) = match legend.side {
-        // Right: axis runs along the bar's RIGHT edge (away from
-        // the panel), ticks pointing right, labels right.
-        LegendSide::Right => (
-            Point::new(bar_rect.x1, bar_rect.y1),
-            Point::new(bar_rect.x1, bar_rect.y0),
-            (1.0, 0.0),
-        ),
-        // Left: axis on the bar's LEFT edge, ticks left.
-        LegendSide::Left => (
-            Point::new(bar_rect.x0, bar_rect.y1),
-            Point::new(bar_rect.x0, bar_rect.y0),
-            (-1.0, 0.0),
-        ),
-        // Top: axis on the bar's TOP edge (away from the panel),
-        // ticks up.
-        LegendSide::Top => (
-            Point::new(bar_rect.x0, bar_rect.y0),
-            Point::new(bar_rect.x1, bar_rect.y0),
-            (0.0, -1.0),
-        ),
-        // Bottom: axis on the bar's BOTTOM edge, ticks down.
-        LegendSide::Bottom => (
-            Point::new(bar_rect.x0, bar_rect.y1),
-            Point::new(bar_rect.x1, bar_rect.y1),
-            (0.0, 1.0),
-        ),
-    };
+    let (axis_start, axis_end, tick_direction) = axis_baseline(side, bar_rect);
 
-    let majors = colorbar_majors(domain);
+    let majors_owned = colorbar_majors(domain);
+    let majors_owned = if legend.bin_spacing == BinSpacing::Equal {
+        colorbar_majors_remap_equal(&majors_owned)
+    } else {
+        majors_owned
+    };
+    let majors = open_end_trim(&majors_owned, legend.open_lower, legend.open_upper);
     crate::plot::chrome::linear_axis::draw_linear_axis_at(
         scene,
         axis_start,
         axis_end,
         tick_direction,
-        &majors,
+        majors,
         &[],
         dpi,
     );
+}
+
+/// Remap each major's fraction to its equal-spaced position
+/// (`i / (n − 1)`), preserving order and labels. Used when the legend
+/// is in [`BinSpacing::Equal`] mode so the tick rail's labels still
+/// report the underlying break values but their positions line up
+/// with the equal-width bin / colour blocks.
+fn colorbar_majors_remap_equal(majors: &[(f64, String)]) -> Vec<(f64, String)> {
+    let n = majors.len();
+    if n <= 1 {
+        return majors.to_vec();
+    }
+    majors
+        .iter()
+        .enumerate()
+        .map(|(i, (_, label))| (i as f64 / (n - 1) as f64, label.clone()))
+        .collect()
+}
+
+/// Drop the first and / or last element from a majors slice when the
+/// caller has marked the corresponding outer bin as open. Operates on
+/// the per-break `(frac, label)` pairs `draw_linear_axis_at`
+/// consumes — the swatches / gradient blocks themselves are unaffected.
+fn open_end_trim(majors: &[(f64, String)], open_lower: bool, open_upper: bool) -> &[(f64, String)] {
+    let start = if open_lower && !majors.is_empty() {
+        1
+    } else {
+        0
+    };
+    let end_excl = if open_upper && majors.len() > start {
+        majors.len() - 1
+    } else {
+        majors.len()
+    };
+    if start <= end_excl {
+        &majors[start..end_excl]
+    } else {
+        &[]
+    }
 }
 
 /// Domain-fraction (axis-frac) + label string per break, for the
@@ -1012,10 +1211,12 @@ fn colorbar_majors(domain: &crate::plot::scale::Scale) -> Vec<(f64, String)> {
 /// `fill` defaults to the legend's `domain_scale` if not in
 /// `bindings`. Single `scene.fill` call — no AA seams between
 /// adjacent sample rects.
+#[allow(clippy::too_many_arguments)]
 fn draw_gradient_bar(
     domain_scale_name: &str,
     domain: &crate::plot::scale::Scale,
     spec: &ColorbarSpec,
+    bin_spacing: BinSpacing,
     registry: &ScaleRegistry,
     bar: &Rect,
     side: LegendSide,
@@ -1086,7 +1287,7 @@ fn draw_gradient_bar(
         // adjacent bin's outer stop — peniko interpolates between
         // them across zero distance, producing an instant
         // transition (a step) in the gradient.
-        let mut break_fracs: Vec<f64> = domain
+        let mut break_values: Vec<f64> = domain
             .breaks(DEFAULT_BREAK_COUNT)
             .iter()
             .filter_map(|v| {
@@ -1094,26 +1295,31 @@ fn draw_gradient_bar(
                 if !n.is_finite() {
                     return None;
                 }
-                Some((n - min) / span)
+                Some(n)
             })
-            .filter(|f| (0.0..=1.0).contains(f))
+            .filter(|n| *n >= min && *n <= max)
             .collect();
         // Make sure the bar is fully covered even if the breaks
-        // don't reach the bar's endpoints — clamp to [0, 1] on
+        // don't reach the domain endpoints — clamp to [min, max] on
         // either side.
-        if break_fracs.first().copied().unwrap_or(1.0) > 0.0 {
-            break_fracs.insert(0, 0.0);
+        if break_values.first().copied().unwrap_or(max) > min {
+            break_values.insert(0, min);
         }
-        if break_fracs.last().copied().unwrap_or(0.0) < 1.0 {
-            break_fracs.push(1.0);
+        if break_values.last().copied().unwrap_or(min) < max {
+            break_values.push(max);
         }
-        if break_fracs.len() < 2 {
+        if break_values.len() < 2 {
             return;
         }
-        let mut out = Vec::with_capacity(break_fracs.len() * 2);
-        for w in break_fracs.windows(2) {
-            let (lo_t, hi_t) = (w[0], w[1]);
-            let mid_value = Value::Number(min + (lo_t + hi_t) * 0.5 * span);
+        let n_bins = break_values.len() - 1;
+        let mut out = Vec::with_capacity(break_values.len() * 2);
+        for (i, w) in break_values.windows(2).enumerate() {
+            let (lo, hi) = (w[0], w[1]);
+            let mid_value = Value::Number((lo + hi) * 0.5);
+            let (lo_t, hi_t) = match bin_spacing {
+                BinSpacing::Proportional => ((lo - min) / span, (hi - min) / span),
+                BinSpacing::Equal => (i as f64 / n_bins as f64, (i + 1) as f64 / n_bins as f64),
+            };
             let color = resolve_stop_colour(mid_value);
             out.push(peniko::ColorStop {
                 offset: lo_t as f32,
@@ -1267,7 +1473,10 @@ impl LegendMeasure {
         };
 
         LegendMeasure {
-            side: legend.side,
+            // Store the cardinal layout direction so primary/cross
+            // dim matches can use a 4-arm pattern. In-panel legends
+            // size themselves the same as a Right legend.
+            side: cardinal_side(legend.side),
             body,
             entry_count,
             max_label_w_px: max_label_w,
@@ -1366,6 +1575,9 @@ impl LegendMeasure {
                     + self.max_label_h_px
                     + 2.0 * padding
             }
+            (_, LegendSide::InPanel { .. }) => {
+                unreachable!("LegendMeasure stores cardinal side, never InPanel")
+            }
         }
     }
 
@@ -1453,6 +1665,9 @@ impl LegendMeasure {
                 let bar_len = (n - 1.0).max(1.0) * pitch + self.max_label_w_px;
                 bar_len.max(self.title_w_px) + 2.0 * padding
             }
+            (_, LegendSide::InPanel { .. }) => {
+                unreachable!("LegendMeasure stores cardinal side, never InPanel")
+            }
         }
     }
 }
@@ -1465,6 +1680,9 @@ impl Measure for LegendMeasure {
         match self.side {
             LegendSide::Right | LegendSide::Left => WidthHint::Min(self.primary_dim_px(dpi)),
             LegendSide::Top | LegendSide::Bottom => WidthHint::Min(0.0),
+            LegendSide::InPanel { .. } => {
+                unreachable!("LegendMeasure stores cardinal side, never InPanel")
+            }
         }
     }
 
@@ -1475,6 +1693,9 @@ impl Measure for LegendMeasure {
         match self.side {
             LegendSide::Top | LegendSide::Bottom => self.primary_dim_px(dpi),
             LegendSide::Right | LegendSide::Left => 0.0,
+            LegendSide::InPanel { .. } => {
+                unreachable!("LegendMeasure stores cardinal side, never InPanel")
+            }
         }
     }
 }
@@ -1508,6 +1729,9 @@ impl Measure for LegendStackMeasure {
         match self.side {
             LegendSide::Right | LegendSide::Left => WidthHint::Min(self.primary_max(dpi)),
             LegendSide::Top | LegendSide::Bottom => WidthHint::Min(0.0),
+            LegendSide::InPanel { .. } => {
+                unreachable!("LegendStackMeasure is constructed with a cardinal side")
+            }
         }
     }
     fn height_at(&self, _width: f64, dpi: f64) -> f64 {
@@ -1518,6 +1742,9 @@ impl Measure for LegendStackMeasure {
         match self.side {
             LegendSide::Top | LegendSide::Bottom => self.primary_max(dpi),
             LegendSide::Right | LegendSide::Left => 0.0,
+            LegendSide::InPanel { .. } => {
+                unreachable!("LegendStackMeasure is constructed with a cardinal side")
+            }
         }
     }
 }
@@ -1956,5 +2183,171 @@ mod tests {
             l_w > s_w,
             "legend with scaled size up to 12pt should be wider than fixed-4pt: {s_w} vs {l_w}"
         );
+    }
+
+    fn sample_majors() -> Vec<(f64, String)> {
+        vec![
+            (0.0, "0".into()),
+            (0.25, "1".into()),
+            (0.5, "2".into()),
+            (0.75, "3".into()),
+            (1.0, "4".into()),
+        ]
+    }
+
+    #[test]
+    fn open_lower_drops_first_major() {
+        let m = sample_majors();
+        let trimmed = open_end_trim(&m, true, false);
+        assert_eq!(trimmed.len(), 4);
+        assert_eq!(trimmed[0].1, "1");
+        assert_eq!(trimmed[3].1, "4");
+    }
+
+    #[test]
+    fn open_upper_drops_last_major() {
+        let m = sample_majors();
+        let trimmed = open_end_trim(&m, false, true);
+        assert_eq!(trimmed.len(), 4);
+        assert_eq!(trimmed[0].1, "0");
+        assert_eq!(trimmed[3].1, "3");
+    }
+
+    #[test]
+    fn open_both_drops_both_terminals() {
+        let m = sample_majors();
+        let trimmed = open_end_trim(&m, true, true);
+        assert_eq!(trimmed.len(), 3);
+        assert_eq!(trimmed[0].1, "1");
+        assert_eq!(trimmed[2].1, "3");
+    }
+
+    #[test]
+    fn open_neither_returns_full_slice() {
+        let m = sample_majors();
+        let trimmed = open_end_trim(&m, false, false);
+        assert_eq!(trimmed.len(), 5);
+    }
+
+    #[test]
+    fn open_trim_handles_short_slices() {
+        // Single element + open_lower yields empty.
+        let one = vec![(0.5_f64, "mid".to_string())];
+        assert!(open_end_trim(&one, true, false).is_empty());
+        // Empty slice in is empty slice out.
+        let empty: Vec<(f64, String)> = vec![];
+        assert!(open_end_trim(&empty, true, true).is_empty());
+    }
+
+    #[test]
+    fn legends_with_different_open_flags_are_not_compatible() {
+        let a = Legend::new("x").open_lower();
+        let b = Legend::new("x");
+        assert!(!a.is_compatible_with(&b));
+        let c = Legend::new("x").open_upper();
+        assert!(!a.is_compatible_with(&c));
+    }
+
+    #[test]
+    fn equal_remap_spaces_majors_uniformly() {
+        // Pathological proportional split with five breaks.
+        let m = vec![
+            (0.0, "0".into()),
+            (0.01, "1".into()),
+            (0.05, "5".into()),
+            (0.5, "50".into()),
+            (1.0, "100".into()),
+        ];
+        let remapped = colorbar_majors_remap_equal(&m);
+        assert_eq!(remapped.len(), 5);
+        // Labels preserved in order.
+        assert_eq!(remapped[0].1, "0");
+        assert_eq!(remapped[4].1, "100");
+        // Fractions are i / (n - 1) = i / 4.
+        for (i, (frac, _)) in remapped.iter().enumerate() {
+            let expected = i as f64 / 4.0;
+            assert!(
+                (frac - expected).abs() < 1e-12,
+                "remap[{i}] = {frac}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn equal_remap_short_slice_is_passthrough() {
+        let single = vec![(0.42_f64, "lonely".to_string())];
+        let remapped = colorbar_majors_remap_equal(&single);
+        assert_eq!(remapped.len(), 1);
+        assert!((remapped[0].0 - 0.42).abs() < 1e-12);
+    }
+
+    #[test]
+    fn legends_with_different_bin_spacing_are_not_compatible() {
+        let a = Legend::new("x").equal_bins();
+        let b = Legend::new("x");
+        assert!(!a.is_compatible_with(&b));
+    }
+
+    #[test]
+    fn bin_spacing_default_is_proportional() {
+        let legend = Legend::new("x");
+        assert_eq!(legend.bin_spacing, BinSpacing::Proportional);
+    }
+
+    #[test]
+    fn resolve_anchor_top_right_six_pt() {
+        let panel = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let rect = resolve_anchor(panel, Anchor::TopRight, 6.0, (20.0, 10.0));
+        // Legend's TR corner sits at (94, 6) = panel TR - inset; size is (20, 10).
+        assert!((rect.x1 - 94.0).abs() < 1e-12);
+        assert!((rect.y0 - 6.0).abs() < 1e-12);
+        assert!((rect.x0 - 74.0).abs() < 1e-12);
+        assert!((rect.y1 - 16.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn resolve_anchor_centre_centres_on_panel() {
+        let panel = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let rect = resolve_anchor(panel, Anchor::Center, 6.0, (20.0, 10.0));
+        // Centre anchor ignores inset — the legend bbox centre lands on the panel centre.
+        let cx = (rect.x0 + rect.x1) * 0.5;
+        let cy = (rect.y0 + rect.y1) * 0.5;
+        assert!((cx - 50.0).abs() < 1e-12);
+        assert!((cy - 50.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn resolve_anchor_bottom_left() {
+        let panel = Rect::new(10.0, 20.0, 110.0, 120.0);
+        let rect = resolve_anchor(panel, Anchor::BottomLeft, 4.0, (30.0, 12.0));
+        // BL anchor: legend BL = panel BL offset inward by 4 on both axes.
+        assert!((rect.x0 - 14.0).abs() < 1e-12);
+        assert!((rect.y1 - 116.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn in_panel_legend_natural_size_is_nonzero_for_populated_stack() {
+        let legend = Legend::new("category_color")
+            .side(LegendSide::InPanel {
+                anchor: Anchor::TopRight,
+                inset_pt: 6.0,
+            })
+            .key(LegendKeySpec::point().scaled("fill", "category_color"));
+        let reg = build_registry();
+        let (w, h) = legend_stack_natural_size(&[&legend], &reg, dpi_96());
+        assert!(w > 0.0);
+        assert!(h > 0.0);
+    }
+
+    #[test]
+    fn in_panel_legend_natural_size_zero_for_empty_stack() {
+        let legend = Legend::new("category_color").side(LegendSide::InPanel {
+            anchor: Anchor::TopRight,
+            inset_pt: 6.0,
+        });
+        let reg = build_registry();
+        let (w, h) = legend_stack_natural_size(&[&legend], &reg, dpi_96());
+        assert_eq!(w, 0.0);
+        assert_eq!(h, 0.0);
     }
 }

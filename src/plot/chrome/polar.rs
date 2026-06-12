@@ -10,7 +10,7 @@
 //! `ChromeStrategy::InsidePanel` is not implemented yet.
 
 use crate::brush::Brush;
-use crate::geometry::{Affine, Point, Rect};
+use crate::geometry::{Affine, Point, Rect, Vec2};
 use crate::layout::{Measure, WidthHint};
 use crate::pick::PickId;
 use crate::plot::chrome::linear_axis::{
@@ -19,12 +19,14 @@ use crate::plot::chrome::linear_axis::{
 };
 use crate::plot::projection::PolarProjection;
 use crate::plot::scale::Scale;
-use crate::primitives::segment;
+use crate::primitives::{segment, PolylineSampler};
 use crate::scales::breaks::DEFAULT_BREAK_COUNT;
 use crate::scales::chrome::AxisSide;
 use crate::scales::value::Value;
 use crate::scene::SceneBuilder;
+use crate::scene::{Glyph, GlyphRun};
 use crate::stroke::Stroke;
+use crate::text::run_layout_glyphs;
 use crate::text::{Alignment, TextRun, TextStyle};
 
 /// Draw a radius axis along the spoke at `theta_frac` ∈ [0, 1].
@@ -40,6 +42,7 @@ pub fn draw_radius_axis(
     scale: &Scale,
     theta_frac: f64,
     dpi: f64,
+    title: Option<&str>,
 ) {
     let g = polar.geometry(panel);
     if g.r_outer <= 0.0 {
@@ -65,6 +68,35 @@ pub fn draw_radius_axis(
     let end = Point::new(g.cx + g.r_outer * ux, g.cy - g.r_outer * uy);
     let tick_direction = radius_axis_tick_direction(polar, theta_frac);
     draw_linear_axis_at(scene, start, end, tick_direction, &majors, &minors, dpi);
+
+    if let Some(title_text) = title {
+        // Largest label width / height — used to budget the title's
+        // outward distance from the spoke's outer tip.
+        let style = TextStyle::new(LABEL_FONT_SIZE_PT);
+        let (max_label_w, max_label_h) =
+            majors
+                .iter()
+                .fold((0.0_f64, 0.0_f64), |(mw, mh), (_, label)| {
+                    let run = TextRun::new(label, &style);
+                    let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+                    let w = run.natural_width();
+                    (mw.max(w), mh.max(h))
+                });
+        // Projecting the label's bbox onto the tick direction picks
+        // whichever axis the label is offset along. Equivalent to the
+        // cartesian title placement past the longest label.
+        let (tx, ty) = tick_direction;
+        let label_extent = max_label_w * tx.abs() + max_label_h * ty.abs();
+        draw_radius_title(
+            scene,
+            panel,
+            polar,
+            theta_frac,
+            label_extent,
+            title_text,
+            dpi,
+        );
+    }
 }
 
 /// Draw an angular axis around the outer or inner ring of a polar
@@ -82,6 +114,7 @@ pub fn draw_angular_axis(
     scale: &Scale,
     ring: AngularRing,
     dpi: f64,
+    title: Option<&str>,
 ) {
     let g = polar.geometry(panel);
     if g.r_outer <= 0.0 {
@@ -182,6 +215,35 @@ pub fn draw_angular_axis(
             },
             dpi,
         );
+    }
+
+    if let Some(title_text) = title {
+        // Largest label height — used to push the title beyond the
+        // angular tick labels.
+        let (max_label_w, max_label_h) = scale
+            .breaks(DEFAULT_BREAK_COUNT)
+            .iter()
+            .filter(|v| !matches!(v, Value::Null))
+            .fold((0.0_f64, 0.0_f64), |(mw, mh), v| {
+                let label = scale.format(v);
+                let run = TextRun::new(&label, &style);
+                let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+                let w = run.natural_width();
+                (mw.max(w), mh.max(h))
+            });
+        let label_max = max_label_w.max(max_label_h);
+        // Outer ring titles sit further out past the label rail;
+        // inner ring titles sit further in (toward the centre).
+        match ring {
+            AngularRing::Outer => {
+                draw_angular_title(scene, panel, polar, label_max, title_text, dpi);
+            }
+            AngularRing::Inner => {
+                // Inner-ring title placement isn't implemented:
+                // labels point inward and a curved title there
+                // would compete for centre space. Silently skip.
+            }
+        }
     }
 }
 
@@ -391,4 +453,261 @@ fn radius_axis_tick_direction(polar: &PolarProjection, theta_frac: f64) -> (f64,
     // CW perpendicular for CCW sweep / CCW perpendicular for CW sweep,
     // expressed in math convention and then flipped to screen y-down.
     (sign * theta.sin(), sign * theta.cos())
+}
+
+// Gap (pt) between the outermost axis label and the title text.
+const TITLE_GAP_PT: f64 = 6.0;
+// Number of segments to sample an angular title's arc into a polyline
+// for the text-along-path layout.
+const ANGULAR_TITLE_ARC_SEGMENTS: usize = 32;
+
+/// Render a radius axis title past the outer end of the spoke. The
+/// title rotates to align with the spoke and auto-flips if rendering
+/// would place it upside-down on screen.
+///
+/// `label_extent_px` is the projected extent of the outermost tick
+/// label onto the tick direction — it pushes the title past the
+/// label rail.
+fn draw_radius_title(
+    scene: &mut dyn SceneBuilder,
+    panel: Rect,
+    polar: &PolarProjection,
+    theta_frac: f64,
+    label_extent_px: f64,
+    title: &str,
+    dpi: f64,
+) {
+    let g = polar.geometry(panel);
+    if g.r_outer <= 0.0 {
+        return;
+    }
+    let (ux, uy) = polar.unit_position(theta_frac);
+    // Spoke direction in screen-y-down coords.
+    let (sx, sy) = (ux, -uy);
+    // Rotation angle (math screen coords, y-down).
+    let mut theta_spoke = sy.atan2(sx);
+
+    let style = crate::plot::plot::axis_title_style();
+    let run = crate::text::TextRun::new(title, &style);
+    let title_w = run.natural_width();
+    let title_h = run.set_max_width(f32::INFINITY, crate::text::Alignment::Start) as f64;
+    let glyphs = run_layout_glyphs(&run);
+    if glyphs.is_empty() {
+        return;
+    }
+    let baseline_ref = glyphs[0].y as f64;
+
+    let tick_px = pt_to_px(TICK_LENGTH_PT, dpi);
+    let label_gap_px = pt_to_px(LABEL_GAP_PT, dpi);
+    let title_gap_px = pt_to_px(TITLE_GAP_PT, dpi);
+    let outer_offset = tick_px + label_gap_px + label_extent_px + title_gap_px;
+
+    // Anchor sits past the outer tick + label rail, along the spoke
+    // from the polar centre.
+    let outer_r = g.r_outer + outer_offset;
+    let anchor_x = g.cx + outer_r * ux;
+    let anchor_y = g.cy - outer_r * uy;
+
+    // Upright correction: if the title's natural baseline orientation
+    // would render upside-down (sin(θ) > 0 in screen-y-down ⇒ baseline
+    // normal points down ⇒ glyphs appear upside-down), add π and slide
+    // the anchor along the rotated baseline so the title still
+    // occupies the outer portion of the spoke.
+    let upside_down = theta_spoke.sin() > 0.0;
+    let (origin_x, origin_y) = if upside_down {
+        theta_spoke += std::f64::consts::PI;
+        // After flipping, the title's local x runs back along the
+        // spoke (inward). Slide the origin outward by title_w + 2 *
+        // baseline body so the body sits in the same world location.
+        let cos_t = theta_spoke.cos();
+        let sin_t = theta_spoke.sin();
+        (anchor_x - title_w * cos_t, anchor_y - title_w * sin_t)
+    } else {
+        (anchor_x, anchor_y)
+    };
+
+    // Centre the title across the spoke (along the perpendicular)
+    // by offsetting half its height. In glyph-local y-down space
+    // the baseline is at `baseline_ref`, so a y-offset of
+    // `-title_h * 0.5 + baseline_ref` puts the title bbox centre on
+    // the spoke.
+    let perp_offset = -title_h * 0.5 + baseline_ref;
+
+    let brush = Brush::Solid(axis_ink());
+    for g_glyph in &glyphs {
+        let y_above_baseline = g_glyph.y as f64 - baseline_ref;
+        let xform = Affine::translate(Vec2::new(origin_x, origin_y))
+            * Affine::rotate(theta_spoke)
+            * Affine::translate(Vec2::new(g_glyph.x as f64, perp_offset + y_above_baseline));
+        let stamp = Glyph {
+            id: g_glyph.id,
+            x: 0.0,
+            y: 0.0,
+        };
+        let glyph_run = GlyphRun {
+            font: &g_glyph.font,
+            font_size: g_glyph.font_size,
+            transform: xform,
+            glyph_transform: None,
+            brush: &brush,
+            brush_alpha: 1.0,
+            hint: false,
+            glyphs: std::slice::from_ref(&stamp),
+        };
+        scene.draw_glyphs(&glyph_run, PickId::Skip);
+    }
+}
+
+/// Render an angular axis title curving along an arc just past the
+/// outer ring. The title spans an angular extent of `text_w / r_title`
+/// centred at the arc midpoint. Uses text-on-path layout with the
+/// `upright` flip so the title reads right-side-up regardless of
+/// which side of the panel the arc midpoint lands on.
+fn draw_angular_title(
+    scene: &mut dyn SceneBuilder,
+    panel: Rect,
+    polar: &PolarProjection,
+    label_max_px: f64,
+    title: &str,
+    dpi: f64,
+) {
+    let g = polar.geometry(panel);
+    if g.r_outer <= 0.0 {
+        return;
+    }
+    let style = crate::plot::plot::axis_title_style();
+    let run = crate::text::TextRun::new(title, &style);
+    let text_w = run.natural_width();
+    let _title_h = run.set_max_width(f32::INFINITY, crate::text::Alignment::Start) as f64;
+    let glyphs = run_layout_glyphs(&run);
+    if glyphs.is_empty() || text_w <= 0.0 {
+        return;
+    }
+    let baseline_ref = glyphs[0].y as f64;
+    let descent_px = run.last_line_descender();
+    let ascent_px = run.natural_height() - descent_px;
+
+    let tick_px = pt_to_px(TICK_LENGTH_PT, dpi);
+    let label_gap_px = pt_to_px(LABEL_GAP_PT, dpi);
+    let title_gap_px = pt_to_px(TITLE_GAP_PT, dpi);
+    let r_title = g.r_outer + tick_px + label_gap_px + label_max_px + title_gap_px;
+    if r_title <= 0.0 {
+        return;
+    }
+
+    // Arc midpoint angle (math convention).
+    let span = polar.theta_end - polar.theta_start;
+    let is_full_circle = (span.abs() - std::f64::consts::TAU).abs() < 1e-6;
+    let theta_mid_math = if is_full_circle {
+        std::f64::consts::FRAC_PI_2 // 12 o'clock for full circles.
+    } else {
+        (polar.theta_start + polar.theta_end) * 0.5
+    };
+    // Arc length the title spans, in radians.
+    let arc_radians = text_w / r_title;
+    if !arc_radians.is_finite() || arc_radians <= 0.0 {
+        return;
+    }
+    // Sweep direction matches the polar's natural sweep (CCW or CW).
+    let sweep_sign = if polar.theta_end > polar.theta_start {
+        -1.0
+    } else {
+        1.0
+    };
+    let start_math = theta_mid_math - sweep_sign * arc_radians * 0.5;
+    let end_math = theta_mid_math + sweep_sign * arc_radians * 0.5;
+
+    // Sample the arc into a polyline in screen-y-down coords.
+    let n = ANGULAR_TITLE_ARC_SEGMENTS;
+    let mut points: Vec<Point> = Vec::with_capacity(n + 1);
+    for i in 0..=n {
+        let t = i as f64 / n as f64;
+        let theta = start_math + (end_math - start_math) * t;
+        points.push(Point::new(
+            g.cx + r_title * theta.cos(),
+            g.cy - r_title * theta.sin(),
+        ));
+    }
+    let sampler = PolylineSampler::from_polyline(&points);
+    let path_length = sampler.total_length();
+    if path_length <= 0.0 {
+        return;
+    }
+
+    // Upright detection: count glyph tangents pointing into the left
+    // half-plane against a threshold; reverse the arc if the majority
+    // do. Same logic as TextPathGeom's `upright = true` mode.
+    let natural_shift = (path_length - text_w) * 0.5; // hjust = 0.5
+    let mut upside_down = 0usize;
+    let mut counted = 0usize;
+    for gph in &glyphs {
+        let half_advance = gph.advance as f64 * 0.5;
+        let d = natural_shift + gph.x as f64 + half_advance;
+        if !d.is_finite() {
+            continue;
+        }
+        let d_clamped = d.clamp(0.0, path_length);
+        if let Some(s) = sampler.sample_at(d_clamped) {
+            counted += 1;
+            if s.tangent.x < 0.0 {
+                upside_down += 1;
+            }
+        }
+    }
+    let flipped = counted > 0 && upside_down * 2 > counted;
+
+    let hjust_shift = if flipped {
+        // hjust = 0.5 inverts to 0.5 (centre), so the shift is the same.
+        natural_shift
+    } else {
+        natural_shift
+    };
+    // When flipped, the glyph body extends "downward" from the
+    // baseline; rebase by (ascent - descent) so its world-bbox
+    // matches the unflipped case.
+    let effective_vjust = if flipped { ascent_px - descent_px } else { 0.0 };
+
+    let brush = Brush::Solid(axis_ink());
+    for gph in &glyphs {
+        let half_advance = gph.advance as f64 * 0.5;
+        let d_glyph = hjust_shift + gph.x as f64 + half_advance;
+        if !d_glyph.is_finite() || d_glyph < 0.0 || d_glyph > path_length {
+            continue;
+        }
+        let d_sample = if flipped {
+            path_length - d_glyph
+        } else {
+            d_glyph
+        };
+        let sample = match sampler.sample_at(d_sample) {
+            Some(s) => s,
+            None => continue,
+        };
+        let tangent = if flipped {
+            -sample.tangent
+        } else {
+            sample.tangent
+        };
+        let theta = tangent.y.atan2(tangent.x);
+        let y_above_baseline = gph.y as f64 - baseline_ref;
+        let xform = Affine::translate(Vec2::new(sample.point.x, sample.point.y))
+            * Affine::rotate(theta)
+            * Affine::translate(Vec2::new(-half_advance, effective_vjust + y_above_baseline));
+        let stamp = Glyph {
+            id: gph.id,
+            x: 0.0,
+            y: 0.0,
+        };
+        let glyph_run = GlyphRun {
+            font: &gph.font,
+            font_size: gph.font_size,
+            transform: xform,
+            glyph_transform: None,
+            brush: &brush,
+            brush_alpha: 1.0,
+            hint: false,
+            glyphs: std::slice::from_ref(&stamp),
+        };
+        scene.draw_glyphs(&glyph_run, PickId::Skip);
+    }
 }

@@ -732,11 +732,11 @@ impl Plot {
         patch = self.wire_axes(patch, registry, dpi);
 
         // Legends — explicitly composed by the caller via
-        // `Plot::add_legend{,_separate}`. Each attached legend
-        // contributes a `LegendMeasure` cell to the slot picked by
-        // its `side`. v1 supports one legend per side (multiple
-        // legends routed to the same slot overwrite); cross-side
-        // stacking is a follow-up.
+        // `Plot::add_legend{,_separate}`. Each attached side's
+        // legends are aggregated into one `LegendStackMeasure` cell
+        // through `legend_stack_measure`. In-panel legends reserve
+        // zero chrome space and render against the resolved panel
+        // rect from `draw_chrome_into`.
         patch = self.wire_legends(patch, registry, dpi);
 
         // Panel is always present (the geom panel lives here).
@@ -956,7 +956,13 @@ impl Plot {
                             (panel, self.projection.as_polar(), registry.get(scale_name))
                         {
                             crate::plot::chrome::polar::draw_radius_axis(
-                                scene, panel_rect, polar, scale, theta_frac, dpi,
+                                scene,
+                                panel_rect,
+                                polar,
+                                scale,
+                                theta_frac,
+                                dpi,
+                                axis.title.as_deref(),
                             );
                         }
                     }
@@ -971,7 +977,13 @@ impl Plot {
                                 PolarRing::Inner => crate::plot::chrome::polar::AngularRing::Inner,
                             };
                             crate::plot::chrome::polar::draw_angular_axis(
-                                scene, panel_rect, polar, scale, ring, dpi,
+                                scene,
+                                panel_rect,
+                                polar,
+                                scale,
+                                ring,
+                                dpi,
+                                axis.title.as_deref(),
                             );
                         }
                     }
@@ -1033,6 +1045,34 @@ impl Plot {
             }
         }
 
+        // In-panel legends — overlay on top of the panel rect at
+        // their anchor / inset. They reserve no chrome space; the
+        // panel rect they paint into comes from the solved layout.
+        if let Some(panel) = layout.get(&self.patch_id, Slot::Panel) {
+            for (anchor, inset_pt, group) in legends_grouped_in_panel(&self.legends) {
+                if group.is_empty() {
+                    continue;
+                }
+                let inset_px = inset_pt * dpi / 72.0;
+                let (w, h) =
+                    crate::plot::chrome::legend::legend_stack_natural_size(&group, registry, dpi);
+                if w <= 0.0 || h <= 0.0 {
+                    continue;
+                }
+                let slot_rect =
+                    crate::plot::chrome::legend::resolve_anchor(panel, anchor, inset_px, (w, h));
+                crate::plot::chrome::legend::render_legend_stack(
+                    &group,
+                    crate::scales::chrome::LegendSide::Right,
+                    slot_rect,
+                    registry,
+                    &self.shapes,
+                    scene,
+                    dpi,
+                );
+            }
+        }
+
         // Plot-level text slots — title / subtitle / caption.
         let ink = Brush::Solid(Color::new([0.0, 0.0, 0.0, 1.0]));
         let entries: [(Slot, Option<&String>, StyleFn); 3] = [
@@ -1048,8 +1088,10 @@ impl Plot {
         }
 
         // Axis title slots — sourced from `Axis::title` on each
-        // attached cartesian axis. Polar axis titles are inline
-        // (rendered by the axis renderer itself) — TODO.
+        // attached cartesian axis. Polar axis titles render inline
+        // through the polar draw path in `draw_axes_into` (radius
+        // titles along the spoke, angular titles curving past the
+        // outer ring) and don't participate in slot rendering.
         use crate::plot::chrome::axis::AxisPlacement;
         for axis in &self.axes {
             let Some(title) = axis.title.as_ref() else {
@@ -1088,7 +1130,7 @@ fn caption_style() -> crate::text::TextStyle {
 }
 
 #[cfg(feature = "text")]
-fn axis_title_style() -> crate::text::TextStyle {
+pub(crate) fn axis_title_style() -> crate::text::TextStyle {
     crate::text::TextStyle::new(12.0)
 }
 
@@ -1163,6 +1205,9 @@ fn legends_grouped_by_side(
         (LegendSide::Bottom, Slot::LegendBottom, Vec::new()),
     ];
     for legend in legends {
+        if matches!(legend.side, LegendSide::InPanel { .. }) {
+            continue;
+        }
         for (side, _, group) in out.iter_mut() {
             if *side == legend.side {
                 group.push(legend);
@@ -1171,6 +1216,40 @@ fn legends_grouped_by_side(
         }
     }
     out
+}
+
+/// Partition the plot's legends by their [`crate::scales::chrome::Anchor`]
+/// and `inset_pt` so each anchor's group is rendered as a single
+/// in-panel stack. Only in-panel legends appear; the four
+/// anatomical-side variants are skipped (see [`legends_grouped_by_side`]).
+#[cfg(feature = "text")]
+fn legends_grouped_in_panel(
+    legends: &[crate::plot::chrome::legend::Legend],
+) -> Vec<(
+    crate::scales::chrome::Anchor,
+    f64,
+    Vec<&crate::plot::chrome::legend::Legend>,
+)> {
+    use crate::scales::chrome::LegendSide;
+    let mut groups: Vec<(
+        crate::scales::chrome::Anchor,
+        f64,
+        Vec<&crate::plot::chrome::legend::Legend>,
+    )> = Vec::new();
+    for legend in legends {
+        let LegendSide::InPanel { anchor, inset_pt } = legend.side else {
+            continue;
+        };
+        if let Some((_, _, group)) = groups
+            .iter_mut()
+            .find(|(a, inset, _)| *a == anchor && (inset - inset_pt).abs() < f64::EPSILON)
+        {
+            group.push(legend);
+        } else {
+            groups.push((anchor, inset_pt, vec![legend]));
+        }
+    }
+    groups
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
