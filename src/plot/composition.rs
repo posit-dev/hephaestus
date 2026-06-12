@@ -97,10 +97,15 @@ impl CompositionTemplate {
     }
 
     /// Rebuild a `Composition` from this template, wiring each known
-    /// patch's chrome via the attached plots.
+    /// patch's chrome via the attached plots. Per-patch aspect locks
+    /// are propagated into the outer grid's Fr weights by
+    /// `emit_patch_into` at solve time — depending on whether each
+    /// patch is alone in its row or column, the aspect is encoded
+    /// into either the row Fr or the column Fr so siblings on the
+    /// other axis don't conflict.
     fn rebuild(
         &self,
-        plots: &HashMap<String, Plot>,
+        plots: &HashMap<String, Vec<Plot>>,
         registry: &ScaleRegistry,
         dpi: f64,
     ) -> Composition {
@@ -134,7 +139,7 @@ impl ElementTemplate {
 
     fn rebuild(
         &self,
-        plots: &HashMap<String, Plot>,
+        plots: &HashMap<String, Vec<Plot>>,
         registry: &ScaleRegistry,
         dpi: f64,
     ) -> Element {
@@ -151,30 +156,121 @@ impl ElementTemplate {
     }
 }
 
-/// Build a `Patch` for `id`, wiring the attached plot's chrome if any.
-/// Always adds the `Panel` slot so `draw_panel_into` finds a rect.
+/// Build a `Patch` for `id` by wiring every attached plot's chrome,
+/// merging slot contributions across plots. Each plot's `wire()`
+/// builds a single-plot patch independently; the orchestrator then
+/// harvests their [`PatchPlacement`]s, groups by region, and
+/// re-emits one cell per region — wrapping multiple contributions
+/// in [`MaxMergeMeasure`](crate::layout::MaxMergeMeasure) so a
+/// region's track sizes to fit *every* contributing plot's
+/// requirement, not just the last one.
 fn wire_into_patch(
     id: &str,
-    plots: &HashMap<String, Plot>,
+    plots: &HashMap<String, Vec<Plot>>,
     registry: &ScaleRegistry,
     dpi: f64,
 ) -> Patch {
-    let plot = plots.get(id);
+    let plot_list = plots.get(id);
     #[cfg(feature = "text")]
     {
-        if let Some(plot) = plot {
-            return plot.wire(Patch::new(id), registry, dpi);
+        if let Some(list) = plot_list {
+            if !list.is_empty() {
+                return wire_merged_patch(id, list, registry, dpi);
+            }
         }
     }
     let _ = registry;
     let _ = dpi;
-    // Unattached patches, or non-text builds: just attach a Panel slot
-    // so the layout still places a rect for that patch.
+    // Unattached patches, or non-text builds: just attach a Panel
+    // slot so the layout still places a rect for that patch.
     let p = Patch::new(id);
-    match plot {
+    match plot_list.and_then(|list| list.first()) {
         Some(pl) => pl.wire_panel(p),
         None => pl_wire_panel_fallback(p),
     }
+}
+
+/// Per-plot harvest + max-merge. Each plot wires into its own
+/// fresh patch; we then group the resulting placements by region
+/// across plots, max-merging the underlying [`Measure`]s.
+#[cfg(feature = "text")]
+fn wire_merged_patch(id: &str, plots: &[Plot], registry: &ScaleRegistry, dpi: f64) -> Patch {
+    use crate::composition::PatchPlacement;
+    use crate::layout::{Cell, MaxMergeMeasure, Placement};
+
+    // Collect (region → Vec of (placement, measure)). Insertion order
+    // captures the first plot's placement geometry, which all other
+    // plots' contributions to the same region must match (they
+    // resolve through the same `Slot::name()` →
+    // `Slot::placement()` mapping).
+    type RegionEntry = (String, Placement, Vec<Box<dyn crate::layout::Measure>>);
+    let mut by_region: Vec<RegionEntry> = Vec::new();
+    for plot in plots {
+        let per_plot = plot.wire(Patch::new(id), registry, dpi);
+        for PatchPlacement {
+            placement,
+            region,
+            cell,
+        } in per_plot.into_placements()
+        {
+            if let Some((_, _, measures)) = by_region.iter_mut().find(|(r, _, _)| *r == region) {
+                measures.push(cell.into_measure());
+            } else {
+                by_region.push((region, placement, vec![cell.into_measure()]));
+            }
+        }
+    }
+
+    // Emit one cell per region with a max-merged measure.
+    let mut patch = Patch::new(id);
+    // Cross-plot aspect agreement: every plot that has an opinion
+    // on the panel aspect (polar projections, today) contributes
+    // its `desired_panel_aspect`. If all opinions agree on the
+    // same ratio, lock the patch to that aspect. If any pair
+    // disagrees, skip the lock — the user is in an advanced
+    // multi-projection layout and the orchestrator can't pick a
+    // winner.
+    let aspects: Vec<(f32, f32)> = plots
+        .iter()
+        .filter_map(|p| p.desired_panel_aspect(registry))
+        .collect();
+    if let Some(agreed) = unify_aspect(&aspects) {
+        patch = patch.aspect(agreed.0, agreed.1);
+    }
+    for (region, placement, mut measures) in by_region {
+        let cell = if measures.len() == 1 {
+            // Single contribution — no need to wrap.
+            Cell::measured_boxed(measures.pop().unwrap())
+        } else {
+            Cell::measured(MaxMergeMeasure::new(measures))
+        };
+        patch = patch.place_at(
+            region,
+            placement.row,
+            placement.col,
+            crate::composition::Span::rc(placement.row_span, placement.col_span),
+            cell,
+        );
+    }
+    patch
+}
+
+/// Reduce a list of `(width, height)` aspect demands to one, if
+/// every demand has the same `w/h` ratio (within a small epsilon).
+/// Returns the first demand if they all agree, `None` if any
+/// disagrees or the list is empty.
+#[cfg(feature = "text")]
+fn unify_aspect(aspects: &[(f32, f32)]) -> Option<(f32, f32)> {
+    let first = *aspects.first()?;
+    let ratio0 = (first.0 as f64) / (first.1 as f64);
+    const EPS: f64 = 1e-3;
+    for &(w, h) in &aspects[1..] {
+        let r = (w as f64) / (h as f64);
+        if (r - ratio0).abs() > EPS {
+            return None;
+        }
+    }
+    Some(first)
 }
 
 /// Same as `Plot::wire_panel` but for unattached patches (no Plot
@@ -216,7 +312,12 @@ pub enum ValidationIssue {
 pub struct PlotComposition {
     template: CompositionTemplate,
     scales: ScaleRegistry,
-    plots: HashMap<String, Plot>,
+    /// Plots attached to each patch id, in attach order. Multiple
+    /// plots per patch are supported — each draws its own chrome
+    /// into the same patch slots, with later plots overlaying
+    /// earlier ones (the user controls draw order via attach
+    /// order).
+    plots: HashMap<String, Vec<Plot>>,
     /// Per-plot dirty bits, plumbed for partial-repaint heuristics. Not
     /// currently consumed — every render re-draws the full table.
     plot_dirty: HashMap<String, bool>,
@@ -317,40 +418,68 @@ impl PlotComposition {
         self
     }
 
-    /// Attach a plot bound to its patch id. Replaces any previous plot
-    /// at the same patch id. Flips the layout's dirty flag.
+    /// Attach a plot bound to its patch id. **Appends** to the patch's
+    /// plot list — multiple plots per patch are supported; later
+    /// plots draw on top of earlier ones. Flips the layout's dirty
+    /// flag.
     pub fn attach_plot(&mut self, plot: Plot) {
         let id = plot.patch_id().to_string();
         self.plot_dirty.insert(id.clone(), true);
-        self.plots.insert(id, plot);
+        self.plots.entry(id).or_default().push(plot);
         self.layout_dirty = true;
     }
 
-    /// Detach and return the plot bound to `patch_id`, if any. Flips the
-    /// layout's dirty flag.
-    pub fn detach_plot(&mut self, patch_id: &str) -> Option<Plot> {
-        let removed = self.plots.remove(patch_id);
-        if removed.is_some() {
+    /// Detach every plot attached to `patch_id`, returning the full
+    /// list in attach order. Flips the layout's dirty flag.
+    pub fn detach_plot(&mut self, patch_id: &str) -> Vec<Plot> {
+        let removed = self.plots.remove(patch_id).unwrap_or_default();
+        if !removed.is_empty() {
             self.plot_dirty.insert(patch_id.to_string(), true);
             self.layout_dirty = true;
         }
         removed
     }
 
-    /// Borrow the plot bound to `patch_id`, if any.
+    /// Borrow the **first** plot attached to `patch_id`, if any.
+    /// Use [`Self::plots_in`] when the patch may hold multiple
+    /// plots.
     pub fn plot(&self, patch_id: &str) -> Option<&Plot> {
-        self.plots.get(patch_id)
+        self.plots.get(patch_id).and_then(|v| v.first())
     }
 
-    /// Iterate over `(patch_id, plot)` pairs. Order is unspecified.
+    /// Borrow every plot attached to `patch_id`, in attach order.
+    pub fn plots_in(&self, patch_id: &str) -> &[Plot] {
+        self.plots
+            .get(patch_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Iterate over `(patch_id, plot)` pairs across every plot in
+    /// every patch. Order is HashMap-iteration for patch ids and
+    /// attach order within a patch.
     pub fn plots(&self) -> impl Iterator<Item = (&str, &Plot)> + '_ {
-        self.plots.iter().map(|(k, v)| (k.as_str(), v))
+        self.plots
+            .iter()
+            .flat_map(|(k, v)| v.iter().map(move |p| (k.as_str(), p)))
     }
 
-    /// Mutate a plot through a closure. Flags its dirty bit and the
-    /// global layout dirty bit.
+    /// Mutate the **first** plot at `patch_id` through a closure.
+    /// Flags its dirty bit and the global layout dirty bit. Use
+    /// [`Self::update_plot_at`] to target a specific plot when the
+    /// patch holds multiple.
     pub fn update_plot(&mut self, patch_id: &str, f: impl FnOnce(&mut Plot)) {
-        if let Some(p) = self.plots.get_mut(patch_id) {
+        if let Some(p) = self.plots.get_mut(patch_id).and_then(|v| v.first_mut()) {
+            f(p);
+            self.plot_dirty.insert(patch_id.to_string(), true);
+            self.layout_dirty = true;
+        }
+    }
+
+    /// Mutate the plot at `(patch_id, index)` (zero-based, in
+    /// attach order). No-op if the index is out of range.
+    pub fn update_plot_at(&mut self, patch_id: &str, index: usize, f: impl FnOnce(&mut Plot)) {
+        if let Some(p) = self.plots.get_mut(patch_id).and_then(|v| v.get_mut(index)) {
             f(p);
             self.plot_dirty.insert(patch_id.to_string(), true);
             self.layout_dirty = true;
@@ -400,28 +529,47 @@ impl PlotComposition {
             .as_ref()
             .expect("layout must be cached by this point");
 
-        // Panels first — they include the in-panel chrome (background,
-        // grid, outline) plus the geoms, all clipped to the panel
-        // rect. Picking is opt-in per geom via the `"pick_id"`
-        // channel — the orchestrator does no ticket allocation; the
-        // raw value reported by `VelloRenderer::pick_at` is the
-        // user-supplied id directly.
-        for plot in self.plots.values_mut() {
-            plot.draw_panel_into(scene, layout, &self.scales, dpi);
+        // Phase 1: patch backgrounds. Every plot lays down its
+        // `Slot::Background` fill (if it has one) before any panel
+        // chrome / geom / axis is drawn.
+        for list in self.plots.values() {
+            for plot in list {
+                plot.draw_patch_background_into(scene, layout);
+            }
         }
 
-        // Chrome on top. For cartesian this draws into axis slots
-        // outside the panel; for polar it draws the radius / angular
-        // axes inside the panel without the panel clip, so the axis
-        // labels can bleed beyond the inscribed disk and the axis
-        // lines / ticks paint over the panel background fill.
-        // Order across plots is map iteration order — stable within
-        // a render but unspecified across renders. For visual
-        // layering this is fine: chrome never overlaps geom content
-        // of a different plot.
+        // Phase 2: panel chromes. Every plot paints its projection
+        // bg + grid + outline. Doing this across ALL plots before
+        // any geoms means a `clip = false` plot's geoms that spill
+        // into a neighbouring panel don't get overpainted by that
+        // neighbour's panel chrome in a later step.
+        for list in self.plots.values() {
+            for plot in list {
+                plot.draw_panel_chrome_into(scene, layout, &self.scales, dpi);
+            }
+        }
+
+        // Phase 3: geoms. Each plot installs its own clip (if
+        // enabled) and paints its geoms; cross-plot overlays layer
+        // in attach order. Picking is opt-in per geom via the
+        // `"pick_id"` channel; the orchestrator does no ticket
+        // allocation.
+        for list in self.plots.values_mut() {
+            for plot in list {
+                plot.draw_geoms_into(scene, layout, &self.scales, dpi);
+            }
+        }
+
+        // Phase 4: axes + legends + plot text. Cartesian axes
+        // render in the patch's anatomical axis slots; polar axes
+        // render inside the panel area (without the panel clip),
+        // letting labels bleed beyond the inscribed disk and the
+        // axis lines paint over the panel background.
         #[cfg(feature = "text")]
-        for plot in self.plots.values() {
-            plot.draw_chrome_into(scene, layout, &self.scales, dpi);
+        for list in self.plots.values() {
+            for plot in list {
+                plot.draw_chrome_into(scene, layout, &self.scales, dpi);
+            }
         }
 
         // Clear dirty bits after a successful render.
@@ -437,7 +585,11 @@ impl PlotComposition {
     ///   bound to scales whose output range doesn't match.
     pub fn validate(&self) -> Vec<ValidationIssue> {
         let mut out = Vec::new();
-        for (plot_id, plot) in &self.plots {
+        for (plot_id, plot) in self
+            .plots
+            .iter()
+            .flat_map(|(k, v)| v.iter().map(move |p| (k, p)))
+        {
             // Walk declared channels (drives expected_output checks).
             let decls: HashMap<&str, &super::geom::ChannelDecl> = plot
                 .geom_ids()
@@ -494,8 +646,10 @@ impl PlotComposition {
     /// heuristics consume the dirty bits.
     fn flag_plots_referencing(&mut self, scale_name: &str) {
         let target: Arc<str> = Arc::from(scale_name);
-        for (pid, plot) in &self.plots {
-            let referenced = plot.bindings().any(|(_, sn)| sn == &*target);
+        for (pid, list) in &self.plots {
+            let referenced = list
+                .iter()
+                .any(|plot| plot.bindings().any(|(_, sn)| sn == &*target));
             if referenced {
                 self.plot_dirty.insert(pid.clone(), true);
             }

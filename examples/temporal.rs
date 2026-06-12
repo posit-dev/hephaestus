@@ -19,7 +19,9 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{beside, Composition, Patch};
 use hephaestus::geometry::Size;
+use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom};
+use hephaestus::scales::chrome::AxisSide;
 use hephaestus::scales::value::Date;
 use hephaestus::Renderer;
 
@@ -72,6 +74,11 @@ fn main() {
                 .set("size", 5.0_f64)
                 .build(),
         );
+        p.add_axis(Axis::rail(
+            x_scale_name,
+            AxisPlacement::Cartesian(AxisSide::Bottom),
+        ));
+        p.add_axis(Axis::rail("y", AxisPlacement::Cartesian(AxisSide::Left)));
         view.attach_plot(p);
     }
 

@@ -15,7 +15,8 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{beside, Composition, Patch};
 use hephaestus::geometry::Size;
-use hephaestus::plot::projection::{PolarEdgeStyle, PolarProjection, Projection};
+use hephaestus::plot::chrome::axis::{Axis, AxisPlacement, PolarRing};
+use hephaestus::plot::projection::{PolarProjection, Projection};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom, RectGeom, SegmentGeom};
 use hephaestus::Renderer;
 
@@ -37,13 +38,10 @@ fn comp_shape() -> Composition {
 /// left or down, so the bbox is asymmetric around the math origin.
 fn partial_projection() -> Projection {
     Projection::Polar(PolarProjection {
-        angle_channel: "x".into(),
-        radius_channel: "y".into(),
         theta_start: -std::f64::consts::PI / 3.0,
         theta_end: 3.0 * std::f64::consts::PI / 4.0,
         inner_radius_frac: 0.2,
-        edge_style: PolarEdgeStyle::Geodesic,
-        theta_break_fracs: Vec::new(),
+        ..PolarProjection::full_circle()
     })
 }
 
@@ -135,6 +133,14 @@ fn main() {
             .set("size", 6.0_f64)
             .build(),
     );
+    p_scatter.add_axis(Axis::rail(
+        "theta_full",
+        AxisPlacement::PolarAngular(PolarRing::Outer),
+    ));
+    p_scatter.add_axis(Axis::rail(
+        "radius_unit",
+        AxisPlacement::PolarRadius { theta_frac: 0.0 },
+    ));
     view.attach_plot(p_scatter);
 
     // ── Rose: annular-wedge bars via RectGeom (its 4 edges densify
@@ -152,6 +158,14 @@ fn main() {
             .set("fill", bar_color)
             .build(),
     );
+    p_rose.add_axis(Axis::rail(
+        "theta_full",
+        AxisPlacement::PolarAngular(PolarRing::Outer),
+    ));
+    p_rose.add_axis(Axis::rail(
+        "radius_unit",
+        AxisPlacement::PolarRadius { theta_frac: 0.0 },
+    ));
     view.attach_plot(p_rose);
 
     // ── Gauge ──
@@ -169,6 +183,21 @@ fn main() {
             .set("linewidth", 4.0_f64)
             .build(),
     );
+    p_gauge.add_axis(Axis::rail(
+        "gauge_theta",
+        AxisPlacement::PolarAngular(PolarRing::Outer),
+    ));
+    // Inner ring labels — useful on the gauge because it's a ring
+    // (40 % hole), and showing the inner ring's tick marks gives a
+    // second reference for reading the needle position.
+    p_gauge.add_axis(Axis::rail(
+        "gauge_theta",
+        AxisPlacement::PolarAngular(PolarRing::Inner),
+    ));
+    p_gauge.add_axis(Axis::rail(
+        "gauge_radius",
+        AxisPlacement::PolarRadius { theta_frac: 0.0 },
+    ));
     view.attach_plot(p_gauge);
 
     // ── Partial arc (-60° → 135°) ──
@@ -184,6 +213,14 @@ fn main() {
             .set("size", 7.0_f64)
             .build(),
     );
+    p_partial.add_axis(Axis::rail(
+        "partial_theta",
+        AxisPlacement::PolarAngular(PolarRing::Outer),
+    ));
+    p_partial.add_axis(Axis::rail(
+        "partial_radius",
+        AxisPlacement::PolarRadius { theta_frac: 0.0 },
+    ));
     view.attach_plot(p_partial);
 
     let issues = view.validate();

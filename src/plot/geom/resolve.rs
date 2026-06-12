@@ -412,14 +412,14 @@ pub(crate) fn draw_linetype_with_markers(
                                 } else {
                                     linewidth_px
                                 };
-                                let marker_xform = xform
+                                let marker_xform_unscaled = xform
                                     * Affine::translate(sample.point.to_vec2())
-                                    * Affine::rotate(sample.tangent.atan2())
-                                    * Affine::scale(scale_factor);
+                                    * Affine::rotate(sample.tangent.atan2());
                                 emit_marker_shape(
                                     scene,
                                     shape,
-                                    marker_xform,
+                                    marker_xform_unscaled,
+                                    scale_factor,
                                     marker_fill,
                                     marker_stroke,
                                     pt_to_px(DEFAULT_MARKER_OUTLINE_PT, dpi),
@@ -571,11 +571,12 @@ pub(crate) fn emit_endpoint_marker(
         sn * scaled_anchor.x + cs * scaled_anchor.y,
     );
     let origin = placement.to_vec2() - anchor_world;
-    let local = Affine::translate(origin) * rot * Affine::scale(size_px);
+    let local_unscaled = Affine::translate(origin) * rot;
     emit_marker_shape(
         scene,
         shape,
-        xform * local,
+        xform * local_unscaled,
+        size_px,
         marker_fill,
         marker_stroke,
         stroke_width_px,
@@ -594,10 +595,12 @@ pub(crate) fn emit_endpoint_marker(
 ///   lands at the placement point. The caller's `xform` is expected to
 ///   already carry the desired translate/rotate/scale; the scale factor
 ///   becomes the glyph's effective font size in pixels.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_marker_shape(
     scene: &mut dyn SceneBuilder,
     shape: &Shape,
-    xform: Affine,
+    xform_unscaled: Affine,
+    scale_factor: f64,
     marker_fill: Color,
     marker_stroke: Color,
     outline_px: f64,
@@ -605,6 +608,7 @@ pub(crate) fn emit_marker_shape(
 ) {
     match shape.kind() {
         ShapeKind::Paths { paths, style } => {
+            let xform = xform_unscaled * Affine::scale(scale_factor);
             let outline_spec = Stroke::new(outline_px);
             for sub in paths {
                 match style {
@@ -642,15 +646,22 @@ pub(crate) fn emit_marker_shape(
             // linewidth track. The bbox height is the typographic
             // ascender, but the visible ink of most glyphs only fills
             // ~85% of that height (typical emoji padding within their
-            // em-square; Latin cap-to-baseline within ascender). The
-            // boost is composed inside the same transform as the
-            // centring shift, so the glyph stays centred while
-            // growing. PointGeom does *not* apply this boost — its
-            // sizing is anchored to the GLYPH_BBOX_REFERENCE
-            // convention, which already targets the vector-shape
-            // visual extent.
+            // em-square; Latin cap-to-baseline within ascender).
+            // PointGeom does *not* apply this boost — its sizing is
+            // anchored to the GLYPH_BBOX_REFERENCE convention, which
+            // already targets the vector-shape visual extent.
+            //
+            // The effective scale (incl. INK_COVERAGE_BOOST) is baked
+            // into `font_size` rather than the transform so vello
+            // picks the matching bitmap strike for colour-emoji
+            // fonts — `font_size: 1.0` with a transform scale would
+            // pick the smallest strike and upscale (= fuzzy).
             const INK_COVERAGE_BOOST: f64 = 1.0 / 0.85;
-            let centring = Affine::translate(em_origin.to_vec2() - em_bbox.center().to_vec2());
+            let effective_font_size = scale_factor * INK_COVERAGE_BOOST;
+            // Centring is in em-space; convert to pixel space at the
+            // effective font size, then apply the unscaled outer
+            // transform (which carries the rotation + translation).
+            let centring_em = em_origin.to_vec2() - em_bbox.center().to_vec2();
             let glyphs = [Glyph {
                 id: glyph_id,
                 x: 0.0,
@@ -659,8 +670,8 @@ pub(crate) fn emit_marker_shape(
             let brush = Brush::Solid(marker_fill);
             let run = GlyphRun {
                 font,
-                font_size: 1.0,
-                transform: xform * Affine::scale(INK_COVERAGE_BOOST) * centring,
+                font_size: effective_font_size as f32,
+                transform: xform_unscaled * Affine::translate(centring_em * effective_font_size),
                 glyph_transform: None,
                 brush: &brush,
                 brush_alpha: 1.0,

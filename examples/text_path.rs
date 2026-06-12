@@ -13,7 +13,9 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{beside, Composition, Patch, Span};
 use hephaestus::geometry::Size;
+use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::{scale, LineGeom, Plot, PlotComposition, TextPathGeom};
+use hephaestus::scales::chrome::AxisSide;
 use hephaestus::Renderer;
 
 fn main() {
@@ -94,6 +96,15 @@ fn main() {
                 .build(),
         );
 
+        plot.add_axis(Axis::rail(
+            "x_axis",
+            AxisPlacement::Cartesian(AxisSide::Bottom),
+        ));
+        plot.add_axis(Axis::rail(
+            "y_axis",
+            AxisPlacement::Cartesian(AxisSide::Left),
+        ));
+
         let mut view = PlotComposition::new(comp())
             .add_scale("x_axis", scale::continuous(0.0..=100.0))
             .add_scale("y_axis", scale::continuous(0.0..=100.0))
@@ -160,6 +171,14 @@ fn main() {
                     .set("vjust", -3.0_f64)
                     .build(),
             );
+            plot.add_axis(Axis::rail(
+                "x_axis",
+                AxisPlacement::Cartesian(AxisSide::Bottom),
+            ));
+            plot.add_axis(Axis::rail(
+                "y_axis",
+                AxisPlacement::Cartesian(AxisSide::Left),
+            ));
             plot
         };
 
@@ -252,6 +271,15 @@ fn main() {
                 .set("fill", rgb8(30, 40, 70))
                 .build(),
         );
+
+        plot.add_axis(Axis::rail(
+            "x_axis",
+            AxisPlacement::Cartesian(AxisSide::Bottom),
+        ));
+        plot.add_axis(Axis::rail(
+            "y_axis",
+            AxisPlacement::Cartesian(AxisSide::Left),
+        ));
 
         let mut view = PlotComposition::new(comp())
             .add_scale("x_axis", scale::continuous(0.0..=100.0))

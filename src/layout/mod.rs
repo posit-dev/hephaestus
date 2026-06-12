@@ -407,15 +407,99 @@ impl Cell {
         }
     }
 
+    /// Like [`Self::measured`] but takes an already-boxed measure.
+    /// Used when a caller has extracted a `Box<dyn Measure>` from
+    /// another cell (via [`Self::into_measure`]) and wants to
+    /// re-wrap it without unboxing.
+    pub fn measured_boxed(m: Box<dyn Measure>) -> Self {
+        Self {
+            measure: m,
+            id: None,
+        }
+    }
+
     /// Tag this cell so its resolved rect is retrievable from
     /// [`Layout::rect`].
     pub fn id(mut self, id: CellId) -> Self {
         self.id = Some(id);
         self
     }
+
+    /// Consume this cell and return its [`Measure`]. Callers that
+    /// need to merge multiple cells into one (e.g. the orchestrator
+    /// when several plots contribute to the same patch slot) extract
+    /// the inner measures here and wrap them in
+    /// [`MaxMergeMeasure`].
+    pub fn into_measure(self) -> Box<dyn Measure> {
+        self.measure
+    }
+
+    /// Borrow this cell's identifier tag, if any.
+    pub fn cell_id(&self) -> Option<CellId> {
+        self.id
+    }
 }
 
 struct EmptyMeasure;
+
+/// A [`Measure`] that delegates to a stack of child measures and
+/// reports the **max** across them on every query. Used when the
+/// orchestrator merges multiple contributions to the same slot from
+/// different plots — the resulting cell sizes itself to fit
+/// whichever child needs the most space.
+///
+/// Width-hint merging picks `Min(max_min)` when every child reports
+/// `Min`; if any child opts into iteration via
+/// [`WidthHint::NeedsHeight`], the wrapper does too with the max
+/// seed. The iteration loop then queries `width_at` on the wrapper,
+/// which max-merges across the same children.
+pub struct MaxMergeMeasure {
+    children: Vec<Box<dyn Measure>>,
+}
+
+impl MaxMergeMeasure {
+    /// Build a wrapper around a non-empty stack of measures. Passing
+    /// an empty `Vec` is allowed; the wrapper then behaves like
+    /// [`EmptyMeasure`] (zero on every query).
+    pub fn new(children: Vec<Box<dyn Measure>>) -> Self {
+        Self { children }
+    }
+}
+
+impl Measure for MaxMergeMeasure {
+    fn width_hint(&self, dpi: f64) -> WidthHint {
+        let mut max_min: f64 = 0.0;
+        let mut any_needs_height = false;
+        for c in &self.children {
+            match c.width_hint(dpi) {
+                WidthHint::Min(w) => max_min = max_min.max(w),
+                WidthHint::NeedsHeight { seed } => {
+                    any_needs_height = true;
+                    max_min = max_min.max(seed);
+                }
+            }
+        }
+        if any_needs_height {
+            WidthHint::NeedsHeight { seed: max_min }
+        } else {
+            WidthHint::Min(max_min)
+        }
+    }
+
+    fn height_at(&self, width: f64, dpi: f64) -> f64 {
+        self.children
+            .iter()
+            .map(|c| c.height_at(width, dpi))
+            .fold(0.0_f64, f64::max)
+    }
+
+    fn width_at(&self, height: f64, dpi: f64) -> f64 {
+        self.children
+            .iter()
+            .map(|c| c.width_at(height, dpi))
+            .fold(0.0_f64, f64::max)
+    }
+}
 
 impl Measure for EmptyMeasure {
     fn width_hint(&self, _dpi: f64) -> WidthHint {
@@ -736,6 +820,21 @@ impl Layout {
     /// Iterate every tagged node.
     pub fn iter(&self) -> impl Iterator<Item = (CellId, Rect)> + '_ {
         self.rects.iter().map(|(k, v)| (*k, *v))
+    }
+
+    /// Shift every resolved rect (and the root) by `(dx, dy)` pixels.
+    /// Used to centre a layout inside a larger surface when the
+    /// composition's natural aspect leaves slack on one or both axes.
+    pub fn translate(&mut self, dx: f64, dy: f64) {
+        self.root = Rect::new(
+            self.root.x0 + dx,
+            self.root.y0 + dy,
+            self.root.x1 + dx,
+            self.root.y1 + dy,
+        );
+        for rect in self.rects.values_mut() {
+            *rect = Rect::new(rect.x0 + dx, rect.y0 + dy, rect.x1 + dx, rect.y1 + dy);
+        }
     }
 }
 
@@ -1453,9 +1552,12 @@ mod tests {
         // 600×450. Fixed pre-allocation: 100 col + 50 row = 100 col left,
         // 400 row left after fixed. Free width for Fr = 600 - 100 = 500.
         // respect_at(1, 1) marks cell (row 1, col 1). Respected col 1 fr=1,
-        // unrespected col 2 fr=1, respected row 1 fr=1.
-        // resp_scale: width 500/1 = 500 vs height 400/1 = 400 → 400 binds.
-        // col 1 = 1*400 = 400. col 2 = (500 - 400) / 1 = 100. row 1 = 400.
+        // unrespected col 2 fr=1 (total col Fr = 2), respected row 1 fr=1
+        // (total row Fr = 1). resp_scale divides by *total* Fr in each
+        // axis so unrespected siblings retain their share before respect
+        // consumes the axis: width 500/2 = 250 vs height 400/1 = 400 →
+        // 250 binds. col 1 = 1*250 = 250 (locked square at 250×250); col 2
+        // absorbs the remaining 500 - 250 = 250 width.
         let mut g = Grid::new(
             [
                 Track::Fixed(Length::px(100.0)),
@@ -1470,11 +1572,11 @@ mod tests {
         let layout = g.solve(Size::new(600.0, 450.0), 96.0);
 
         let r1 = layout.rect(CellId(1)).unwrap();
-        approx_eq(r1.x1 - r1.x0, 400.0, 0.5, "respected col width");
-        approx_eq(r1.y1 - r1.y0, 400.0, 0.5, "respected row height");
+        approx_eq(r1.x1 - r1.x0, 250.0, 0.5, "respected col width");
+        approx_eq(r1.y1 - r1.y0, 250.0, 0.5, "respected row height");
 
         let r2 = layout.rect(CellId(2)).unwrap();
-        approx_eq(r2.x1 - r2.x0, 100.0, 0.5, "unrespected col absorbs slack");
+        approx_eq(r2.x1 - r2.x0, 250.0, 0.5, "unrespected col gets its share");
     }
 
     #[test]
@@ -1507,21 +1609,22 @@ mod tests {
     #[test]
     fn respect_matrix_width_binding_uses_smaller_scale() {
         // Same shape as `respect_matrix_single_cell_locks_one_pair` but
-        // with the aspect-ratio flipped so width is the binding axis.
+        // with the viewport flipped so width is the binding axis.
         // 1×2 grid `[Fr(1), Fr(1)] × [Fr(1)]` in 200×800 viewport
-        // (tall narrow) with respect_at(0, 0).
-        // resp_scale: width 200/1 = 200 vs height 800/1 = 800 → 200 binds.
-        // col 0 = 200, col 1 unrespected = (200 - 200)/1 = 0 (no slack);
-        // row 0 = 200.
+        // (tall narrow) with respect_at(0, 0). Total col Fr = 2,
+        // total row Fr = 1.
+        // resp_scale: width 200/2 = 100 vs height 800/1 = 800 → 100 binds.
+        // col 0 = 100 (locked square at 100×100); unrespected col 1
+        // absorbs the remaining 200 - 100 = 100 width; row 0 = 100.
         let mut g = Grid::new([Track::Fr(1.0), Track::Fr(1.0)], [Track::Fr(1.0)]).respect_at(0, 0);
         g.place(Placement::at(1, 1), Grid::cell().id(CellId(1)));
         g.place(Placement::at(1, 2), Grid::cell().id(CellId(2)));
         let layout = g.solve(Size::new(200.0, 800.0), 96.0);
         let r1 = layout.rect(CellId(1)).unwrap();
-        approx_eq(r1.x1 - r1.x0, 200.0, 0.5, "width-bound col 0");
-        approx_eq(r1.y1 - r1.y0, 200.0, 0.5, "row 0 height matches");
+        approx_eq(r1.x1 - r1.x0, 100.0, 0.5, "width-bound col 0");
+        approx_eq(r1.y1 - r1.y0, 100.0, 0.5, "row 0 height matches");
         let r2 = layout.rect(CellId(2)).unwrap();
-        approx_eq(r2.x1 - r2.x0, 0.0, 0.5, "unrespected col gets zero slack");
+        approx_eq(r2.x1 - r2.x0, 100.0, 0.5, "unrespected col gets its share");
     }
 
     #[test]

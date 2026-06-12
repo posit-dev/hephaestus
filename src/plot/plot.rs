@@ -72,22 +72,64 @@ pub struct Plot {
     title: Option<String>,
     subtitle: Option<String>,
     caption: Option<String>,
-    axis_left_title: Option<String>,
-    axis_bottom_title: Option<String>,
-    axis_right_title: Option<String>,
-    axis_top_title: Option<String>,
 
     shapes: ShapeRegistry,
+
+    /// Axes attached to this plot. Composed explicitly via
+    /// [`Self::add_axis`]; no axis is rendered unless the caller
+    /// adds one. Same opt-in model as legends.
+    #[cfg(feature = "text")]
+    axes: Vec<crate::plot::chrome::axis::Axis>,
+    #[cfg(feature = "text")]
+    next_axis_id: u32,
+
+    /// Legends attached to this plot. Composed explicitly by the
+    /// caller via [`Self::add_legend`] / [`Self::add_legend_separate`].
+    /// Nothing is inferred from `bindings`. Gated on `feature = "text"`
+    /// because `Legend` references types from the text-gated chrome
+    /// module.
+    #[cfg(feature = "text")]
+    legends: Vec<crate::plot::chrome::legend::Legend>,
+    /// Next [`LegendId`] to hand out from `add_legend*`.
+    #[cfg(feature = "text")]
+    next_legend_id: u32,
 
     /// Coordinate projection. v1 ships `Cartesian` only — geom output
     /// is unchanged from the pre-projection era. E.3b introduces
     /// `Polar` for partial-arc / gauge layouts.
     projection: crate::plot::projection::Projection,
 
+    /// Whether geoms are clipped to the projection's outline when
+    /// drawn. `true` by default. When `false`, geoms can spill
+    /// beyond the panel (occasionally useful for debug renders or
+    /// when the outline is itself decorative). Always uses the
+    /// projection's outline (rect for cartesian, circle / arc /
+    /// polygon for polar) so clipping behaves consistently across
+    /// projections.
+    clip: bool,
+
+    /// Patch-wide background fill — covers panel + axes + titles +
+    /// padding, but not the outer margin. `None` by default (no
+    /// fill; the canvas colour shows through). Painted in the
+    /// orchestrator's first render pass across all plots, before
+    /// any panel chrome / geom is drawn.
+    background_color: Option<crate::color::Color>,
+
     /// Tracked for the orchestrator's partial-repaint heuristics; not
     /// currently consulted by the draw path.
     #[allow(dead_code)]
     dirty: bool,
+
+    /// Data-space aspect ratio for cartesian plots — how much screen
+    /// space one x-axis unit takes compared to one y-axis unit. A
+    /// ratio of `2.0` makes one x-unit twice as wide on screen as one
+    /// y-unit is tall (matching `coord_fixed(ratio = 0.5)` in ggplot:
+    /// the convention here is x:y, where ggplot's `ratio` is y/x).
+    /// `None` (the default) lets the panel flex.
+    ///
+    /// Ignored when the projection is non-cartesian — polar
+    /// projections compute their own aspect from their bounding box.
+    cartesian_aspect_ratio: Option<f64>,
 }
 
 impl Plot {
@@ -108,14 +150,56 @@ impl Plot {
             title: None,
             subtitle: None,
             caption: None,
-            axis_left_title: None,
-            axis_bottom_title: None,
-            axis_right_title: None,
-            axis_top_title: None,
             shapes: ShapeRegistry::with_builtins(),
+            #[cfg(feature = "text")]
+            axes: Vec::new(),
+            #[cfg(feature = "text")]
+            next_axis_id: 0,
+            #[cfg(feature = "text")]
+            legends: Vec::new(),
+            #[cfg(feature = "text")]
+            next_legend_id: 0,
             projection: crate::plot::projection::Projection::Cartesian,
+            clip: true,
+            background_color: None,
             dirty: true,
+            cartesian_aspect_ratio: None,
         }
+    }
+
+    /// Lock the panel's data-space aspect ratio to `ratio` (x-unit to
+    /// y-unit). With `ratio = 2.0`, one x-axis unit takes up twice
+    /// the screen space as one y-axis unit — equivalent to
+    /// ggplot's `coord_fixed(ratio = 0.5)`. Computed against each
+    /// scale's input-range extent at wire time; the patch's panel
+    /// is then aspect-locked to `(x_extent * ratio, y_extent)`.
+    ///
+    /// Only meaningful for the cartesian projection. Polar
+    /// projections override with their own bbox aspect.
+    pub fn aspect_ratio(mut self, ratio: f64) -> Self {
+        self.cartesian_aspect_ratio = if ratio.is_finite() && ratio > 0.0 {
+            Some(ratio)
+        } else {
+            None
+        };
+        self
+    }
+
+    /// Override whether geoms are clipped to the projection's
+    /// outline (default `true`). Set to `false` to let geoms spill
+    /// past the panel boundary.
+    pub fn clip(mut self, clip: bool) -> Self {
+        self.clip = clip;
+        self
+    }
+
+    /// Set the patch-wide background fill colour. Drawn in the
+    /// orchestrator's first render pass; covers panel + axes +
+    /// titles + padding, but not the outer margin. Pass `None`
+    /// (the default) to skip the fill entirely.
+    pub fn background_color(mut self, color: Option<crate::color::Color>) -> Self {
+        self.background_color = color;
+        self
     }
 
     /// Read accessor for the bound patch id.
@@ -128,6 +212,70 @@ impl Plot {
     /// override via [`Self::projection`].
     pub fn projection_ref(&self) -> &crate::plot::projection::Projection {
         &self.projection
+    }
+
+    /// Aspect ratio this plot wants its panel cell locked to, as a
+    /// `(width, height)` ratio. `None` means "I don't care; let the
+    /// layout flex".
+    ///
+    /// - **Cartesian without `aspect_ratio`**: `None` — flex.
+    /// - **Cartesian with `aspect_ratio = r`**: `(x_extent * r,
+    ///   y_extent)` so one x-unit takes `r` times the screen space
+    ///   of one y-unit. Requires both `"x"` and `"y"` bindings to
+    ///   resolve to continuous scales with finite extents; returns
+    ///   `None` otherwise.
+    /// - **Polar with `fit_to_bbox = true`** (the default): the
+    ///   projection's bbox aspect (e.g. `2:1` for a half-disk
+    ///   gauge, `1:1` for a full circle), so the inscribed
+    ///   projection geometry fills the panel without slack.
+    /// - **Polar with `fit_to_bbox = false`**: `1:1` (a square
+    ///   panel; the largest inscribed disk fills it).
+    ///
+    /// The orchestrator collects each attached plot's aspect on a
+    /// patch and locks the patch to it when every plot agrees; if
+    /// they disagree it leaves the patch unlocked.
+    pub fn desired_panel_aspect(&self, registry: &ScaleRegistry) -> Option<(f32, f32)> {
+        match &self.projection {
+            crate::plot::projection::Projection::Cartesian => {
+                let ratio = self.cartesian_aspect_ratio?;
+                let x_extent = self
+                    .bindings
+                    .get("x")
+                    .and_then(|n| registry.get(n))
+                    .and_then(|s| s.input_range())
+                    .and_then(|r| r.extent())?;
+                let y_extent = self
+                    .bindings
+                    .get("y")
+                    .and_then(|n| registry.get(n))
+                    .and_then(|s| s.input_range())
+                    .and_then(|r| r.extent())?;
+                if !(x_extent > 0.0 && y_extent > 0.0) {
+                    return None;
+                }
+                let w = (x_extent * ratio) as f32;
+                let h = y_extent as f32;
+                if w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0 {
+                    Some((w, h))
+                } else {
+                    None
+                }
+            }
+            crate::plot::projection::Projection::Polar(p) => {
+                if p.fit_to_bbox {
+                    let (min_x, min_y, max_x, max_y) = p.bounding_box_units();
+                    let bbox_w = (max_x - min_x) as f32;
+                    let bbox_h = (max_y - min_y) as f32;
+                    if bbox_w.is_finite() && bbox_h.is_finite() && bbox_w > 0.0 && bbox_h > 0.0 {
+                        Some((bbox_w, bbox_h))
+                    } else {
+                        None
+                    }
+                } else {
+                    Some((1.0, 1.0))
+                }
+            }
+        }
     }
 
     /// Set the coordinate projection (consumes self; builder-style).
@@ -155,30 +303,6 @@ impl Plot {
     /// Set the plot's caption, rendered in the [`Slot::Caption`] slot.
     pub fn caption(mut self, s: impl Into<String>) -> Self {
         self.caption = Some(s.into());
-        self
-    }
-
-    /// Set the left axis title.
-    pub fn axis_left_title(mut self, s: impl Into<String>) -> Self {
-        self.axis_left_title = Some(s.into());
-        self
-    }
-
-    /// Set the bottom axis title.
-    pub fn axis_bottom_title(mut self, s: impl Into<String>) -> Self {
-        self.axis_bottom_title = Some(s.into());
-        self
-    }
-
-    /// Set the right axis title.
-    pub fn axis_right_title(mut self, s: impl Into<String>) -> Self {
-        self.axis_right_title = Some(s.into());
-        self
-    }
-
-    /// Set the top axis title.
-    pub fn axis_top_title(mut self, s: impl Into<String>) -> Self {
-        self.axis_top_title = Some(s.into());
         self
     }
 
@@ -306,17 +430,47 @@ impl<'a> ScaleResolver for PlotScaleResolver<'a> {
 // panel rect.
 
 impl Plot {
-    /// Draw geoms into the panel slot rect from `layout`. Installs a
-    /// panel clip (`push_layer` / `pop_layer`), builds a
-    /// [`PlotScaleResolver`] over the plot's bindings and the given
-    /// registry, and iterates the geom list.
-    ///
-    /// Picking is opt-in per geom via the `"pick_id"` channel. Geoms
-    /// without a `pick_id` channel set are non-pickable (they emit
-    /// `PickId::Skip` for every primitive); no ticket allocation
-    /// happens at this layer.
-    pub fn draw_panel_into(
-        &mut self,
+    /// Paint this plot's [`Slot::Background`] fill — the patch-wide
+    /// background covering panel + axes + titles + padding (but not
+    /// the outer margin). `None` background colour skips the fill.
+    /// Called by the orchestrator in a first pass across all plots
+    /// so backgrounds settle before any panel chrome / geom draws
+    /// on top — important when multiple plots share a patch.
+    pub fn draw_patch_background_into(
+        &self,
+        scene: &mut dyn SceneBuilder,
+        layout: &crate::composition::CompositionLayout,
+    ) {
+        let Some(color) = self.background_color else {
+            return;
+        };
+        let Some(rect) = layout.get(&self.patch_id, Slot::Background) else {
+            return;
+        };
+        if rect.x1 <= rect.x0 || rect.y1 <= rect.y0 {
+            return;
+        }
+        use kurbo::Shape;
+        let path: crate::path::Path = rect.to_path(0.0);
+        scene.fill(
+            crate::path::FillRule::NonZero,
+            crate::geometry::Affine::IDENTITY,
+            &crate::brush::Brush::Solid(color),
+            None,
+            &path,
+            crate::pick::PickId::Skip,
+        );
+    }
+
+    /// Paint the projection's panel chrome — background fill, grid
+    /// lines, and outline stroke — into the panel slot. No geoms.
+    /// Called as the orchestrator's phase-2 pass across every plot
+    /// so all panel backgrounds settle before any geom is drawn —
+    /// otherwise a later plot's panel background would overpaint an
+    /// earlier plot's geoms when the earlier plot has `clip = false`
+    /// and its geoms spill into the later panel.
+    pub fn draw_panel_chrome_into(
+        &self,
         scene: &mut dyn SceneBuilder,
         layout: &crate::composition::CompositionLayout,
         registry: &ScaleRegistry,
@@ -329,26 +483,6 @@ impl Plot {
         if panel.x1 <= panel.x0 || panel.y1 <= panel.y0 {
             return;
         }
-
-        // Rebuild diff state on every dirty geom before drawing.
-        for (_, geom) in self.geoms.iter_mut() {
-            geom.rebuild_diff_against_previous();
-        }
-
-        // Clip to the panel.
-        let panel_path = rect_to_path(panel);
-        scene.push_layer(
-            crate::blend::BlendMode::default(),
-            1.0,
-            crate::geometry::Affine::IDENTITY,
-            &panel_path,
-        );
-
-        // In-panel chrome: background, minor + major grid lines,
-        // panel outline. Shared across all projections — the
-        // projection contributes the boundary path and per-channel
-        // grid-line geometry. Drawn before the geoms so they paint
-        // on top.
         #[cfg(feature = "text")]
         {
             let channels = self.projection.consume_channels();
@@ -371,6 +505,38 @@ impl Plot {
                 dpi,
             );
         }
+        // Suppress unused-vars under no-text.
+        #[cfg(not(feature = "text"))]
+        let _ = (scene, panel, registry, dpi);
+    }
+
+    /// Draw geoms into the panel slot. Installs a clip layer using
+    /// the projection's outline path when [`Plot::clip`] is `true`
+    /// (the default). Phase-3 pass of the orchestrator render — all
+    /// panel chromes have been painted by phase 2, so geoms layer
+    /// cleanly without later chrome erasing earlier spilled output.
+    ///
+    /// Picking is opt-in per geom via the `"pick_id"` channel;
+    /// geoms without one emit `PickId::Skip` for every primitive.
+    pub fn draw_geoms_into(
+        &mut self,
+        scene: &mut dyn SceneBuilder,
+        layout: &crate::composition::CompositionLayout,
+        registry: &ScaleRegistry,
+        dpi: f64,
+    ) {
+        let panel = match layout.get(&self.patch_id, Slot::Panel) {
+            Some(r) => r,
+            None => return,
+        };
+        if panel.x1 <= panel.x0 || panel.y1 <= panel.y0 {
+            return;
+        }
+
+        // Rebuild diff state on every dirty geom before drawing.
+        for (_, geom) in self.geoms.iter_mut() {
+            geom.rebuild_diff_against_previous();
+        }
 
         let resolver = PlotScaleResolver {
             bindings: &self.bindings,
@@ -378,15 +544,57 @@ impl Plot {
         };
         let ctx =
             GeomContext::with_projection(panel, dpi, &self.shapes, &resolver, &self.projection);
+
+        let clip_path: Option<crate::path::Path> = if self.clip {
+            #[cfg(feature = "text")]
+            {
+                Some(crate::plot::chrome::panel::panel_outline_path(
+                    &self.projection,
+                    panel,
+                ))
+            }
+            #[cfg(not(feature = "text"))]
+            {
+                Some(rect_to_path(panel))
+            }
+        } else {
+            None
+        };
+
+        if let Some(path) = &clip_path {
+            scene.push_layer(
+                crate::blend::BlendMode::default(),
+                1.0,
+                crate::geometry::Affine::IDENTITY,
+                path,
+            );
+        }
         for (_, geom) in self.geoms.iter() {
             geom.draw(scene, &ctx);
         }
-
-        scene.pop_layer();
+        if clip_path.is_some() {
+            scene.pop_layer();
+        }
         self.dirty = false;
+    }
+
+    /// One-call panel draw: panel chrome + geoms in sequence.
+    /// Convenience for stand-alone (non-orchestrator) callers that
+    /// only have one plot per patch. The orchestrator's render
+    /// flow splits these so multi-plot patches phase correctly.
+    pub fn draw_panel_into(
+        &mut self,
+        scene: &mut dyn SceneBuilder,
+        layout: &crate::composition::CompositionLayout,
+        registry: &ScaleRegistry,
+        dpi: f64,
+    ) {
+        self.draw_panel_chrome_into(scene, layout, registry, dpi);
+        self.draw_geoms_into(scene, layout, registry, dpi);
     }
 }
 
+#[allow(dead_code)]
 fn rect_to_path(r: Rect) -> crate::path::Path {
     use kurbo::Shape;
     r.to_path(0.0)
@@ -396,6 +604,88 @@ fn rect_to_path(r: Rect) -> crate::path::Path {
 
 #[cfg(feature = "text")]
 impl Plot {
+    /// Attach an axis to this plot. Validates the placement against
+    /// the active projection — cartesian axes require a Cartesian
+    /// projection; polar axes require a Polar projection. Panics
+    /// otherwise, same trade-off as `Plot::new`.
+    pub fn add_axis(
+        &mut self,
+        axis: crate::plot::chrome::axis::Axis,
+    ) -> crate::plot::chrome::axis::AxisId {
+        use crate::plot::chrome::axis::AxisPlacement;
+        use crate::plot::projection::Projection;
+        match (&axis.placement, &self.projection) {
+            (AxisPlacement::Cartesian(_), Projection::Cartesian) => {}
+            (AxisPlacement::PolarRadius { .. } | AxisPlacement::PolarAngular(_), Projection::Polar(_)) => {}
+            (placement, projection) => panic!(
+                "Plot::add_axis: placement {placement:?} is incompatible with projection {projection:?}"
+            ),
+        }
+        let id = crate::plot::chrome::axis::AxisId(self.next_axis_id);
+        self.next_axis_id += 1;
+        self.axes.push(axis);
+        id
+    }
+
+    /// Borrow the attached axes in insertion order.
+    pub fn axes(&self) -> &[crate::plot::chrome::axis::Axis] {
+        &self.axes
+    }
+
+    /// Remove all attached axes.
+    pub fn clear_axes(&mut self) {
+        self.axes.clear();
+    }
+
+    /// Attach a legend to this plot. If an existing legend matches
+    /// on `(domain_scale, side, title)`, its keys are appended and
+    /// the existing legend's id is returned. Otherwise a new legend
+    /// is added and its id returned.
+    pub fn add_legend(
+        &mut self,
+        legend: crate::plot::chrome::legend::Legend,
+    ) -> crate::plot::chrome::legend::LegendId {
+        use crate::plot::chrome::legend::LegendBody;
+        if let Some(idx) = self
+            .legends
+            .iter()
+            .position(|l| l.is_compatible_with(&legend))
+        {
+            // Only stack-style legends merge their keys; the
+            // colorbar case is excluded by `is_compatible_with`.
+            if let (LegendBody::Stack(existing), LegendBody::Stack(incoming)) =
+                (&mut self.legends[idx].body, legend.body)
+            {
+                existing.keys.extend(incoming.keys);
+            }
+            return crate::plot::chrome::legend::LegendId(idx as u32);
+        }
+        self.add_legend_separate(legend)
+    }
+
+    /// Attach a legend without merging into a compatible existing
+    /// legend. Use when two legends with the same triple should be
+    /// rendered side-by-side instead.
+    pub fn add_legend_separate(
+        &mut self,
+        legend: crate::plot::chrome::legend::Legend,
+    ) -> crate::plot::chrome::legend::LegendId {
+        let id = crate::plot::chrome::legend::LegendId(self.next_legend_id);
+        self.next_legend_id += 1;
+        self.legends.push(legend);
+        id
+    }
+
+    /// Borrow the attached legends in insertion order.
+    pub fn legends(&self) -> &[crate::plot::chrome::legend::Legend] {
+        &self.legends
+    }
+
+    /// Remove all attached legends.
+    pub fn clear_legends(&mut self) {
+        self.legends.clear();
+    }
+
     /// Wire chrome cells into `patch` based on this plot's current
     /// state. The returned `Patch` is ready to drop into a
     /// [`Composition`] for solving.
@@ -411,6 +701,18 @@ impl Plot {
     /// Unknown scale names also skip — `wire` is lenient by design;
     /// `PlotComposition::validate()` (Phase 7) surfaces such mismatches.
     pub fn wire(&self, mut patch: Patch, registry: &ScaleRegistry, dpi: f64) -> Patch {
+        // Aspect lock from the projection's natural geometry — see
+        // `Self::desired_panel_aspect`. Cartesian plots return
+        // `None`; polar plots return either the projection bbox
+        // aspect (fit_to_bbox = true) or 1:1 (fit_to_bbox = false).
+        // When the orchestrator merges multiple plots into one
+        // patch it cross-checks every plot's desired aspect for
+        // agreement before applying it to the final patch; this
+        // single-plot path sets it unconditionally.
+        if let Some((w, h)) = self.desired_panel_aspect(registry) {
+            patch = patch.aspect(w, h);
+        }
+
         // Title row + variants.
         if let Some(t) = &self.title {
             patch = patch.slot(Slot::Title, text_cell(t, title_style()));
@@ -421,46 +723,276 @@ impl Plot {
         if let Some(t) = &self.caption {
             patch = patch.slot(Slot::Caption, text_cell(t, caption_style()));
         }
-        if let Some(t) = &self.axis_left_title {
-            patch = patch.slot(Slot::AxisLeftTitle, text_cell(t, axis_title_style()));
-        }
-        if let Some(t) = &self.axis_bottom_title {
-            patch = patch.slot(Slot::AxisBottomTitle, text_cell(t, axis_title_style()));
-        }
-        if let Some(t) = &self.axis_right_title {
-            patch = patch.slot(Slot::AxisRightTitle, text_cell(t, axis_title_style()));
-        }
-        if let Some(t) = &self.axis_top_title {
-            patch = patch.slot(Slot::AxisTopTitle, text_cell(t, axis_title_style()));
-        }
+        // Axes — explicitly composed by the caller via
+        // `Plot::add_axis`. Each cartesian axis contributes a rail
+        // cell (when its `scale_name` is set) and / or a title cell
+        // (when its `title` is set) to the matching anatomical
+        // slots. Polar axes wire nothing here; they render in-panel
+        // from `draw_chrome_into`.
+        patch = self.wire_axes(patch, registry, dpi);
 
-        // Axes — wire the scale bound to "x" into AxisBottom and the
-        // scale bound to "y" into AxisLeft. Unbound or unknown-scale
-        // channels skip their slot.
-        //
-        // Polar / future Ternary draw chrome inside the panel (their
-        // `chrome_strategy()` returns `InsidePanel`); skip the axis
-        // slot population entirely. Labels may extend beyond the
-        // inscribed disk; reserving bleed strips around the panel for
-        // them is a follow-up (see `ChromeStrategy::InsidePanel` doc).
-        if self.projection.chrome_strategy() == crate::plot::projection::ChromeStrategy::PatchSlots
-        {
-            if let Some(s) = self.resolved_scale("x", registry) {
-                patch = patch.slot(
-                    Slot::AxisBottom,
-                    Cell::measured(BoxMeasure::new(s.axis_measure(AxisSide::Bottom, dpi))),
-                );
-            }
-            if let Some(s) = self.resolved_scale("y", registry) {
-                patch = patch.slot(
-                    Slot::AxisLeft,
-                    Cell::measured(BoxMeasure::new(s.axis_measure(AxisSide::Left, dpi))),
-                );
-            }
-        }
+        // Legends — explicitly composed by the caller via
+        // `Plot::add_legend{,_separate}`. Each attached legend
+        // contributes a `LegendMeasure` cell to the slot picked by
+        // its `side`. v1 supports one legend per side (multiple
+        // legends routed to the same slot overwrite); cross-side
+        // stacking is a follow-up.
+        patch = self.wire_legends(patch, registry, dpi);
 
         // Panel is always present (the geom panel lives here).
         self.wire_panel(patch)
+    }
+
+    fn wire_axes(&self, mut patch: Patch, registry: &ScaleRegistry, dpi: f64) -> Patch {
+        use crate::plot::chrome::axis::AxisPlacement;
+        for axis in &self.axes {
+            match axis.placement {
+                AxisPlacement::Cartesian(side) => {
+                    // Rail cell → matching AxisBottom/Top/Left/Right slot.
+                    if let Some(scale_name) = &axis.scale_name {
+                        if let Some(scale) = registry.get(scale_name) {
+                            let slot = cartesian_axis_slot(side);
+                            patch = patch.slot(
+                                slot,
+                                Cell::measured(BoxMeasure::new(scale.axis_measure(side, dpi))),
+                            );
+                        }
+                    }
+                    // Title cell → matching AxisBottomTitle/etc. slot.
+                    if let Some(title) = &axis.title {
+                        let slot = cartesian_axis_title_slot(side);
+                        patch = patch.slot(slot, text_cell(title, axis_title_style()));
+                    }
+                }
+                AxisPlacement::PolarRadius { .. } | AxisPlacement::PolarAngular(_) => {
+                    // Polar axes draw in-panel during chrome
+                    // rendering; the only patch-slot contribution
+                    // is a bleed reservation handled below across
+                    // all polar axes at once.
+                }
+            }
+        }
+        // InsidePanel chrome bleed reservation: axes that draw
+        // inside the panel rect (polar today; a future ternary or
+        // inset projection would join the family) need their
+        // labels to bleed past the panel boundary. Collect every
+        // such axis's label set, compute conservative per-side
+        // bleed, and drop the resulting measure into the four axis
+        // slots so the layout reserves room outside the inscribed
+        // shape. The per-projection bleed arithmetic lives inside
+        // the helper — polar is the only path implemented so far.
+        if matches!(
+            self.projection.chrome_strategy(),
+            crate::plot::projection::ChromeStrategy::InsidePanel
+        ) {
+            patch = self.wire_chrome_bleed(patch, registry, dpi);
+        }
+        patch
+    }
+
+    fn wire_chrome_bleed(&self, mut patch: Patch, registry: &ScaleRegistry, dpi: f64) -> Patch {
+        use crate::plot::chrome::axis::{AxisPlacement, PolarRing};
+        use crate::plot::chrome::polar::{
+            BleedAxis, BleedLabel, BleedLabelKind, PolarBleedMeasure,
+        };
+        use crate::scales::breaks::DEFAULT_BREAK_COUNT;
+        use crate::scales::value::Value;
+
+        // Polar projection's angle/sweep — needed to convert a
+        // scale's break (as a `theta_frac`) into the math angle the
+        // label projects from.
+        let polar = match self.projection.as_polar() {
+            Some(p) => p,
+            None => return patch,
+        };
+
+        // Project a math-space point (x, y) on the unit-radius
+        // sweep into the projection's bounding-box-normalised panel
+        // coordinates: (0, 0) is the bbox top-left in screen space,
+        // (1, 1) is bottom-right. Used by the bleed compute to
+        // decide which panel edges each label sits at, since the
+        // polar centre may live anywhere inside (or on the edge of)
+        // the panel for partial-arc projections.
+        let (bbox_min_x, bbox_min_y, bbox_max_x, bbox_max_y) = polar.bounding_box_units();
+        let bbox_w = (bbox_max_x - bbox_min_x).max(f64::EPSILON);
+        let bbox_h = (bbox_max_y - bbox_min_y).max(f64::EPSILON);
+        let outer_pos = |math_x: f64, math_y: f64| -> (f64, f64) {
+            let nx = (math_x - bbox_min_x) / bbox_w;
+            let ny = (bbox_max_y - math_y) / bbox_h;
+            (nx, ny)
+        };
+        // sign convention mirrors `radius_axis_tick_direction` in
+        // chrome::polar — +1 for CCW sweep, -1 for CW. Used to
+        // compute the perpendicular "outside the sweep" direction
+        // that radius axis ticks (and labels) follow.
+        let sign = if polar.theta_end > polar.theta_start {
+            1.0_f64
+        } else {
+            -1.0_f64
+        };
+
+        let mut axes: Vec<BleedAxis> = Vec::new();
+        for axis in &self.axes {
+            let kind = match axis.placement {
+                AxisPlacement::PolarAngular(PolarRing::Outer) => BleedLabelKind::OuterAngular,
+                AxisPlacement::PolarAngular(PolarRing::Inner) => BleedLabelKind::InnerAngular,
+                AxisPlacement::PolarRadius { .. } => BleedLabelKind::Radius,
+                AxisPlacement::Cartesian(_) => continue,
+            };
+            let Some(scale_name) = &axis.scale_name else {
+                continue;
+            };
+            let Some(scale) = registry.get(scale_name) else {
+                continue;
+            };
+            let mut labels = Vec::new();
+            match axis.placement {
+                AxisPlacement::PolarRadius { theta_frac } => {
+                    // Every radius break sits along the same spoke;
+                    // the outermost break (at radius = 1) lives on
+                    // the outer arc and dominates the bleed.
+                    let theta = polar.theta_for_frac(theta_frac);
+                    let pos = outer_pos(theta.cos(), theta.sin());
+                    // Tick direction = perpendicular to the spoke,
+                    // toward the exterior of the swept wedge. Same
+                    // formula `radius_axis_tick_direction` uses.
+                    let direction = (sign * theta.sin(), sign * theta.cos());
+                    for v in scale.breaks(DEFAULT_BREAK_COUNT) {
+                        if matches!(v, Value::Null) {
+                            continue;
+                        }
+                        labels.push(BleedLabel {
+                            text: scale.format(&v),
+                            kind,
+                            outer_pos: pos,
+                            direction,
+                        });
+                    }
+                }
+                AxisPlacement::PolarAngular(_) => {
+                    // Each angular break has its own theta from the
+                    // scale's mapping (which the projection turns
+                    // into a math angle). The outer-angular label
+                    // anchor sits at (cos θ, sin θ) on the unit
+                    // arc — also the bbox extent in that direction —
+                    // and the tick direction radiates outward
+                    // along the same (cos θ, -sin θ) screen-space
+                    // vector.
+                    for v in scale.breaks(DEFAULT_BREAK_COUNT) {
+                        if matches!(v, Value::Null) {
+                            continue;
+                        }
+                        let Some(frac) = scale.map(&v).as_number() else {
+                            continue;
+                        };
+                        if !frac.is_finite() || !(0.0..=1.0).contains(&frac) {
+                            continue;
+                        }
+                        let theta = polar.theta_for_frac(frac);
+                        labels.push(BleedLabel {
+                            text: scale.format(&v),
+                            kind,
+                            outer_pos: outer_pos(theta.cos(), theta.sin()),
+                            direction: (theta.cos(), -theta.sin()),
+                        });
+                    }
+                }
+                _ => unreachable!(),
+            }
+            if !labels.is_empty() {
+                axes.push(BleedAxis { labels });
+            }
+        }
+        if axes.is_empty() {
+            return patch;
+        }
+        let bleed = crate::plot::chrome::polar::compute_polar_bleed(&axes, dpi);
+        for side in [
+            AxisSide::Top,
+            AxisSide::Right,
+            AxisSide::Bottom,
+            AxisSide::Left,
+        ] {
+            let slot = cartesian_axis_slot(side);
+            patch = patch.slot(
+                slot,
+                Cell::measured(PolarBleedMeasure {
+                    side,
+                    bleed: bleed.clone(),
+                }),
+            );
+        }
+        patch
+    }
+
+    fn draw_axes_into(
+        &self,
+        scene: &mut dyn SceneBuilder,
+        layout: &crate::composition::CompositionLayout,
+        panel: Option<Rect>,
+        registry: &ScaleRegistry,
+        dpi: f64,
+    ) {
+        use crate::plot::chrome::axis::{AxisPlacement, PolarRing};
+        for axis in &self.axes {
+            match axis.placement {
+                AxisPlacement::Cartesian(side) => {
+                    if let Some(scale_name) = &axis.scale_name {
+                        if let (Some(panel_rect), Some(scale)) = (panel, registry.get(scale_name)) {
+                            let slot = cartesian_axis_slot(side);
+                            if let Some(slot_rect) = layout.get(&self.patch_id, slot) {
+                                scale.draw_axis(scene, slot_rect, panel_rect, side, dpi);
+                            }
+                        }
+                    }
+                    // Cartesian titles render through the title-slot
+                    // path the same way `Plot::title` does — handled
+                    // by the title-slot draw loop below in
+                    // `draw_chrome_into`.
+                }
+                AxisPlacement::PolarRadius { theta_frac } => {
+                    if let Some(scale_name) = &axis.scale_name {
+                        if let (Some(panel_rect), Some(polar), Some(scale)) =
+                            (panel, self.projection.as_polar(), registry.get(scale_name))
+                        {
+                            crate::plot::chrome::polar::draw_radius_axis(
+                                scene, panel_rect, polar, scale, theta_frac, dpi,
+                            );
+                        }
+                    }
+                }
+                AxisPlacement::PolarAngular(ring) => {
+                    if let Some(scale_name) = &axis.scale_name {
+                        if let (Some(panel_rect), Some(polar), Some(scale)) =
+                            (panel, self.projection.as_polar(), registry.get(scale_name))
+                        {
+                            let ring = match ring {
+                                PolarRing::Outer => crate::plot::chrome::polar::AngularRing::Outer,
+                                PolarRing::Inner => crate::plot::chrome::polar::AngularRing::Inner,
+                            };
+                            crate::plot::chrome::polar::draw_angular_axis(
+                                scene, panel_rect, polar, scale, ring, dpi,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn wire_legends(&self, mut patch: Patch, registry: &ScaleRegistry, dpi: f64) -> Patch {
+        for (side, slot, group) in legends_grouped_by_side(&self.legends) {
+            if group.is_empty() {
+                continue;
+            }
+            patch = patch.slot(
+                slot,
+                Cell::measured(BoxMeasure::new(
+                    crate::plot::chrome::legend::legend_stack_measure(&group, side, registry, dpi),
+                )),
+            );
+        }
+        patch
     }
 
     /// Render axes + text blocks into the resolved chrome slots from
@@ -478,63 +1010,35 @@ impl Plot {
         use crate::text::{draw_text_in_rect, TextRun, TextStyle};
         type StyleFn = fn() -> TextStyle;
 
-        // Axes / polar chrome.
+        // Axes — explicit, no defaults.
         let panel = layout.get(&self.patch_id, Slot::Panel);
-        match self.projection.chrome_strategy() {
-            crate::plot::projection::ChromeStrategy::PatchSlots => {
-                if let (Some(panel), Some(scale)) = (panel, self.resolved_scale("x", registry)) {
-                    if let Some(slot) = layout.get(&self.patch_id, Slot::AxisBottom) {
-                        scale.draw_axis(scene, slot, panel, AxisSide::Bottom, dpi);
-                    }
-                }
-                if let (Some(panel), Some(scale)) = (panel, self.resolved_scale("y", registry)) {
-                    if let Some(slot) = layout.get(&self.patch_id, Slot::AxisLeft) {
-                        scale.draw_axis(scene, slot, panel, AxisSide::Left, dpi);
-                    }
-                }
+        self.draw_axes_into(scene, layout, panel, registry, dpi);
+
+        // Legends — render each side's stack of attached legends
+        // into the matching slot. Mirrors the wiring loop.
+        for (side, slot, group) in legends_grouped_by_side(&self.legends) {
+            if group.is_empty() {
+                continue;
             }
-            crate::plot::projection::ChromeStrategy::InsidePanel => {
-                if let (Some(panel), Some(polar)) = (panel, self.projection.as_polar()) {
-                    let angle_scale = self.resolved_scale(&polar.angle_channel, registry);
-                    let radius_scale = self.resolved_scale(&polar.radius_channel, registry);
-                    crate::plot::chrome::polar::draw_polar_chrome(
-                        scene,
-                        panel,
-                        polar,
-                        angle_scale,
-                        radius_scale,
-                        dpi,
-                    );
-                }
+            if let Some(rect) = layout.get(&self.patch_id, slot) {
+                crate::plot::chrome::legend::render_legend_stack(
+                    &group,
+                    side,
+                    rect,
+                    registry,
+                    &self.shapes,
+                    scene,
+                    dpi,
+                );
             }
         }
 
-        // Text slots.
+        // Plot-level text slots — title / subtitle / caption.
         let ink = Brush::Solid(Color::new([0.0, 0.0, 0.0, 1.0]));
-        let entries: [(Slot, Option<&String>, StyleFn); 7] = [
+        let entries: [(Slot, Option<&String>, StyleFn); 3] = [
             (Slot::Title, self.title.as_ref(), title_style),
             (Slot::Subtitle, self.subtitle.as_ref(), subtitle_style),
             (Slot::Caption, self.caption.as_ref(), caption_style),
-            (
-                Slot::AxisLeftTitle,
-                self.axis_left_title.as_ref(),
-                axis_title_style,
-            ),
-            (
-                Slot::AxisBottomTitle,
-                self.axis_bottom_title.as_ref(),
-                axis_title_style,
-            ),
-            (
-                Slot::AxisRightTitle,
-                self.axis_right_title.as_ref(),
-                axis_title_style,
-            ),
-            (
-                Slot::AxisTopTitle,
-                self.axis_top_title.as_ref(),
-                axis_title_style,
-            ),
         ];
         for (slot, text, style_fn) in entries {
             if let (Some(text), Some(rect)) = (text, layout.get(&self.patch_id, slot)) {
@@ -542,11 +1046,24 @@ impl Plot {
                 draw_text_in_rect(scene, &run, rect, &ink, crate::pick::PickId::Skip);
             }
         }
-    }
 
-    fn resolved_scale<'r>(&self, channel: &str, registry: &'r ScaleRegistry) -> Option<&'r Scale> {
-        let name = self.bindings.get(channel)?;
-        registry.get(name)
+        // Axis title slots — sourced from `Axis::title` on each
+        // attached cartesian axis. Polar axis titles are inline
+        // (rendered by the axis renderer itself) — TODO.
+        use crate::plot::chrome::axis::AxisPlacement;
+        for axis in &self.axes {
+            let Some(title) = axis.title.as_ref() else {
+                continue;
+            };
+            let AxisPlacement::Cartesian(side) = axis.placement else {
+                continue;
+            };
+            let slot = cartesian_axis_title_slot(side);
+            if let Some(rect) = layout.get(&self.patch_id, slot) {
+                let run = TextRun::new(title, &axis_title_style());
+                draw_text_in_rect(scene, &run, rect, &ink, crate::pick::PickId::Skip);
+            }
+        }
     }
 }
 
@@ -605,6 +1122,57 @@ impl crate::layout::Measure for BoxMeasure {
     }
 }
 
+/// Bucket the plot's attached legends by `LegendSide`. Returns one
+/// `(side, slot, members)` triple per side in a stable order (Right,
+/// Left, Top, Bottom) so the layout solver and the draw loop iterate
+/// in lockstep. Empty sides are still yielded — the caller checks
+/// `members.is_empty()` to skip.
+#[cfg(feature = "text")]
+fn cartesian_axis_slot(side: AxisSide) -> Slot {
+    match side {
+        AxisSide::Left => Slot::AxisLeft,
+        AxisSide::Right => Slot::AxisRight,
+        AxisSide::Bottom => Slot::AxisBottom,
+        AxisSide::Top => Slot::AxisTop,
+    }
+}
+
+#[cfg(feature = "text")]
+fn cartesian_axis_title_slot(side: AxisSide) -> Slot {
+    match side {
+        AxisSide::Left => Slot::AxisLeftTitle,
+        AxisSide::Right => Slot::AxisRightTitle,
+        AxisSide::Bottom => Slot::AxisBottomTitle,
+        AxisSide::Top => Slot::AxisTopTitle,
+    }
+}
+
+#[cfg(feature = "text")]
+fn legends_grouped_by_side(
+    legends: &[crate::plot::chrome::legend::Legend],
+) -> Vec<(
+    crate::scales::chrome::LegendSide,
+    Slot,
+    Vec<&crate::plot::chrome::legend::Legend>,
+)> {
+    use crate::scales::chrome::LegendSide;
+    let mut out: Vec<(LegendSide, Slot, Vec<&crate::plot::chrome::legend::Legend>)> = vec![
+        (LegendSide::Right, Slot::LegendRight, Vec::new()),
+        (LegendSide::Left, Slot::LegendLeft, Vec::new()),
+        (LegendSide::Top, Slot::LegendTop, Vec::new()),
+        (LegendSide::Bottom, Slot::LegendBottom, Vec::new()),
+    ];
+    for legend in legends {
+        for (side, _, group) in out.iter_mut() {
+            if *side == legend.side {
+                group.push(legend);
+                break;
+            }
+        }
+    }
+    out
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -645,6 +1213,52 @@ mod tests {
         assert_eq!(p.subtitle.as_deref(), Some("S"));
         assert_eq!(p.binding("x"), Some("time"));
         assert_eq!(p.binding("y"), Some("price"));
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn cartesian_aspect_ratio_propagates_extents() {
+        let c = comp_with_two();
+        let mut reg = ScaleRegistry::new();
+        reg.insert("x", scale::continuous(0.0..=10.0));
+        reg.insert("y", scale::continuous(0.0..=5.0));
+        // ratio = 2 means x-step is 2x y-step. Panel demand:
+        // (x_extent * ratio, y_extent) = (10 * 2, 5) = (20, 5).
+        let p = Plot::new(&c, "a")
+            .bind("x", "x")
+            .bind("y", "y")
+            .aspect_ratio(2.0);
+        let (w, h) = p.desired_panel_aspect(&reg).expect("aspect set");
+        assert!((w - 20.0).abs() < 1e-4, "w = {w}");
+        assert!((h - 5.0).abs() < 1e-4, "h = {h}");
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn cartesian_aspect_ratio_default_is_none() {
+        let c = comp_with_two();
+        let reg = ScaleRegistry::new();
+        let p = Plot::new(&c, "a");
+        assert!(p.desired_panel_aspect(&reg).is_none());
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn cartesian_aspect_ratio_needs_continuous_extents() {
+        // Discrete scales have no `extent()` — should fall back to
+        // None even with aspect_ratio set.
+        let c = comp_with_two();
+        let mut reg = ScaleRegistry::new();
+        reg.insert(
+            "x",
+            scale::discrete(Vec::<crate::scales::value::Value>::new()),
+        );
+        reg.insert("y", scale::continuous(0.0..=1.0));
+        let p = Plot::new(&c, "a")
+            .bind("x", "x")
+            .bind("y", "y")
+            .aspect_ratio(1.0);
+        assert!(p.desired_panel_aspect(&reg).is_none());
     }
 
     #[test]
@@ -760,16 +1374,17 @@ mod tests {
         }
 
         #[test]
-        fn wire_drops_axis_bottom_when_x_bound() {
-            let (_c, registry, plot) = make_with_x();
-            // Wire into a fresh patch; verify it now carries an
-            // AxisBottom slot by solving and checking the rect exists.
+        fn wire_drops_axis_bottom_when_explicit_axis_added() {
+            // Explicit `add_axis` populates the matching slot;
+            // without it the slot stays empty.
+            use crate::plot::chrome::axis::{Axis, AxisPlacement};
+            let (_c, registry, mut plot) = make_with_x();
+            plot.add_axis(Axis::rail("x", AxisPlacement::Cartesian(AxisSide::Bottom)));
             let patch = plot.wire(CompPatch::new("a"), &registry, 96.0);
             let comp = beside(patch, CompPatch::new("b"));
             let layout = comp.solve(crate::geometry::Size::new(400.0, 300.0), 96.0);
             assert!(layout.get("a", Slot::AxisBottom).is_some());
             assert!(layout.get("a", Slot::Panel).is_some());
-            // No y binding → no AxisLeft.
             assert!(layout.get("a", Slot::AxisLeft).is_none());
         }
 
@@ -800,12 +1415,22 @@ mod tests {
 
         #[test]
         fn shared_x_scale_drives_two_plots() {
-            // Two plots sharing the same scale name → both get
-            // AxisBottom chrome cells that report the same dimensions.
+            // Two plots sharing the same scale name, each with an
+            // explicit bottom axis → both get AxisBottom chrome
+            // cells that report the same dimensions.
+            use crate::plot::chrome::axis::{Axis, AxisPlacement};
             let c = beside(CompPatch::new("a"), CompPatch::new("b"));
             let registry = ScaleRegistry::new().with("time", scale::continuous(0.0..=100.0));
-            let plot_a = Plot::new(&c, "a").bind("x", "time");
-            let plot_b = Plot::new(&c, "b").bind("x", "time");
+            let mut plot_a = Plot::new(&c, "a").bind("x", "time");
+            plot_a.add_axis(Axis::rail(
+                "time",
+                AxisPlacement::Cartesian(AxisSide::Bottom),
+            ));
+            let mut plot_b = Plot::new(&c, "b").bind("x", "time");
+            plot_b.add_axis(Axis::rail(
+                "time",
+                AxisPlacement::Cartesian(AxisSide::Bottom),
+            ));
             let comp = beside(
                 plot_a.wire(CompPatch::new("a"), &registry, 96.0),
                 plot_b.wire(CompPatch::new("b"), &registry, 96.0),
@@ -813,8 +1438,6 @@ mod tests {
             let layout = comp.solve(crate::geometry::Size::new(1000.0, 300.0), 96.0);
             let axis_a = layout.get("a", Slot::AxisBottom).unwrap();
             let axis_b = layout.get("b", Slot::AxisBottom).unwrap();
-            // Both AxisBottom rects share the same height (chrome row is
-            // merged across blocks in the composition solver).
             assert!((axis_a.y1 - axis_a.y0 - (axis_b.y1 - axis_b.y0)).abs() < 0.5);
         }
     }

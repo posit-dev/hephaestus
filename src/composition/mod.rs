@@ -49,10 +49,13 @@ pub struct Patch {
     padding: Inset,
 }
 
-struct PatchPlacement {
-    placement: Placement,
-    region: String,
-    cell: Cell,
+/// One slot placement inside a [`Patch`] — captures the anatomical
+/// position, the region name (used for lookups in the resolved
+/// layout), and the [`Cell`] whose measure drives sizing.
+pub struct PatchPlacement {
+    pub placement: Placement,
+    pub region: String,
+    pub cell: Cell,
 }
 
 impl Patch {
@@ -87,6 +90,15 @@ impl Patch {
 
     /// Place content into a named anatomical [`Slot`]. The slot's region name
     /// (e.g. `"axis_left_text"`) is used in [`CompositionLayout::get`] lookups.
+    ///
+    /// Multiple calls for the same `Slot` produce multiple
+    /// placements; the layout solver rejects that as a duplicate id.
+    /// Callers that need to merge contributions from multiple sources
+    /// (e.g. the `PlotComposition` orchestrator when several plots
+    /// share a patch) should harvest each source's placements
+    /// independently via [`Self::into_placements`] and emit one
+    /// merged cell per region — typically by wrapping the per-source
+    /// measures in a [`MaxMergeMeasure`](crate::layout::MaxMergeMeasure).
     pub fn slot(mut self, s: Slot, cell: Cell) -> Self {
         let (r, c, rs, cs) = s.placement();
         self.placements.push(PatchPlacement {
@@ -95,6 +107,34 @@ impl Patch {
             cell,
         });
         self
+    }
+
+    /// Consume this patch and yield its placements. Each placement
+    /// is a `(placement, region, cell)` triple — the orchestrator
+    /// uses this to harvest contributions from multiple plots,
+    /// group by region, and re-emit one merged cell per region.
+    pub fn into_placements(self) -> Vec<PatchPlacement> {
+        self.placements
+    }
+
+    /// Borrow this patch's id, if any.
+    pub fn patch_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
+    /// Borrow this patch's aspect lock, if any.
+    pub fn aspect_ratio(&self) -> Option<(f32, f32)> {
+        self.aspect
+    }
+
+    /// Borrow this patch's outer margin inset.
+    pub fn margin_inset(&self) -> &Inset {
+        &self.margin
+    }
+
+    /// Borrow this patch's inner padding inset.
+    pub fn padding_inset(&self) -> &Inset {
+        &self.padding
     }
 
     /// Escape hatch: place content at a raw (1-indexed) `(row, col)` with an
@@ -652,7 +692,7 @@ fn build_single_patch(
     let cols = patch_block_tracks(Track::Fr(1.0), Axis::Width);
     let rows = patch_block_tracks(Track::Fr(1.0), Axis::Height);
     let mut g = Grid::new(cols, rows).id(grid_id);
-    emit_patch_into(&mut g, p, 0, 0, 1, 1, state)?;
+    emit_patch_into(&mut g, p, 0, 0, 1, 1, state, true, true)?;
     Ok(g)
 }
 
@@ -690,6 +730,35 @@ fn build_composition_grid(
     let rows = composition_row_tracks(&c);
     let mut g = Grid::new(cols, rows).id(grid_id);
 
+    // Count aspect-bearing placements per outer row / col so each
+    // child's emit / nest path knows whether it's the sole aspect-
+    // contributor on its row or col. When alone in a col, it can
+    // safely encode its aspect into the col Fr weight; when alone
+    // in a row, it encodes into the row Fr. Cells alone in both
+    // default to encoding via the col axis. When multiple aspect
+    // cells share a row OR col, neither Fr can carry the signal —
+    // respect alone keeps the cell coupled. A nested composition
+    // counts as aspect-bearing iff its own children resolve to a
+    // determinate natural aspect (every leaf patch is locked).
+    let mut aspect_per_row = vec![0u32; c.rows];
+    let mut aspect_per_col = vec![0u32; c.cols];
+    for cp in &c.placements {
+        let has_aspect = match &cp.element {
+            Element::Patch(p) => p.aspect.is_some(),
+            Element::Composition(inner) => composition_natural_aspect(inner).is_some(),
+        };
+        if has_aspect {
+            let r = (cp.row as usize).saturating_sub(1);
+            let col = (cp.col as usize).saturating_sub(1);
+            if r < c.rows {
+                aspect_per_row[r] += 1;
+            }
+            if col < c.cols {
+                aspect_per_col[col] += 1;
+            }
+        }
+    }
+
     let placements = c.placements;
     for cp in placements {
         let block_row = (cp.row - 1) as usize;
@@ -698,6 +767,8 @@ fn build_composition_grid(
         let block_col_span = cp.span.cols.max(1) as usize;
         match cp.element {
             Element::Patch(p) => {
+                let alone_in_col = aspect_per_col.get(block_col).copied().unwrap_or(0) == 1;
+                let alone_in_row = aspect_per_row.get(block_row).copied().unwrap_or(0) == 1;
                 emit_patch_into(
                     &mut g,
                     p,
@@ -706,11 +777,21 @@ fn build_composition_grid(
                     block_row_span,
                     block_col_span,
                     state,
+                    alone_in_col,
+                    alone_in_row,
                 )?;
             }
             Element::Composition(inner) => {
                 let sub_rows = inner.rows;
                 let sub_cols = inner.cols;
+                // Snapshot the nested composition's natural aspect
+                // *before* moving it into the recursive build — we
+                // want the same alone-in-col / alone-in-row Fr
+                // propagation that `emit_patch_into` does for
+                // leaf patches, so a stacked column of aspect-
+                // locked plots can broadcast its width up to its
+                // sibling in the outer grid.
+                let nested_aspect = composition_natural_aspect(&inner);
                 let sub_id = state.alloc_id();
                 let sub = build_composition_grid(
                     inner,
@@ -742,6 +823,30 @@ fn build_composition_grid(
                     sub_rows,
                     sub_cols,
                 );
+                // Propagate the nested composition's aspect to the
+                // outer block's panel cell (same axis-selection rule
+                // `emit_patch_into` uses for leaf patches): the
+                // panel-row × panel-col cell is the canonical
+                // anchor for cross-grid respect.
+                if let Some((aw, ah)) = nested_aspect {
+                    let alone_in_col = aspect_per_col.get(block_col).copied().unwrap_or(0) == 1;
+                    let alone_in_row = aspect_per_row.get(block_row).copied().unwrap_or(0) == 1;
+                    if alone_in_col || alone_in_row {
+                        let panel_row_0 = block_row * TABLE_ROWS + (PANEL_ROW - 1) as usize;
+                        let panel_col_0 = block_col * TABLE_COLS + (PANEL_COL - 1) as usize;
+                        install_respect_at(&mut g, panel_row_0, panel_col_0);
+                        if alone_in_col {
+                            let ratio = if ah.abs() < f64::EPSILON { aw } else { aw / ah };
+                            set_fr_if_fr(&mut g.node.cols, panel_col_0, ratio as f32);
+                            if alone_in_row {
+                                set_fr_if_fr(&mut g.node.rows, panel_row_0, 1.0);
+                            }
+                        } else if alone_in_row {
+                            let ratio = if aw.abs() < f64::EPSILON { ah } else { ah / aw };
+                            set_fr_if_fr(&mut g.node.rows, panel_row_0, ratio as f32);
+                        }
+                    }
+                }
             }
         }
     }
@@ -887,6 +992,7 @@ fn composition_row_tracks(c: &Composition) -> Vec<Track> {
 /// optional aspect-locked panel wrap into the outer grid at block
 /// `(block_row, block_col)`, spanning `block_row_span × block_col_span`
 /// outer blocks.
+#[allow(clippy::too_many_arguments)]
 fn emit_patch_into(
     g: &mut Grid,
     patch: Patch,
@@ -895,6 +1001,8 @@ fn emit_patch_into(
     block_row_span: usize,
     block_col_span: usize,
     state: &mut BuildState,
+    alone_in_col: bool,
+    alone_in_row: bool,
 ) -> Result<(), CompositionError> {
     let Patch {
         id,
@@ -919,16 +1027,29 @@ fn emit_patch_into(
         g.place(translated.clone(), p.cell.id(cell_id));
         if let (Some((aw, ah)), true) = (aspect, is_panel) {
             // Adopting R `grid`'s selective-respect path: mark the outer
-            // panel cell in the respect matrix and set the panel col/row
-            // Fr weights to (aw, ah) so the solver couples them at the
-            // requested ratio. Sibling unrespected fr tracks absorb the
-            // slack — `beside(fixed.aspect(1, 1), flex)` makes flex
-            // expand to fill, matching patchwork's behaviour.
+            // panel cell in the respect matrix and encode the aspect
+            // ratio into whichever axis is free of conflict. When the
+            // patch is alone in its outer column, the column Fr can
+            // carry `aw/ah` and the row Fr stays canonical (1). When
+            // the patch is alone in its row but shares its column with
+            // siblings, the column Fr must stay 1 (other rows want it
+            // too) and the row Fr encodes the aspect as `ah/aw`. When
+            // it shares both axes, neither Fr can carry the signal —
+            // respect alone couples the cell. Sibling unrespected Fr
+            // tracks absorb the slack.
             let panel_row_0 = (translated.row as usize).saturating_sub(1);
             let panel_col_0 = (translated.col as usize).saturating_sub(1);
             install_respect_at(g, panel_row_0, panel_col_0);
-            set_fr_if_fr(&mut g.node.cols, panel_col_0, aw);
-            set_fr_if_fr(&mut g.node.rows, panel_row_0, ah);
+            if alone_in_col {
+                let ratio = if ah.abs() < f32::EPSILON { aw } else { aw / ah };
+                set_fr_if_fr(&mut g.node.cols, panel_col_0, ratio);
+                if alone_in_row {
+                    set_fr_if_fr(&mut g.node.rows, panel_row_0, 1.0);
+                }
+            } else if alone_in_row {
+                let ratio = if aw.abs() < f32::EPSILON { ah } else { ah / aw };
+                set_fr_if_fr(&mut g.node.rows, panel_row_0, ratio);
+            }
         }
     }
     emit_ring_sizers(
@@ -1004,6 +1125,65 @@ fn install_respect_at(g: &mut Grid, row: usize, col: usize) {
 fn set_fr_if_fr(tracks: &mut [Track], idx: usize, f: f32) {
     if let Some(Track::Fr(w)) = tracks.get_mut(idx) {
         *w = f;
+    }
+}
+
+/// Recursive natural aspect of `c` in `(width, height)` Fr units —
+/// the shape the composition would naturally take if every contained
+/// aspect-locked patch got its requested ratio.
+///
+/// Returns `None` when any contained patch lacks an aspect lock (the
+/// composition then has no determinate natural shape). When every
+/// row and column resolves, the result is suitable for the same
+/// alone-in-col / alone-in-row Fr propagation that
+/// [`emit_patch_into`] applies to leaf patches: a 4×1 stack of
+/// fixed-aspect plots can broadcast its 1 : 3.357 demand up to its
+/// sibling so the outer beside divides its column Fr by that ratio
+/// instead of falling back to `1 : 1`.
+///
+/// Per-cell axis selection mirrors `emit_patch_into`: a cell alone
+/// in its column contributes to col width as `aw / ah`; a cell
+/// alone in its row but sharing its column contributes to row
+/// height as `ah / aw`; cells alone in both default to the col
+/// axis; cells sharing both leave their tracks at the canonical 1.
+fn composition_natural_aspect(c: &Composition) -> Option<(f64, f64)> {
+    if c.placements.is_empty() {
+        return None;
+    }
+    let mut col_counts = vec![0u32; c.cols];
+    let mut row_counts = vec![0u32; c.rows];
+    let mut aspects: Vec<(usize, usize, (f64, f64))> = Vec::with_capacity(c.placements.len());
+    for p in &c.placements {
+        let aspect = match &p.element {
+            Element::Patch(patch) => patch.aspect.map(|(w, h)| (w as f64, h as f64))?,
+            Element::Composition(inner) => composition_natural_aspect(inner)?,
+        };
+        let r = (p.row as usize).saturating_sub(1);
+        let col = (p.col as usize).saturating_sub(1);
+        if r >= c.rows || col >= c.cols {
+            continue;
+        }
+        col_counts[col] += 1;
+        row_counts[r] += 1;
+        aspects.push((r, col, aspect));
+    }
+    let mut col_w = vec![1.0_f64; c.cols];
+    let mut row_h = vec![1.0_f64; c.rows];
+    for (r, col, (aw, ah)) in aspects {
+        let alone_in_col = col_counts[col] == 1;
+        let alone_in_row = row_counts[r] == 1;
+        if alone_in_col && ah > 0.0 {
+            col_w[col] = aw / ah;
+        } else if alone_in_row && aw > 0.0 {
+            row_h[r] = ah / aw;
+        }
+    }
+    let total_w: f64 = col_w.iter().sum();
+    let total_h: f64 = row_h.iter().sum();
+    if total_w > 0.0 && total_h > 0.0 {
+        Some((total_w, total_h))
+    } else {
+        None
     }
 }
 
@@ -1339,6 +1519,13 @@ impl CompositionLayout {
     /// [`get`](Self::get)).
     pub fn layout(&self) -> &Layout {
         &self.layout
+    }
+
+    /// Shift every resolved rect by `(dx, dy)` pixels. Used by
+    /// the orchestrator to centre a natural-aspect composition
+    /// inside an over-sized canvas.
+    pub fn translate(&mut self, dx: f64, dy: f64) {
+        self.layout.translate(dx, dy);
     }
 }
 

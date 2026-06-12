@@ -15,8 +15,12 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{Composition, Patch, Span};
 use hephaestus::geometry::Size;
+#[cfg(feature = "text")]
+use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::value::Value;
 use hephaestus::plot::{scale, Plot, PlotComposition, RectGeom};
+#[cfg(feature = "text")]
+use hephaestus::scales::chrome::AxisSide;
 use hephaestus::Renderer;
 
 fn main() {
@@ -47,6 +51,17 @@ fn main() {
                 .set("fill", rgb8(180, 90, 70))
                 .build(),
         );
+        #[cfg(feature = "text")]
+        {
+            plot.add_axis(Axis::rail(
+                "category",
+                AxisPlacement::Cartesian(AxisSide::Bottom),
+            ));
+            plot.add_axis(Axis::rail(
+                "value",
+                AxisPlacement::Cartesian(AxisSide::Left),
+            ));
+        }
         let mut view = PlotComposition::new(comp())
             .add_scale(
                 "category",
@@ -105,6 +120,17 @@ fn main() {
                 .set("fill", group_col)
                 .build(),
         );
+        #[cfg(feature = "text")]
+        {
+            plot.add_axis(Axis::rail(
+                "category",
+                AxisPlacement::Cartesian(AxisSide::Bottom),
+            ));
+            plot.add_axis(Axis::rail(
+                "value",
+                AxisPlacement::Cartesian(AxisSide::Left),
+            ));
+        }
         let red = Color::new([0.85, 0.4, 0.4, 1.0]);
         let green = Color::new([0.4, 0.7, 0.4, 1.0]);
         let blue = Color::new([0.4, 0.55, 0.85, 1.0]);
@@ -167,6 +193,17 @@ fn main() {
                 .set("corner_radius", 3.0_f64)
                 .build(),
         );
+        #[cfg(feature = "text")]
+        {
+            plot.add_axis(Axis::rail(
+                "x_axis",
+                AxisPlacement::Cartesian(AxisSide::Bottom),
+            ));
+            plot.add_axis(Axis::rail(
+                "y_axis",
+                AxisPlacement::Cartesian(AxisSide::Left),
+            ));
+        }
         let mut view = PlotComposition::new(comp())
             .add_scale("x_axis", scale::continuous(0.0..=cols as f64))
             .add_scale("y_axis", scale::continuous(0.0..=rows as f64))

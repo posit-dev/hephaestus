@@ -15,7 +15,11 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{beside, Patch};
 use hephaestus::geometry::Size;
+#[cfg(feature = "text")]
+use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom};
+#[cfg(feature = "text")]
+use hephaestus::scales::chrome::AxisSide;
 use hephaestus::Renderer;
 
 fn main() {
@@ -53,6 +57,14 @@ fn main() {
     #[cfg(feature = "text")]
     {
         plot_price.set_title("Price");
+        plot_price.add_axis(Axis::rail(
+            "time",
+            AxisPlacement::Cartesian(AxisSide::Bottom),
+        ));
+        plot_price.add_axis(Axis::rail(
+            "price_y",
+            AxisPlacement::Cartesian(AxisSide::Left),
+        ));
     }
 
     let mut plot_volume = Plot::new(&comp(), "volume")
@@ -69,6 +81,14 @@ fn main() {
     #[cfg(feature = "text")]
     {
         plot_volume.set_title("Volume");
+        plot_volume.add_axis(Axis::rail(
+            "time",
+            AxisPlacement::Cartesian(AxisSide::Bottom),
+        ));
+        plot_volume.add_axis(Axis::rail(
+            "volume_y",
+            AxisPlacement::Cartesian(AxisSide::Left),
+        ));
     }
 
     let mut view = PlotComposition::new(comp())

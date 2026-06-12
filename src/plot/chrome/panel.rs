@@ -99,7 +99,6 @@ pub fn draw_panel_chrome(
     let major_brush = Brush::Solid(major_grid_color());
     let outline_brush = Brush::Solid(outline_color());
 
-    // Channel-0 grid (vertical lines for Cartesian, spokes for Polar).
     if let Some(scale) = scales.channel_0 {
         draw_grid_lines(
             scene,
@@ -110,7 +109,6 @@ pub fn draw_panel_chrome(
             &major_brush,
         );
     }
-    // Channel-1 grid (horizontal lines for Cartesian, rings for Polar).
     if let Some(scale) = scales.channel_1 {
         draw_grid_lines(
             scene,

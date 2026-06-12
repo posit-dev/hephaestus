@@ -42,7 +42,6 @@ pub const PLOT_TOP: u16 = 5;
 pub const PLOT_BOTTOM: u16 = 13;
 
 const PLOT_COL_SPAN: u16 = PLOT_RIGHT - PLOT_LEFT + 1;
-const PLOT_ROW_SPAN: u16 = PLOT_BOTTOM - PLOT_TOP + 1;
 
 /// 1-indexed row of the top margin track.
 pub const MARGIN_TOP_ROW: u16 = 1;
@@ -163,25 +162,29 @@ impl Slot {
             Slot::AxisTop => (8, PANEL_COL, 1, 1),
             Slot::AxisTopTitle => (7, PANEL_COL, 1, 1),
             Slot::StripTop => (6, PANEL_COL, 1, 1),
-            // Legends span horizontally across the symmetric ring.
-            Slot::LegendTop => (PLOT_TOP, PLOT_LEFT, 1, PLOT_COL_SPAN),
+            // Legends sit at the panel column so they align with the
+            // panel area, not the full plot row span. Stacking
+            // multiple legends along the same side is the renderer's
+            // responsibility (see `chrome::legend`).
+            Slot::LegendTop => (PLOT_TOP, PANEL_COL, 1, 1),
 
             Slot::AxisBottom => (10, PANEL_COL, 1, 1),
             Slot::AxisBottomTitle => (11, PANEL_COL, 1, 1),
             Slot::StripBottom => (12, PANEL_COL, 1, 1),
-            Slot::LegendBottom => (PLOT_BOTTOM, PLOT_LEFT, 1, PLOT_COL_SPAN),
+            Slot::LegendBottom => (PLOT_BOTTOM, PANEL_COL, 1, 1),
 
             // Left symmetric ring — single cell at the panel row.
             Slot::AxisLeft => (PANEL_ROW, 6, 1, 1),
             Slot::AxisLeftTitle => (PANEL_ROW, 5, 1, 1),
             Slot::StripLeft => (PANEL_ROW, 4, 1, 1),
-            // Side legends span vertically across the symmetric ring.
-            Slot::LegendLeft => (PLOT_TOP, PLOT_LEFT, PLOT_ROW_SPAN, 1),
+            // Side legends sit at the panel row so they align with
+            // the panel area, not the full plot column span.
+            Slot::LegendLeft => (PANEL_ROW, PLOT_LEFT, 1, 1),
 
             Slot::AxisRight => (PANEL_ROW, 8, 1, 1),
             Slot::AxisRightTitle => (PANEL_ROW, 9, 1, 1),
             Slot::StripRight => (PANEL_ROW, 10, 1, 1),
-            Slot::LegendRight => (PLOT_TOP, PLOT_RIGHT, PLOT_ROW_SPAN, 1),
+            Slot::LegendRight => (PANEL_ROW, PLOT_RIGHT, 1, 1),
 
             // Asymmetric text tracks outside the legend ring.
             Slot::Title => (3, PLOT_LEFT, 1, PLOT_COL_SPAN),

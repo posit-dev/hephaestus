@@ -35,7 +35,11 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{beside, grid, Composition, Element, Patch};
 use hephaestus::geometry::Size;
+#[cfg(feature = "text")]
+use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom};
+#[cfg(feature = "text")]
+use hephaestus::scales::chrome::AxisSide;
 use hephaestus::Renderer;
 
 fn comp_shape(aspect: Option<(f32, f32)>) -> Composition {
@@ -151,6 +155,14 @@ fn attach_all(
                 .set("size", 4.0_f64)
                 .build(),
         );
+        #[cfg(feature = "text")]
+        {
+            p.add_axis(Axis::rail(
+                "time",
+                AxisPlacement::Cartesian(AxisSide::Bottom),
+            ));
+            p.add_axis(Axis::rail("y", AxisPlacement::Cartesian(AxisSide::Left)));
+        }
         view.attach_plot(p);
     }
 }

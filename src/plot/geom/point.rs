@@ -351,14 +351,21 @@ impl Geom for PointGeom {
                     let Some(fc) = fill_color else { continue };
                     // Normalise glyph height to the vector-shape bbox
                     // convention so vector and glyph markers at the same
-                    // "size" render at comparable visual extent.
+                    // "size" render at comparable visual extent. The
+                    // effective em-to-pixel scale is baked into
+                    // `font_size` rather than the transform so vello
+                    // picks the matching bitmap strike for colour
+                    // emoji fonts; a `font_size: 1.0` with a transform
+                    // scale would pick the smallest strike and upscale
+                    // it, producing fuzzy rendering at chart sizes.
                     let h = em_bbox.height();
                     if h <= 0.0 || !h.is_finite() {
                         continue;
                     }
                     let bbox_norm = GLYPH_BBOX_REFERENCE / h;
-                    let centring =
-                        Affine::translate(em_origin.to_vec2() - em_bbox.center().to_vec2());
+                    let effective_font_size_px = size_px * bbox_norm;
+                    let centring_px =
+                        (em_origin.to_vec2() - em_bbox.center().to_vec2()) * effective_font_size_px;
                     let glyphs = [Glyph {
                         id: glyph_id,
                         x: 0.0,
@@ -367,8 +374,8 @@ impl Geom for PointGeom {
                     let brush = Brush::Solid(fc);
                     let run = GlyphRun {
                         font,
-                        font_size: 1.0,
-                        transform: xform * Affine::scale(bbox_norm) * centring,
+                        font_size: effective_font_size_px as f32,
+                        transform: Affine::translate((px + centring_px.x, py + centring_px.y)),
                         glyph_transform: None,
                         brush: &brush,
                         brush_alpha: 1.0,

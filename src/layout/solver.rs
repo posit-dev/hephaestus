@@ -432,23 +432,36 @@ fn width_pass_grid(
     // respected and unrespected; respected tracks share a single scale
     // bound by the smaller of the two axes' demand; unrespected tracks
     // absorb the remainder.
+    //
+    // The resp_scale division denominators are `col_fr_respected +
+    // col_fr_unrespected` (i.e. the total Fr) rather than just the
+    // respected part. The intent: leave the unrespected sibling
+    // tracks their Fr share before the respected aspect lock claims
+    // the rest. Without this, a single aspect-locked cell on an
+    // axis with unrespected siblings would consume the whole axis,
+    // collapsing the siblings to zero. With it, a 2×2 grid that
+    // has a square-locked cell at (1,1) and three flex cells
+    // resolves cleanly — locked cell square at the min axis scale,
+    // siblings absorb the rest of each axis.
     let (col_fr_respected, col_fr_unrespected) =
         split_fr(&node.cols, |i| node.respect.col_respected(i));
-    let (row_fr_respected, _row_fr_unrespected) =
+    let (row_fr_respected, row_fr_unrespected) =
         split_fr(&node.rows, |i| node.respect.row_respected(i));
 
     let respect_active = col_fr_respected > 0.0 && row_fr_respected > 0.0;
+    let col_fr_total_resp = col_fr_respected + col_fr_unrespected;
+    let row_fr_total_resp = row_fr_respected + row_fr_unrespected;
 
     // resp_scale: the per-fr scale used by every respected track. The
     // smaller of (width-side demand, provisional-height-side demand) wins
     // (the binding axis). When respect isn't active, this is unused.
-    let resp_scale_w = if respect_active {
-        free_w / col_fr_respected
+    let resp_scale_w = if respect_active && col_fr_total_resp > 0.0 {
+        free_w / col_fr_total_resp
     } else {
         0.0
     };
-    let resp_scale_h_prov = if respect_active {
-        free_h_provisional / row_fr_respected
+    let resp_scale_h_prov = if respect_active && row_fr_total_resp > 0.0 {
+        free_h_provisional / row_fr_total_resp
     } else {
         0.0
     };
@@ -699,17 +712,21 @@ fn height_pass_grid(
     // Selective respect (height side). Mirror of the width pass:
     // respected rows share a single scale clamped against pass 1's
     // resp_scale (`gw.per_fr_w`); unrespected rows absorb remainder.
-    // Auto rows have already consumed their content height from
-    // `free_h`, so if content demand was larger than respect's prediction
-    // the grid grows past respect (documented).
+    // Same total-Fr denominator as the width pass — leaves the
+    // unrespected siblings their share before the respected
+    // aspect lock claims the rest. Auto rows have already consumed
+    // their content height from `free_h`, so if content demand
+    // was larger than respect's prediction the grid grows past
+    // respect (documented).
     let (row_fr_respected, row_fr_unrespected) =
         split_fr(&node.rows, |i| node.respect.row_respected(i));
     let (col_fr_respected, _col_fr_unrespected) =
         split_fr(&node.cols, |i| node.respect.col_respected(i));
     let respect_active = col_fr_respected > 0.0 && row_fr_respected > 0.0;
+    let row_fr_total_resp = row_fr_respected + row_fr_unrespected;
 
-    let resp_scale_h = if respect_active {
-        free_h / row_fr_respected
+    let resp_scale_h = if respect_active && row_fr_total_resp > 0.0 {
+        free_h / row_fr_total_resp
     } else {
         0.0
     };

@@ -488,7 +488,20 @@ fn interpolate_range(t: f64, range: Option<&OutputRange>) -> Value {
                 Value::Color(lerp_color(vs[lo], vs[lo + 1], frac as f32))
             }
         },
-        Some(OutputRange::Strings(_)) => Value::Null,
+        // Strings have no numeric interpolation; pick the nearest
+        // index along the output range, mirroring Linetypes. Lets
+        // continuous scales drive non-numeric discrete outputs like
+        // shape names without forcing a separate ordinal/binned
+        // scale type.
+        Some(OutputRange::Strings(vs)) => match vs.len() {
+            0 => Value::Null,
+            1 => Value::String(vs[0].clone()),
+            n => {
+                let idx = (t * (n - 1) as f64).round() as isize;
+                let clamped = idx.clamp(0, n as isize - 1) as usize;
+                Value::String(vs[clamped].clone())
+            }
+        },
         Some(OutputRange::Linetypes(vs)) => match vs.len() {
             0 => Value::Null,
             1 => Value::Linetype(vs[0].clone()),

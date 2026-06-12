@@ -14,8 +14,12 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{Composition, Patch, Span};
 use hephaestus::geometry::Size;
+#[cfg(feature = "text")]
+use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::value::Value;
 use hephaestus::plot::{scale, EllipseGeom, Plot, PlotComposition, PointGeom};
+#[cfg(feature = "text")]
+use hephaestus::scales::chrome::AxisSide;
 use hephaestus::Renderer;
 
 fn main() {
@@ -96,6 +100,18 @@ fn main() {
                 .build(),
         );
 
+        #[cfg(feature = "text")]
+        {
+            plot.add_axis(Axis::rail(
+                "x_axis",
+                AxisPlacement::Cartesian(AxisSide::Bottom),
+            ));
+            plot.add_axis(Axis::rail(
+                "y_axis",
+                AxisPlacement::Cartesian(AxisSide::Left),
+            ));
+        }
+
         let mut view = PlotComposition::new(comp())
             .add_scale("x_axis", scale::continuous(0.0..=100.0))
             .add_scale("y_axis", scale::continuous(0.0..=80.0))
@@ -157,6 +173,18 @@ fn main() {
                 .set("linewidth", 1.0_f64)
                 .build(),
         );
+
+        #[cfg(feature = "text")]
+        {
+            plot.add_axis(Axis::rail(
+                "x_axis",
+                AxisPlacement::Cartesian(AxisSide::Bottom),
+            ));
+            plot.add_axis(Axis::rail(
+                "y_axis",
+                AxisPlacement::Cartesian(AxisSide::Left),
+            ));
+        }
 
         let mut view = PlotComposition::new(comp())
             .add_scale("x_axis", scale::continuous(0.0..=100.0))

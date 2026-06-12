@@ -221,6 +221,29 @@ pub struct PolarProjection {
     ///   correctly bends at each category boundary instead of
     ///   cutting diagonally across them.
     pub theta_break_fracs: Vec<f64>,
+    /// Use the projected bbox to size + offset the inscribed disk
+    /// inside the panel rect. `true` by default — partial-arc
+    /// projections (gauges, half-disks) get their swept area
+    /// centred in the panel rather than the full-circle's centre.
+    ///
+    /// Set to `false` when two or more polar projections share the
+    /// same panel (concentric nesting, multiple partial arcs at
+    /// different theta_start offsets, etc.) so they share a common
+    /// centre + max radius regardless of their individual sweeps.
+    pub fit_to_bbox: bool,
+    /// Optional outer-radius override, as a fraction of the
+    /// projection's natural maximum radius (the inscribed-disk
+    /// radius for full-circle, or the bbox-fitted radius for
+    /// partial arcs when `fit_to_bbox` is on). `None` = fill the
+    /// available space.
+    ///
+    /// Pairs with [`Self::inner_radius_frac`] for concentric
+    /// nesting: an outer projection with
+    /// `outer_radius_frac = None, inner_radius_frac = 0.5` and an
+    /// inner projection with `outer_radius_frac = Some(0.5)`
+    /// (both with `fit_to_bbox = false`) draw on disjoint annular
+    /// regions of the same panel.
+    pub outer_radius_frac: Option<f64>,
 }
 
 impl PolarProjection {
@@ -235,6 +258,8 @@ impl PolarProjection {
             inner_radius_frac: 0.0,
             edge_style: PolarEdgeStyle::Geodesic,
             theta_break_fracs: Vec::new(),
+            fit_to_bbox: true,
+            outer_radius_frac: None,
         }
     }
 
@@ -250,6 +275,8 @@ impl PolarProjection {
             inner_radius_frac: 0.4,
             edge_style: PolarEdgeStyle::Geodesic,
             theta_break_fracs: Vec::new(),
+            fit_to_bbox: true,
+            outer_radius_frac: None,
         }
     }
 
@@ -281,6 +308,8 @@ impl PolarProjection {
             inner_radius_frac: 0.0,
             edge_style: PolarEdgeStyle::Chord,
             theta_break_fracs,
+            fit_to_bbox: true,
+            outer_radius_frac: None,
         }
     }
 
@@ -384,32 +413,36 @@ impl PolarProjection {
             };
         }
 
-        let (min_x, min_y, max_x, max_y) = self.bounding_box_units();
-        let bbox_w = (max_x - min_x).max(f64::EPSILON);
-        let bbox_h = (max_y - min_y).max(f64::EPSILON);
+        let (cx, cy, max_radius) = if self.fit_to_bbox {
+            // Fit the projected bbox into the panel preserving
+            // aspect. Asymmetric sweeps land their centre off-panel-
+            // centre so the swept region fills the panel.
+            let (min_x, min_y, max_x, max_y) = self.bounding_box_units();
+            let bbox_w = (max_x - min_x).max(f64::EPSILON);
+            let bbox_h = (max_y - min_y).max(f64::EPSILON);
+            let scale = (panel_w / bbox_w).min(panel_h / bbox_h);
+            let scaled_bbox_w = bbox_w * scale;
+            let scaled_bbox_h = bbox_h * scale;
+            let bbox_x0_px = panel.x0 + (panel_w - scaled_bbox_w) * 0.5;
+            let bbox_y0_px = panel.y0 + (panel_h - scaled_bbox_h) * 0.5;
+            let centre_rel_x = -min_x / bbox_w;
+            let centre_rel_y = -min_y / bbox_h;
+            // Screen y flips (math y up → screen y down).
+            let cx = bbox_x0_px + centre_rel_x * scaled_bbox_w;
+            let cy = bbox_y0_px + (1.0 - centre_rel_y) * scaled_bbox_h;
+            (cx, cy, scale)
+        } else {
+            // Fit-to-bbox disabled: centre on the panel's geometric
+            // centre with the largest inscribed disk. Lets multiple
+            // polar projections share a panel (concentric nesting,
+            // overlapping partial arcs).
+            let cx = panel.x0 + panel_w * 0.5;
+            let cy = panel.y0 + panel_h * 0.5;
+            let max_radius = panel_w.min(panel_h) * 0.5;
+            (cx, cy, max_radius)
+        };
 
-        // Fit bbox into panel preserving aspect. Pick the dimension
-        // (width or height) that constrains.
-        let scale_for_width = panel_w / bbox_w;
-        let scale_for_height = panel_h / bbox_h;
-        let scale = scale_for_width.min(scale_for_height);
-
-        let scaled_bbox_w = bbox_w * scale;
-        let scaled_bbox_h = bbox_h * scale;
-        let bbox_x0_px = panel.x0 + (panel_w - scaled_bbox_w) * 0.5;
-        let bbox_y0_px = panel.y0 + (panel_h - scaled_bbox_h) * 0.5;
-
-        // The polar centre (math 0,0) lives at relative position
-        // (-min_x / bbox_w, -min_y / bbox_h) inside the math bbox.
-        // Screen y flips (math y up → screen y down), so the
-        // y-relative gets `1 -`.
-        let centre_rel_x = -min_x / bbox_w;
-        let centre_rel_y = -min_y / bbox_h;
-        let cx = bbox_x0_px + centre_rel_x * scaled_bbox_w;
-        let cy = bbox_y0_px + (1.0 - centre_rel_y) * scaled_bbox_h;
-
-        // Unit radius in math coords scales by `scale` pixels.
-        let r_outer = scale;
+        let r_outer = max_radius * self.outer_radius_frac.unwrap_or(1.0);
         let r_inner = r_outer * self.inner_radius_frac;
 
         PolarGeometry {
@@ -1191,13 +1224,9 @@ mod tests {
         // pie (no inner radius). Sweep includes angles in [0, π/2]
         // and the origin → x ∈ [0, 1], y ∈ [0, 1].
         let pie = PolarProjection {
-            angle_channel: "x".into(),
-            radius_channel: "y".into(),
             theta_start: 0.0,
             theta_end: std::f64::consts::FRAC_PI_2,
-            inner_radius_frac: 0.0,
-            edge_style: PolarEdgeStyle::Geodesic,
-            theta_break_fracs: Vec::new(),
+            ..PolarProjection::full_circle()
         };
         let (mn_x, mn_y, mx_x, mx_y) = pie.bounding_box_units();
         approx_pt((mn_x, mn_y), (0.0, 0.0), 1e-9, "quarter-pie min");

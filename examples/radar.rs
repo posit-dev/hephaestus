@@ -22,22 +22,26 @@ use std::sync::Arc;
 
 use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
-use hephaestus::composition::{beside, stack, Composition, Patch};
+use hephaestus::composition::{beside, grid, Composition, Patch};
 use hephaestus::geometry::Size;
+use hephaestus::plot::chrome::axis::{Axis, AxisPlacement, PolarRing};
 use hephaestus::plot::projection::{PolarEdgeStyle, PolarProjection, Projection};
 use hephaestus::plot::{scale, LineGeom, Plot, PlotComposition, PointGeom, RectGeom, SegmentGeom};
 use hephaestus::scales::value::Value;
 use hephaestus::Renderer;
 
 fn comp_shape() -> Composition {
-    let top = beside(
-        beside(
-            beside(Patch::new("scatter"), Patch::new("rose")),
-            Patch::new("gauge"),
-        ),
-        Patch::new("partial"),
+    let left = grid(
+        4,
+        1,
+        vec![
+            Patch::new("scatter").into(),
+            Patch::new("rose").into(),
+            Patch::new("gauge").into(),
+            Patch::new("partial").into(),
+        ],
     );
-    stack(top, Patch::new("polygon"))
+    beside(left, Patch::new("polygon"))
 }
 
 /// Half-disk radar gauge: chord-style, theta sweeps 180° → 0°
@@ -45,13 +49,12 @@ fn comp_shape() -> Composition {
 /// spaced categories along the sweep at band centres.
 fn radar_gauge_projection(n: usize) -> Projection {
     Projection::Polar(PolarProjection {
-        angle_channel: "x".into(),
-        radius_channel: "y".into(),
         theta_start: std::f64::consts::PI,
         theta_end: 0.0,
         inner_radius_frac: 0.4,
         edge_style: PolarEdgeStyle::Chord,
         theta_break_fracs: (0..n).map(|i| (i as f64 + 0.5) / n as f64).collect(),
+        ..PolarProjection::full_circle()
     })
 }
 
@@ -60,13 +63,12 @@ fn radar_gauge_projection(n: usize) -> Projection {
 /// band-centre break positions over `n` categories.
 fn radar_partial_projection(n: usize) -> Projection {
     Projection::Polar(PolarProjection {
-        angle_channel: "x".into(),
-        radius_channel: "y".into(),
         theta_start: -std::f64::consts::PI / 3.0,
         theta_end: 3.0 * std::f64::consts::PI / 4.0,
         inner_radius_frac: 0.2,
         edge_style: PolarEdgeStyle::Chord,
         theta_break_fracs: (0..n).map(|i| (i as f64 + 0.5) / n as f64).collect(),
+        ..PolarProjection::full_circle()
     })
 }
 
@@ -191,6 +193,14 @@ fn main() {
             .set("size", 6.0_f64)
             .build(),
     );
+    p_scatter.add_axis(Axis::rail(
+        "scatter_cat",
+        AxisPlacement::PolarAngular(PolarRing::Outer),
+    ));
+    p_scatter.add_axis(Axis::rail(
+        "radius_unit",
+        AxisPlacement::PolarRadius { theta_frac: 0.0 },
+    ));
     view.attach_plot(p_scatter);
 
     // ── Rose (radar) ──
@@ -211,6 +221,14 @@ fn main() {
             .set("fill", bar_color)
             .build(),
     );
+    p_rose.add_axis(Axis::rail(
+        "rose_cat",
+        AxisPlacement::PolarAngular(PolarRing::Outer),
+    ));
+    p_rose.add_axis(Axis::rail(
+        "radius_unit",
+        AxisPlacement::PolarRadius { theta_frac: 0.0 },
+    ));
     view.attach_plot(p_rose);
 
     // ── Gauge (radar) ──
@@ -230,6 +248,18 @@ fn main() {
             .set("linewidth", 4.0_f64)
             .build(),
     );
+    p_gauge.add_axis(Axis::rail(
+        "gauge_cat",
+        AxisPlacement::PolarAngular(PolarRing::Outer),
+    ));
+    p_gauge.add_axis(Axis::rail(
+        "gauge_cat",
+        AxisPlacement::PolarAngular(PolarRing::Inner),
+    ));
+    p_gauge.add_axis(Axis::rail(
+        "gauge_radius",
+        AxisPlacement::PolarRadius { theta_frac: 0.0 },
+    ));
     view.attach_plot(p_gauge);
 
     // ── Partial radar arc (-60° → 135°) ──
@@ -245,6 +275,14 @@ fn main() {
             .set("size", 7.0_f64)
             .build(),
     );
+    p_partial.add_axis(Axis::rail(
+        "partial_cat",
+        AxisPlacement::PolarAngular(PolarRing::Outer),
+    ));
+    p_partial.add_axis(Axis::rail(
+        "partial_radius",
+        AxisPlacement::PolarRadius { theta_frac: 0.0 },
+    ));
     view.attach_plot(p_partial);
 
     // ── Polygon (radar): non-adjacent jumps to show interpolation ──
@@ -270,6 +308,14 @@ fn main() {
             .set("size", 8.0_f64)
             .build(),
     );
+    p_polygon.add_axis(Axis::rail(
+        "polygon_cat",
+        AxisPlacement::PolarAngular(PolarRing::Outer),
+    ));
+    p_polygon.add_axis(Axis::rail(
+        "radius_unit",
+        AxisPlacement::PolarRadius { theta_frac: 0.0 },
+    ));
     view.attach_plot(p_polygon);
 
     let issues = view.validate();

@@ -31,6 +31,87 @@ use kurbo::Shape;
 
 use crate::scales::chrome::AxisSide;
 
+// ─── Axis spec (high-level Plot surface) ─────────────────────────────────────
+
+/// Stable identifier returned by [`crate::plot::Plot::add_axis`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AxisId(pub u32);
+
+/// One axis attached to a [`Plot`](crate::plot::Plot). Built
+/// manually by the caller — `Plot` doesn't infer any default axes
+/// from its channel bindings.
+///
+/// Both the rail (`scale_name`) and the `title` are optional. A
+/// title-only axis (rail = `None`, title = `Some`) reserves the
+/// title slot for an axis whose rail has been suppressed.
+#[derive(Clone, Debug)]
+pub struct Axis {
+    /// Scale that supplies the breaks + map for the rail. `None`
+    /// means "no rail" — the title (if any) still renders.
+    pub scale_name: Option<String>,
+    pub placement: AxisPlacement,
+    pub title: Option<String>,
+}
+
+/// Where an axis sits relative to its plot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AxisPlacement {
+    /// Standard rectilinear axis along one of the panel's four
+    /// edges. Wired into the corresponding patch slot via
+    /// [`Scale::axis_measure`] + [`Scale::draw_axis`].
+    Cartesian(AxisSide),
+    /// Radius axis along a spoke at `theta_frac ∈ [0, 1]` on a
+    /// polar projection. The spoke direction is computed via the
+    /// projection's `unit_position` so it follows the polygon edge
+    /// on chord-style projections.
+    PolarRadius { theta_frac: f64 },
+    /// Angular axis along the projection's outer or inner ring.
+    /// The inner variant is silently skipped when the projection
+    /// has `inner_radius_frac == 0` (no hole, no inner ring), so a
+    /// single axis definition works for both disk and ring layouts.
+    PolarAngular(PolarRing),
+}
+
+/// Which ring an angular axis runs along.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PolarRing {
+    Outer,
+    Inner,
+}
+
+impl Axis {
+    /// Axis with a rail driven by `scale_name`. Add a title via
+    /// [`Self::title`].
+    pub fn rail(scale_name: impl Into<String>, placement: AxisPlacement) -> Self {
+        Self {
+            scale_name: Some(scale_name.into()),
+            placement,
+            title: None,
+        }
+    }
+
+    /// Title-only axis — reserves the matching title slot
+    /// (cartesian) or renders an inline title (polar) without
+    /// drawing a rail. Use when the rail would be visual noise but
+    /// the slot still needs a label.
+    pub fn title_only(title: impl Into<String>, placement: AxisPlacement) -> Self {
+        Self {
+            scale_name: None,
+            placement,
+            title: Some(title.into()),
+        }
+    }
+
+    /// Attach a title to an existing axis. Cartesian axes draw the
+    /// title into the matching patch
+    /// [`Slot::AxisLeftTitle`](crate::composition::Slot) /
+    /// `AxisBottomTitle` / etc.; polar axes render it inline.
+    pub fn title(mut self, t: impl Into<String>) -> Self {
+        self.title = Some(t.into());
+        self
+    }
+}
+
 // ─── AxisMeasure ─────────────────────────────────────────────────────────────
 
 /// Snapshot of an axis's chrome footprint. Holds shaped TextRuns for each
