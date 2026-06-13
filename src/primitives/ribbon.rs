@@ -38,6 +38,7 @@ use kurbo::Vec2;
 use crate::color::Color;
 use crate::geometry::Point;
 use crate::mesh::Mesh;
+use crate::stroke::{Cap, Join};
 
 const EPSILON: f64 = 1e-9;
 /// Approximation tolerance for round-cap / round-join arcs, in panel
@@ -54,34 +55,22 @@ const ROUND_TOLERANCE: f64 = 0.5;
 /// segment lengths.
 const SEAM_BLEED_PX: f64 = 0.75;
 
-// ── Options & enums ─────────────────────────────────────────────────────────
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum RibbonCap {
-    #[default]
-    Butt,
-    Square,
-    Round,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum RibbonJoin {
-    #[default]
-    Miter,
-    Bevel,
-    Round,
-}
+// ── Options ────────────────────────────────────────────────────────────────
 
 /// Tessellation options for [`polyline_ribbon`] / [`polyline_gradient`]
-/// / [`polyline_ribbon_full`].
+/// / [`polyline_ribbon_full`]. Caps and joins reuse [`crate::stroke::Cap`]
+/// and [`crate::stroke::Join`] — same three variants each.
 #[derive(Clone, Copy, Debug)]
 pub struct RibbonOptions {
     /// Half-width in panel pixels. Used by entry points that don't
     /// take a per-vertex half-width slice; ignored by
     /// [`polyline_ribbon_full`] when `half_widths` is `Some`.
     pub half_width: f64,
-    pub cap: RibbonCap,
-    pub join: RibbonJoin,
+    /// End-cap style for open ribbons. Ignored by `polygon_*` entry
+    /// points (closed loops have no endpoints to cap).
+    pub cap: Cap,
+    /// Corner-join style at each interior vertex.
+    pub join: Join,
     /// Maximum ratio `1 / cos(turn_angle / 2)` allowed at a mitre
     /// join. Joins exceeding this fall back to bevel for that join
     /// only. Matches the SVG default of `4.0`.
@@ -92,8 +81,8 @@ impl Default for RibbonOptions {
     fn default() -> Self {
         Self {
             half_width: 1.0,
-            cap: RibbonCap::default(),
-            join: RibbonJoin::default(),
+            cap: Cap::Butt,
+            join: Join::Miter,
             miter_limit: 4.0,
         }
     }
@@ -353,7 +342,7 @@ fn ribbon_inner(
         };
 
         let want_miter = match opts.join {
-            RibbonJoin::Miter => miter_mag <= opts.miter_limit && denom > EPSILON,
+            Join::Miter => miter_mag <= opts.miter_limit && denom > EPSILON,
             // Round and bevel both emit two shoulder pairs; round
             // additionally fills the outside notch with a fan, bevel
             // fills it with one triangle.
@@ -452,8 +441,8 @@ fn ribbon_inner(
     // polygons every segment is interior, so the cap-bleed path is
     // unused.
     let cap_bleed_amount = match opts.cap {
-        RibbonCap::Butt => 0.0,
-        RibbonCap::Square | RibbonCap::Round => SEAM_BLEED_PX,
+        Cap::Butt => 0.0,
+        Cap::Square | Cap::Round => SEAM_BLEED_PX,
     };
     for i in 0..n_segs {
         let i_next = (i + 1) % n;
@@ -533,7 +522,7 @@ fn emit_join_fill(
     pi: Point,
     layout: &VertexLayout,
     color: Color,
-    join: RibbonJoin,
+    join: Join,
 ) {
     let (outside_in, outside_out) = if layout.bevel_outside_left {
         (layout.in_left, layout.out_left)
@@ -541,7 +530,7 @@ fn emit_join_fill(
         (layout.in_right, layout.out_right)
     };
     match join {
-        RibbonJoin::Bevel | RibbonJoin::Miter => {
+        Join::Bevel | Join::Miter => {
             let i_p = vertices.len() as u32;
             vertices.push(pi);
             vcolors.push(color);
@@ -553,7 +542,7 @@ fn emit_join_fill(
             vcolors.push(color);
             indices.extend_from_slice(&[i_p, i_oi, i_oo]);
         }
-        RibbonJoin::Round => {
+        Join::Round => {
             emit_round_fan(
                 vertices,
                 vcolors,
@@ -584,12 +573,12 @@ fn emit_cap(
     b: Point,
     outward: Vec2,
     color: Color,
-    cap: RibbonCap,
+    cap: Cap,
     half_width: f64,
 ) {
     match cap {
-        RibbonCap::Butt => {} // No cap geometry.
-        RibbonCap::Square => {
+        Cap::Butt => {} // No cap geometry.
+        Cap::Square => {
             // Extrude (a, b) by `half_width` along `outward`, emit a
             // quad.
             let a_ext = a + outward * half_width;
@@ -608,7 +597,7 @@ fn emit_cap(
             vcolors.push(color);
             indices.extend_from_slice(&[i_a, i_b, i_be, i_a, i_be, i_ae]);
         }
-        RibbonCap::Round => {
+        Cap::Round => {
             emit_round_cap_fan(
                 vertices, vcolors, indices, endpoint, a, b, color, half_width,
             );
@@ -774,8 +763,8 @@ mod tests {
         let pts = [pt(0.0, 0.0), pt(10.0, 0.0)];
         let opts = RibbonOptions {
             half_width: 1.0,
-            cap: RibbonCap::Butt,
-            join: RibbonJoin::Miter,
+            cap: Cap::Butt,
+            join: Join::Miter,
             miter_limit: 4.0,
         };
         let mesh = polyline_ribbon(&pts, red(), &opts);
@@ -896,7 +885,7 @@ mod tests {
         let pts = [pt(0.0, 0.0), pt(10.0, 0.0), pt(10.0, 10.0)];
         let opts = RibbonOptions {
             half_width: 1.0,
-            join: RibbonJoin::Miter,
+            join: Join::Miter,
             ..RibbonOptions::default()
         };
         let mesh = polyline_ribbon(&pts, red(), &opts);
@@ -927,7 +916,7 @@ mod tests {
         let pts = [pt(0.0, 0.0), pt(10.0, 0.0), pt(0.0, 0.1)];
         let opts = RibbonOptions {
             half_width: 1.0,
-            join: RibbonJoin::Miter,
+            join: Join::Miter,
             miter_limit: 2.0,
             ..RibbonOptions::default()
         };
@@ -941,7 +930,7 @@ mod tests {
         let pts = [pt(0.0, 0.0), pt(10.0, 0.0), pt(10.0, 10.0)];
         let opts = RibbonOptions {
             half_width: 1.0,
-            join: RibbonJoin::Bevel,
+            join: Join::Bevel,
             ..RibbonOptions::default()
         };
         let mesh = polyline_ribbon(&pts, red(), &opts);
@@ -954,7 +943,7 @@ mod tests {
         let pts = [pt(0.0, 0.0), pt(10.0, 0.0), pt(10.0, 10.0)];
         let opts = RibbonOptions {
             half_width: 5.0, // larger radius → more fan segments
-            join: RibbonJoin::Round,
+            join: Join::Round,
             ..RibbonOptions::default()
         };
         let mesh = polyline_ribbon(&pts, red(), &opts);
@@ -971,7 +960,7 @@ mod tests {
         let pts = [pt(0.0, 0.0), pt(10.0, 0.0)];
         let opts = RibbonOptions {
             half_width: 1.0,
-            cap: RibbonCap::Square,
+            cap: Cap::Square,
             ..RibbonOptions::default()
         };
         let mesh = polyline_ribbon(&pts, red(), &opts);
@@ -990,7 +979,7 @@ mod tests {
         let pts = [pt(0.0, 0.0), pt(10.0, 0.0)];
         let opts = RibbonOptions {
             half_width: 5.0,
-            cap: RibbonCap::Round,
+            cap: Cap::Round,
             ..RibbonOptions::default()
         };
         let mesh = polyline_ribbon(&pts, red(), &opts);
@@ -1003,7 +992,7 @@ mod tests {
         let pts = [pt(0.0, 0.0), pt(10.0, 0.0)];
         let opts = RibbonOptions {
             half_width: 1.0,
-            cap: RibbonCap::Butt,
+            cap: Cap::Butt,
             ..RibbonOptions::default()
         };
         let mesh = polyline_ribbon(&pts, red(), &opts);
@@ -1015,7 +1004,7 @@ mod tests {
         let pts = [pt(0.0, 0.0), pt(10.0, 0.0)];
         let opts = RibbonOptions {
             half_width: 1.0,
-            cap: RibbonCap::Butt,
+            cap: Cap::Butt,
             ..RibbonOptions::default()
         };
         let mesh = polyline_ribbon(&pts, red(), &opts);
@@ -1051,7 +1040,7 @@ mod tests {
         let pts = [pt(0.0, 0.0), pt(10.0, 0.0), pt(5.0, 8.66)];
         let opts = RibbonOptions {
             half_width: 1.0,
-            join: RibbonJoin::Miter,
+            join: Join::Miter,
             ..RibbonOptions::default()
         };
         let mesh = polygon_ribbon(&pts, red(), &opts);
@@ -1065,7 +1054,7 @@ mod tests {
         let pts = [pt(0.0, 0.0), pt(10.0, 0.0), pt(10.0, 10.0), pt(0.0, 10.0)];
         let opts = RibbonOptions {
             half_width: 1.0,
-            join: RibbonJoin::Bevel,
+            join: Join::Bevel,
             ..RibbonOptions::default()
         };
         let mesh = polygon_ribbon(&pts, red(), &opts);
@@ -1094,14 +1083,14 @@ mod tests {
             let opts = RibbonOptions {
                 half_width: 1.0,
                 cap,
-                join: RibbonJoin::Miter,
+                join: Join::Miter,
                 ..RibbonOptions::default()
             };
             polygon_ribbon(&pts, red(), &opts).triangle_count()
         };
-        let butt = make(RibbonCap::Butt);
-        assert_eq!(butt, make(RibbonCap::Square));
-        assert_eq!(butt, make(RibbonCap::Round));
+        let butt = make(Cap::Butt);
+        assert_eq!(butt, make(Cap::Square));
+        assert_eq!(butt, make(Cap::Round));
     }
 
     #[test]
@@ -1113,7 +1102,7 @@ mod tests {
         let cols = [red(), green(), blue()];
         let opts = RibbonOptions {
             half_width: 1.0,
-            join: RibbonJoin::Miter,
+            join: Join::Miter,
             ..RibbonOptions::default()
         };
         let mesh = polygon_gradient(&pts, &cols, &opts);
@@ -1144,7 +1133,7 @@ mod tests {
         let pts = [pt(0.0, 0.0), pt(10.0, 0.0), pt(10.0, 10.0), pt(0.0, 10.0)];
         let opts = RibbonOptions {
             half_width: 1.0,
-            join: RibbonJoin::Miter,
+            join: Join::Miter,
             ..RibbonOptions::default()
         };
         let m_thin = polygon_ribbon_full(&pts, None, Some(&[1.0_f64; 4]), &opts);
@@ -1177,7 +1166,7 @@ mod tests {
         let widths = [1.0_f64, 4.0, 1.0];
         let opts = RibbonOptions {
             half_width: 1.0,
-            join: RibbonJoin::Miter,
+            join: Join::Miter,
             ..RibbonOptions::default()
         };
         let mesh = polygon_ribbon_full(&pts, None, Some(&widths), &opts);

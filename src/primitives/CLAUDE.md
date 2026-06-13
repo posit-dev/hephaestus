@@ -39,7 +39,7 @@ Geometry transforms (`round_corners`, `clip_polyline`, `offset_polygon`, `round_
 - **`polyline_ribbon`**, **`polyline_ribbon_full`** — open ribbons.
 - **`polygon_ribbon`**, **`polygon_ribbon_full`** — closed ribbons.
 - **`polyline_gradient`**, **`polygon_gradient`** — colour-along helpers.
-- **`RibbonOptions`**, **`RibbonCap`**, **`RibbonJoin`** — configuration.
+- **`RibbonOptions`** — configuration. Reuses [`crate::stroke::Cap`] / [`crate::stroke::Join`] (same three variants each — no need for ribbon-specific enums).
 
 If every vertex would share the same colour, a plain `stroke` / `fill` with a solid brush is cheaper than a ribbon mesh — the per-vertex colour is the whole point.
 

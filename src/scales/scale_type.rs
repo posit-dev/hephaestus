@@ -7,7 +7,7 @@
 //! callers either dispatch on the kind themselves (see hephaestus's
 //! `Scale::map`) or call the per-kind function directly.
 
-use crate::color::Color;
+use crate::color::lerp_color;
 
 use super::breaks::{
     extended_breaks, linear_minor_breaks_between, log_minor_breaks, log_pretty_breaks, sqrt_breaks,
@@ -485,7 +485,7 @@ fn interpolate_range(t: f64, range: Option<&OutputRange>) -> Value {
             1 => Value::Color(vs[0]),
             n => {
                 let (lo, frac) = pick_segment(t, n);
-                Value::Color(lerp_color(vs[lo], vs[lo + 1], frac as f32))
+                Value::Color(lerp_color(vs[lo], vs[lo + 1], frac))
             }
         },
         // Strings have no numeric interpolation; pick the nearest
@@ -526,17 +526,6 @@ fn pick_segment(t: f64, n: usize) -> (usize, f64) {
 
 fn lerp_f64(a: f64, b: f64, t: f64) -> f64 {
     a + t * (b - a)
-}
-
-fn lerp_color(a: Color, b: Color, t: f32) -> Color {
-    let [ar, ag, ab, aa] = a.components;
-    let [br, bg, bb, ba] = b.components;
-    Color::new([
-        ar + t * (br - ar),
-        ag + t * (bg - ag),
-        ab + t * (bb - ab),
-        aa + t * (ba - aa),
-    ])
 }
 
 /// Find the bin index whose `[edges[i], edges[i+1])` bracket contains

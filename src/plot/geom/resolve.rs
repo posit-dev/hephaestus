@@ -98,6 +98,35 @@ pub(crate) fn resolve_number_channel(
     resolve_value(channel, scale, i)?.as_number()
 }
 
+/// True when the channel resolves to a different value across any pair
+/// of rows in `rows`. Used by ribbon-mode dispatch in `LineGeom` /
+/// `PolygonGeom` to upgrade from `Op::Stroke` to a per-vertex
+/// tessellated mesh only when there is actual within-mark variation.
+/// Returns `false` for `Channel::Constant`, unset channels, and data
+/// channels whose rows all map to the same value (compared via
+/// [`Value::key_eq`] — variant-aware, NaN-canonicalised, same
+/// equality the diff machinery uses).
+pub(crate) fn channel_varies_across(
+    channel: Option<&Channel>,
+    scale: Option<&Scale>,
+    rows: &[usize],
+) -> bool {
+    let Some(channel) = channel else { return false };
+    if matches!(channel, Channel::Constant(_)) {
+        return false;
+    }
+    let mut first: Option<Value> = None;
+    for &i in rows {
+        let v = resolve_value(Some(channel), scale, i);
+        match (&first, &v) {
+            (None, Some(_)) => first = v,
+            (Some(a), Some(b)) if !a.key_eq(b) => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Resolve a numeric channel with a fallback default. Equivalent to
 /// `resolve_number_channel(...).unwrap_or(default)`.
 pub(crate) fn resolve_number_channel_or(

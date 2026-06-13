@@ -22,9 +22,10 @@ use hephaestus::mesh::Mesh;
 use hephaestus::pick::PickId;
 use hephaestus::primitives::{
     polygon_gradient, polygon_ribbon_full, polyline_gradient, polyline_ribbon,
-    polyline_ribbon_full, RibbonCap, RibbonJoin, RibbonOptions,
+    polyline_ribbon_full, RibbonOptions,
 };
 use hephaestus::scene::SceneBuilder;
+use hephaestus::stroke::{Cap, Join};
 use hephaestus::{Point, Renderer};
 
 fn main() {
@@ -62,8 +63,8 @@ fn main() {
             .collect();
         let opts = RibbonOptions {
             half_width: pt_to_px(12.0, dpi) * 0.5,
-            cap: RibbonCap::Round,
-            join: RibbonJoin::Round,
+            cap: Cap::Round,
+            join: Join::Round,
             miter_limit: 4.0,
         };
         let mesh = polyline_gradient(&points, &colors, &opts);
@@ -102,8 +103,8 @@ fn main() {
             .collect();
         let opts = RibbonOptions {
             half_width: 1.0,
-            cap: RibbonCap::Round,
-            join: RibbonJoin::Round,
+            cap: Cap::Round,
+            join: Join::Round,
             miter_limit: 4.0,
         };
         // `polyline_ribbon_full` with no colours uses black; pass a
@@ -169,8 +170,8 @@ fn main() {
             .collect();
         let opts = RibbonOptions {
             half_width: 1.0,
-            cap: RibbonCap::Round,
-            join: RibbonJoin::Round,
+            cap: Cap::Round,
+            join: Join::Round,
             miter_limit: 4.0,
         };
         let mesh = polyline_ribbon_full(&points, Some(&colors), Some(&half_widths), &opts);
@@ -189,14 +190,14 @@ fn main() {
     {
         let (w, h) = (900u32, 700u32);
         let caps = [
-            ("butt", RibbonCap::Butt),
-            ("square", RibbonCap::Square),
-            ("round", RibbonCap::Round),
+            ("butt", Cap::Butt),
+            ("square", Cap::Square),
+            ("round", Cap::Round),
         ];
         let joins = [
-            ("miter", RibbonJoin::Miter),
-            ("bevel", RibbonJoin::Bevel),
-            ("round", RibbonJoin::Round),
+            ("miter", Join::Miter),
+            ("bevel", Join::Bevel),
+            ("round", Join::Round),
         ];
         // Build 9 ribbons in one mesh (or one render): for each
         // (row, col), zigzag polyline showing the cap and join.
@@ -258,8 +259,8 @@ fn main() {
             .collect();
         let opts = RibbonOptions {
             half_width: pt_to_px(28.0, dpi) * 0.5,
-            cap: RibbonCap::Butt,
-            join: RibbonJoin::Round,
+            cap: Cap::Butt,
+            join: Join::Round,
             miter_limit: 4.0,
         };
         let mesh = polygon_gradient(&points, &colors, &opts);
@@ -308,8 +309,8 @@ fn main() {
             .collect();
         let opts = RibbonOptions {
             half_width: 1.0,
-            cap: RibbonCap::Butt, // ignored by polygon_*
-            join: RibbonJoin::Round,
+            cap: Cap::Butt, // ignored by polygon_*
+            join: Join::Round,
             miter_limit: 4.0,
         };
         let mesh = polygon_ribbon_full(&points, Some(&colors), Some(&half_widths), &opts);

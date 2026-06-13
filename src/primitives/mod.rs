@@ -71,12 +71,12 @@ mod ribbon;
 
 pub use arc_length::{ArcLengthWalker, ArcSample, PolylineSampler, TrailingPolicy};
 pub use corner::round_corners;
-pub use end_clip::{clip_polyline, EndClip};
+pub use end_clip::{clip_polyline, clip_polyline_with_attrs, EndClip};
 pub use offset::offset_polygon;
 pub use path_corner::round_path_corners;
 pub use ribbon::{
     polygon_gradient, polygon_ribbon, polygon_ribbon_full, polyline_gradient, polyline_ribbon,
-    polyline_ribbon_full, RibbonCap, RibbonJoin, RibbonOptions,
+    polyline_ribbon_full, RibbonOptions,
 };
 
 /// Path-approximation tolerance for curved primitives ([`circle`],

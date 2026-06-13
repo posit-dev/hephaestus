@@ -65,12 +65,14 @@
 //! → marks are non-pickable.
 
 use crate::brush::Brush;
+use crate::color::{lerp_color, Color};
 use crate::geometry::{Affine, Point};
 use crate::plot::diff::{diff_columns, diff_positional, KeyIndex};
+use crate::plot::projection::InteriorSample;
 use crate::plot::value::{DataColumn, Value};
 use crate::primitives::{
-    clip_polyline, polyline, round_corners, CornerRounding, EndClip, PolylineOptions,
-    PolylineSampler,
+    clip_polyline, clip_polyline_with_attrs, polyline, polyline_ribbon_full, round_corners,
+    CornerRounding, EndClip, PolylineOptions, PolylineSampler, RibbonOptions,
 };
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
@@ -78,10 +80,11 @@ use crate::stroke::{Cap, Join, Stroke};
 use super::linetype;
 use super::marks::{build_marks_from_column, MarkSlot};
 use super::resolve::{
-    build_stroke_for_pattern, draw_linetype_with_markers, emit_endpoint_marker, endpoint_outward,
-    override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or, resolve_cap_channel,
-    resolve_color_channel, resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position, resolve_str_channel_or,
+    build_stroke_for_pattern, channel_varies_across, draw_linetype_with_markers,
+    emit_endpoint_marker, endpoint_outward, override_alpha, pt_to_px, resolve_angle_channel,
+    resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel, resolve_join_channel,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
+    resolve_position, resolve_str_channel_or,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -409,6 +412,28 @@ impl Geom for LineGeom {
                 resolve_color_channel(fill_ch, fill_scale, i0).unwrap_or(stroke_color);
             let has_markers = !linetype::is_marker_free(&dash_pattern_pt);
 
+            // Hoist clip + corner-radius resolution so they're available
+            // for both the ribbon-mode decision and the per-mark draw
+            // path below.
+            let clip_start_pt =
+                resolve_number_channel_or(clip_start_radius_ch, clip_start_radius_scale, i0, 0.0);
+            let clip_end_pt =
+                resolve_number_channel_or(clip_end_radius_ch, clip_end_radius_scale, i0, 0.0);
+            let corner_radius_pt =
+                resolve_number_channel_or(corner_radius_ch, corner_radius_scale, i0, 0.0);
+
+            // ── Ribbon-mode decision. Upgrade to a per-vertex
+            // tessellated mesh when linewidth or stroke varies within
+            // the mark. Gated to solid linetype + no corner rounding
+            // (dashed patterns and curved beziers don't compose with
+            // the polyline-only ribbon primitive).
+            let linewidth_varies = channel_varies_across(linewidth_ch, linewidth_scale, &mark.rows);
+            let stroke_varies = channel_varies_across(stroke_ch, stroke_scale, &mark.rows)
+                || channel_varies_across(stroke_opacity_ch, stroke_opacity_scale, &mark.rows);
+            let ribbon_mode = dash_pattern_pt.is_empty()
+                && corner_radius_pt == 0.0
+                && (linewidth_varies || stroke_varies);
+
             // ── Per-vertex positions for this mark. ──
             //
             // Under non-linear projections (polar, future ternary) the
@@ -421,10 +446,29 @@ impl Geom for LineGeom {
             // Cartesian `interpolate_segment` is a no-op and `points`
             // ends up identical to the pre-projection-densification
             // build.
+            //
+            // In ribbon mode we additionally co-build per-vertex
+            // `widths` and `colors`, lerping interior-sample attrs by
+            // the channel-space `t` returned by
+            // `interpolate_segment_with_t`. The three arrays stay
+            // length-aligned through densification.
             let is_linear = ctx.projection.is_linear();
             let mut interior: Vec<(f64, f64)> = Vec::new();
+            let mut interior_t: Vec<InteriorSample> = Vec::new();
             let mut prev_channels: Option<[f64; 2]> = None;
+            let mut prev_w: Option<f64> = None;
+            let mut prev_c: Option<Color> = None;
             let mut points: Vec<Point> = Vec::with_capacity(mark.rows.len());
+            let mut widths: Vec<f64> = if ribbon_mode {
+                Vec::with_capacity(mark.rows.len())
+            } else {
+                Vec::new()
+            };
+            let mut colors: Vec<Color> = if ribbon_mode {
+                Vec::with_capacity(mark.rows.len())
+            } else {
+                Vec::new()
+            };
             for &i in &mark.rows {
                 let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
                 let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
@@ -434,17 +478,53 @@ impl Geom for LineGeom {
                     continue;
                 }
                 let curr_channels = [px_frac, py_frac];
+
+                let (curr_w, curr_c) = if ribbon_mode {
+                    let w_pt = resolve_number_channel_or(
+                        linewidth_ch,
+                        linewidth_scale,
+                        i,
+                        DEFAULT_LINEWIDTH_PT,
+                    );
+                    let w_half_px = pt_to_px(w_pt, ctx.dpi) * 0.5;
+                    let c = override_alpha(
+                        resolve_color_channel(stroke_ch, stroke_scale, i),
+                        resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i),
+                    )
+                    .unwrap_or(stroke_color);
+                    (w_half_px, c)
+                } else {
+                    (0.0, stroke_color) // unused in non-ribbon mode
+                };
+
                 if !is_linear {
                     if let Some(prev) = prev_channels {
-                        interior.clear();
-                        ctx.projection.interpolate_segment(
-                            panel,
-                            &prev,
-                            &curr_channels,
-                            &mut interior,
-                        );
-                        for (ipx, ipy) in &interior {
-                            points.push(Point::new(*ipx, *ipy));
+                        if ribbon_mode {
+                            interior_t.clear();
+                            ctx.projection.interpolate_segment_with_t(
+                                panel,
+                                &prev,
+                                &curr_channels,
+                                &mut interior_t,
+                            );
+                            let pw = prev_w.unwrap();
+                            let pc = prev_c.unwrap();
+                            for s in &interior_t {
+                                points.push(Point::new(s.px, s.py));
+                                widths.push(pw + s.t * (curr_w - pw));
+                                colors.push(lerp_color(pc, curr_c, s.t));
+                            }
+                        } else {
+                            interior.clear();
+                            ctx.projection.interpolate_segment(
+                                panel,
+                                &prev,
+                                &curr_channels,
+                                &mut interior,
+                            );
+                            for (ipx, ipy) in &interior {
+                                points.push(Point::new(*ipx, *ipy));
+                            }
                         }
                     }
                 }
@@ -458,6 +538,12 @@ impl Geom for LineGeom {
                     py -= pt_to_px(off, ctx.dpi);
                 }
                 points.push(Point::new(px, py));
+                if ribbon_mode {
+                    widths.push(curr_w);
+                    colors.push(curr_c);
+                    prev_w = Some(curr_w);
+                    prev_c = Some(curr_c);
+                }
                 prev_channels = Some(curr_channels);
             }
             if points.len() < 2 {
@@ -479,44 +565,54 @@ impl Geom for LineGeom {
                 Affine::rotate_about(-angle, Point::new(cx, cy))
             };
 
-            // ── End clip + corner rounding (per-mark, first row). ──
-            let clip_start_pt =
-                resolve_number_channel_or(clip_start_radius_ch, clip_start_radius_scale, i0, 0.0);
-            let clip_end_pt =
-                resolve_number_channel_or(clip_end_radius_ch, clip_end_radius_scale, i0, 0.0);
-            let clipped: Vec<Point> = if clip_start_pt > 0.0 || clip_end_pt > 0.0 {
-                let start = (clip_start_pt > 0.0).then(|| EndClip::Circle {
-                    center: points[0],
-                    radius: pt_to_px(clip_start_pt, ctx.dpi),
-                });
-                let end = (clip_end_pt > 0.0).then(|| EndClip::Circle {
-                    center: *points.last().unwrap(),
-                    radius: pt_to_px(clip_end_pt, ctx.dpi),
-                });
-                clip_polyline(&points, start, end)
-            } else {
-                points.clone()
-            };
+            // ── End clip (per-mark, first row). Ribbon mode threads
+            // widths / colors through the clip; non-ribbon clips
+            // points only.
+            let (clipped, clipped_widths, clipped_colors): (Vec<Point>, Vec<f64>, Vec<Color>) =
+                if clip_start_pt > 0.0 || clip_end_pt > 0.0 {
+                    let start = (clip_start_pt > 0.0).then(|| EndClip::Circle {
+                        center: points[0],
+                        radius: pt_to_px(clip_start_pt, ctx.dpi),
+                    });
+                    let end = (clip_end_pt > 0.0).then(|| EndClip::Circle {
+                        center: *points.last().unwrap(),
+                        radius: pt_to_px(clip_end_pt, ctx.dpi),
+                    });
+                    if ribbon_mode {
+                        clip_polyline_with_attrs(&points, &widths, &colors, start, end)
+                    } else {
+                        (clip_polyline(&points, start, end), Vec::new(), Vec::new())
+                    }
+                } else if ribbon_mode {
+                    (points.clone(), widths.clone(), colors.clone())
+                } else {
+                    (points.clone(), Vec::new(), Vec::new())
+                };
             if clipped.len() < 2 {
                 continue;
             }
 
-            let corner_radius_pt =
-                resolve_number_channel_or(corner_radius_ch, corner_radius_scale, i0, 0.0);
-            let path = if corner_radius_pt > 0.0 {
-                let max_angle_deg = resolve_number_channel_or(
-                    corner_max_angle_ch,
-                    corner_max_angle_scale,
-                    i0,
-                    f64::INFINITY,
-                );
-                let opts = CornerRounding {
-                    max_cut: pt_to_px(corner_radius_pt, ctx.dpi),
-                    max_angle_deg,
-                };
-                round_corners(&clipped, false, opts)
+            // Non-ribbon mode builds a kurbo path (with optional corner
+            // rounding) for the stroke / marker walker. Ribbon mode
+            // bypasses this — the mesh is emitted directly below.
+            let path = if !ribbon_mode {
+                if corner_radius_pt > 0.0 {
+                    let max_angle_deg = resolve_number_channel_or(
+                        corner_max_angle_ch,
+                        corner_max_angle_scale,
+                        i0,
+                        f64::INFINITY,
+                    );
+                    let opts = CornerRounding {
+                        max_cut: pt_to_px(corner_radius_pt, ctx.dpi),
+                        max_angle_deg,
+                    };
+                    round_corners(&clipped, false, opts)
+                } else {
+                    polyline(&clipped, PolylineOptions::default())
+                }
             } else {
-                polyline(&clipped, PolylineOptions::default())
+                crate::path::Path::new()
             };
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
 
@@ -562,7 +658,22 @@ impl Geom for LineGeom {
                 );
             }
 
-            if !has_markers {
+            if ribbon_mode {
+                // ── Per-vertex ribbon mesh path. ──
+                let opts = RibbonOptions {
+                    half_width: 0.0, // superseded by per-vertex half_widths
+                    cap,
+                    join,
+                    miter_limit: 4.0,
+                };
+                let mesh = polyline_ribbon_full(
+                    &clipped,
+                    Some(&clipped_colors),
+                    Some(&clipped_widths),
+                    &opts,
+                );
+                scene.draw_mesh(&mesh, xform, pick);
+            } else if !has_markers {
                 // Fast path: pure-dash linetype (or solid). One stroke
                 // op carries the kurbo dash pattern.
                 let stroke_spec = build_stroke_for_pattern(
@@ -932,7 +1043,10 @@ mod tests {
     }
 
     #[test]
-    fn within_mark_linewidth_divergence_uses_first_row() {
+    fn within_mark_linewidth_divergence_upgrades_to_mesh() {
+        // Phase E.5: variance in `linewidth` triggers a per-vertex
+        // ribbon-mesh upgrade. The stroke fast-path is bypassed; one
+        // DrawMesh op carries the per-vertex half-widths.
         let mut g = LineGeom::builder()
             .keys(vec!["A", "A"])
             .set("x", vec![0.0_f64, 1.0])
@@ -946,16 +1060,29 @@ mod tests {
         let c = ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales);
         let mut scene = RecordingScene::default();
         g.draw(&mut scene, &c);
-        let widths: Vec<f64> = scene
+        // No stroke ops — the body upgraded to a mesh.
+        let strokes = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .count();
+        assert_eq!(strokes, 0);
+        let meshes: Vec<&crate::mesh::Mesh> = scene
             .ops
             .iter()
             .filter_map(|op| match op {
-                Op::Stroke { stroke, .. } => Some(stroke.width),
+                Op::DrawMesh { mesh, .. } => Some(mesh),
                 _ => None,
             })
             .collect();
-        assert_eq!(widths.len(), 1);
-        assert!((widths[0] - 4.0 * 96.0 / 72.0).abs() < 1e-9);
+        assert_eq!(meshes.len(), 1);
+        // The first vertex sits on the centerline at row 0's position,
+        // displaced by row 0's half-width along the perpendicular. The
+        // perpendicular displacement magnitude equals the row 0
+        // half-width = 2 pt × 96/72 = 8/3 px.
+        // We just confirm the mesh has at least 4 vertices (two pairs
+        // of left/right offsets, one per data row).
+        assert!(meshes[0].vertices.len() >= 4);
     }
 
     #[test]
@@ -2005,5 +2132,166 @@ mod tests {
             .filter(|op| matches!(op, Op::Stroke { .. }))
             .count();
         assert_eq!(strokes, 0);
+    }
+
+    // ─── Phase E.5: ribbon-mode dispatch tests ────────────────────────────
+
+    fn mesh_ops(scene: &RecordingScene) -> Vec<&crate::mesh::Mesh> {
+        scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::DrawMesh { mesh, .. } => Some(mesh),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn stroke_count(scene: &RecordingScene) -> usize {
+        scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .count()
+    }
+
+    #[test]
+    fn constant_linewidth_stays_on_stroke_path() {
+        // No within-mark variance → no upgrade.
+        let mut g = LineGeom::builder()
+            .keys(vec!["A", "A", "A"])
+            .set("x", Raw(vec![0.0_f64, 0.5, 1.0]))
+            .set("y", Raw(vec![0.5_f64, 0.5, 0.5]))
+            .set("stroke", red_solid())
+            .set("linewidth", 2.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        assert_eq!(stroke_count(&scene), 1);
+        assert!(mesh_ops(&scene).is_empty());
+    }
+
+    #[test]
+    fn varying_stroke_upgrades_to_mesh() {
+        // Per-row stroke variation → ribbon upgrade.
+        let red = Color::new([1.0, 0.0, 0.0, 1.0]);
+        let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
+        let mut g = LineGeom::builder()
+            .keys(vec!["A", "A", "A"])
+            .set("x", Raw(vec![0.0_f64, 0.5, 1.0]))
+            .set("y", Raw(vec![0.5_f64, 0.5, 0.5]))
+            .set("stroke", vec![red, blue, red])
+            .set("linewidth", 2.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        assert_eq!(stroke_count(&scene), 0);
+        let meshes = mesh_ops(&scene);
+        assert_eq!(meshes.len(), 1);
+        // Colors array on the mesh should reflect per-vertex stroke
+        // (red, blue, red roughly — quad-pair tessellation duplicates).
+        assert!(meshes[0]
+            .colors
+            .iter()
+            .any(|c| (c.components[2] - 1.0).abs() < 1e-3));
+    }
+
+    #[test]
+    fn dashed_linetype_blocks_upgrade() {
+        // linetype != solid, even with varying linewidth → stay on
+        // kurbo stroke path.
+        let mut g = LineGeom::builder()
+            .keys(vec!["A", "A", "A"])
+            .set("x", Raw(vec![0.0_f64, 0.5, 1.0]))
+            .set("y", Raw(vec![0.5_f64, 0.5, 0.5]))
+            .set("stroke", red_solid())
+            .set("linewidth", vec![2.0_f64, 6.0, 2.0])
+            .set("linetype", Value::Linetype(linetype::dashed()))
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        assert_eq!(stroke_count(&scene), 1);
+        assert!(mesh_ops(&scene).is_empty());
+    }
+
+    #[test]
+    fn corner_radius_blocks_upgrade() {
+        // corner_radius > 0 → stay on kurbo path even with variance.
+        let mut g = LineGeom::builder()
+            .keys(vec!["A", "A", "A"])
+            .set("x", Raw(vec![0.0_f64, 0.5, 1.0]))
+            .set("y", Raw(vec![0.5_f64, 0.5, 0.5]))
+            .set("stroke", red_solid())
+            .set("linewidth", vec![2.0_f64, 6.0, 2.0])
+            .set("corner_radius", 2.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        assert_eq!(stroke_count(&scene), 1);
+        assert!(mesh_ops(&scene).is_empty());
+    }
+
+    #[test]
+    fn ribbon_with_end_clip_produces_clipped_mesh() {
+        // Variance + clip_end_radius > 0 → upgrade, clip the triple in
+        // attrs-aware mode. The terminal mesh half-width should fall
+        // between the two adjacent data half-widths because the synth
+        // endpoint is lerped on the segment.
+        let mut g = LineGeom::builder()
+            .keys(vec!["A", "A"])
+            .set("x", Raw(vec![0.0_f64, 1.0]))
+            .set("y", Raw(vec![0.5_f64, 0.5]))
+            .set("stroke", red_solid())
+            // 2 pt → 12 pt in px = (1.33, 8.0); half-widths 0.667, 4.0
+            .set("linewidth", vec![2.0_f64, 12.0])
+            .set("clip_end_radius", 18.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        assert_eq!(stroke_count(&scene), 0);
+        let meshes = mesh_ops(&scene);
+        assert_eq!(meshes.len(), 1);
+        // Ribbon mesh has ≥ 4 vertices (2 data points × 2 sides). The
+        // clip produced a new endpoint between rows 0 and 1, so the
+        // mesh's last x coordinate is < 100 px (the unclipped endpoint).
+        let max_x = meshes[0]
+            .vertices
+            .iter()
+            .map(|v| v.x)
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            max_x < 100.0,
+            "expected clipped endpoint < 100 px, got max_x = {max_x}"
+        );
     }
 }

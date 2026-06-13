@@ -51,20 +51,25 @@
 //! round the result").
 
 use crate::brush::Brush;
+use crate::color::{lerp_color, Color};
 use crate::geometry::{Affine, Point};
 use crate::path::{FillRule, Path};
 use crate::plot::diff::{diff_columns, diff_positional, KeyIndex};
+use crate::plot::projection::InteriorSample;
 use crate::plot::value::{DataColumn, Value};
-use crate::primitives::{offset_polygon, round_corners, CornerRounding, PolylineSampler};
+use crate::primitives::{
+    offset_polygon, polygon_ribbon_full, round_corners, CornerRounding, PolylineSampler,
+    RibbonOptions,
+};
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
 
 use super::linetype;
 use super::resolve::{
-    build_stroke_for_pattern, draw_linetype_with_markers, override_alpha, pt_to_px,
-    resolve_angle_channel, resolve_cap_channel, resolve_color_channel, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
-    resolve_position,
+    build_stroke_for_pattern, channel_varies_across, draw_linetype_with_markers, override_alpha,
+    pt_to_px, resolve_angle_channel, resolve_cap_channel, resolve_color_channel,
+    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, resolve_position,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -438,18 +443,66 @@ impl Geom for PolygonGeom {
                 f64::INFINITY,
             );
 
+            // ── Ribbon-mode decision (Phase E.5). Upgrade the outline
+            // stroke to a per-vertex tessellated mesh per ring when
+            // `linewidth` or `stroke` varies within the mark. Gated to
+            // solid linetype + no `expand` + no corner rounding, since
+            // those produce non-polyline outputs that don't fit the
+            // ribbon primitive. The fill emission is unaffected.
+            let dash_pattern_pt = resolve_linetype_channel(linetype_ch, linetype_scale, i0);
+            let all_rows: Vec<usize> = mark.rings.iter().flatten().copied().collect();
+            let linewidth_varies = channel_varies_across(linewidth_ch, linewidth_scale, &all_rows);
+            let stroke_varies = channel_varies_across(stroke_ch, stroke_scale, &all_rows)
+                || channel_varies_across(stroke_opacity_ch, stroke_opacity_scale, &all_rows);
+            let ribbon_mode = stroke_color.is_some()
+                && dash_pattern_pt.is_empty()
+                && expand_pt == 0.0
+                && corner_radius_pt == 0.0
+                && (linewidth_varies || stroke_varies);
+
             // First pass: build vertex sequences for every ring.
             // Under non-linear projections, edges between consecutive
             // vertices are densified so polygon outlines follow the
             // projected geodesic. Closes the ring too (last → first
             // edge gets densified just like the others).
+            //
+            // In ribbon mode, co-build per-ring `widths` and `colors`
+            // alongside `points`, lerping each interior-sample attr at
+            // the channel-space `t` returned by
+            // `interpolate_segment_with_t`.
             let is_linear = ctx.projection.is_linear();
             let mut interior: Vec<(f64, f64)> = Vec::new();
+            let mut interior_t: Vec<InteriorSample> = Vec::new();
             let mut rings_pts: Vec<Vec<Point>> = Vec::with_capacity(mark.rings.len());
+            let mut rings_widths: Vec<Vec<f64>> = if ribbon_mode {
+                Vec::with_capacity(mark.rings.len())
+            } else {
+                Vec::new()
+            };
+            let mut rings_colors: Vec<Vec<Color>> = if ribbon_mode {
+                Vec::with_capacity(mark.rings.len())
+            } else {
+                Vec::new()
+            };
+            let fallback_stroke = stroke_color.unwrap_or_else(|| Color::new([0.0, 0.0, 0.0, 1.0]));
             for ring in &mark.rings {
                 let mut points: Vec<Point> = Vec::with_capacity(ring.len());
+                let mut widths: Vec<f64> = if ribbon_mode {
+                    Vec::with_capacity(ring.len())
+                } else {
+                    Vec::new()
+                };
+                let mut colors: Vec<Color> = if ribbon_mode {
+                    Vec::with_capacity(ring.len())
+                } else {
+                    Vec::new()
+                };
                 let mut prev_channels: Option<[f64; 2]> = None;
                 let mut first_channels: Option<[f64; 2]> = None;
+                let mut prev_w: Option<f64> = None;
+                let mut prev_c: Option<Color> = None;
+                let mut first_w: Option<f64> = None;
+                let mut first_c: Option<Color> = None;
                 for &i in ring {
                     let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
                     let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
@@ -459,17 +512,53 @@ impl Geom for PolygonGeom {
                         continue;
                     }
                     let curr_channels = [x_frac, y_frac];
+
+                    let (curr_w, curr_c) = if ribbon_mode {
+                        let w_pt = resolve_number_channel_or(
+                            linewidth_ch,
+                            linewidth_scale,
+                            i,
+                            DEFAULT_LINEWIDTH_PT,
+                        );
+                        let w_half_px = pt_to_px(w_pt, ctx.dpi) * 0.5;
+                        let c = override_alpha(
+                            resolve_color_channel(stroke_ch, stroke_scale, i),
+                            resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i),
+                        )
+                        .unwrap_or(fallback_stroke);
+                        (w_half_px, c)
+                    } else {
+                        (0.0, fallback_stroke)
+                    };
+
                     if !is_linear {
                         if let Some(prev) = prev_channels {
-                            interior.clear();
-                            ctx.projection.interpolate_segment(
-                                panel,
-                                &prev,
-                                &curr_channels,
-                                &mut interior,
-                            );
-                            for (ipx, ipy) in &interior {
-                                points.push(Point::new(*ipx, *ipy));
+                            if ribbon_mode {
+                                interior_t.clear();
+                                ctx.projection.interpolate_segment_with_t(
+                                    panel,
+                                    &prev,
+                                    &curr_channels,
+                                    &mut interior_t,
+                                );
+                                let pw = prev_w.unwrap();
+                                let pc = prev_c.unwrap();
+                                for s in &interior_t {
+                                    points.push(Point::new(s.px, s.py));
+                                    widths.push(pw + s.t * (curr_w - pw));
+                                    colors.push(lerp_color(pc, curr_c, s.t));
+                                }
+                            } else {
+                                interior.clear();
+                                ctx.projection.interpolate_segment(
+                                    panel,
+                                    &prev,
+                                    &curr_channels,
+                                    &mut interior,
+                                );
+                                for (ipx, ipy) in &interior {
+                                    points.push(Point::new(*ipx, *ipy));
+                                }
                             }
                         }
                     }
@@ -483,6 +572,16 @@ impl Geom for PolygonGeom {
                         py -= pt_to_px(off, ctx.dpi);
                     }
                     points.push(Point::new(px, py));
+                    if ribbon_mode {
+                        widths.push(curr_w);
+                        colors.push(curr_c);
+                        prev_w = Some(curr_w);
+                        prev_c = Some(curr_c);
+                        if first_w.is_none() {
+                            first_w = Some(curr_w);
+                            first_c = Some(curr_c);
+                        }
+                    }
                     if first_channels.is_none() {
                         first_channels = Some(curr_channels);
                     }
@@ -492,17 +591,44 @@ impl Geom for PolygonGeom {
                 if !is_linear {
                     if let (Some(prev), Some(first)) = (prev_channels, first_channels) {
                         if prev != first {
-                            interior.clear();
-                            ctx.projection
-                                .interpolate_segment(panel, &prev, &first, &mut interior);
-                            for (ipx, ipy) in &interior {
-                                points.push(Point::new(*ipx, *ipy));
+                            if ribbon_mode {
+                                interior_t.clear();
+                                ctx.projection.interpolate_segment_with_t(
+                                    panel,
+                                    &prev,
+                                    &first,
+                                    &mut interior_t,
+                                );
+                                let pw = prev_w.unwrap();
+                                let pc = prev_c.unwrap();
+                                let fw = first_w.unwrap();
+                                let fc = first_c.unwrap();
+                                for s in &interior_t {
+                                    points.push(Point::new(s.px, s.py));
+                                    widths.push(pw + s.t * (fw - pw));
+                                    colors.push(lerp_color(pc, fc, s.t));
+                                }
+                            } else {
+                                interior.clear();
+                                ctx.projection.interpolate_segment(
+                                    panel,
+                                    &prev,
+                                    &first,
+                                    &mut interior,
+                                );
+                                for (ipx, ipy) in &interior {
+                                    points.push(Point::new(*ipx, *ipy));
+                                }
                             }
                         }
                     }
                 }
                 if points.len() >= 3 {
                     rings_pts.push(points);
+                    if ribbon_mode {
+                        rings_widths.push(widths);
+                        rings_colors.push(colors);
+                    }
                 }
             }
             if rings_pts.is_empty() {
@@ -585,12 +711,32 @@ impl Geom for PolygonGeom {
                 );
                 let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
                 if linewidth_px.is_finite() && linewidth_px > 0.0 {
-                    let dash_pattern_pt = resolve_linetype_channel(linetype_ch, linetype_scale, i0);
+                    // dash_pattern_pt already resolved above for the
+                    // ribbon-mode decision; re-use it.
                     let dash_offset_pt =
                         resolve_number_channel_or(dash_offset_ch, dash_offset_scale, i0, 0.0);
                     let cap = resolve_cap_channel(cap_ch, cap_scale, i0, DEFAULT_CAP);
                     let join = resolve_join_channel(join_ch, join_scale, i0, DEFAULT_JOIN);
-                    if linetype::is_marker_free(&dash_pattern_pt) {
+                    if ribbon_mode {
+                        // Per-ring ribbon mesh (Phase E.5). `offset_rings`
+                        // is the un-modified `rings_pts` because
+                        // ribbon mode gates on expand == 0 and corner_radius == 0.
+                        let opts = RibbonOptions {
+                            half_width: 0.0,
+                            cap,
+                            join,
+                            miter_limit: MITER_LIMIT,
+                        };
+                        for (r, ring) in offset_rings.iter().enumerate() {
+                            if ring.len() < 3 {
+                                continue;
+                            }
+                            let widths = &rings_widths[r];
+                            let colors = &rings_colors[r];
+                            let mesh = polygon_ribbon_full(ring, Some(colors), Some(widths), &opts);
+                            scene.draw_mesh(&mesh, xform, pick);
+                        }
+                    } else if linetype::is_marker_free(&dash_pattern_pt) {
                         let stroke_spec = build_stroke_for_pattern(
                             linewidth_px,
                             cap,
@@ -1204,5 +1350,138 @@ mod tests {
             "got {} markers around perimeter",
             fill_colors.len() - 1
         );
+    }
+
+    // ─── Phase E.5: ribbon-mode outline tests ─────────────────────────────
+
+    fn stroke_count(scene: &RecordingScene) -> usize {
+        scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .count()
+    }
+
+    fn mesh_count(scene: &RecordingScene) -> usize {
+        scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::DrawMesh { .. }))
+            .count()
+    }
+
+    #[test]
+    fn polygon_constant_outline_stays_on_stroke_path() {
+        let mut g = PolygonGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 1.0, 1.0, 0.0]))
+            .set("y", Raw(vec![0.0_f64, 0.0, 1.0, 1.0]))
+            .set("fill", red())
+            .set("stroke", red())
+            .set("linewidth", 2.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let r = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &r, &scales),
+        );
+        // One fill (interior) + one stroke (outline) → no mesh.
+        assert_eq!(mesh_count(&scene), 0);
+        assert_eq!(stroke_count(&scene), 1);
+    }
+
+    #[test]
+    fn polygon_varying_linewidth_upgrades_outline_to_mesh() {
+        let mut g = PolygonGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 1.0, 1.0, 0.0]))
+            .set("y", Raw(vec![0.0_f64, 0.0, 1.0, 1.0]))
+            .set("fill", red())
+            .set("stroke", red())
+            .set("linewidth", vec![2.0_f64, 6.0, 2.0, 6.0])
+            .build();
+        g.rebuild_diff_against_previous();
+        let r = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &r, &scales),
+        );
+        // Fill stays as Op::Fill; outline upgraded to mesh.
+        assert_eq!(stroke_count(&scene), 0);
+        assert_eq!(mesh_count(&scene), 1);
+    }
+
+    #[test]
+    fn polygon_varying_stroke_color_upgrades_outline() {
+        let red_c = Color::new([1.0, 0.0, 0.0, 1.0]);
+        let blue_c = Color::new([0.0, 0.0, 1.0, 1.0]);
+        let mut g = PolygonGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 1.0, 1.0, 0.0]))
+            .set("y", Raw(vec![0.0_f64, 0.0, 1.0, 1.0]))
+            .set("fill", red_c)
+            .set("stroke", vec![red_c, blue_c, red_c, blue_c])
+            .set("linewidth", 2.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let r = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &r, &scales),
+        );
+        assert_eq!(stroke_count(&scene), 0);
+        assert_eq!(mesh_count(&scene), 1);
+    }
+
+    #[test]
+    fn polygon_expand_blocks_ribbon_upgrade() {
+        let mut g = PolygonGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 1.0, 1.0, 0.0]))
+            .set("y", Raw(vec![0.0_f64, 0.0, 1.0, 1.0]))
+            .set("fill", red())
+            .set("stroke", red())
+            .set("linewidth", vec![2.0_f64, 6.0, 2.0, 6.0])
+            .set("expand", 2.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let r = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &r, &scales),
+        );
+        assert_eq!(stroke_count(&scene), 1);
+        assert_eq!(mesh_count(&scene), 0);
+    }
+
+    #[test]
+    fn polygon_ribbon_does_not_affect_fill() {
+        let mut g = PolygonGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 1.0, 1.0, 0.0]))
+            .set("y", Raw(vec![0.0_f64, 0.0, 1.0, 1.0]))
+            .set("fill", red())
+            .set("stroke", red())
+            .set("linewidth", vec![2.0_f64, 6.0, 2.0, 6.0])
+            .build();
+        g.rebuild_diff_against_previous();
+        let r = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &r, &scales),
+        );
+        // Exactly one fill op (the interior).
+        let fills = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count();
+        assert_eq!(fills, 1);
     }
 }
