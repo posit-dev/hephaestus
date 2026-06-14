@@ -144,6 +144,14 @@ name = "ribbon_gradient"
 required-features = ["vello", "png"]
 
 [[example]]
+name = "ribbon_line_polar"
+required-features = ["vello", "png", "text"]
+
+[[example]]
+name = "ribbon_geom"
+required-features = ["vello", "png", "text"]
+
+[[example]]
 name = "endpoint_arrows"
 required-features = ["vello", "png"]
 

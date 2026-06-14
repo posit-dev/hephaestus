@@ -40,6 +40,7 @@ pub mod point;
 pub mod polygon;
 pub mod rect;
 pub mod resolve;
+pub mod ribbon;
 pub mod segment;
 pub mod state;
 #[cfg(feature = "text")]
@@ -55,6 +56,7 @@ pub use line::LineGeom;
 pub use point::PointGeom;
 pub use polygon::PolygonGeom;
 pub use rect::RectGeom;
+pub use ribbon::RibbonGeom;
 pub use segment::SegmentGeom;
 pub use state::{GeomState, KeysStrategy};
 #[cfg(feature = "text")]
