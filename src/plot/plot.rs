@@ -759,9 +759,13 @@ impl Plot {
                         }
                     }
                     // Title cell → matching AxisBottomTitle/etc. slot.
+                    // Vertical sides rotate the text 90°, so the slot's
+                    // chrome contribution becomes the text's font height
+                    // (not its natural width); horizontal sides keep the
+                    // unrotated TextRun measure.
                     if let Some(title) = &axis.title {
                         let slot = cartesian_axis_title_slot(side);
-                        patch = patch.slot(slot, text_cell(title, axis_title_style()));
+                        patch = patch.slot(slot, axis_title_cell(title, side));
                     }
                 }
                 AxisPlacement::PolarRadius { .. } | AxisPlacement::PolarAngular(_) => {
@@ -1063,10 +1067,11 @@ impl Plot {
         }
 
         // Axis title slots — sourced from `Axis::title` on each
-        // attached cartesian axis. Polar axis titles render inline
-        // through the polar draw path in `draw_axes_into` (radius
-        // titles along the spoke, angular titles curving past the
-        // outer ring) and don't participate in slot rendering.
+        // attached cartesian axis. Horizontal sides centre the title
+        // across the panel column; vertical sides rotate 90° and
+        // centre along the panel row so the title parallels the
+        // axis it labels. Polar axis titles render inline through
+        // `draw_axes_into` and don't participate in slot rendering.
         use crate::plot::chrome::axis::AxisPlacement;
         for axis in &self.axes {
             let Some(title) = axis.title.as_ref() else {
@@ -1078,7 +1083,7 @@ impl Plot {
             let slot = cartesian_axis_title_slot(side);
             if let Some(rect) = layout.get(&self.patch_id, slot) {
                 let run = TextRun::new(title, &axis_title_style());
-                draw_text_in_rect(scene, &run, rect, &ink, crate::pick::PickId::Skip);
+                draw_axis_title(scene, &run, rect, side, &ink);
             }
         }
     }
@@ -1107,6 +1112,88 @@ fn caption_style() -> crate::text::TextStyle {
 #[cfg(feature = "text")]
 pub(crate) fn axis_title_style() -> crate::text::TextStyle {
     crate::text::TextStyle::new(12.0)
+}
+
+/// Build the `Cell` for a cartesian axis title slot. Vertical sides
+/// (Left/Right) wrap the shaped run in a [`RotatedAxisTitleMeasure`]
+/// so the slot's column width reflects the rotated text's footprint
+/// (one font line height) rather than the natural string width.
+/// Horizontal sides reuse the unrotated `TextRun` measure directly.
+#[cfg(feature = "text")]
+fn axis_title_cell(title: &str, side: AxisSide) -> Cell {
+    let run = crate::text::TextRun::new(title, &axis_title_style());
+    if side.is_vertical() {
+        Cell::measured(RotatedAxisTitleMeasure {
+            rotated_w: run.natural_height(),
+        })
+    } else {
+        Cell::measured(run)
+    }
+}
+
+/// Measure for an axis title rotated 90° onto a vertical chrome
+/// column. The slot's horizontal contribution is the font's line
+/// height (post-rotation width); the vertical extent is panel-driven,
+/// so the cell reports no row contribution.
+#[cfg(feature = "text")]
+struct RotatedAxisTitleMeasure {
+    rotated_w: f64,
+}
+
+#[cfg(feature = "text")]
+impl crate::layout::Measure for RotatedAxisTitleMeasure {
+    fn width_hint(&self, _dpi: f64) -> crate::layout::WidthHint {
+        crate::layout::WidthHint::Min(self.rotated_w)
+    }
+
+    fn height_at(&self, _width: f64, _dpi: f64) -> f64 {
+        0.0
+    }
+
+    fn width_at(&self, _height: f64, _dpi: f64) -> f64 {
+        self.rotated_w
+    }
+}
+
+/// Centre a cartesian axis title inside `rect`. Horizontal sides
+/// (Bottom/Top) layout the run at the slot's full width with
+/// [`crate::text::Alignment::Center`] so the line balances across
+/// the panel column. Vertical sides (Left/Right) rotate the run 90°
+/// — CCW for Left (text reads bottom-to-top), CW for Right — and
+/// drop the rotated centre at the slot rect's centre so it parallels
+/// the axis it labels.
+#[cfg(feature = "text")]
+fn draw_axis_title(
+    scene: &mut dyn SceneBuilder,
+    run: &crate::text::TextRun,
+    rect: Rect,
+    side: AxisSide,
+    brush: &crate::brush::Brush,
+) {
+    use crate::geometry::{Affine, Vec2};
+    use crate::text::{draw_text, Alignment};
+    let cx = (rect.x0 + rect.x1) * 0.5;
+    let cy = (rect.y0 + rect.y1) * 0.5;
+    let pid = crate::pick::PickId::Skip;
+    if side.is_horizontal() {
+        let w = (rect.x1 - rect.x0) as f32;
+        run.set_max_width(w, Alignment::Center);
+        draw_text(scene, run, rect.x0, rect.y0, brush, Affine::IDENTITY, pid);
+    } else {
+        // Lay out unconstrained so the run stays single-line; the
+        // panel row drives how tall the rotated text can grow.
+        let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+        let w = run.content_width();
+        let theta = match side {
+            AxisSide::Left => -std::f64::consts::FRAC_PI_2,
+            AxisSide::Right => std::f64::consts::FRAC_PI_2,
+            _ => unreachable!("draw_axis_title vertical branch reached with horizontal side"),
+        };
+        let transform = Affine::translate(Vec2::new(cx, cy))
+            * Affine::rotate(theta)
+            * Affine::translate(Vec2::new(-w * 0.5, -h * 0.5));
+        draw_text(scene, run, 0.0, 0.0, brush, transform, pid);
+    }
 }
 
 // ─── BoxMeasure shim ─────────────────────────────────────────────────────────
