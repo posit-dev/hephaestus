@@ -11,7 +11,9 @@ use crate::color::lerp_color;
 
 use super::breaks::{
     extended_breaks, linear_minor_breaks_between, log_minor_breaks, log_pretty_breaks, sqrt_breaks,
-    symlog_breaks, symlog_minor_breaks, temporal_breaks_from_f64, temporal_minor_breaks_from_f64,
+    symlog_breaks, symlog_minor_breaks, temporal_breaks_date, temporal_breaks_datetime,
+    temporal_breaks_from_f64, temporal_breaks_time, temporal_minor_breaks_from_f64,
+    TemporalInterval,
 };
 use super::input::InputRange;
 use super::output::OutputRange;
@@ -232,6 +234,46 @@ pub fn temporal_breaks(
     };
     temporal_breaks_from_f64(min, max, unit, n)
         .into_iter()
+        .map(|raw| wrap_temporal_value(raw, unit))
+        .collect()
+}
+
+/// Calendar-aligned major breaks at a user-specified interval (e.g.
+/// every 2 weeks). Skips the automatic interval picker — the caller has
+/// already chosen the cadence. Output variant matches `unit`; see
+/// [`temporal_breaks`] for the variant table.
+pub fn temporal_breaks_with_interval(
+    input_range: Option<&InputRange>,
+    unit: TemporalUnit,
+    interval: TemporalInterval,
+) -> Vec<Value> {
+    let (min, max) = match input_range {
+        Some(InputRange::Continuous { min, max }) => (*min, *max),
+        _ => return Vec::new(),
+    };
+    if !min.is_finite() || !max.is_finite() || min >= max {
+        return Vec::new();
+    }
+    let raws: Vec<f64> = match unit {
+        TemporalUnit::Date => temporal_breaks_date(min as i32, max as i32, interval)
+            .into_iter()
+            .filter(|d| (*d as f64) >= min && (*d as f64) <= max)
+            .map(|d| d as f64)
+            .collect(),
+        TemporalUnit::DateTime | TemporalUnit::Duration => {
+            temporal_breaks_datetime(min as i64, max as i64, interval)
+                .into_iter()
+                .filter(|us| (*us as f64) >= min && (*us as f64) <= max)
+                .map(|us| us as f64)
+                .collect()
+        }
+        TemporalUnit::Time => temporal_breaks_time(min as i64, max as i64, interval)
+            .into_iter()
+            .filter(|us| (*us as f64) >= min && (*us as f64) <= max)
+            .map(|us| us as f64)
+            .collect(),
+    };
+    raws.into_iter()
         .map(|raw| wrap_temporal_value(raw, unit))
         .collect()
 }

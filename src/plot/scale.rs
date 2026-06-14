@@ -30,15 +30,53 @@ pub use crate::scales::{
     discrete_breaks, discrete_map, extended_breaks, identity_map, input, linear_breaks,
     linear_minor_breaks_between, log_minor_breaks, log_pretty_breaks, ordinal_map, output,
     scale_type, sqrt_breaks, symlog_breaks, symlog_minor_breaks, temporal_breaks,
-    temporal_minor_breaks, transform, transform_allowed_domain, transform_forward,
-    transform_inverse, value, AxisSide, InputRange, LegendSide, OutputRange, ScaleTypeKind,
-    TemporalUnit, Transform, TransformKind, DEFAULT_BREAK_COUNT,
+    temporal_breaks_with_interval, temporal_minor_breaks, transform, transform_allowed_domain,
+    transform_forward, transform_inverse, value, AxisSide, CalendarUnit, InputRange, LegendSide,
+    OutputRange, ScaleTypeKind, TemporalInterval, TemporalUnit, Transform, TransformKind,
+    DEFAULT_BREAK_COUNT,
 };
 
 // Axis / legend chrome renderers live in src/plot/chrome/ — re-exported
 // here so legacy `crate::plot::scale::axis::*` paths keep working.
 #[cfg(feature = "text")]
 pub use crate::plot::chrome::{axis, legend};
+
+/// Tick-label formatter closure stored on a [`Scale`]. Receives a break
+/// value and returns its rendered label.
+pub type LabelFormatter = dyn Fn(&Value) -> String;
+
+// ─── BreaksSpec ──────────────────────────────────────────────────────────────
+
+/// User-supplied break specification. When set on a [`Scale`], replaces
+/// the scale-type's automatic break algorithm at
+/// [`Scale::breaks`]. The [`BreaksSpec::Labeled`] variant additionally
+/// supplies fixed label strings that bypass the formatter.
+#[derive(Clone, Debug)]
+pub enum BreaksSpec {
+    /// Pin exact break positions; labels still flow through the
+    /// formatter / default per-variant rules.
+    Explicit(Vec<Value>),
+    /// Pin exact positions paired with explicit label strings. The two
+    /// vectors are index-aligned and have equal length by construction
+    /// (built via `unzip` in the setter). Labels here take priority
+    /// over any custom formatter for the listed values.
+    Labeled {
+        /// Break positions, in input-space.
+        breaks: Vec<Value>,
+        /// Labels paired index-wise with [`Self::Labeled::breaks`].
+        labels: Vec<String>,
+    },
+    /// Numeric "every N" — emit multiples of `step` across the
+    /// continuous domain (`..., k * step, (k+1) * step, ...`
+    /// intersected with `[min, max]`). Used by continuous numeric
+    /// scales; falls back to the default algorithm on non-continuous
+    /// scales.
+    NumericInterval(f64),
+    /// Calendar interval (e.g. every 2 weeks). Used by temporal
+    /// scales; falls back to the default algorithm on non-temporal
+    /// scales.
+    TemporalInterval(TemporalInterval),
+}
 
 // ─── Scale ───────────────────────────────────────────────────────────────────
 
@@ -56,6 +94,12 @@ pub struct Scale {
     transform: Transform,
     input_range: Option<InputRange>,
     output_range: Option<OutputRange>,
+    /// User-supplied break override, if any. `None` ⇒ use the scale
+    /// type's automatic break algorithm.
+    breaks_spec: Option<BreaksSpec>,
+    /// User-supplied tick-label formatter, if any. `None` ⇒ use the
+    /// default per-variant formatter (see [`Scale::default_format`]).
+    formatter: Option<Arc<LabelFormatter>>,
     /// Bumped on every mutation. Plumbed for per-channel cache
     /// invalidation; not currently consulted by the draw path.
     generation: Cell<u64>,
@@ -70,6 +114,8 @@ impl Scale {
             transform: Transform::default(),
             input_range: None,
             output_range: None,
+            breaks_spec: None,
+            formatter: None,
             generation: Cell::new(0),
         }
     }
@@ -195,6 +241,112 @@ impl Scale {
         self.bump_generation();
     }
 
+    // ── Break overrides (`&mut self`; bump generation) ──
+
+    /// Pin exact break positions, overriding the scale-type's automatic
+    /// algorithm. Labels still flow through the formatter / default
+    /// per-variant rules; to pin labels too, use
+    /// [`Self::with_breaks_labeled`].
+    pub fn with_breaks(mut self, breaks: Vec<Value>) -> Self {
+        self.breaks_spec = Some(BreaksSpec::Explicit(breaks));
+        self
+    }
+
+    /// Replace the break override with the given pinned positions.
+    /// Bumps the generation counter.
+    pub fn set_breaks(&mut self, breaks: Vec<Value>) {
+        self.breaks_spec = Some(BreaksSpec::Explicit(breaks));
+        self.bump_generation();
+    }
+
+    /// Pin exact break positions paired with explicit label strings.
+    /// Each pair contributes one tick at the given value labelled with
+    /// the given string; labels take priority over any formatter for
+    /// the listed values.
+    pub fn with_breaks_labeled(mut self, pairs: Vec<(Value, String)>) -> Self {
+        let (breaks, labels): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
+        self.breaks_spec = Some(BreaksSpec::Labeled { breaks, labels });
+        self
+    }
+
+    /// Replace the break override with pinned positions + labels.
+    /// Bumps the generation counter.
+    pub fn set_breaks_labeled(&mut self, pairs: Vec<(Value, String)>) {
+        let (breaks, labels): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
+        self.breaks_spec = Some(BreaksSpec::Labeled { breaks, labels });
+        self.bump_generation();
+    }
+
+    /// Numeric "every N" breaks: emit multiples of `step` across the
+    /// continuous domain. Applies to continuous numeric scales (and to
+    /// temporal scales constructed via the legacy
+    /// [`continuous`]`(date_a..=date_b)` path, which treats the domain
+    /// as raw f64); for calendar-aware ticks on a `temporal(...)`
+    /// scale use [`Self::with_temporal_interval`].
+    pub fn with_interval(mut self, step: f64) -> Self {
+        self.breaks_spec = Some(BreaksSpec::NumericInterval(step));
+        self
+    }
+
+    /// Replace the break override with a numeric interval. Bumps the
+    /// generation counter.
+    pub fn set_interval(&mut self, step: f64) {
+        self.breaks_spec = Some(BreaksSpec::NumericInterval(step));
+        self.bump_generation();
+    }
+
+    /// Calendar interval breaks (e.g. every 2 weeks). Applies to scales
+    /// constructed via [`temporal`]; on a non-temporal scale this falls
+    /// back to the default algorithm (no panic).
+    pub fn with_temporal_interval(mut self, interval: TemporalInterval) -> Self {
+        self.breaks_spec = Some(BreaksSpec::TemporalInterval(interval));
+        self
+    }
+
+    /// Replace the break override with a calendar interval. Bumps the
+    /// generation counter.
+    pub fn set_temporal_interval(&mut self, interval: TemporalInterval) {
+        self.breaks_spec = Some(BreaksSpec::TemporalInterval(interval));
+        self.bump_generation();
+    }
+
+    /// Clear any pinned breaks / labels / interval; revert to the
+    /// scale type's automatic algorithm. Bumps the generation counter.
+    pub fn clear_breaks(&mut self) {
+        self.breaks_spec = None;
+        self.bump_generation();
+    }
+
+    // ── Formatter override ──
+
+    /// Set a custom formatter applied to each break value before
+    /// rendering. Overrides the default per-variant formatter. Explicit
+    /// labels set via [`Self::with_breaks_labeled`] still take priority
+    /// over this closure for the values they cover.
+    pub fn with_format<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&Value) -> String + 'static,
+    {
+        self.formatter = Some(Arc::new(f));
+        self
+    }
+
+    /// Replace the formatter in place. Bumps the generation counter.
+    pub fn set_format<F>(&mut self, f: F)
+    where
+        F: Fn(&Value) -> String + 'static,
+    {
+        self.formatter = Some(Arc::new(f));
+        self.bump_generation();
+    }
+
+    /// Clear the custom formatter; revert to the default per-variant
+    /// rules. Bumps the generation counter.
+    pub fn clear_format(&mut self) {
+        self.formatter = None;
+        self.bump_generation();
+    }
+
     fn bump_generation(&mut self) {
         self.generation.set(self.generation.get() + 1);
     }
@@ -256,7 +408,25 @@ impl Scale {
     /// Tick / category positions in **input** space. `n` is a target for
     /// continuous scales; discrete / ordinal ignore it and return every
     /// domain entry.
+    ///
+    /// When a [`BreaksSpec`] has been set via [`Self::with_breaks`] /
+    /// [`Self::with_interval`] / etc., the override takes precedence
+    /// and `n` is ignored. A mismatch between override variant and
+    /// scale type (e.g. [`BreaksSpec::TemporalInterval`] on a numeric
+    /// scale) silently falls back to the automatic algorithm.
     pub fn breaks(&self, n: usize) -> Vec<Value> {
+        if let Some(spec) = &self.breaks_spec {
+            if let Some(bs) = self.breaks_from_spec(spec) {
+                return bs;
+            }
+        }
+        self.breaks_auto(n)
+    }
+
+    // Scale-type's automatic break algorithm — extracted so `breaks`
+    // can short-circuit on a `breaks_spec` override and fall back here
+    // for mismatches.
+    fn breaks_auto(&self, n: usize) -> Vec<Value> {
         match self.scale_type {
             ScaleTypeKind::Continuous => {
                 continuous_breaks(self.input_range.as_ref(), &self.transform, n)
@@ -268,6 +438,54 @@ impl Scale {
             ScaleTypeKind::Binned => binned_breaks(self.output_range.as_ref()),
             ScaleTypeKind::Identity => Vec::new(),
         }
+    }
+
+    // Apply a user-supplied `BreaksSpec`. Returns `None` when the spec
+    // is incompatible with the scale type (caller falls back to
+    // `breaks_auto`).
+    fn breaks_from_spec(&self, spec: &BreaksSpec) -> Option<Vec<Value>> {
+        match spec {
+            BreaksSpec::Explicit(vs) => Some(vs.clone()),
+            BreaksSpec::Labeled { breaks, .. } => Some(breaks.clone()),
+            BreaksSpec::NumericInterval(step) => self.breaks_numeric_interval(*step),
+            BreaksSpec::TemporalInterval(interval) => match self.scale_type {
+                ScaleTypeKind::Temporal(unit) => Some(temporal_breaks_with_interval(
+                    self.input_range.as_ref(),
+                    unit,
+                    *interval,
+                )),
+                _ => None,
+            },
+        }
+    }
+
+    // Numeric "every N" — multiples of `step` intersected with the
+    // continuous domain. Returns `None` on non-continuous scales or
+    // invalid steps so the caller falls back.
+    fn breaks_numeric_interval(&self, step: f64) -> Option<Vec<Value>> {
+        if !step.is_finite() || step <= 0.0 {
+            return None;
+        }
+        let (min, max) = match self.input_range.as_ref()? {
+            InputRange::Continuous { min, max } => (*min, *max),
+            _ => return None,
+        };
+        if !min.is_finite() || !max.is_finite() || min > max {
+            return None;
+        }
+        let first_k = (min / step).ceil();
+        let last_k = (max / step).floor();
+        if last_k < first_k {
+            return Some(Vec::new());
+        }
+        let count = ((last_k - first_k) as usize).saturating_add(1);
+        let mut out = Vec::with_capacity(count);
+        let mut k = first_k;
+        while k <= last_k {
+            out.push(Value::Number(k * step));
+            k += 1.0;
+        }
+        Some(out)
     }
 
     /// Minor (sub-tick) positions in input space. Empty for non-continuous
@@ -290,11 +508,24 @@ impl Scale {
         }
     }
 
-    /// Format a value as its tick label. Numeric values use
-    /// `format!("{n}")`; temporal variants render compact YYYY-MM-DD /
-    /// HH:MM:SS strings (UTC). Strings pass through; everything else
-    /// uses [`std::fmt::Debug`].
+    /// Format a value as its tick label.
+    ///
+    /// Precedence (highest first): an explicit [`BreaksSpec::Labeled`]
+    /// label for `v`, a custom formatter set via [`Self::with_format`],
+    /// then the built-in per-variant default
+    /// ([`Self::default_format`]). Numeric values render via Rust's
+    /// shortest round-trip `Display` after a 12-sig-fig snap (so
+    /// `0.30000000000000004` reads as `"0.3"`); temporal variants
+    /// render compact `YYYY-MM-DD` / `HH:MM:SS` strings.
     pub fn format(&self, v: &Value) -> String {
+        if let Some(BreaksSpec::Labeled { breaks, labels }) = &self.breaks_spec {
+            if let Some(i) = breaks.iter().position(|b| b.key_eq(v)) {
+                return labels[i].clone();
+            }
+        }
+        if let Some(f) = &self.formatter {
+            return f(v);
+        }
         format_value(v)
     }
 
@@ -346,6 +577,26 @@ impl Scale {
         self.output_range.as_ref()
     }
 
+    /// Borrow the configured break override, if any. `None` ⇒ the scale
+    /// uses its automatic break algorithm.
+    pub fn breaks_spec(&self) -> Option<&BreaksSpec> {
+        self.breaks_spec.as_ref()
+    }
+
+    /// Built-in per-variant tick-label formatter. Exposed so user
+    /// closures supplied to [`Self::with_format`] can fall through to
+    /// the default for variants they don't care to customise:
+    ///
+    /// ```ignore
+    /// scale.with_format(|v| match v {
+    ///     Value::Number(n) => format!("${n:.2}"),
+    ///     other => Scale::default_format(other),
+    /// })
+    /// ```
+    pub fn default_format(v: &Value) -> String {
+        format_value(v)
+    }
+
     /// Monotonic counter incremented on every mutation. Plumbed for
     /// downstream scaled-output caching to invalidate per-channel
     /// caches without comparing values; not currently consulted.
@@ -362,6 +613,11 @@ impl std::fmt::Debug for Scale {
             .field("transform", &self.transform)
             .field("input_range", &self.input_range)
             .field("output_range", &self.output_range)
+            .field("breaks_spec", &self.breaks_spec)
+            .field(
+                "formatter",
+                &self.formatter.as_ref().map(|_| "<fn>").unwrap_or("none"),
+            )
             .field("generation", &self.generation.get())
             .finish()
     }
@@ -382,7 +638,7 @@ impl std::fmt::Debug for Scale {
 fn format_value(v: &Value) -> String {
     use crate::scales::value::Date;
     match v {
-        Value::Number(n) => format!("{n}"),
+        Value::Number(n) => format_number(*n),
         Value::String(s) => (**s).to_string(),
         Value::Bool(b) => format!("{b}"),
         Value::Null => "NA".to_string(),
@@ -445,6 +701,28 @@ fn format_value(v: &Value) -> String {
             }
         }
     }
+}
+
+/// Format a finite f64 as its tick label, scrubbing accumulated
+/// floating-point noise. Break-generation algorithms accumulate a few
+/// ULPs of error which surface as digits in the 14th-16th position;
+/// rounding at 12 significant figures wipes that noise while preserving
+/// any precision a plot label could plausibly need.
+///
+/// The round-trip via 12-significant-digit scientific form snaps to a
+/// nearby f64 that Rust's shortest-round-trip `Display` then prints
+/// cleanly: `0.30000000000000004` → `"0.3"`; `0.6000000000001` → `"0.6"`.
+fn format_number(n: f64) -> String {
+    if !n.is_finite() {
+        return format!("{n}");
+    }
+    if n == 0.0 {
+        return "0".to_string();
+    }
+    let cleaned: f64 = format!("{n:.11e}")
+        .parse()
+        .expect("formatted scientific f64 round-trips");
+    format!("{cleaned}")
 }
 
 /// Project a continuous-domain endpoint to its canonical f64. Accepts
@@ -1493,5 +1771,194 @@ mod tests {
             let _ = temporal(0.0_f64..=10.0_f64);
         });
         assert!(result.is_err(), "expected panic on non-temporal endpoint");
+    }
+
+    // ── Float-precision-safe default number formatter ──
+
+    #[test]
+    fn default_number_formatter_scrubs_floating_point_noise() {
+        let s = identity();
+        assert_eq!(s.format(&Value::Number(0.1 + 0.2)), "0.3");
+        assert_eq!(s.format(&Value::Number(0.6000000000001)), "0.6");
+        assert_eq!(s.format(&Value::Number(1.0)), "1");
+        assert_eq!(s.format(&Value::Number(1.5)), "1.5");
+        assert_eq!(s.format(&Value::Number(0.0)), "0");
+        assert_eq!(s.format(&Value::Number(-0.0)), "0");
+        // 12-sig-fig snap preserves real precision (9 sig figs here).
+        assert_eq!(s.format(&Value::Number(0.123456789)), "0.123456789");
+        // Non-finite values pass through.
+        assert_eq!(s.format(&Value::Number(f64::INFINITY)), "inf");
+        assert_eq!(s.format(&Value::Number(f64::NEG_INFINITY)), "-inf");
+        assert_eq!(s.format(&Value::Number(f64::NAN)), "NaN");
+    }
+
+    // ── Custom formatter ──
+
+    #[test]
+    fn custom_formatter_overrides_default() {
+        let s = identity().with_format(|v| match v {
+            Value::Number(n) => format!("${n:.2}"),
+            other => Scale::default_format(other),
+        });
+        assert_eq!(s.format(&Value::Number(12.345)), "$12.35");
+        // Non-numeric variants fall through to the default delegate.
+        assert_eq!(s.format(&Value::from("abc")), "abc");
+    }
+
+    #[test]
+    fn clear_format_reverts_to_default() {
+        let mut s = identity().with_format(|_| "X".to_string());
+        assert_eq!(s.format(&Value::Number(1.0)), "X");
+        s.clear_format();
+        assert_eq!(s.format(&Value::Number(1.0)), "1");
+    }
+
+    #[test]
+    fn formatter_survives_clone() {
+        let s = identity().with_format(|v| match v {
+            Value::Number(n) => format!("n={n}"),
+            other => Scale::default_format(other),
+        });
+        let s2 = s.clone();
+        assert_eq!(s.format(&Value::Number(3.0)), "n=3");
+        assert_eq!(s2.format(&Value::Number(3.0)), "n=3");
+    }
+
+    // ── Explicit break overrides ──
+
+    #[test]
+    fn explicit_breaks_pin_positions() {
+        let s = continuous(0.0..=100.0).with_breaks(vec![
+            Value::Number(25.0),
+            Value::Number(50.0),
+            Value::Number(75.0),
+        ]);
+        let bs = s.breaks(5);
+        let nums: Vec<f64> = bs.iter().filter_map(|v| v.as_number()).collect();
+        assert_eq!(nums, vec![25.0, 50.0, 75.0]);
+    }
+
+    #[test]
+    fn labeled_breaks_pin_labels() {
+        let s = continuous(0.0..=1.0).with_breaks_labeled(vec![
+            (Value::Number(0.0), "low".to_string()),
+            (Value::Number(1.0), "high".to_string()),
+        ]);
+        assert_eq!(s.format(&Value::Number(0.0)), "low");
+        assert_eq!(s.format(&Value::Number(1.0)), "high");
+        // Unlisted values fall through to formatter / default.
+        assert_eq!(s.format(&Value::Number(0.5)), "0.5");
+    }
+
+    #[test]
+    fn labeled_breaks_take_priority_over_formatter() {
+        let s = continuous(0.0..=1.0)
+            .with_format(|_| "FORMATTED".to_string())
+            .with_breaks_labeled(vec![(Value::Number(0.5), "MID".to_string())]);
+        assert_eq!(s.format(&Value::Number(0.5)), "MID");
+        // Outside the labeled set, formatter wins.
+        assert_eq!(s.format(&Value::Number(0.7)), "FORMATTED");
+    }
+
+    #[test]
+    fn clear_breaks_reverts_to_auto() {
+        let mut s = continuous(0.0..=10.0).with_breaks(vec![Value::Number(5.0)]);
+        assert_eq!(s.breaks(5).len(), 1);
+        s.clear_breaks();
+        let bs = s.breaks(5);
+        assert!(bs.len() > 1, "expected automatic breaks after clear");
+    }
+
+    // ── Interval break overrides ──
+
+    #[test]
+    fn numeric_interval_emits_aligned_multiples() {
+        let s = continuous(0.5..=12.0).with_interval(2.0);
+        let bs = s.breaks(0);
+        let nums: Vec<f64> = bs.iter().filter_map(|v| v.as_number()).collect();
+        assert_eq!(nums, vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0]);
+    }
+
+    #[test]
+    fn numeric_interval_handles_negative_domain() {
+        let s = continuous(-5.0..=5.0).with_interval(2.5);
+        let bs = s.breaks(0);
+        let nums: Vec<f64> = bs.iter().filter_map(|v| v.as_number()).collect();
+        assert_eq!(nums, vec![-5.0, -2.5, 0.0, 2.5, 5.0]);
+    }
+
+    #[test]
+    fn numeric_interval_falls_back_on_discrete() {
+        let s = discrete(["a", "b", "c"].into_iter().map(Into::into)).with_interval(1.0);
+        let bs = s.breaks(0);
+        // NumericInterval is meaningless on Discrete — falls back to
+        // the automatic discrete_breaks (full domain).
+        assert_eq!(bs.len(), 3);
+    }
+
+    #[test]
+    fn temporal_interval_emits_calendar_aligned_ticks() {
+        let s = temporal(Date::from_ymd(2024, 1, 1)..=Date::from_ymd(2024, 3, 31))
+            .with_temporal_interval(TemporalInterval::new(2, CalendarUnit::Week));
+        let bs = s.breaks(0);
+        // Every tick should be a Date variant aligned to the start of a
+        // calendar week (Monday in our convention).
+        assert!(!bs.is_empty(), "expected biweekly ticks in the span");
+        for v in &bs {
+            assert!(matches!(v, Value::Date(_)), "{v:?} is not Date");
+        }
+    }
+
+    #[test]
+    fn temporal_interval_falls_back_on_numeric_scale() {
+        // TemporalInterval on a plain numeric scale should silently
+        // fall back to the automatic algorithm.
+        let s = continuous(0.0..=100.0)
+            .with_temporal_interval(TemporalInterval::new(1, CalendarUnit::Week));
+        let bs = s.breaks(5);
+        assert!(!bs.is_empty(), "fallback should still produce breaks");
+        // All breaks should be Value::Number (continuous output).
+        assert!(bs.iter().all(|v| matches!(v, Value::Number(_))));
+    }
+
+    // ── Introspection ──
+
+    #[test]
+    fn breaks_spec_accessor_reflects_state() {
+        let s = continuous(0.0..=10.0);
+        assert!(s.breaks_spec().is_none());
+        let s = s.with_interval(2.5);
+        assert!(matches!(
+            s.breaks_spec(),
+            Some(BreaksSpec::NumericInterval(2.5))
+        ));
+    }
+
+    // ── Generation counter ──
+
+    #[test]
+    fn override_mutators_bump_generation() {
+        let mut s = continuous(0.0..=10.0);
+        let g0 = s.generation();
+        s.set_breaks(vec![Value::Number(5.0)]);
+        assert!(s.generation() > g0);
+        let g1 = s.generation();
+        s.set_format(|_| "X".to_string());
+        assert!(s.generation() > g1);
+        let g2 = s.generation();
+        s.set_interval(1.0);
+        assert!(s.generation() > g2);
+        let g3 = s.generation();
+        s.clear_breaks();
+        assert!(s.generation() > g3);
+    }
+
+    #[test]
+    fn override_chained_builders_do_not_bump_generation() {
+        let s = continuous(0.0..=10.0)
+            .with_breaks(vec![Value::Number(5.0)])
+            .with_format(|_| "X".to_string())
+            .with_interval(2.0);
+        assert_eq!(s.generation(), 0);
     }
 }

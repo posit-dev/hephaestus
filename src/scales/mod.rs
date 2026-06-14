@@ -72,7 +72,8 @@ pub use output::OutputRange;
 pub use scale_type::{
     binned_band_width, binned_band_width_at, binned_breaks, binned_map, continuous_breaks,
     continuous_map, continuous_minor_breaks, discrete_band_width, discrete_breaks, discrete_map,
-    identity_map, ordinal_map, temporal_breaks, temporal_minor_breaks, ScaleTypeKind, TemporalUnit,
+    identity_map, ordinal_map, temporal_breaks, temporal_breaks_with_interval,
+    temporal_minor_breaks, ScaleTypeKind, TemporalUnit,
 };
 pub use transform::{
     transform_allowed_domain, transform_forward, transform_inverse, Transform, TransformKind,
