@@ -806,21 +806,6 @@ impl Plot {
             None => return patch,
         };
 
-        // Project a math-space point (x, y) on the unit-radius
-        // sweep into the projection's bounding-box-normalised panel
-        // coordinates: (0, 0) is the bbox top-left in screen space,
-        // (1, 1) is bottom-right. Used by the bleed compute to
-        // decide which panel edges each label sits at, since the
-        // polar centre may live anywhere inside (or on the edge of)
-        // the panel for partial-arc projections.
-        let (bbox_min_x, bbox_min_y, bbox_max_x, bbox_max_y) = polar.bounding_box_units();
-        let bbox_w = (bbox_max_x - bbox_min_x).max(f64::EPSILON);
-        let bbox_h = (bbox_max_y - bbox_min_y).max(f64::EPSILON);
-        let outer_pos = |math_x: f64, math_y: f64| -> (f64, f64) {
-            let nx = (math_x - bbox_min_x) / bbox_w;
-            let ny = (bbox_max_y - math_y) / bbox_h;
-            (nx, ny)
-        };
         // sign convention mirrors `radius_axis_tick_direction` in
         // chrome::polar — +1 for CCW sweep, -1 for CW. Used to
         // compute the perpendicular "outside the sweep" direction
@@ -848,14 +833,10 @@ impl Plot {
             let mut labels = Vec::new();
             match axis.placement {
                 AxisPlacement::PolarRadius { theta_frac } => {
-                    // Every radius break sits along the same spoke;
-                    // the outermost break (at radius = 1) lives on
-                    // the outer arc and dominates the bleed.
+                    // Every radius break sits along the same spoke,
+                    // so the tick direction is shared. Same formula
+                    // as `radius_axis_tick_direction`.
                     let theta = polar.theta_for_frac(theta_frac);
-                    let pos = outer_pos(theta.cos(), theta.sin());
-                    // Tick direction = perpendicular to the spoke,
-                    // toward the exterior of the swept wedge. Same
-                    // formula `radius_axis_tick_direction` uses.
                     let direction = (sign * theta.sin(), sign * theta.cos());
                     for v in scale.breaks(DEFAULT_BREAK_COUNT) {
                         if matches!(v, Value::Null) {
@@ -864,19 +845,14 @@ impl Plot {
                         labels.push(BleedLabel {
                             text: scale.format(&v),
                             kind,
-                            outer_pos: pos,
                             direction,
                         });
                     }
                 }
                 AxisPlacement::PolarAngular(_) => {
                     // Each angular break has its own theta from the
-                    // scale's mapping (which the projection turns
-                    // into a math angle). The outer-angular label
-                    // anchor sits at (cos θ, sin θ) on the unit
-                    // arc — also the bbox extent in that direction —
-                    // and the tick direction radiates outward
-                    // along the same (cos θ, -sin θ) screen-space
+                    // scale's mapping. The tick direction radiates
+                    // outward along the (cos θ, -sin θ) screen-space
                     // vector.
                     for v in scale.breaks(DEFAULT_BREAK_COUNT) {
                         if matches!(v, Value::Null) {
@@ -892,7 +868,6 @@ impl Plot {
                         labels.push(BleedLabel {
                             text: scale.format(&v),
                             kind,
-                            outer_pos: outer_pos(theta.cos(), theta.sin()),
                             direction: (theta.cos(), -theta.sin()),
                         });
                     }

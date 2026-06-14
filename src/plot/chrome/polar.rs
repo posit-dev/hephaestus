@@ -342,20 +342,25 @@ pub fn compute_polar_bleed(axes: &[BleedAxis], dpi: f64) -> PolarBleed {
         bottom_px: 0.0,
         left_px: 0.0,
     };
-    // Each label is described by its anchor in bbox-normalised panel
-    // coords plus the tick `direction` it's offset by. The label's
-    // centre sits at `anchor + dir * size / 2`, and the text box
-    // extends ± size / 2 from that centre. Outer-angular labels
-    // anchor `tick + gap` past the bbox boundary in `dir`; radius
-    // labels anchor on the spoke itself.
+    // Each label is described by the tick `direction` it offsets by
+    // from its anchor on the polar boundary. After `draw_axis_label`'s
+    // quadrant-aware quantisation, the label's bounding box spans
+    //   horizontal: anchor.x + (dx_q - 1) * w/2 .. anchor.x + (dx_q + 1) * w/2
+    //   vertical:   anchor.y + (dy_q - 1) * h/2 .. anchor.y + (dy_q + 1) * h/2
+    // where dir_q ∈ {-1, 0, 1} after the cardinal dead-band, and the
+    // anchor itself sits `anchor_offset * (dx, dy)` past the polar
+    // boundary in the (raw, non-quantised) tick direction.
     //
-    // For a label whose normalised anchor sits on a given panel
-    // edge, the bleed past that edge is the full distance from the
-    // edge to the far side of the text box in that direction. The
-    // formulas below derive directly from substituting `dir_x ∈
-    // {-1, 0, 1}` (or fractional) into the box-extent equations,
-    // matching the placement logic in `draw_axis_label`.
-    const EDGE_EPS: f64 = 1e-3;
+    // The conservative bleed past a cardinal panel edge assumes the
+    // label's anchor sits on the matching bbox edge — over-reserves by
+    // up to (1 - n) * scaled_bbox px for labels whose anchor lies
+    // inside the bbox in that direction, but never under-reserves.
+    // For full-circle layouts the cardinal anchors land exactly on the
+    // bbox edges so the over-reservation collapses to zero; partial
+    // arcs whose sweep crosses a cardinal direction between two breaks
+    // (no break exactly at the cardinal) rely on this conservative
+    // contribution to reserve space for the near-cardinal labels.
+    const CARDINAL_EPS: f64 = 0.05;
     for axis in axes {
         for label in &axis.labels {
             let run = TextRun::new(&label.text, &style);
@@ -368,31 +373,36 @@ pub fn compute_polar_bleed(axes: &[BleedAxis], dpi: f64) -> PolarBleed {
                 BleedLabelKind::OuterAngular | BleedLabelKind::Radius => tick_px + gap_px,
                 BleedLabelKind::InnerAngular => continue,
             };
-            let (nx, ny) = label.outer_pos;
             let (dx, dy) = label.direction;
-            if nx <= EDGE_EPS {
-                let b = anchor_offset * -dx + (1.0 - dx) * w * 0.5;
-                if b > 0.0 {
-                    bleed.left_px = bleed.left_px.max(b);
-                }
+            let dx_q = if dx > CARDINAL_EPS {
+                1.0
+            } else if dx < -CARDINAL_EPS {
+                -1.0
+            } else {
+                0.0
+            };
+            let dy_q = if dy > CARDINAL_EPS {
+                1.0
+            } else if dy < -CARDINAL_EPS {
+                -1.0
+            } else {
+                0.0
+            };
+            let b_right = dx * anchor_offset + (dx_q + 1.0) * w * 0.5;
+            if b_right > 0.0 {
+                bleed.right_px = bleed.right_px.max(b_right);
             }
-            if nx >= 1.0 - EDGE_EPS {
-                let b = anchor_offset * dx + (1.0 + dx) * w * 0.5;
-                if b > 0.0 {
-                    bleed.right_px = bleed.right_px.max(b);
-                }
+            let b_left = -dx * anchor_offset + (1.0 - dx_q) * w * 0.5;
+            if b_left > 0.0 {
+                bleed.left_px = bleed.left_px.max(b_left);
             }
-            if ny <= EDGE_EPS {
-                let b = anchor_offset * -dy + (1.0 - dy) * h * 0.5;
-                if b > 0.0 {
-                    bleed.top_px = bleed.top_px.max(b);
-                }
+            let b_bottom = dy * anchor_offset + (dy_q + 1.0) * h * 0.5;
+            if b_bottom > 0.0 {
+                bleed.bottom_px = bleed.bottom_px.max(b_bottom);
             }
-            if ny >= 1.0 - EDGE_EPS {
-                let b = anchor_offset * dy + (1.0 + dy) * h * 0.5;
-                if b > 0.0 {
-                    bleed.bottom_px = bleed.bottom_px.max(b);
-                }
+            let b_top = -dy * anchor_offset + (1.0 - dy_q) * h * 0.5;
+            if b_top > 0.0 {
+                bleed.top_px = bleed.top_px.max(b_top);
             }
         }
     }
@@ -406,18 +416,14 @@ pub struct BleedAxis {
 
 /// One label's contribution to the bleed.
 ///
-/// `outer_pos` is the anchor's position in **bbox-normalised** panel
-/// coordinates — `(0, 0)` is top-left of the projection's bounding
-/// box (which matches the panel rect when `fit_to_bbox = true`),
-/// `(1, 1)` bottom-right. `direction` is the screen-space unit
-/// vector the chrome offsets the label by from its anchor (mirrors
-/// the `AxisLabelAt::direction` `draw_axis_label` uses): a radius
-/// label at a horizontal bottom spoke has direction `(0, 1)`,
-/// pushing the entire label below the anchor.
+/// `direction` is the screen-space unit vector the chrome offsets the
+/// label by from its anchor (mirrors the `AxisLabelAt::direction`
+/// `draw_axis_label` uses): a radius label at a horizontal bottom
+/// spoke has direction `(0, 1)`, pushing the entire label below the
+/// anchor.
 pub struct BleedLabel {
     pub text: String,
     pub kind: BleedLabelKind,
-    pub outer_pos: (f64, f64),
     pub direction: (f64, f64),
 }
 
@@ -461,9 +467,12 @@ const TITLE_GAP_PT: f64 = 6.0;
 // for the text-along-path layout.
 const ANGULAR_TITLE_ARC_SEGMENTS: usize = 32;
 
-/// Render a radius axis title past the outer end of the spoke. The
-/// title rotates to align with the spoke and auto-flips if rendering
-/// would place it upside-down on screen.
+/// Render a radius axis title past the outer end of the tick labels,
+/// offset perpendicular to the spoke (matching the cartesian Y-axis
+/// convention: parallel to the axis, past the label rail). Centred
+/// along the visible spoke segment between `r_inner` and `r_outer`.
+/// Rotates to align with the spoke and auto-flips if rendering would
+/// place it upside-down on screen.
 ///
 /// `label_extent_px` is the projected extent of the outermost tick
 /// label onto the tick direction — it pushes the title past the
@@ -484,7 +493,10 @@ fn draw_radius_title(
     let (ux, uy) = polar.unit_position(theta_frac);
     // Spoke direction in screen-y-down coords.
     let (sx, sy) = (ux, -uy);
-    // Rotation angle (math screen coords, y-down).
+    // Perpendicular direction (tick direction) pointing OUTSIDE the
+    // swept polar region — the same vector the tick labels offset by.
+    let (tx, ty) = radius_axis_tick_direction(polar, theta_frac);
+    // Rotation angle (screen coords, y-down).
     let mut theta_spoke = sy.atan2(sx);
 
     let style = crate::plot::plot::axis_title_style();
@@ -500,25 +512,33 @@ fn draw_radius_title(
     let tick_px = pt_to_px(TICK_LENGTH_PT, dpi);
     let label_gap_px = pt_to_px(LABEL_GAP_PT, dpi);
     let title_gap_px = pt_to_px(TITLE_GAP_PT, dpi);
-    let outer_offset = tick_px + label_gap_px + label_extent_px + title_gap_px;
+    // Perpendicular distance from the spoke to the title's bbox
+    // centre: tick + label_gap + label extent + title_gap clears the
+    // label rail; the extra title_h / 2 puts the title's near edge
+    // at exactly title_gap past the labels.
+    let perp_distance = tick_px + label_gap_px + label_extent_px + title_gap_px + title_h * 0.5;
 
-    // Anchor sits past the outer tick + label rail, along the spoke
-    // from the polar centre.
-    let outer_r = g.r_outer + outer_offset;
-    let anchor_x = g.cx + outer_r * ux;
-    let anchor_y = g.cy - outer_r * uy;
+    // Midpoint of the visible spoke segment, offset perpendicular by
+    // `perp_distance` along the tick direction.
+    let mid_r = (g.r_inner + g.r_outer) * 0.5;
+    let body_center_x = g.cx + mid_r * ux + perp_distance * tx;
+    let body_center_y = g.cy - mid_r * uy + perp_distance * ty;
+
+    // Place the rotated glyph origin so the title body centres on
+    // (body_center_x, body_center_y). The body runs from local x = 0
+    // to local x = title_w; the centre is at half that distance from
+    // the origin along the rotated x-axis (= the spoke direction).
+    let anchor_x = body_center_x - (title_w * 0.5) * sx;
+    let anchor_y = body_center_y - (title_w * 0.5) * sy;
 
     // Upright correction: if the title's natural baseline orientation
     // would render upside-down (sin(θ) > 0 in screen-y-down ⇒ baseline
-    // normal points down ⇒ glyphs appear upside-down), add π and slide
-    // the anchor along the rotated baseline so the title still
-    // occupies the outer portion of the spoke.
+    // normal points down ⇒ glyphs appear upside-down), add π. The
+    // body-centred placement above keeps the title in the same world
+    // location regardless of the flip.
     let upside_down = theta_spoke.sin() > 0.0;
     let (origin_x, origin_y) = if upside_down {
         theta_spoke += std::f64::consts::PI;
-        // After flipping, the title's local x runs back along the
-        // spoke (inward). Slide the origin outward by title_w + 2 *
-        // baseline body so the body sits in the same world location.
         let cos_t = theta_spoke.cos();
         let sin_t = theta_spoke.sin();
         (anchor_x - title_w * cos_t, anchor_y - title_w * sin_t)
@@ -526,11 +546,11 @@ fn draw_radius_title(
         (anchor_x, anchor_y)
     };
 
-    // Centre the title across the spoke (along the perpendicular)
+    // Centre the title across the rotated baseline (perpendicular axis)
     // by offsetting half its height. In glyph-local y-down space
     // the baseline is at `baseline_ref`, so a y-offset of
     // `-title_h * 0.5 + baseline_ref` puts the title bbox centre on
-    // the spoke.
+    // the rotated baseline.
     let perp_offset = -title_h * 0.5 + baseline_ref;
 
     let brush = Brush::Solid(axis_ink());
