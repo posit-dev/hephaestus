@@ -45,6 +45,16 @@ const EPSILON: f64 = 1e-9;
 /// pixels. Sub-pixel deviation from the true arc — visually
 /// indistinguishable at any reasonable zoom.
 const ROUND_TOLERANCE: f64 = 0.5;
+
+/// Maximum angular step per fan triangle, in radians. The chord-error
+/// formula `ε = R(1 − cos(Δθ/2))` keeps the *positional* deviation
+/// sub-pixel, but at small `R` (typical line half-widths of 1–3 px)
+/// it picks angular steps of 60–90°, which read as visible corners
+/// even though the chord error itself is sub-pixel. Capping the step
+/// at 15° (= π/12 rad) ensures at least 12 segments per semicircle
+/// at any radius, eliminating the perceptible faceting on round
+/// caps and joins of thin lines.
+const ROUND_MAX_ANGULAR_STEP: f64 = std::f64::consts::PI / 12.0;
 /// Per-segment seam-bleed in panel pixels. Each interior quad is
 /// extended this far past its natural endpoint at both ends along the
 /// local segment tangent, so adjacent quads overlap and SrcOver
@@ -620,12 +630,16 @@ fn emit_round_cap_fan(
     color: Color,
     half_width: f64,
 ) {
-    // Approximate angular step from tolerance: ε = R · (1 - cos(Δθ/2))
-    // → Δθ ≈ 2·acos(1 - ε/R). For a semicircle of arc length π·R,
-    // segment count is roughly π·R / sqrt(8·ε·R) ≈ π·sqrt(R/(8·ε)).
+    // Two complementary bounds on the angular step:
+    //   1. Chord error: ε = R · (1 - cos(Δθ/2)) → Δθ ≈ 2·acos(1 - ε/R).
+    //      Sub-pixel chord deviation at any radius.
+    //   2. Max angular step: capped at ROUND_MAX_ANGULAR_STEP so even
+    //      thin lines (small R) get enough segments to read as smooth.
+    // Take the smaller (= denser) of the two.
     let r = half_width.max(EPSILON);
-    let theta_step = (1.0 - (ROUND_TOLERANCE / r).clamp(0.0, 1.0)).acos() * 2.0;
-    let segments = (std::f64::consts::PI / theta_step.max(1e-3)).ceil() as usize;
+    let chord_step = (1.0 - (ROUND_TOLERANCE / r).clamp(0.0, 1.0)).acos() * 2.0;
+    let theta_step = chord_step.clamp(1e-3, ROUND_MAX_ANGULAR_STEP);
+    let segments = (std::f64::consts::PI / theta_step).ceil() as usize;
     let segments = segments.clamp(4, 64);
 
     // From endpoint, the angle of vector (a - endpoint) and (b - endpoint).
@@ -704,8 +718,13 @@ fn emit_round_fan(
     }
     // The bevel direction is the SHORTER of the two sweeps around
     // pivot. Stick with the (-π, π] delta directly.
-    let theta_step = (1.0 - (ROUND_TOLERANCE / r.max(EPSILON)).clamp(0.0, 1.0)).acos() * 2.0;
-    let segments = (delta.abs() / theta_step.max(1e-3)).ceil() as usize;
+    //
+    // Angular step is the smaller of (a) chord-error driven and
+    // (b) the absolute cap — see `emit_round_cap_fan` for the
+    // rationale.
+    let chord_step = (1.0 - (ROUND_TOLERANCE / r.max(EPSILON)).clamp(0.0, 1.0)).acos() * 2.0;
+    let theta_step = chord_step.clamp(1e-3, ROUND_MAX_ANGULAR_STEP);
+    let segments = (delta.abs() / theta_step).ceil() as usize;
     let n_steps = segments.clamp(2, 32);
     let step = delta / n_steps as f64;
 

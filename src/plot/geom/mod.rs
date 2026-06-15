@@ -33,6 +33,7 @@ use crate::plot::value::{DataColumn, Date, DateTime, Duration, Time, Value};
 use crate::scene::SceneBuilder;
 use crate::shape::ShapeRegistry;
 
+pub mod bspline;
 pub mod ellipse;
 pub mod line;
 pub(crate) mod marks;
@@ -51,6 +52,7 @@ pub mod text_fit;
 pub mod text_path;
 pub mod wedge;
 
+pub use bspline::BSplineGeom;
 pub use ellipse::EllipseGeom;
 pub use line::LineGeom;
 pub use point::PointGeom;

@@ -36,9 +36,9 @@ pub mod value;
 pub use composition::{PlotComposition, ValidationIssue};
 pub use diff::{diff_columns, diff_positional, KeyIndex};
 pub use geom::{
-    linetype, BuildableGeom, Channel, ChannelDecl, EllipseGeom, ExpectedOutput, Geom, GeomBuilder,
-    GeomContext, Keys, LineGeom, PointGeom, PolygonGeom, Raw, RectGeom, RibbonGeom, ScaleResolver,
-    SegmentGeom, WedgeGeom,
+    linetype, BSplineGeom, BuildableGeom, Channel, ChannelDecl, EllipseGeom, ExpectedOutput, Geom,
+    GeomBuilder, GeomContext, Keys, LineGeom, PointGeom, PolygonGeom, Raw, RectGeom, RibbonGeom,
+    ScaleResolver, SegmentGeom, WedgeGeom,
 };
 #[cfg(feature = "text")]
 pub use geom::{TextFitGeom, TextGeom, TextPathGeom};

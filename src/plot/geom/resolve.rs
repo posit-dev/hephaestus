@@ -519,6 +519,48 @@ fn resolve_pattern_px(
         .collect()
 }
 
+/// Forward extent (in pt) that an endpoint-marker shape occupies in
+/// front of its anchor, taking `invert` into account. Used by line-
+/// and curve-like geoms to extend the user-supplied `clip_*_radius`
+/// just enough to make room for the marker so its tip lands at the
+/// user-supplied clip boundary (or the original endpoint when no
+/// user clip is set).
+///
+/// The shape's local +x axis is aligned with the outward direction
+/// at draw time ([`emit_endpoint_marker`] mode-B). Forward extent
+/// from the anchor along that axis is `bbox.x1 - anchor.x` in shape
+/// units; when `invert` flips the marker, the new forward direction
+/// is the old -x, so the rendered forward extent becomes
+/// `anchor.x - bbox.x0`. Multiplied by `size_pt` since
+/// [`emit_marker_shape`] scales shape coordinates by `size_px =
+/// pt_to_px(size_pt, dpi)`.
+///
+/// Returns `0.0` when the marker is unset, unknown to the registry,
+/// non-positive in size, or has no forward extent. Callers add the
+/// result to any user-supplied `clip_*_radius` channel value before
+/// trimming.
+pub(crate) fn auto_endpoint_clip_pt(
+    marker_name: &str,
+    size_pt: f64,
+    invert: bool,
+    shapes: &ShapeRegistry,
+) -> f64 {
+    if marker_name.is_empty() || !size_pt.is_finite() || size_pt <= 0.0 {
+        return 0.0;
+    }
+    let Some(shape) = shapes.get(marker_name) else {
+        return 0.0;
+    };
+    let bbox = shape.bounding_box();
+    let anchor = shape.anchor();
+    let extent_units = if invert {
+        anchor.x - bbox.x0
+    } else {
+        bbox.x1 - anchor.x
+    };
+    extent_units.max(0.0) * size_pt
+}
+
 /// Compute the outward direction for an endpoint marker.
 ///
 /// The rule, per Phase C.5: the arrowhead's local +x axis points along

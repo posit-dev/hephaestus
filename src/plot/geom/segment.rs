@@ -35,10 +35,11 @@ use crate::stroke::{Cap, Join, Stroke};
 
 use super::linetype;
 use super::resolve::{
-    build_stroke_for_pattern, draw_linetype_with_markers, emit_endpoint_marker, endpoint_outward,
-    override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or, resolve_cap_channel,
-    resolve_color_channel, resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position, resolve_str_channel_or,
+    auto_endpoint_clip_pt, build_stroke_for_pattern, draw_linetype_with_markers,
+    emit_endpoint_marker, endpoint_outward, override_alpha, pt_to_px, resolve_angle_channel,
+    resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel, resolve_join_channel,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
+    resolve_position, resolve_str_channel_or,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -293,14 +294,49 @@ impl Geom for SegmentGeom {
             let cap = resolve_cap_channel(cap_ch, cap_scale, i, DEFAULT_CAP);
             let join = resolve_join_channel(join_ch, join_scale, i, DEFAULT_JOIN);
 
-            // Optional endpoint clipping by a circle at the segment's
-            // start / end. Trims the segment where it exits the circle;
-            // when the radius is ≥ the segment length the whole segment
-            // disappears (matches primitive behaviour).
-            let clip_start_pt =
+            // Endpoint-marker constants. Resolved BEFORE the clip
+            // calc so the auto-clip contribution can fold in below.
+            let start_name = resolve_str_channel_or(start_marker_ch, start_marker_scale, i, "");
+            let end_name = resolve_str_channel_or(end_marker_ch, end_marker_scale, i, "");
+            let default_marker_size_pt = 3.0 * linewidth_pt;
+            let start_marker_size_pt = resolve_number_channel_or(
+                start_marker_size_ch,
+                start_marker_size_scale,
+                i,
+                default_marker_size_pt,
+            );
+            let end_marker_size_pt = resolve_number_channel_or(
+                end_marker_size_ch,
+                end_marker_size_scale,
+                i,
+                default_marker_size_pt,
+            );
+            let start_invert = resolve_bool_channel_or(
+                start_marker_invert_ch,
+                start_marker_invert_scale,
+                i,
+                false,
+            );
+            let end_invert =
+                resolve_bool_channel_or(end_marker_invert_ch, end_marker_invert_scale, i, false);
+
+            // Endpoint clipping. `clip_*_radius` covers the explicit-
+            // trim use case (graph node boundaries, breathing room
+            // next to a data point); on top of that we automatically
+            // add the forward extent of any endpoint marker so the
+            // marker's tip lands at the user's clip boundary (or the
+            // original endpoint when no user clip is set) without the
+            // user having to compute the marker geometry themselves.
+            let user_clip_start_pt =
                 resolve_number_channel_or(clip_start_radius_ch, clip_start_radius_scale, i, 0.0);
-            let clip_end_pt =
+            let user_clip_end_pt =
                 resolve_number_channel_or(clip_end_radius_ch, clip_end_radius_scale, i, 0.0);
+            let auto_clip_start_pt =
+                auto_endpoint_clip_pt(&start_name, start_marker_size_pt, start_invert, ctx.shapes);
+            let auto_clip_end_pt =
+                auto_endpoint_clip_pt(&end_name, end_marker_size_pt, end_invert, ctx.shapes);
+            let clip_start_pt = user_clip_start_pt + auto_clip_start_pt;
+            let clip_end_pt = user_clip_end_pt + auto_clip_end_pt;
             let p0 = Point::new(px, py);
             let p1 = Point::new(px2, py2);
             let original = [p0, p1];
@@ -369,37 +405,20 @@ impl Geom for SegmentGeom {
 
             let marker_fill = resolve_color_channel(fill_ch, fill_scale, i).unwrap_or(stroke_color);
 
-            // Endpoint-marker channel resolution. Resolved up front so
-            // the start marker can be emitted before the stroke and the
-            // end marker after — matching LineGeom's path-order
-            // convention.
-            let start_name = resolve_str_channel_or(start_marker_ch, start_marker_scale, i, "");
-            let end_name = resolve_str_channel_or(end_marker_ch, end_marker_scale, i, "");
-            let default_marker_size_pt = 3.0 * linewidth_pt;
+            // Start marker emitted before the stroke; end marker
+            // after — matching LineGeom's path-order convention.
             let marker_outline_px = linewidth_px.max(pt_to_px(0.5, ctx.dpi));
 
             if !start_name.is_empty() {
-                let size_pt = resolve_number_channel_or(
-                    start_marker_size_ch,
-                    start_marker_size_scale,
-                    i,
-                    default_marker_size_pt,
-                );
-                let size_px = pt_to_px(size_pt, ctx.dpi);
+                let size_px = pt_to_px(start_marker_size_pt, ctx.dpi);
                 let fill = resolve_color_channel(start_marker_fill_ch, start_marker_fill_scale, i)
                     .unwrap_or(marker_fill);
-                let invert = resolve_bool_channel_or(
-                    start_marker_invert_ch,
-                    start_marker_invert_scale,
-                    i,
-                    false,
-                );
                 let outward = endpoint_outward(&pts, &original, true, clip_start_pt > 0.0);
                 emit_endpoint_marker(
                     scene,
                     pts[0],
                     outward,
-                    invert,
+                    start_invert,
                     &start_name,
                     size_px,
                     fill,
@@ -455,27 +474,15 @@ impl Geom for SegmentGeom {
             }
 
             if !end_name.is_empty() {
-                let size_pt = resolve_number_channel_or(
-                    end_marker_size_ch,
-                    end_marker_size_scale,
-                    i,
-                    default_marker_size_pt,
-                );
-                let size_px = pt_to_px(size_pt, ctx.dpi);
+                let size_px = pt_to_px(end_marker_size_pt, ctx.dpi);
                 let fill = resolve_color_channel(end_marker_fill_ch, end_marker_fill_scale, i)
                     .unwrap_or(marker_fill);
-                let invert = resolve_bool_channel_or(
-                    end_marker_invert_ch,
-                    end_marker_invert_scale,
-                    i,
-                    false,
-                );
                 let outward = endpoint_outward(&pts, &original, false, clip_end_pt > 0.0);
                 emit_endpoint_marker(
                     scene,
                     pts[pts.len() - 1],
                     outward,
-                    invert,
+                    end_invert,
                     &end_name,
                     size_px,
                     fill,
@@ -1031,8 +1038,10 @@ mod tests {
 
     #[test]
     fn end_marker_anchor_lands_at_last_vertex() {
-        // arrow-closed has anchor (-1, 0). Place end marker on the
-        // (100, 50) endpoint; transform * anchor should map to (100, 50).
+        // Auto-clip trims `(bbox.x1 - anchor.x) * size_pt = 1.0 * 10 =
+        // 10 pt` so the arrow's tip lands at the original endpoint.
+        // The anchor (the back of the arrow body) therefore sits at
+        // `(100 - 10pt_in_px, 50)`.
         let g = horizontal_segment_with(|b| {
             b.set("end_marker", "arrow-closed")
                 .set("end_marker_size", 10.0_f64);
@@ -1042,14 +1051,21 @@ mod tests {
         assert!(!xforms.is_empty(), "expected an end-marker fill");
         let xf = xforms[0];
         let anchor = xf * kurbo::Point::new(-1.0, 0.0);
-        assert!((anchor.x - 100.0).abs() < 1e-6, "anchor.x = {}", anchor.x);
+        let size_px = 10.0 * 96.0 / 72.0;
+        assert!(
+            (anchor.x - (100.0 - size_px)).abs() < 1e-6,
+            "anchor.x = {} (expected {})",
+            anchor.x,
+            100.0 - size_px
+        );
         assert!((anchor.y - 50.0).abs() < 1e-6, "anchor.y = {}", anchor.y);
     }
 
     #[test]
     fn end_marker_tip_extends_outward() {
-        // For arrow-closed: local (0, 0) is the tip. After transform it
-        // should land beyond the endpoint, in the +x direction.
+        // Auto-clip lands the arrow tip exactly on the original
+        // endpoint; the (0, 0) tip vertex in shape coords maps to
+        // (100, 50) after the transform.
         let g = horizontal_segment_with(|b| {
             b.set("end_marker", "arrow-closed")
                 .set("end_marker_size", 10.0_f64);
@@ -1057,42 +1073,39 @@ mod tests {
         let scene = draw_into_scene(&g);
         let xforms = fills_after_strokes(&scene);
         let tip = xforms[0] * kurbo::Point::new(0.0, 0.0);
-        // size = 10 pt = 10 * 96/72 ≈ 13.33 px.
-        let size_px = 10.0 * 96.0 / 72.0;
         assert!(
-            (tip.x - (100.0 + size_px)).abs() < 1e-6,
-            "tip.x = {} (expected {})",
-            tip.x,
-            100.0 + size_px
+            (tip.x - 100.0).abs() < 1e-6,
+            "tip.x = {} (expected 100)",
+            tip.x
         );
         assert!((tip.y - 50.0).abs() < 1e-6, "tip.y = {}", tip.y);
     }
 
     #[test]
     fn start_marker_anchor_lands_at_first_vertex_and_tip_points_back() {
-        // Mode B at start: outward = (-1, 0). After rotation+anchor
-        // math, the anchor (-1, 0) lands on (0, 50) and the tip (0, 0)
-        // sits in the -x direction beyond (0, 50).
+        // Mode B at start with auto-clip: trim shifts the anchor
+        // forward into the segment by `size_pt × 1.0`, and the tip
+        // (in -x outward direction) lands at the original first
+        // vertex (0, 50).
         let g = horizontal_segment_with(|b| {
             b.set("start_marker", "arrow-closed")
                 .set("start_marker_size", 10.0_f64);
         });
         let scene = draw_into_scene(&g);
-        // Start marker is emitted BEFORE the stroke.
         let xforms = fills_before_strokes(&scene);
         assert!(!xforms.is_empty(), "expected a start-marker fill");
         let xf = xforms[0];
         let anchor = xf * kurbo::Point::new(-1.0, 0.0);
-        assert!((anchor.x - 0.0).abs() < 1e-6, "anchor.x = {}", anchor.x);
-        assert!((anchor.y - 50.0).abs() < 1e-6, "anchor.y = {}", anchor.y);
-        let tip = xf * kurbo::Point::new(0.0, 0.0);
         let size_px = 10.0 * 96.0 / 72.0;
         assert!(
-            (tip.x - (0.0 - size_px)).abs() < 1e-6,
-            "tip.x = {} (expected {})",
-            tip.x,
-            -size_px
+            (anchor.x - size_px).abs() < 1e-6,
+            "anchor.x = {} (expected {})",
+            anchor.x,
+            size_px
         );
+        assert!((anchor.y - 50.0).abs() < 1e-6, "anchor.y = {}", anchor.y);
+        let tip = xf * kurbo::Point::new(0.0, 0.0);
+        assert!((tip.x - 0.0).abs() < 1e-6, "tip.x = {} (expected 0)", tip.x);
     }
 
     #[test]
@@ -1132,9 +1145,13 @@ mod tests {
 
     #[test]
     fn marker_respects_clip_start_radius() {
-        // Horizontal segment, clip_start_radius = 15 pt = 20 px.
-        // Start marker's anchor should land at (20, 50), and outward
-        // direction (chord) points back to (0, 50) ⇒ -x.
+        // Horizontal segment, clip_start_radius = 15 pt (= user trim
+        // toward a node boundary, etc.) plus a size-10-pt arrow
+        // contributing another 10 pt of auto-clip: effective trim =
+        // 25 pt. The arrow anchor lands at (25pt_in_px, 50); the tip
+        // (in the chord direction toward original first vertex)
+        // lands at the user's clip boundary, 15 pt from the data
+        // endpoint.
         let g = horizontal_segment_with(|b| {
             b.set("start_marker", "arrow-closed")
                 .set("start_marker_size", 10.0_f64)
@@ -1143,22 +1160,21 @@ mod tests {
         let scene = draw_into_scene(&g);
         let xf = fills_before_strokes(&scene)[0];
         let anchor = xf * kurbo::Point::new(-1.0, 0.0);
-        let expected_x = 15.0 * 96.0 / 72.0;
+        let user_clip_px = 15.0 * 96.0 / 72.0;
+        let auto_clip_px = 10.0 * 96.0 / 72.0;
+        let expected_anchor_x = user_clip_px + auto_clip_px;
         assert!(
-            (anchor.x - expected_x).abs() < 1e-6,
+            (anchor.x - expected_anchor_x).abs() < 1e-6,
             "anchor.x = {} (expected {})",
             anchor.x,
-            expected_x
+            expected_anchor_x
         );
-        // Tip is in the chord direction (toward original first vertex
-        // at (0, 50)) → -x from anchor.
         let tip = xf * kurbo::Point::new(0.0, 0.0);
-        let size_px = 10.0 * 96.0 / 72.0;
         assert!(
-            (tip.x - (expected_x - size_px)).abs() < 1e-6,
-            "tip.x = {} (expected {})",
+            (tip.x - user_clip_px).abs() < 1e-6,
+            "tip.x = {} (expected user clip boundary {})",
             tip.x,
-            expected_x - size_px
+            user_clip_px
         );
     }
 
