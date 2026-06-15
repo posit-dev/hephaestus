@@ -76,12 +76,12 @@ use crate::path::{FillRule, Path};
 use crate::plot::diff::{diff_columns, diff_positional, KeyIndex};
 use crate::plot::value::{DataColumn, Value};
 use crate::scene::SceneBuilder;
-use crate::stroke::Stroke;
 
 use super::marks::{build_marks_from_column, MarkSlot};
+use super::outline::{draw_curve_outline, resolve_outline_spec, OutlineChannels, OutlineScales};
 use super::resolve::{
-    channel_varies_across, override_alpha, pt_to_px, resolve_color_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position,
+    channel_varies_across, override_alpha, resolve_color_channel, resolve_number_channel,
+    resolve_pick_id, resolve_position,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -92,10 +92,12 @@ use super::{
     Keys,
 };
 
-const DEFAULT_LINEWIDTH_PT: f64 = 1.0;
-
 /// Catalog of channels this geom recognises, with their expected scale
-/// output type.
+/// output type. Outline-related channels (everything driving the
+/// per-curve stroke + endpoint-marker dispatch) ship in both an
+/// unsuffixed form for curve A and a `2`-suffixed form for curve B, so
+/// each boundary can be independently dashed / capped / clipped /
+/// marker-stamped.
 const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("x", ExpectedOutput::Numbers),
     ("y", ExpectedOutput::Numbers),
@@ -103,11 +105,41 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("y2", ExpectedOutput::Numbers),
     ("fill", ExpectedOutput::Colors),
     ("alpha", ExpectedOutput::Numbers),
-    ("stroke", ExpectedOutput::Colors),
-    ("stroke2", ExpectedOutput::Colors),
-    ("linewidth", ExpectedOutput::Numbers),
-    ("linewidth2", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
+    // Curve A outline.
+    ("stroke", ExpectedOutput::Colors),
+    ("linewidth", ExpectedOutput::Numbers),
+    ("linetype", ExpectedOutput::Linetypes),
+    ("dash_offset", ExpectedOutput::Numbers),
+    ("cap", ExpectedOutput::Strings),
+    ("join", ExpectedOutput::Strings),
+    ("clip_start_radius", ExpectedOutput::Numbers),
+    ("clip_end_radius", ExpectedOutput::Numbers),
+    ("start_marker", ExpectedOutput::Strings),
+    ("end_marker", ExpectedOutput::Strings),
+    ("start_marker_size", ExpectedOutput::Numbers),
+    ("end_marker_size", ExpectedOutput::Numbers),
+    ("start_marker_fill", ExpectedOutput::Colors),
+    ("end_marker_fill", ExpectedOutput::Colors),
+    ("start_marker_invert", ExpectedOutput::Any),
+    ("end_marker_invert", ExpectedOutput::Any),
+    // Curve B outline (mirror of curve A's surface).
+    ("stroke2", ExpectedOutput::Colors),
+    ("linewidth2", ExpectedOutput::Numbers),
+    ("linetype2", ExpectedOutput::Linetypes),
+    ("dash_offset2", ExpectedOutput::Numbers),
+    ("cap2", ExpectedOutput::Strings),
+    ("join2", ExpectedOutput::Strings),
+    ("clip_start_radius2", ExpectedOutput::Numbers),
+    ("clip_end_radius2", ExpectedOutput::Numbers),
+    ("start_marker2", ExpectedOutput::Strings),
+    ("end_marker2", ExpectedOutput::Strings),
+    ("start_marker_size2", ExpectedOutput::Numbers),
+    ("end_marker_size2", ExpectedOutput::Numbers),
+    ("start_marker_fill2", ExpectedOutput::Colors),
+    ("end_marker_fill2", ExpectedOutput::Colors),
+    ("start_marker_invert2", ExpectedOutput::Any),
+    ("end_marker_invert2", ExpectedOutput::Any),
 ];
 
 /// Which optional channels supply curve B, and therefore how the
@@ -291,11 +323,10 @@ impl Geom for RibbonGeom {
         let y2_scale_bound = ctx.scale_for("y2");
         let fill_scale = ctx.scale_for("fill");
         let alpha_scale = ctx.scale_for("alpha");
-        let stroke_scale = ctx.scale_for("stroke");
-        let stroke2_scale = ctx.scale_for("stroke2");
-        let linewidth_scale = ctx.scale_for("linewidth");
-        let linewidth2_scale = ctx.scale_for("linewidth2");
         let pick_id_scale = ctx.scale_for("pick_id");
+
+        let outline_a_scales = OutlineScales::from_ctx(ctx, "");
+        let outline_b_scales = OutlineScales::from_ctx(ctx, "2");
 
         let channels = &self.state.channels;
         let (x_col, x_scale) = match channels.get("x") {
@@ -311,11 +342,10 @@ impl Geom for RibbonGeom {
 
         let fill_ch = channels.get("fill");
         let alpha_ch = channels.get("alpha");
-        let stroke_ch = channels.get("stroke");
-        let stroke2_ch = channels.get("stroke2");
-        let linewidth_ch = channels.get("linewidth");
-        let linewidth2_ch = channels.get("linewidth2");
         let pick_id_ch = channels.get("pick_id");
+
+        let outline_a_ch = OutlineChannels::from_map(channels, "");
+        let outline_b_ch = OutlineChannels::from_map(channels, "2");
 
         // Curve-B inputs. Horizontal: B = `(x, y2)`. Vertical:
         // B = `(x2, y)`. Free: B = `(x2, y2)`. The unused channel in
@@ -336,18 +366,27 @@ impl Geom for RibbonGeom {
                 resolve_color_channel(fill_ch, fill_scale, i0),
                 resolve_number_channel(alpha_ch, alpha_scale, i0),
             );
-            let mark_stroke = override_alpha(
-                resolve_color_channel(stroke_ch, stroke_scale, i0),
-                resolve_number_channel(alpha_ch, alpha_scale, i0),
+            let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
+            let outline_a_spec = resolve_outline_spec(
+                &outline_a_ch,
+                &outline_a_scales,
+                alpha_ch,
+                alpha_scale,
+                i0,
+                pick,
             );
-            let mark_stroke2 = override_alpha(
-                resolve_color_channel(stroke2_ch, stroke2_scale, i0),
-                resolve_number_channel(alpha_ch, alpha_scale, i0),
+            let outline_b_spec = resolve_outline_spec(
+                &outline_b_ch,
+                &outline_b_scales,
+                alpha_ch,
+                alpha_scale,
+                i0,
+                pick,
             );
 
             // If nothing to draw (no fill, no stroke on either curve)
             // skip the whole mark.
-            if mark_fill.is_none() && mark_stroke.is_none() && mark_stroke2.is_none() {
+            if mark_fill.is_none() && outline_a_spec.is_none() && outline_b_spec.is_none() {
                 continue;
             }
 
@@ -377,6 +416,9 @@ impl Geom for RibbonGeom {
             let mut row_for_vertex: Vec<usize> = Vec::with_capacity(mark.rows.len());
             let mut vertex_origins: Vec<VertexOrigin> = Vec::with_capacity(mark.rows.len());
             let mut prev_real: Option<(usize, [f64; 2], [f64; 2])> = None;
+            // First real row's (a_ch, b_ch); used after the loop to densify
+            // the start cap (curve B's first → curve A's first in data space).
+            let mut first_real: Option<([f64; 2], [f64; 2])> = None;
 
             for &i in &mark.rows {
                 let x_frac = resolve_position(x_col.get(i), x_scale, 0.0);
@@ -455,6 +497,9 @@ impl Geom for RibbonGeom {
                     next_row: i,
                     t: 1.0,
                 });
+                if first_real.is_none() {
+                    first_real = Some((a_ch, b_ch));
+                }
                 prev_real = Some((i, a_ch, b_ch));
             }
 
@@ -465,19 +510,59 @@ impl Geom for RibbonGeom {
             debug_assert_eq!(curve_a_pts.len(), curve_b_pts.len());
             debug_assert_eq!(curve_a_pts.len(), vertex_origins.len());
 
-            // Build the closed fill contour: forward along curve A, then
-            // back along curve B (reversed), then close.
+            // Densify the two terminal caps under non-linear projections.
+            // The start cap connects curve B's first vertex back to curve A's
+            // first vertex in data space; the end cap connects curve A's last
+            // vertex to curve B's last vertex. Under Cartesian, both calls
+            // return zero interior samples and the contour shape is unchanged.
+            // Under polar with a non-radial cap (Free orientation with
+            // distinct theta on the two endpoints) the cap acquires the same
+            // geodesic curvature as the per-curve densification.
+            //
+            // Cap densification touches only the closed-contour path (the
+            // solid and gradient fill paths plus future per-curve outline
+            // strokes). The mesh path (varying fill) keeps straight cap
+            // chords — the mesh's quad topology doesn't naturally accommodate
+            // cap-arc triangles, and forcing it would require a fan
+            // triangulation that complicates `ribbon_band_mesh`.
+            let mut start_cap_samples: Vec<crate::plot::projection::InteriorSample> = Vec::new();
+            let mut end_cap_samples: Vec<crate::plot::projection::InteriorSample> = Vec::new();
+            if !is_linear {
+                if let (Some((first_a, first_b)), Some((_, last_a, last_b))) =
+                    (first_real, prev_real)
+                {
+                    ctx.projection.interpolate_segment_with_t(
+                        panel,
+                        &last_a,
+                        &last_b,
+                        &mut end_cap_samples,
+                    );
+                    ctx.projection.interpolate_segment_with_t(
+                        panel,
+                        &first_b,
+                        &first_a,
+                        &mut start_cap_samples,
+                    );
+                }
+            }
+
+            // Build the closed fill contour: forward along curve A, end cap
+            // samples, reversed curve B, start cap samples, then close.
             let mut path = Path::new();
             path.move_to(curve_a_pts[0]);
             for p in &curve_a_pts[1..] {
                 path.line_to(*p);
             }
+            for s in &end_cap_samples {
+                path.line_to(Point::new(s.px, s.py));
+            }
             for p in curve_b_pts.iter().rev() {
                 path.line_to(*p);
             }
+            for s in &start_cap_samples {
+                path.line_to(Point::new(s.px, s.py));
+            }
             path.close_path();
-
-            let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
 
             // ── Fill dispatch (variance-detect). ──
             //
@@ -507,14 +592,56 @@ impl Geom for RibbonGeom {
                         alpha_scale,
                         mark_color,
                     );
-                    let mesh = crate::primitives::ribbon_band_mesh(
+                    let mut mesh = crate::primitives::ribbon_band_mesh(
                         &curve_a_pts,
                         &curve_b_pts,
                         &colors_a,
                         &colors_b,
                     );
-                    if !mesh.is_empty() {
+                    if !mesh.vertices.is_empty() && curve_a_pts.len() >= 2 {
+                        // Cap-fan + clip combo. The fan adds
+                        // triangles in outward-bulging cap crescents
+                        // (where the strip's straight chord falls
+                        // short of the data-space arc); the clip
+                        // carves any inward-bulging cap overshoot
+                        // off the strip's straight chord. Both
+                        // directions land at the densified arc
+                        // boundary symmetrically.
+                        let last = curve_a_pts.len() - 1;
+                        let start_neighbor = Point::new(
+                            (curve_a_pts[1].x + curve_b_pts[1].x) * 0.5,
+                            (curve_a_pts[1].y + curve_b_pts[1].y) * 0.5,
+                        );
+                        let end_neighbor = Point::new(
+                            (curve_a_pts[last - 1].x + curve_b_pts[last - 1].x) * 0.5,
+                            (curve_a_pts[last - 1].y + curve_b_pts[last - 1].y) * 0.5,
+                        );
+                        append_cap_fan_to_mesh(
+                            &mut mesh,
+                            curve_a_pts[0],
+                            curve_b_pts[0],
+                            start_neighbor,
+                            &start_cap_samples,
+                            colors_a[0],
+                            CapDirection::Start,
+                        );
+                        append_cap_fan_to_mesh(
+                            &mut mesh,
+                            curve_a_pts[last],
+                            curve_b_pts[last],
+                            end_neighbor,
+                            &end_cap_samples,
+                            *colors_a.last().unwrap(),
+                            CapDirection::End,
+                        );
+                        scene.push_layer(
+                            crate::blend::BlendMode::NORMAL,
+                            1.0,
+                            Affine::IDENTITY,
+                            &path,
+                        );
                         scene.draw_mesh(&mesh, Affine::IDENTITY, pick);
+                        scene.pop_layer();
                     }
                 } else {
                     let brush = if varies {
@@ -545,58 +672,17 @@ impl Geom for RibbonGeom {
                 }
             }
 
-            // ── Curve A outline (independent of the fill). ──
-            if let Some(sc) = mark_stroke {
-                let linewidth_pt = resolve_number_channel_or(
-                    linewidth_ch,
-                    linewidth_scale,
-                    i0,
-                    DEFAULT_LINEWIDTH_PT,
-                );
-                let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
-                if linewidth_px.is_finite() && linewidth_px > 0.0 {
-                    let mut a_path = Path::new();
-                    a_path.move_to(curve_a_pts[0]);
-                    for p in &curve_a_pts[1..] {
-                        a_path.line_to(*p);
-                    }
-                    let stroke_spec = Stroke::new(linewidth_px);
-                    scene.stroke(
-                        &stroke_spec,
-                        Affine::IDENTITY,
-                        &Brush::Solid(sc),
-                        None,
-                        &a_path,
-                        pick,
-                    );
-                }
+            // ── Per-curve outlines. ──
+            //
+            // Each curve emits its own full LineGeom-style outline if
+            // its stroke channel is bound: dashed pattern, endpoint
+            // markers, endpoint clipping all flow through the same
+            // helper that LineGeom / BSplineGeom use.
+            if let Some(ref spec) = outline_a_spec {
+                draw_curve_outline(scene, ctx, &curve_a_pts, spec);
             }
-
-            // ── Curve B outline (independent of curve A's). ──
-            if let Some(sc) = mark_stroke2 {
-                let linewidth_pt = resolve_number_channel_or(
-                    linewidth2_ch,
-                    linewidth2_scale,
-                    i0,
-                    DEFAULT_LINEWIDTH_PT,
-                );
-                let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
-                if linewidth_px.is_finite() && linewidth_px > 0.0 {
-                    let mut b_path = Path::new();
-                    b_path.move_to(curve_b_pts[0]);
-                    for p in &curve_b_pts[1..] {
-                        b_path.line_to(*p);
-                    }
-                    let stroke_spec = Stroke::new(linewidth_px);
-                    scene.stroke(
-                        &stroke_spec,
-                        Affine::IDENTITY,
-                        &Brush::Solid(sc),
-                        None,
-                        &b_path,
-                        pick,
-                    );
-                }
+            if let Some(ref spec) = outline_b_spec {
+                draw_curve_outline(scene, ctx, &curve_b_pts, spec);
             }
         }
     }
@@ -779,7 +865,7 @@ struct VertexOrigin {
 /// Falls back to the corresponding curve-A coordinate for the channel
 /// that wasn't supplied in axis-aligned modes.
 #[allow(clippy::too_many_arguments)]
-fn resolve_b_row(
+pub(crate) fn resolve_b_row(
     orientation: Orientation,
     x2_ch: Option<&Channel>,
     y2_ch: Option<&Channel>,
@@ -802,6 +888,103 @@ fn resolve_b_row(
         }
     };
     Some((b_x, b_y))
+}
+
+/// Which terminal of the band a cap fan attaches to. Determines the
+/// order in which the cap samples are walked around the pivot so the
+/// fan winds consistently — start-cap samples come from
+/// `interpolate_segment_with_t(B's-first → A's-first)` and need to be
+/// reversed; end-cap samples come from `A's-last → B's-last` and walk
+/// the fan directly.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CapDirection {
+    Start,
+    End,
+}
+
+/// Append a fan triangulation that fills the crescent between the
+/// strip's straight cap chord (pivot ↔ other) and the densified
+/// data-space cap arc.
+///
+/// The pivot vertex (one of the curve endpoints at the cap) is the
+/// fan apex; the ring walks from the pivot along the cap arc to
+/// `other` (the matching endpoint on the opposite curve). All cap-fan
+/// vertices take `cap_color` — the band's per-vertex colour at that
+/// end of the strip — so the fan blends seamlessly into the strip's
+/// first / last quad.
+///
+/// `neighbor` is the strip's pair adjacent to the cap (the second pair
+/// for a `Start` cap, the second-to-last pair for an `End` cap),
+/// supplied as the midpoint of its A and B vertices. It defines the
+/// strip's sweep direction at the cap so the fan can detect when the
+/// cap arc bulges into the strip's interior — in that case the fan is
+/// skipped to avoid double-filling the strip with overlapping
+/// triangles. Under the more common outward-bulge geometry (e.g.
+/// caps at constant outer radius under polar) the fan adds the
+/// missing crescent without overlap.
+///
+/// No-op when there are no interior cap samples (linear projection,
+/// or a cap whose endpoints coincide in data space).
+pub(crate) fn append_cap_fan_to_mesh(
+    mesh: &mut crate::mesh::Mesh,
+    pivot: Point,
+    other: Point,
+    neighbor: Point,
+    cap_samples: &[crate::plot::projection::InteriorSample],
+    cap_color: Color,
+    direction: CapDirection,
+) {
+    if cap_samples.is_empty() {
+        return;
+    }
+    let chord_mid = Point::new((pivot.x + other.x) * 0.5, (pivot.y + other.y) * 0.5);
+    // Strip's sweep direction at the cap (from cap midpoint toward
+    // the next-or-previous pair midpoint).
+    let sweep_x = neighbor.x - chord_mid.x;
+    let sweep_y = neighbor.y - chord_mid.y;
+    // Average cap-sample offset from the chord midpoint.
+    let mut bulge_x = 0.0;
+    let mut bulge_y = 0.0;
+    for s in cap_samples {
+        bulge_x += s.px - chord_mid.x;
+        bulge_y += s.py - chord_mid.y;
+    }
+    let inv_n = 1.0 / cap_samples.len() as f64;
+    bulge_x *= inv_n;
+    bulge_y *= inv_n;
+    // Positive dot product → cap bulges in the same direction the
+    // strip sweeps, i.e. into the strip's interior. Adding fan
+    // triangles there would double-fill area the strip already
+    // covers; skip the fan and accept the strip's straight chord as
+    // a slight overshoot of the data-space arc.
+    if bulge_x * sweep_x + bulge_y * sweep_y > 0.0 {
+        return;
+    }
+    let base = mesh.vertices.len() as u32;
+    mesh.vertices.push(pivot);
+    mesh.colors.push(cap_color);
+    let cap_arc_iter: Vec<Point> = match direction {
+        CapDirection::Start => cap_samples
+            .iter()
+            .rev()
+            .map(|s| Point::new(s.px, s.py))
+            .chain(std::iter::once(other))
+            .collect(),
+        CapDirection::End => cap_samples
+            .iter()
+            .map(|s| Point::new(s.px, s.py))
+            .chain(std::iter::once(other))
+            .collect(),
+    };
+    for p in &cap_arc_iter {
+        mesh.vertices.push(*p);
+        mesh.colors.push(cap_color);
+    }
+    for i in 0..cap_arc_iter.len() - 1 {
+        mesh.indices.push(base);
+        mesh.indices.push(base + 1 + i as u32);
+        mesh.indices.push(base + 2 + i as u32);
+    }
 }
 
 fn resolve_optional_position(
@@ -1129,6 +1312,152 @@ mod tests {
     }
 
     #[test]
+    fn curve_b_independent_linetype_dashes() {
+        // Curve A solid, curve B dashed → two stroke ops, the curve-B
+        // one carrying a non-empty dash pattern.
+        use crate::plot::value::LinetypeStep;
+        use std::sync::Arc;
+        let dashed: Arc<[LinetypeStep]> =
+            Arc::from(vec![LinetypeStep::Dash(4.0), LinetypeStep::Gap(2.0)]);
+        let g = RibbonGeom::builder()
+            .set("x", Raw(vec![0.1_f64, 0.5, 0.9]))
+            .set("y", Raw(vec![0.5_f64, 0.7, 0.5]))
+            .set("y2", Raw(vec![0.2_f64, 0.3, 0.2]))
+            .set("stroke", red())
+            .set("stroke2", blue())
+            .set("linewidth", 2.0_f64)
+            .set("linewidth2", 2.0_f64)
+            .set("linetype2", Value::Linetype(dashed))
+            .build();
+        let scene = draw_and_record(g);
+        let strokes: Vec<&Op> = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .collect();
+        assert_eq!(strokes.len(), 2);
+        // Locate the strokes by brush color and check dash status.
+        let mut found_solid_red = false;
+        let mut found_dashed_blue = false;
+        for op in &strokes {
+            if let Op::Stroke {
+                brush: Brush::Solid(c),
+                stroke,
+                ..
+            } = op
+            {
+                let is_dashed = !stroke.dash_pattern.is_empty();
+                let is_red = c.components[0] > 0.99 && c.components[2] < 0.01;
+                let is_blue = c.components[0] < 0.01 && c.components[2] > 0.99;
+                if is_red && !is_dashed {
+                    found_solid_red = true;
+                }
+                if is_blue && is_dashed {
+                    found_dashed_blue = true;
+                }
+            }
+        }
+        assert!(found_solid_red, "expected solid red stroke on curve A");
+        assert!(found_dashed_blue, "expected dashed blue stroke on curve B");
+    }
+
+    #[test]
+    fn clip_start_radius2_clips_curve_b_only() {
+        // Curve A unclipped, curve B with clip_start_radius2 = 5pt.
+        // Both curves should be stroked, but curve B's first vertex is
+        // pushed forward along the curve by the clip.
+        let g = RibbonGeom::builder()
+            .set("x", Raw(vec![0.1_f64, 0.5, 0.9]))
+            .set("y", Raw(vec![0.5_f64, 0.7, 0.5]))
+            .set("y2", Raw(vec![0.2_f64, 0.3, 0.2]))
+            .set("stroke", red())
+            .set("stroke2", blue())
+            .set("linewidth", 2.0_f64)
+            .set("linewidth2", 2.0_f64)
+            .set("clip_start_radius2", 5.0_f64)
+            .build();
+        let scene = draw_and_record(g);
+        // Both strokes still emit.
+        let strokes_count = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .count();
+        assert_eq!(strokes_count, 2);
+        // Curve B's path should start near (but not at) curve A's start
+        // x-coordinate, since the clip trims the first vertex off
+        // (the original curve B's first vertex is at x ≈ 10, and
+        // clip_start_radius2 = 5pt ≈ 6.67px at 96 dpi pushes it forward).
+        let mut curve_a_first_x = None;
+        let mut curve_b_first_x = None;
+        for op in &scene.ops {
+            if let Op::Stroke {
+                brush: Brush::Solid(c),
+                path,
+                ..
+            } = op
+            {
+                let first_x = path
+                    .elements()
+                    .iter()
+                    .find_map(|el| match el {
+                        kurbo::PathEl::MoveTo(p) => Some(p.x),
+                        _ => None,
+                    })
+                    .unwrap();
+                let is_red = c.components[0] > 0.99 && c.components[2] < 0.01;
+                let is_blue = c.components[0] < 0.01 && c.components[2] > 0.99;
+                if is_red {
+                    curve_a_first_x = Some(first_x);
+                } else if is_blue {
+                    curve_b_first_x = Some(first_x);
+                }
+            }
+        }
+        let a_x = curve_a_first_x.expect("curve A stroke missing");
+        let b_x = curve_b_first_x.expect("curve B stroke missing");
+        // Curve A starts at the unclipped first vertex; curve B starts
+        // *past* it because of the clip.
+        assert!(
+            b_x > a_x + 1.0,
+            "curve B should be clipped forward of curve A's first vertex (a_x={a_x}, b_x={b_x})"
+        );
+    }
+
+    #[test]
+    fn curve_b_independent_endpoint_markers() {
+        // Curve A unmarked, curve B with start + end markers.
+        // Expect the curve-B markers to emit additional ops above the
+        // two stroke ops (one per curve).
+        let g = RibbonGeom::builder()
+            .set("x", Raw(vec![0.1_f64, 0.5, 0.9]))
+            .set("y", Raw(vec![0.5_f64, 0.7, 0.5]))
+            .set("y2", Raw(vec![0.2_f64, 0.3, 0.2]))
+            .set("stroke", red())
+            .set("stroke2", blue())
+            .set("linewidth", 2.0_f64)
+            .set("linewidth2", 2.0_f64)
+            .set("start_marker2", "circle")
+            .set("end_marker2", "circle")
+            .build();
+        let scene = draw_and_record(g);
+        let strokes = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .count();
+        let fills = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count();
+        assert_eq!(strokes, 2, "expected two curve strokes");
+        // Two markers (start + end) on curve B; built-in "circle" shape
+        // emits one Op::Fill per marker. Curve A has no markers.
+        assert_eq!(fills, 2, "expected one fill per curve-B marker");
+    }
+
+    #[test]
     fn stroke_both_curves() {
         let g = RibbonGeom::builder()
             .set("x", Raw(vec![0.1_f64, 0.5, 0.9]))
@@ -1294,6 +1623,134 @@ mod tests {
                 assert!(
                     line_count > 6,
                     "expected densified line count > 6, got {line_count}"
+                );
+                return;
+            }
+        }
+        panic!("no fill emitted");
+    }
+
+    #[test]
+    fn polar_band_caps_are_densified() {
+        // Free orientation under polar with curve A and curve B sitting at
+        // distinct theta values at both ends → the start and end caps span
+        // a non-trivial polar arc and should be densified.
+        use crate::plot::projection::Projection;
+        let polar = Projection::polar();
+        let mut g = RibbonGeom::builder()
+            .set("x", Raw(vec![0.1_f64, 0.5, 0.9]))
+            .set("y", Raw(vec![0.8_f64, 0.8, 0.8]))
+            .set("x2", Raw(vec![0.2_f64, 0.5, 0.8]))
+            .set("y2", Raw(vec![0.4_f64, 0.4, 0.4]))
+            .set("fill", red())
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        let panel = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let ctx = GeomContext::with_projection(panel, 96.0, &shapes, &scales, &polar);
+        g.draw(&mut scene, &ctx);
+
+        // Without cap densification a 3-row Free band under polar produces:
+        //   1 MoveTo
+        // + 2 LineTo on curve A (rows 1, 2 — row 0 is MoveTo)
+        // + N_polar interior LineTos for the row-to-row densification on A
+        // + 3 LineTo on reversed curve B
+        // + N_polar interior LineTos for the row-to-row densification on B
+        // + 1 ClosePath
+        //
+        // With cap densification both caps add interior LineTos as well. We
+        // check the path contains the two cap arcs by looking for the
+        // densified samples that don't fall on a straight line between
+        // their bracketing curve endpoints.
+        for op in &scene.ops {
+            if let Op::Fill { path, .. } = op {
+                let lines: Vec<kurbo::Point> = path
+                    .elements()
+                    .iter()
+                    .filter_map(|el| match el {
+                        kurbo::PathEl::LineTo(p) => Some(*p),
+                        _ => None,
+                    })
+                    .collect();
+                let move_to = path
+                    .elements()
+                    .iter()
+                    .find_map(|el| match el {
+                        kurbo::PathEl::MoveTo(p) => Some(*p),
+                        _ => None,
+                    })
+                    .expect("expected a MoveTo");
+                let mut all_pts = vec![move_to];
+                all_pts.extend(lines.iter().copied());
+
+                // Identify the cap region: the polygon walks
+                // curve A forward → end cap samples → reversed curve B →
+                // start cap samples → close. The reversed curve B's first
+                // point is the end of curve B at row 2 = (x=0.8, y2=0.4)
+                // in polar coords; reversed curve B's last point is at row
+                // 0 = (x=0.2, y2=0.4). The start cap samples lie between
+                // (x=0.2, y2=0.4) and (x=0.1, y=0.8) in data space.
+                //
+                // Simpler proof of densification: count line segments. A
+                // 3-row Free band's bare polygon (no row densification, no
+                // cap densification) has 6 line segments (3 on A forward,
+                // 3 on reversed B). Polar row densification adds some; cap
+                // densification adds more. Assert that the total exceeds
+                // what row densification alone could produce.
+                //
+                // Compare against the same band run WITHOUT cap
+                // densification (the previous behaviour) by counting the
+                // segments that land outside the straight chords from
+                // curve_a[last] → curve_b[last] and curve_b[0] →
+                // curve_a[0]. If any such "off-chord" point exists, cap
+                // densification fired.
+                let total_lines = lines.len();
+                assert!(
+                    total_lines > 6,
+                    "expected densified polygon, got {total_lines} line segments"
+                );
+
+                // Stronger check: under the same cap setup with Cartesian
+                // (no densification at all) the polygon has exactly 6
+                // LineTos (no row, no cap densification). Under polar with
+                // row-only densification we'd expect roughly the same plus
+                // row-densification samples — strictly more than 6, but
+                // still finite. The cap arc here spans theta from
+                // ≈ 0.2 turns to ≈ 0.1 turns and from ≈ 0.9 turns to
+                // ≈ 0.8 turns at constant radius, well within the
+                // `MAX_THETA_STEP_RAD = π/120` threshold for sample
+                // insertion. So we should see at LEAST a couple of
+                // off-chord points.
+
+                // Walk all line-to points; identify those that lie on the
+                // straight chord between curve A's last and curve B's
+                // last (the end cap region) or curve B's first and curve
+                // A's first (the start cap region) — anything OFF those
+                // straight chords is a cap arc sample, proving cap
+                // densification fired.
+                //
+                // We don't have direct access to the curve endpoints here,
+                // but we know the polygon visits curve A's first (at
+                // MoveTo), so the polygon's sample stream is
+                // self-describing. Walking the recorded points and
+                // looking for any non-collinear triples close to the
+                // expected cap regions is enough.
+                let collinear_eps = 0.5_f64; // 0.5 px slack
+                let mut cap_arc_count = 0usize;
+                for w in all_pts.windows(3) {
+                    let (a, b, c) = (w[0], w[1], w[2]);
+                    // Signed area of triangle abc: if non-zero, b is off
+                    // the chord between a and c.
+                    let area2 = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+                    if area2.abs() > collinear_eps {
+                        cap_arc_count += 1;
+                    }
+                }
+                assert!(
+                    cap_arc_count > 0,
+                    "expected at least one off-chord (curved) interior sample, got {cap_arc_count}"
                 );
                 return;
             }

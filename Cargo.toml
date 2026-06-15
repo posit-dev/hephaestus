@@ -156,6 +156,14 @@ name = "bspline"
 required-features = ["vello", "png", "text"]
 
 [[example]]
+name = "ribbon_bspline"
+required-features = ["vello", "png", "text"]
+
+[[example]]
+name = "chord_diagram"
+required-features = ["vello", "png"]
+
+[[example]]
 name = "endpoint_arrows"
 required-features = ["vello", "png"]
 

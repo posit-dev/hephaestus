@@ -34,14 +34,17 @@ use crate::scene::SceneBuilder;
 use crate::shape::ShapeRegistry;
 
 pub mod bspline;
+pub(crate) mod bspline_eval;
 pub mod ellipse;
 pub mod line;
 pub(crate) mod marks;
+pub(crate) mod outline;
 pub mod point;
 pub mod polygon;
 pub mod rect;
 pub mod resolve;
 pub mod ribbon;
+pub mod ribbon_bspline;
 pub mod segment;
 pub mod state;
 #[cfg(feature = "text")]
@@ -59,6 +62,7 @@ pub use point::PointGeom;
 pub use polygon::PolygonGeom;
 pub use rect::RectGeom;
 pub use ribbon::RibbonGeom;
+pub use ribbon_bspline::RibbonBSplineGeom;
 pub use segment::SegmentGeom;
 pub use state::{GeomState, KeysStrategy};
 #[cfg(feature = "text")]
