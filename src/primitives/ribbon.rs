@@ -25,6 +25,12 @@
 //! - [`polygon_ribbon_full`] — per-vertex colour and per-vertex
 //!   half-width.
 //!
+//! Quad-strip band between two arbitrary co-indexed polylines:
+//! - [`ribbon_band_mesh`] — fills the band between curve A and curve
+//!   B with per-vertex colour on each side. Used by `RibbonGeom`
+//!   under free-form orientation and under non-linear projections
+//!   when fill varies.
+//!
 //! Caps: butt / square / round (open only — [`RibbonOptions::cap`]
 //! is ignored by the `polygon_*` entry points). Joins: miter (with
 //! auto-bevel fallback when the miter exceeds
@@ -203,6 +209,111 @@ pub fn polygon_ribbon_full(
         None => ColorSource::Constant(Color::new([0.0, 0.0, 0.0, 1.0])),
     };
     ribbon_inner(points, color_source, half_widths, opts, true)
+}
+
+/// Build a filled quad-strip mesh between two co-indexed polylines.
+///
+/// `curve_a` and `curve_b` must have the same length. Each interior
+/// segment from index `i` to `i + 1` emits a quad with corners
+/// `(curve_a[i], curve_b[i], curve_b[i + 1], curve_a[i + 1])`,
+/// tessellated as two triangles in the canonical `[A, B, C, A, C, D]`
+/// pattern that the Vello backend's quad-pair detector folds into a
+/// single bilinear-gradient quad fill. Per-vertex colours come from
+/// `colors_a` (curve A side) and `colors_b` (curve B side).
+///
+/// Returns an empty mesh when either curve has fewer than two points.
+/// Panics on length mismatch.
+///
+/// Adjacent quads overlap by a small fraction of `SEAM_BLEED_PX` along
+/// the local sweep tangent at every interior boundary so the AA seam
+/// between independent quad fills is hidden. The overlap is much
+/// smaller than the polyline-ribbon's `SEAM_BLEED_PX` because each
+/// quad of the band gets its own linear-gradient brush (the
+/// Vello backend's quad-pair detector folds the strip into one gradient
+/// fill per quad); two adjacent quads paint the overlap region twice
+/// with the **same** boundary colour, so SrcOver compositing stacks
+/// the alpha when the fill is translucent and reveals the seam as a
+/// darker band. A small bleed is enough to bridge the AA edge without
+/// producing a perceptible double-coat.
+///
+/// For a uniformly-coloured band a plain `fill` on the path that
+/// traces curve A forward then curve B in reverse is cheaper — the
+/// per-vertex colour is the point of the mesh path.
+pub fn ribbon_band_mesh(
+    curve_a: &[Point],
+    curve_b: &[Point],
+    colors_a: &[Color],
+    colors_b: &[Color],
+) -> Mesh {
+    assert_eq!(
+        curve_a.len(),
+        curve_b.len(),
+        "ribbon_band_mesh: curve_a.len() ({}) != curve_b.len() ({})",
+        curve_a.len(),
+        curve_b.len(),
+    );
+    assert_eq!(
+        curve_a.len(),
+        colors_a.len(),
+        "ribbon_band_mesh: colors_a.len() must match curve_a.len()"
+    );
+    assert_eq!(
+        curve_b.len(),
+        colors_b.len(),
+        "ribbon_band_mesh: colors_b.len() must match curve_b.len()"
+    );
+    let n = curve_a.len();
+    if n < 2 {
+        return Mesh::new(Vec::new(), Vec::new(), Vec::new());
+    }
+
+    let segs = n - 1;
+    let mut vertices: Vec<Point> = Vec::with_capacity(4 * segs);
+    let mut colors: Vec<Color> = Vec::with_capacity(4 * segs);
+    let mut indices: Vec<u32> = Vec::with_capacity(6 * segs);
+
+    for i in 0..segs {
+        // Sweep tangent for segment i: midpoint(a[i], b[i]) → midpoint(a[i+1], b[i+1]).
+        let m0 = Vec2::new(
+            (curve_a[i].x + curve_b[i].x) * 0.5,
+            (curve_a[i].y + curve_b[i].y) * 0.5,
+        );
+        let m1 = Vec2::new(
+            (curve_a[i + 1].x + curve_b[i + 1].x) * 0.5,
+            (curve_a[i + 1].y + curve_b[i + 1].y) * 0.5,
+        );
+        let delta = m1 - m0;
+        let len = delta.hypot();
+        let tangent = if len > EPSILON {
+            delta / len
+        } else {
+            Vec2::new(0.0, 0.0)
+        };
+        // Bleed interior seams; outer-most quad edges (segment 0's near
+        // end and the last segment's far end) carry the band's actual
+        // endpoints — leave them alone so any caller-drawn endcap lines
+        // up flush. Use a third of the polyline-ribbon's bleed: enough
+        // to cover the AA edge without stacking enough alpha to be
+        // perceptible on translucent fills.
+        let interior_bleed = SEAM_BLEED_PX / 3.0;
+        let near_bleed = if i > 0 { interior_bleed } else { 0.0 };
+        let far_bleed = if i + 1 < segs { interior_bleed } else { 0.0 };
+        let near_off = tangent * near_bleed;
+        let far_off = tangent * far_bleed;
+
+        let base = vertices.len() as u32;
+        vertices.push(curve_a[i] - near_off);
+        vertices.push(curve_b[i] - near_off);
+        vertices.push(curve_b[i + 1] + far_off);
+        vertices.push(curve_a[i + 1] + far_off);
+        colors.push(colors_a[i]);
+        colors.push(colors_b[i]);
+        colors.push(colors_b[i + 1]);
+        colors.push(colors_a[i + 1]);
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    Mesh::new(vertices, colors, indices)
 }
 
 // ── Inner machinery ─────────────────────────────────────────────────────────
@@ -1225,5 +1336,75 @@ mod tests {
         let pts = [pt(0.0, 0.0), pt(10.0, 0.0), pt(5.0, 8.66)];
         let cols = [red(), green()];
         let _ = polygon_gradient(&pts, &cols, &RibbonOptions::default());
+    }
+
+    // ── Quad-strip band mesh ───────────────────────────────────────
+
+    #[test]
+    fn ribbon_band_mesh_two_point_strip() {
+        // Smallest case: one quad between two two-point curves.
+        let a = [pt(0.0, 0.0), pt(10.0, 0.0)];
+        let b = [pt(0.0, 5.0), pt(10.0, 5.0)];
+        let mesh = ribbon_band_mesh(&a, &b, &[red(); 2], &[blue(); 2]);
+        assert_eq!(mesh.vertex_count(), 4);
+        assert_eq!(mesh.triangle_count(), 2);
+        let bb = mesh.bounding_box();
+        assert!(approx(bb.x0, 0.0));
+        assert!(approx(bb.x1, 10.0));
+        assert!(approx(bb.y0, 0.0));
+        assert!(approx(bb.y1, 5.0));
+    }
+
+    #[test]
+    fn ribbon_band_mesh_quad_pair_index_pattern() {
+        // Each segment must emit the canonical [base, base+1, base+2,
+        // base, base+2, base+3] index pattern so the Vello quad-pair
+        // detector folds it into a single quad fill.
+        let a = [pt(0.0, 0.0), pt(10.0, 0.0), pt(20.0, 0.0)];
+        let b = [pt(0.0, 5.0), pt(10.0, 5.0), pt(20.0, 5.0)];
+        let mesh = ribbon_band_mesh(&a, &b, &[red(); 3], &[blue(); 3]);
+        assert_eq!(mesh.indices.len(), 12);
+        // Segment 0: 0,1,2,0,2,3
+        assert_eq!(&mesh.indices[0..6], &[0, 1, 2, 0, 2, 3]);
+        // Segment 1: 4,5,6,4,6,7
+        assert_eq!(&mesh.indices[6..12], &[4, 5, 6, 4, 6, 7]);
+    }
+
+    #[test]
+    fn ribbon_band_mesh_per_side_colors_preserved() {
+        let a = [pt(0.0, 0.0), pt(10.0, 0.0)];
+        let b = [pt(0.0, 5.0), pt(10.0, 5.0)];
+        let mesh = ribbon_band_mesh(&a, &b, &[red(), red()], &[blue(), blue()]);
+        for (p, c) in mesh.vertices.iter().zip(mesh.colors.iter()) {
+            if approx(p.y, 0.0) {
+                assert_eq!(*c, red());
+            } else if approx(p.y, 5.0) {
+                assert_eq!(*c, blue());
+            }
+        }
+    }
+
+    #[test]
+    fn ribbon_band_mesh_under_two_points_returns_empty() {
+        let a = [pt(0.0, 0.0)];
+        let b = [pt(0.0, 5.0)];
+        let mesh = ribbon_band_mesh(&a, &b, &[red()], &[blue()]);
+        assert!(mesh.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "curve_a.len()")]
+    fn ribbon_band_mesh_panics_on_curve_length_mismatch() {
+        let a = [pt(0.0, 0.0), pt(10.0, 0.0)];
+        let b = [pt(0.0, 5.0)];
+        let _ = ribbon_band_mesh(&a, &b, &[red(); 2], &[blue(); 1]);
+    }
+
+    #[test]
+    #[should_panic(expected = "colors_a.len()")]
+    fn ribbon_band_mesh_panics_on_colors_a_mismatch() {
+        let a = [pt(0.0, 0.0), pt(10.0, 0.0)];
+        let b = [pt(0.0, 5.0), pt(10.0, 5.0)];
+        let _ = ribbon_band_mesh(&a, &b, &[red()], &[blue(); 2]);
     }
 }

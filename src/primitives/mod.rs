@@ -76,7 +76,7 @@ pub use offset::offset_polygon;
 pub use path_corner::round_path_corners;
 pub use ribbon::{
     polygon_gradient, polygon_ribbon, polygon_ribbon_full, polyline_gradient, polyline_ribbon,
-    polyline_ribbon_full, RibbonOptions,
+    polyline_ribbon_full, ribbon_band_mesh, RibbonOptions,
 };
 
 /// Path-approximation tolerance for curved primitives ([`circle`],

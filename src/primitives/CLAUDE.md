@@ -39,6 +39,7 @@ Geometry transforms (`round_corners`, `clip_polyline`, `offset_polygon`, `round_
 - **`polyline_ribbon`**, **`polyline_ribbon_full`** — open ribbons.
 - **`polygon_ribbon`**, **`polygon_ribbon_full`** — closed ribbons.
 - **`polyline_gradient`**, **`polygon_gradient`** — colour-along helpers.
+- **`ribbon_band_mesh`** — quad-strip mesh between two co-indexed polylines (curve A and curve B). Used by `RibbonGeom`'s mesh path for free-form bands and for axis-aligned bands under non-linear projections, where a screen-aligned linear-gradient brush would misrepresent the sweep.
 - **`RibbonOptions`** — configuration. Reuses [`crate::stroke::Cap`] / [`crate::stroke::Join`] (same three variants each — no need for ribbon-specific enums).
 
 If every vertex would share the same colour, a plain `stroke` / `fill` with a solid brush is cheaper than a ribbon mesh — the per-vertex colour is the whole point.

@@ -1,22 +1,26 @@
 //! End-to-end visual sanity for `RibbonGeom` — filled band between two
-//! curves along a shared axis. Per-mark grouping (rows sharing a key
-//! form one band), variance-detect fill (uniform → solid; varying →
-//! linear gradient along the shared axis), and independent outlines on
-//! curve A vs curve B.
+//! curves. Per-mark grouping (rows sharing a key form one band),
+//! variance-detect fill (uniform → solid; varying → linear gradient
+//! brush in the fast path, quad-strip mesh in the free / non-linear
+//! path), and independent outlines on curve A vs curve B.
 //!
-//! Four renders, all with full plotting chrome (title, subtitle,
+//! Five renders, all with full plotting chrome (title, subtitle,
 //! axes with titles):
 //!
-//! - `ribbon_geom_1_area.png` — horizontal area chart with default
-//!   `y2 = 0` baseline; only the top curve is outlined (asymmetric
-//!   outline case).
+//! - `ribbon_geom_1_area.png` — horizontal area chart with explicit
+//!   `y2 = 0` baseline; only the top curve is outlined.
 //! - `ribbon_geom_2_vertical.png` — vertical orientation (`y` shared,
 //!   `x2 = 0` baseline); no outlines.
 //! - `ribbon_geom_3_overlap.png` — two overlapping horizontal bands
 //!   with explicit `y2`, per-row varying fill (linear gradient brush),
 //!   and both top + bottom curves outlined.
 //! - `ribbon_geom_4_polar.png` — polar annular segment confirming
-//!   projection densification on both edges.
+//!   projection densification on both edges; varying fill routes
+//!   through the quad-strip mesh path (gradient follows the band's
+//!   sweep instead of being screen-aligned).
+//! - `ribbon_geom_5_freeform.png` — free-form band with both `x2` and
+//!   `y2` supplied, traced by parametric curves; per-row varying fill
+//!   exercises the mesh path.
 
 use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
@@ -50,14 +54,15 @@ fn main() {
             })
             .collect();
         let mut plot = Plot::new(&cell_comp(), "panel")
-            .title("Area chart — default y2 = 0 baseline")
-            .subtitle("Top curve outlined; baseline implicit")
+            .title("Area chart — explicit y2 = 0 baseline")
+            .subtitle("Top curve outlined; baseline supplied as constant")
             .bind("x", "time")
             .bind("y", "value");
         plot.add_geom(
             RibbonGeom::builder()
                 .set("x", xs)
                 .set("y", ys)
+                .set("y2", 0.0_f64)
                 .set("fill", rgb8(60, 130, 200))
                 .set("alpha", 0.35_f64)
                 .set("stroke", rgb8(20, 60, 130))
@@ -193,7 +198,7 @@ fn main() {
         );
     }
 
-    // ── Render 4: polar annular segment (densified edges) ──
+    // ── Render 4: polar annular segment with varying fill (mesh path) ──
     {
         let n = 60;
         let thetas: Vec<f64> = (0..n)
@@ -209,10 +214,16 @@ fn main() {
             })
             .collect();
         let inner: Vec<f64> = (0..n).map(|_| 0.45_f64).collect();
+        let fills: Vec<Color> = (0..n)
+            .map(|i| {
+                let t = i as f64 / (n - 1) as f64;
+                lerp_color(rgb8(140, 90, 200), rgb8(220, 180, 60), t)
+            })
+            .collect();
         let mut plot = Plot::new(&cell_comp(), "panel")
             .projection(Projection::polar())
-            .title("Polar annular ribbon")
-            .subtitle("interpolate_segment densifies both edges into smooth arcs")
+            .title("Polar annular ribbon — per-row gradient")
+            .subtitle("Non-linear projection routes varying fill through the mesh path")
             .bind("x", "theta")
             .bind("y", "radius");
         plot.add_geom(
@@ -220,8 +231,8 @@ fn main() {
                 .set("x", thetas)
                 .set("y", outer)
                 .set("y2", inner)
-                .set("fill", rgb8(140, 90, 200))
-                .set("alpha", 0.6_f64)
+                .set("fill", fills)
+                .set("alpha", 0.7_f64)
                 .set("stroke", rgb8(70, 40, 130))
                 .set("stroke2", rgb8(70, 40, 130))
                 .set("linewidth", 1.5_f64)
@@ -248,6 +259,72 @@ fn main() {
             dpi,
             bg,
             "examples/ribbon_geom_4_polar.png",
+        );
+    }
+
+    // ── Render 5: free-form band (both x2 and y2; quad-strip mesh) ──
+    {
+        // Curve A: a sinusoidal arch. Curve B: an offset arch with a
+        // different phase and amplitude. Both edges have their own (x, y)
+        // — the band is not axis-aligned. Per-row varying fill exercises
+        // the mesh path.
+        let n = 80;
+        let mut x_a: Vec<f64> = Vec::with_capacity(n);
+        let mut y_a: Vec<f64> = Vec::with_capacity(n);
+        let mut x_b: Vec<f64> = Vec::with_capacity(n);
+        let mut y_b: Vec<f64> = Vec::with_capacity(n);
+        let mut fills: Vec<Color> = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64 / (n - 1) as f64;
+            // Parametric ribbon: curve A spirals out, curve B follows a
+            // shifted spiral so the band twists across both axes.
+            let theta_a = t * std::f64::consts::TAU * 0.8;
+            let theta_b = t * std::f64::consts::TAU * 0.8 + 0.6;
+            let r_a = 0.20 + 0.65 * t;
+            let r_b = 0.10 + 0.55 * t;
+            x_a.push(0.5 + r_a * theta_a.cos());
+            y_a.push(0.5 + r_a * theta_a.sin());
+            x_b.push(0.5 + r_b * theta_b.cos());
+            y_b.push(0.5 + r_b * theta_b.sin());
+            fills.push(lerp_color(rgb8(40, 140, 200), rgb8(220, 70, 110), t));
+        }
+        let mut plot = Plot::new(&cell_comp(), "panel")
+            .title("Free-form band — both x2 and y2 supplied")
+            .subtitle("Curve A and curve B traced by independent parametric curves")
+            .bind("x", "x")
+            .bind("y", "y")
+            .bind("x2", "x")
+            .bind("y2", "y");
+        plot.add_geom(
+            RibbonGeom::builder()
+                .set("x", x_a)
+                .set("y", y_a)
+                .set("x2", x_b)
+                .set("y2", y_b)
+                .set("fill", fills)
+                .set("alpha", 0.85_f64)
+                .set("stroke", rgb8(20, 60, 100))
+                .set("stroke2", rgb8(120, 30, 50))
+                .set("linewidth", 1.2_f64)
+                .set("linewidth2", 1.2_f64)
+                .build(),
+        );
+        plot.add_axis(Axis::rail("x", AxisPlacement::Cartesian(AxisSide::Bottom)).title("x"));
+        plot.add_axis(Axis::rail("y", AxisPlacement::Cartesian(AxisSide::Left)).title("y"));
+
+        let mut view = PlotComposition::new(cell_comp())
+            .add_scale("x", scale::continuous(0.0..=1.0))
+            .add_scale("y", scale::continuous(0.0..=1.0))
+            .with_plot(plot);
+        panic_on_issues(view.validate());
+        render_to(
+            &mut renderer,
+            &mut view,
+            w,
+            h,
+            dpi,
+            bg,
+            "examples/ribbon_geom_5_freeform.png",
         );
     }
 }

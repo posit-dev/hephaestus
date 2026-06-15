@@ -15,6 +15,7 @@ A geom is a trait-erased (`Box<dyn Geom>`) drawing primitive that holds typed co
 - **`RectGeom`** — axis-aligned rectangles.
 - **`EllipseGeom`** — ellipses (centre + radii).
 - **`PolygonGeom`** — closed polygons; multi-row-per-mark like `LineGeom`.
+- **`RibbonGeom`** — filled band between two curves; multi-row-per-mark like `LineGeom`. Orientation is selected by which of `x2` / `y2` are supplied: only `y2` → horizontal (curve B shares `x`), only `x2` → vertical (curve B shares `y`), both → free (curve B fully independent). At least one of the two is required. Variable fill renders as a linear-gradient brush in the axis-aligned + linear-projection case (fast path); free orientation or any non-linear projection routes through `ribbon_band_mesh` for a per-vertex-coloured quad strip.
 - **`WedgeGeom`** — pie / donut slices.
 - **`TextGeom`**, **`TextFitGeom`**, **`TextPathGeom`** (gated on `text`) — text marks, text fitted to a box, text along a path.
 
