@@ -332,10 +332,18 @@ impl Measure for PolarBleedMeasure {
 /// - **Inner angular** (anchored on the inner ring, pointing
 ///   inward toward the polar centre): never bleeds past the panel
 ///   boundary; skipped here.
+///
+/// Axis titles ([`BleedAxis::title`]) push the bleed further past the
+/// label rail when present. Outer-angular titles sit at the arc
+/// midpoint, curving along an arc; their radial extent past `r_outer`
+/// is `tick + gap + label_max + title_gap + title_h` and is
+/// distributed to cardinal sides by the midpoint direction.
 pub fn compute_polar_bleed(axes: &[BleedAxis], dpi: f64) -> PolarBleed {
     let tick_px = pt_to_px(TICK_LENGTH_PT, dpi);
     let gap_px = pt_to_px(LABEL_GAP_PT, dpi);
+    let title_gap_px = pt_to_px(TITLE_GAP_PT, dpi);
     let style = TextStyle::new(LABEL_FONT_SIZE_PT);
+    let title_style = crate::plot::plot::axis_title_style();
     let mut bleed = PolarBleed {
         top_px: 0.0,
         right_px: 0.0,
@@ -405,13 +413,80 @@ pub fn compute_polar_bleed(axes: &[BleedAxis], dpi: f64) -> PolarBleed {
                 bleed.top_px = bleed.top_px.max(b_top);
             }
         }
+        if let Some(title) = &axis.title {
+            match title.kind {
+                BleedTitleKind::OuterAngular {
+                    direction: (dx, dy),
+                    label_max_px,
+                } => {
+                    let run = TextRun::new(&title.text, &title_style);
+                    let title_h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+                    let title_w = run.natural_width();
+                    // Radial extent past r_outer at the arc midpoint.
+                    // Mirrors `draw_angular_title`'s placement formula.
+                    let radial = tick_px + gap_px + label_max_px + title_gap_px + title_h;
+                    // The title curves along an arc, but its dominant
+                    // bleed is the radial component at the midpoint.
+                    // Distribute to cardinal sides by direction sign.
+                    if dx > 0.0 {
+                        bleed.right_px = bleed.right_px.max(dx * radial);
+                    }
+                    if dx < 0.0 {
+                        bleed.left_px = bleed.left_px.max(-dx * radial);
+                    }
+                    if dy > 0.0 {
+                        bleed.bottom_px = bleed.bottom_px.max(dy * radial);
+                    }
+                    if dy < 0.0 {
+                        bleed.top_px = bleed.top_px.max(-dy * radial);
+                    }
+                    // Tangential half-extent — at a cardinal midpoint
+                    // the curved title's endpoints lean ±title_w/2 to
+                    // the perpendicular cardinal sides. Conservative.
+                    let tangential = title_w * 0.5;
+                    if dx.abs() > dy.abs() {
+                        bleed.top_px = bleed.top_px.max(tangential);
+                        bleed.bottom_px = bleed.bottom_px.max(tangential);
+                    } else {
+                        bleed.left_px = bleed.left_px.max(tangential);
+                        bleed.right_px = bleed.right_px.max(tangential);
+                    }
+                }
+            }
+        }
     }
     bleed
 }
 
-/// One axis's labels for the bleed computer.
+/// One axis's labels (and optional title) for the bleed computer.
 pub struct BleedAxis {
     pub labels: Vec<BleedLabel>,
+    /// Title contribution to the bleed, if the axis has one. Drives
+    /// the title-past-the-label-rail reservation; only outer angular
+    /// titles bleed past the panel in v1.
+    pub title: Option<BleedTitle>,
+}
+
+/// One axis title's contribution to the bleed.
+pub struct BleedTitle {
+    pub text: String,
+    pub kind: BleedTitleKind,
+}
+
+/// How an axis title is placed relative to the polar geometry.
+#[derive(Clone, Copy, Debug)]
+pub enum BleedTitleKind {
+    /// Outer angular axis title — curves along an arc just past the
+    /// label rail, centred at the arc midpoint.
+    OuterAngular {
+        /// Arc-midpoint direction in screen-y-down coords:
+        /// `(cos(θ_mid_math), -sin(θ_mid_math))`.
+        direction: (f64, f64),
+        /// Largest tick-label dimension on this axis, in px. Pushes
+        /// the title past the label rail — same value the renderer
+        /// uses in [`draw_angular_axis`].
+        label_max_px: f64,
+    },
 }
 
 /// One label's contribution to the bleed.

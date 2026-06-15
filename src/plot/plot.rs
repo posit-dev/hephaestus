@@ -797,10 +797,11 @@ impl Plot {
     fn wire_chrome_bleed(&self, mut patch: Patch, registry: &ScaleRegistry, dpi: f64) -> Patch {
         use crate::plot::chrome::axis::{AxisPlacement, PolarRing};
         use crate::plot::chrome::polar::{
-            BleedAxis, BleedLabel, BleedLabelKind, PolarBleedMeasure,
+            BleedAxis, BleedLabel, BleedLabelKind, BleedTitle, BleedTitleKind, PolarBleedMeasure,
         };
         use crate::scales::breaks::DEFAULT_BREAK_COUNT;
         use crate::scales::value::Value;
+        use crate::text::{Alignment, TextRun, TextStyle};
 
         // Polar projection's angle/sweep — needed to convert a
         // scale's break (as a `theta_frac`) into the math angle the
@@ -820,6 +821,8 @@ impl Plot {
             -1.0_f64
         };
 
+        let label_style = TextStyle::new(crate::plot::chrome::linear_axis::LABEL_FONT_SIZE_PT);
+
         let mut axes: Vec<BleedAxis> = Vec::new();
         for axis in &self.axes {
             let kind = match axis.placement {
@@ -835,6 +838,10 @@ impl Plot {
                 continue;
             };
             let mut labels = Vec::new();
+            // Track the largest label dimension for use in title
+            // placement. Mirrors `draw_angular_axis`'s `label_max`.
+            let mut max_label_w = 0.0_f64;
+            let mut max_label_h = 0.0_f64;
             match axis.placement {
                 AxisPlacement::PolarRadius { theta_frac } => {
                     // Every radius break sits along the same spoke,
@@ -846,8 +853,14 @@ impl Plot {
                         if matches!(v, Value::Null) {
                             continue;
                         }
+                        let text = scale.format(&v);
+                        let run = TextRun::new(&text, &label_style);
+                        let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+                        let w = run.natural_width();
+                        max_label_w = max_label_w.max(w);
+                        max_label_h = max_label_h.max(h);
                         labels.push(BleedLabel {
-                            text: scale.format(&v),
+                            text,
                             kind,
                             direction,
                         });
@@ -869,8 +882,14 @@ impl Plot {
                             continue;
                         }
                         let theta = polar.theta_for_frac(frac);
+                        let text = scale.format(&v);
+                        let run = TextRun::new(&text, &label_style);
+                        let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+                        let w = run.natural_width();
+                        max_label_w = max_label_w.max(w);
+                        max_label_h = max_label_h.max(h);
                         labels.push(BleedLabel {
-                            text: scale.format(&v),
+                            text,
                             kind,
                             direction: (theta.cos(), -theta.sin()),
                         });
@@ -878,8 +897,37 @@ impl Plot {
                 }
                 _ => unreachable!(),
             }
-            if !labels.is_empty() {
-                axes.push(BleedAxis { labels });
+            // Title contribution — only outer-angular titles bleed
+            // past the panel in v1. Radius axis titles sit between
+            // r_inner and r_outer (perpendicular to the spoke) so
+            // they don't push past the disk's outer ring; inner
+            // angular titles are unimplemented (see `draw_angular_axis`).
+            let title = axis.title.as_ref().and_then(|title_text| {
+                if matches!(
+                    axis.placement,
+                    AxisPlacement::PolarAngular(PolarRing::Outer)
+                ) {
+                    let span = polar.theta_end - polar.theta_start;
+                    let is_full_circle = (span.abs() - std::f64::consts::TAU).abs() < 1e-6;
+                    let theta_mid_math = if is_full_circle {
+                        std::f64::consts::FRAC_PI_2
+                    } else {
+                        (polar.theta_start + polar.theta_end) * 0.5
+                    };
+                    let label_max_px = max_label_w.max(max_label_h);
+                    Some(BleedTitle {
+                        text: title_text.clone(),
+                        kind: BleedTitleKind::OuterAngular {
+                            direction: (theta_mid_math.cos(), -theta_mid_math.sin()),
+                            label_max_px,
+                        },
+                    })
+                } else {
+                    None
+                }
+            });
+            if !labels.is_empty() || title.is_some() {
+                axes.push(BleedAxis { labels, title });
             }
         }
         if axes.is_empty() {
