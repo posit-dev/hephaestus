@@ -803,7 +803,7 @@ impl Projection {
 }
 
 /// Geodesic densification: insert interior samples along the projected
-/// arc so chord error stays below ~1 pixel.
+/// arc so chord error stays below [`CHORD_ERROR_PX`].
 fn polar_geodesic_samples(
     p: &PolarProjection,
     panel: Rect,
@@ -823,16 +823,37 @@ fn polar_geodesic_samples(
         return;
     }
 
-    // Chord-error heuristic: for a circular arc of radius R and
-    // angular extent θ, midpoint deviates from the chord by
-    // R·(1 − cos(θ/2)) ≈ R·θ²/8 pixels. Pick the per-step angle so
-    // chord error stays below ~1 pixel.
+    // Two criteria combine to pick `n_steps`:
+    //
+    // 1. **Chord-error bound** for a spiral segment (varying r).
+    //    Expanding midpoint-vs-chord deviation to second order:
+    //
+    //      angular:  R_local · (Δθ/n)² / 8   ≈ |cos(θ_m)| component
+    //      spiral:   |Δr/n · Δθ/n| / 4       ≈ |sin(θ_m)| component
+    //
+    //    Both scale as 1/n². The angular term uses the *local*
+    //    radius, which on the high-r side of a varying-r segment can
+    //    be up to 2× the segment average — bound with `r_max`. The
+    //    spiral term vanishes when r is constant (recovers the
+    //    standard arc formula) and dominates for diagonal segments.
+    //
+    // 2. **Angular cap** — `Δθ_step ≤ MAX_THETA_STEP_RAD`. Chord
+    //    error alone permits ~3° per step at typical r and stops
+    //    there because perpendicular deviation is sub-pixel; but on
+    //    filled boundaries (RibbonGeom, PolygonGeom) consecutive
+    //    polyline edges meet at 3° corners that read as polygonal
+    //    facets against the high-contrast fill edge. AA softens the
+    //    elbow on strokes (so the chord-error budget alone is
+    //    enough there) but not on a hard fill edge.
     let g = p.geometry(panel);
-    let avg_r_frac = (r_a_frac + r_b_frac) * 0.5;
-    let avg_r_px = (g.r_inner + avg_r_frac * (g.r_outer - g.r_inner)).max(1.0);
-    let theta_step_max = (CHORD_ERROR_PX * 8.0 / avg_r_px).sqrt();
-    let n_steps =
-        ((theta_delta / theta_step_max).ceil() as usize).clamp(1, MAX_INTERPOLATION_STEPS);
+    let r_a_px = g.r_inner + r_a_frac * (g.r_outer - g.r_inner);
+    let r_b_px = g.r_inner + r_b_frac * (g.r_outer - g.r_inner);
+    let r_max_px = r_a_px.max(r_b_px).max(1.0);
+    let dr_px = (r_b_px - r_a_px).abs();
+    let err_n1 = r_max_px * theta_delta * theta_delta / 8.0 + dr_px * theta_delta / 4.0;
+    let n_chord = ((err_n1 / CHORD_ERROR_PX).sqrt().ceil() as usize).max(1);
+    let n_angle = (theta_delta / MAX_THETA_STEP_RAD).ceil() as usize;
+    let n_steps = n_chord.max(n_angle).clamp(1, MAX_INTERPOLATION_STEPS);
 
     for i in 1..n_steps {
         let t = i as f64 / n_steps as f64;
@@ -907,9 +928,19 @@ pub struct InteriorSample {
 }
 
 /// Maximum chord-error tolerance (pixels) for [`Projection::interpolate_segment`].
-/// Keeps polar arcs visually smooth on standard DPIs without exploding
-/// the sample count on small radii.
-const CHORD_ERROR_PX: f64 = 1.0;
+/// Sub-pixel so the chord-approximation deviation from the true
+/// projected curve stays below the pixel grid even at sub-pixel AA
+/// precision — polar arcs look smooth at any zoom the panel itself
+/// supports. Matches the bspline flattener's tolerance.
+const CHORD_ERROR_PX: f64 = 0.25;
+
+/// Maximum angular step per densified segment, in radians (1.5°).
+/// Caps the tangent rotation between consecutive polyline edges so
+/// filled boundaries (RibbonGeom, PolygonGeom) don't show polygonal
+/// facets at row vertices. Sub-pixel chord error alone permits up to
+/// ~3° per step at typical r — fine for AA-softened strokes, visible
+/// on hard fill edges.
+const MAX_THETA_STEP_RAD: f64 = std::f64::consts::PI / 120.0;
 
 /// Hard upper bound on interior samples per segment. Protects against
 /// degenerate inputs (huge angular extents, tiny radii) producing
@@ -1268,26 +1299,25 @@ mod tests {
 
     #[test]
     fn polar_interpolate_segment_arc_emits_samples() {
-        // Quarter-arc at full radius — should produce a fair number of
-        // samples to keep chord error below 1 px on a 200-pixel radius.
+        // Quarter-arc at full radius. Angular cap (1.5°/step) is the
+        // binding criterion here: π/2 ÷ π/120 = 60 steps → 59
+        // interior samples.
         let panel = square_panel();
         let proj = Projection::polar();
         let mut out = Vec::new();
         proj.interpolate_segment(panel, &[0.0, 1.0], &[0.25, 1.0], &mut out);
-        // At R=200, theta_step_max = sqrt(8/200) ≈ 0.2 rad. Quarter
-        // arc = π/2 ≈ 1.57 rad → n_steps ≈ 8.
         assert!(
-            out.len() >= 5,
-            "expected ≥5 interior samples, got {}",
+            out.len() >= 50,
+            "expected ≥50 interior samples, got {}",
             out.len()
         );
-        assert!(out.len() < 20, "too many samples: {}", out.len());
+        assert!(out.len() < 80, "too many samples: {}", out.len());
         // All samples should sit on the unit-radius circle centred at
         // (200, 200) — within chord-error tolerance.
         for (px, py) in &out {
             let d = ((*px - 200.0).powi(2) + (*py - 200.0).powi(2)).sqrt();
             assert!(
-                (d - 200.0).abs() < 2.0,
+                (d - 200.0).abs() < 1.0,
                 "sample {:?} not on circle (d={d})",
                 (px, py)
             );
@@ -1445,19 +1475,19 @@ mod tests {
     }
 
     #[test]
-    fn polar_interpolate_segment_smaller_radius_needs_fewer_samples() {
-        // Same angular extent but smaller radius → smaller chord error
-        // per step → fewer steps needed.
-        let panel = square_panel();
+    fn polar_interpolate_segment_chord_dominates_at_huge_panel() {
+        // On a large panel the chord-error criterion dominates over
+        // the angular cap. In that regime sample count scales with r.
+        let panel = Rect::new(0.0, 0.0, 8000.0, 8000.0);
         let proj = Projection::polar();
         let mut small_r = Vec::new();
         let mut large_r = Vec::new();
-        // Quarter-arc at r=0.1 (≈ 20 px) vs r=1.0 (≈ 200 px).
+        // Quarter-arc at r=0.1 (≈ 400 px) vs r=1.0 (≈ 4000 px).
         proj.interpolate_segment(panel, &[0.0, 0.1], &[0.25, 0.1], &mut small_r);
         proj.interpolate_segment(panel, &[0.0, 1.0], &[0.25, 1.0], &mut large_r);
         assert!(
             small_r.len() < large_r.len(),
-            "small_r={} large_r={}",
+            "expected fewer samples at smaller r: small_r={} large_r={}",
             small_r.len(),
             large_r.len()
         );

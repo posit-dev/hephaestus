@@ -112,11 +112,7 @@ const DEFAULT_JOIN: Join = Join::Miter;
 /// projected curve. Sub-pixel so the chord-approximation deviation
 /// from the true curve stays below the pixel grid even at sub-pixel
 /// AA precision — splines are smooth to the eye at any zoom level
-/// the panel itself supports. (Tighter than the polar geodesic
-/// densifier in `crate::plot::projection` because polar segments
-/// are circular arcs with known closed-form chord error, while
-/// B-splines lean on a recursive midpoint check that's only as
-/// good as its probe density.)
+/// the panel itself supports.
 const CHORD_ERROR_PX: f64 = 0.25;
 
 /// Maximum recursion depth in the adaptive flattener. Caps work on
