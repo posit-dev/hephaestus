@@ -41,14 +41,10 @@ use super::resolve::{
 };
 use super::{Channel, GeomContext};
 
-/// Default linewidth in pt when the `"linewidth"` channel is unbound.
-pub(crate) const DEFAULT_LINEWIDTH_PT: f64 = 1.0;
-
-/// Default stroke end style (matches LineGeom / BSplineGeom).
-pub(crate) const DEFAULT_CAP: Cap = Cap::Butt;
-
-/// Default stroke vertex style (matches LineGeom / BSplineGeom).
-pub(crate) const DEFAULT_JOIN: Join = Join::Miter;
+// Style defaults (linewidth, cap, join) for outlines come from the
+// caller-supplied `ShapeDefaults` so RibbonGeom and RibbonBSplineGeom
+// (which both call into here) can carry independent defaults under
+// `theme.geom.ribbon` vs `theme.geom.ribbon_bspline`.
 
 /// Channel handles for one curve's full LineGeom-style outline surface,
 /// keyed off a suffix (`""` for curve A, `"2"` for curve B in a ribbon
@@ -153,7 +149,10 @@ impl<'a> OutlineScales<'a> {
 /// `alpha_ch` / `alpha_scale` supply the shared per-mark alpha that
 /// overrides each colour channel's resolved alpha; pass `None` for both
 /// when there is no shared alpha channel.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_outline_spec(
+    ctx: &GeomContext<'_>,
+    defaults: &crate::plot::theme::ShapeDefaults,
     ch: &OutlineChannels<'_>,
     sc: &OutlineScales<'_>,
     alpha_ch: Option<&Channel>,
@@ -161,16 +160,17 @@ pub(crate) fn resolve_outline_spec(
     i0: usize,
     pick: PickId,
 ) -> Option<OutlineSpec> {
+    let _ = ctx;
     let stroke_color = override_alpha(
         resolve_color_channel(ch.stroke, sc.stroke, i0),
         resolve_number_channel(alpha_ch, alpha_scale, i0),
     )?;
     let linewidth_pt =
-        resolve_number_channel_or(ch.linewidth, sc.linewidth, i0, DEFAULT_LINEWIDTH_PT);
+        resolve_number_channel_or(ch.linewidth, sc.linewidth, i0, defaults.linewidth_pt);
     let dash_pattern_pt = resolve_linetype_channel(ch.linetype, sc.linetype, i0);
     let dash_offset_pt = resolve_number_channel_or(ch.dash_offset, sc.dash_offset, i0, 0.0);
-    let cap = resolve_cap_channel(ch.cap, sc.cap, i0, DEFAULT_CAP);
-    let join = resolve_join_channel(ch.join, sc.join, i0, DEFAULT_JOIN);
+    let cap = resolve_cap_channel(ch.cap, sc.cap, i0, defaults.cap);
+    let join = resolve_join_channel(ch.join, sc.join, i0, defaults.join);
     let user_clip_start_pt = resolve_number_channel_or(ch.clip_start, sc.clip_start, i0, 0.0);
     let user_clip_end_pt = resolve_number_channel_or(ch.clip_end, sc.clip_end, i0, 0.0);
 
@@ -399,6 +399,7 @@ pub(crate) fn draw_curve_outline(
             linewidth_px_for_marker,
             spec.marker_fill,
             spec.stroke_color,
+            ctx.theme.geom.marker_outline_pt,
             &solid_stroke_spec,
             xform,
             ctx.shapes,

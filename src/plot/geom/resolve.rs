@@ -27,7 +27,6 @@ use crate::stroke::{Cap, Join, Stroke};
 
 use super::Channel;
 
-const DEFAULT_MARKER_OUTLINE_PT: f64 = 0.5;
 const MARKER_EPSILON: f64 = 1e-9;
 
 /// Maximum valid pick id — the 24-bit `PickId` encoding budget.
@@ -85,6 +84,21 @@ pub(crate) fn resolve_color_channel(
     i: usize,
 ) -> Option<Color> {
     resolve_value(channel, scale, i)?.as_color()
+}
+
+/// Like [`resolve_color_channel`] but falls back to a theme-provided
+/// default when the channel resolves to `None`. The fallback is an
+/// `Option<&ThemeColor>` so the geom can pass
+/// `ctx.theme.geom.<geom>.fill.as_ref()` directly — `None` keeps the
+/// pre-theme "channel-or-nothing" semantic.
+pub(crate) fn resolve_color_channel_or_theme(
+    channel: Option<&Channel>,
+    scale: Option<&Scale>,
+    i: usize,
+    theme_default: Option<&crate::plot::theme::ThemeColor>,
+    palette: &crate::plot::theme::Palette,
+) -> Option<Color> {
+    resolve_color_channel(channel, scale, i).or_else(|| theme_default.map(|tc| tc.resolve(palette)))
 }
 
 /// Resolve an optional numeric channel. Returns `None` when the channel
@@ -181,14 +195,16 @@ pub(crate) fn resolve_linetype_channel(
     }
 }
 
-/// Resolve a string channel with a fallback `'static` default. Used by
-/// shape-name lookups; returns a freshly-allocated `String` for matched
-/// names.
+/// Resolve a string channel with a fallback default. Used by
+/// shape-name lookups; returns a freshly-allocated `String` for
+/// matched names. The fallback accepts any `&str` so callers can
+/// pass either a `'static` literal or a runtime-owned string
+/// (e.g. `&theme.geom.point.shape`).
 pub(crate) fn resolve_str_channel_or(
     channel: Option<&Channel>,
     scale: Option<&Scale>,
     i: usize,
-    default: &'static str,
+    default: &str,
 ) -> String {
     match resolve_value(channel, scale, i).and_then(|v| v.as_str().map(str::to_owned)) {
         Some(s) => s,
@@ -368,6 +384,7 @@ pub(crate) fn draw_linetype_with_markers(
     linewidth_px: f64,
     marker_fill: Color,
     marker_stroke: Color,
+    marker_outline_pt: f64,
     solid_stroke_spec: &Stroke,
     xform: Affine,
     shapes: &ShapeRegistry,
@@ -451,7 +468,7 @@ pub(crate) fn draw_linetype_with_markers(
                                     scale_factor,
                                     marker_fill,
                                     marker_stroke,
-                                    pt_to_px(DEFAULT_MARKER_OUTLINE_PT, dpi),
+                                    pt_to_px(marker_outline_pt, dpi),
                                     pick,
                                 );
                             }

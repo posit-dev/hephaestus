@@ -40,14 +40,14 @@ use crate::geometry::{Affine, Point, Vec2};
 use crate::path::FillRule;
 use crate::primitives::{ellipse as ellipse_path, PolylineSampler};
 use crate::scene::SceneBuilder;
-use crate::stroke::{Cap, Join, Stroke};
+use crate::stroke::Stroke;
 
 use super::linetype;
 use super::resolve::{
     build_stroke_for_pattern, draw_linetype_with_markers, override_alpha, pt_to_px,
-    resolve_angle_channel, resolve_cap_channel, resolve_color_channel, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
-    resolve_position,
+    resolve_angle_channel, resolve_cap_channel, resolve_color_channel_or_theme,
+    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, resolve_position,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -57,9 +57,7 @@ use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomConte
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
-const DEFAULT_LINEWIDTH_PT: f64 = 1.0;
-const DEFAULT_CAP: Cap = Cap::Butt;
-const DEFAULT_JOIN: Join = Join::Miter;
+// Style defaults (linewidth, cap, join) live on `theme.geom.ellipse`.
 
 const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("x", ExpectedOutput::Numbers),
@@ -276,11 +274,23 @@ impl Geom for EllipseGeom {
 
             // ── Resolve styling. ──
             let fill_color = override_alpha(
-                resolve_color_channel(fill_ch, fill_scale, i),
+                resolve_color_channel_or_theme(
+                    fill_ch,
+                    fill_scale,
+                    i,
+                    ctx.theme.geom.ellipse.fill.as_ref(),
+                    &ctx.theme.palette,
+                ),
                 resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i),
             );
             let stroke_color = override_alpha(
-                resolve_color_channel(stroke_ch, stroke_scale, i),
+                resolve_color_channel_or_theme(
+                    stroke_ch,
+                    stroke_scale,
+                    i,
+                    ctx.theme.geom.ellipse.stroke.as_ref(),
+                    &ctx.theme.palette,
+                ),
                 resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i),
             );
             if fill_color.is_none() && stroke_color.is_none() {
@@ -316,15 +326,16 @@ impl Geom for EllipseGeom {
                     linewidth_ch,
                     linewidth_scale,
                     i,
-                    DEFAULT_LINEWIDTH_PT,
+                    ctx.theme.geom.ellipse.linewidth_pt,
                 );
                 let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
                 if linewidth_px.is_finite() && linewidth_px > 0.0 {
                     let dash_pattern_pt = resolve_linetype_channel(linetype_ch, linetype_scale, i);
                     let dash_offset_pt =
                         resolve_number_channel_or(dash_offset_ch, dash_offset_scale, i, 0.0);
-                    let cap = resolve_cap_channel(cap_ch, cap_scale, i, DEFAULT_CAP);
-                    let join = resolve_join_channel(join_ch, join_scale, i, DEFAULT_JOIN);
+                    let cap = resolve_cap_channel(cap_ch, cap_scale, i, ctx.theme.geom.ellipse.cap);
+                    let join =
+                        resolve_join_channel(join_ch, join_scale, i, ctx.theme.geom.ellipse.join);
                     if linetype::is_marker_free(&dash_pattern_pt) {
                         let stroke_spec = build_stroke_for_pattern(
                             linewidth_px,
@@ -349,6 +360,7 @@ impl Geom for EllipseGeom {
                             linewidth_px,
                             sc,
                             sc,
+                            ctx.theme.geom.marker_outline_pt,
                             &solid_stroke_spec,
                             xform,
                             ctx.shapes,

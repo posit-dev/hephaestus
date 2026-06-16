@@ -572,7 +572,8 @@ impl Plot {
             registry,
         };
         let ctx =
-            GeomContext::with_projection(panel, dpi, &self.shapes, &resolver, &self.projection);
+            GeomContext::with_projection(panel, dpi, &self.shapes, &resolver, &self.projection)
+                .with_theme(theme);
 
         let clip_path: Option<crate::path::Path> = if self.clip {
             #[cfg(feature = "text")]

@@ -66,8 +66,8 @@ use crate::text::{run_layout_glyphs, TextRun, TextStyle};
 use super::marks::{build_marks_from_column, MarkSlot};
 use super::resolve::{
     override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or,
-    resolve_color_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
-    resolve_position, resolve_str_channel_or,
+    resolve_color_channel_or_theme, resolve_number_channel, resolve_number_channel_or,
+    resolve_pick_id, resolve_position, resolve_str_channel_or,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -83,8 +83,7 @@ use crate::plot::value::DataColumn;
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
-const DEFAULT_SIZE_PT: f64 = 12.0;
-const DEFAULT_WEIGHT: u16 = 400;
+// Style defaults (size, weight) live on `theme.geom.text_path`.
 fn default_fill() -> Color {
     Color::new([0.0, 0.0, 0.0, 1.0])
 }
@@ -277,19 +276,30 @@ impl Geom for TextPathGeom {
             if text.is_empty() {
                 continue;
             }
-            let size_pt = resolve_number_channel_or(size_ch, size_scale, i0, DEFAULT_SIZE_PT);
+            let size_pt = resolve_number_channel_or(
+                size_ch,
+                size_scale,
+                i0,
+                ctx.theme.geom.text_path.size_pt,
+            );
             let size_px = pt_to_px(size_pt, ctx.dpi);
             if !size_px.is_finite() || size_px <= 0.0 {
                 continue;
             }
             let weight = resolve_number_channel(weight_ch, weight_scale, i0)
                 .map(|w| (w.round() as i64).clamp(1, 1000) as u16)
-                .unwrap_or(DEFAULT_WEIGHT);
+                .unwrap_or(ctx.theme.geom.text_path.weight);
             let italic = resolve_italic(italic_ch, italic_scale, i0);
             let family = resolve_str_opt(family_ch, family_scale, i0);
 
             let fill_color = override_alpha(
-                resolve_color_channel(fill_ch, fill_scale, i0),
+                resolve_color_channel_or_theme(
+                    fill_ch,
+                    fill_scale,
+                    i0,
+                    ctx.theme.geom.text_path.fill.as_ref(),
+                    &ctx.theme.palette,
+                ),
                 resolve_number_channel(alpha_ch, alpha_scale, i0),
             )
             .unwrap_or_else(default_fill);

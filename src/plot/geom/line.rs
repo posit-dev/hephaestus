@@ -75,7 +75,9 @@ use crate::primitives::{
     CornerRounding, EndClip, PolylineOptions, PolylineSampler, RibbonOptions,
 };
 use crate::scene::SceneBuilder;
-use crate::stroke::{Cap, Join, Stroke};
+use crate::stroke::Stroke;
+#[cfg(test)]
+use crate::stroke::{Cap, Join};
 
 use super::linetype;
 use super::marks::{build_marks_from_column, MarkSlot};
@@ -83,8 +85,9 @@ use super::resolve::{
     auto_endpoint_clip_pt, build_stroke_for_pattern, channel_varies_across,
     draw_linetype_with_markers, emit_endpoint_marker, endpoint_outward, override_alpha, pt_to_px,
     resolve_angle_channel, resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel,
-    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position, resolve_str_channel_or,
+    resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
+    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
+    resolve_str_channel_or,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -96,10 +99,8 @@ use super::{
 };
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
-
-const DEFAULT_LINEWIDTH_PT: f64 = 1.0;
-const DEFAULT_CAP: Cap = Cap::Butt;
-const DEFAULT_JOIN: Join = Join::Miter;
+// Style defaults (linewidth, cap, join) live on `theme.geom.line` and
+// are read at draw time via `ctx.theme.geom.line.*`.
 
 /// Catalog of channels this geom recognises, with their expected scale
 /// output type.
@@ -386,7 +387,13 @@ impl Geom for LineGeom {
             // ── Per-mark channel resolution (first row of mark). ──
             let i0 = mark.first_row;
             let stroke_color = override_alpha(
-                resolve_color_channel(stroke_ch, stroke_scale, i0),
+                resolve_color_channel_or_theme(
+                    stroke_ch,
+                    stroke_scale,
+                    i0,
+                    ctx.theme.geom.line.stroke.as_ref(),
+                    &ctx.theme.palette,
+                ),
                 resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i0),
             );
             let stroke_color = match stroke_color {
@@ -394,8 +401,12 @@ impl Geom for LineGeom {
                 None => continue, // no stroke → no line to draw
             };
 
-            let linewidth_pt =
-                resolve_number_channel_or(linewidth_ch, linewidth_scale, i0, DEFAULT_LINEWIDTH_PT);
+            let linewidth_pt = resolve_number_channel_or(
+                linewidth_ch,
+                linewidth_scale,
+                i0,
+                ctx.theme.geom.line.linewidth_pt,
+            );
             let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
             if !linewidth_px.is_finite() || linewidth_px <= 0.0 {
                 continue;
@@ -404,8 +415,8 @@ impl Geom for LineGeom {
             let dash_pattern_pt = resolve_linetype_channel(linetype_ch, linetype_scale, i0);
             let dash_offset_pt =
                 resolve_number_channel_or(dash_offset_ch, dash_offset_scale, i0, 0.0);
-            let cap = resolve_cap_channel(cap_ch, cap_scale, i0, DEFAULT_CAP);
-            let join = resolve_join_channel(join_ch, join_scale, i0, DEFAULT_JOIN);
+            let cap = resolve_cap_channel(cap_ch, cap_scale, i0, ctx.theme.geom.line.cap);
+            let join = resolve_join_channel(join_ch, join_scale, i0, ctx.theme.geom.line.join);
 
             // Marker fill defaults to the resolved stroke color.
             let marker_fill =
@@ -525,7 +536,7 @@ impl Geom for LineGeom {
                         linewidth_ch,
                         linewidth_scale,
                         i,
-                        DEFAULT_LINEWIDTH_PT,
+                        ctx.theme.geom.line.linewidth_pt,
                     );
                     let w_half_px = pt_to_px(w_pt, ctx.dpi) * 0.5;
                     let c = override_alpha(
@@ -739,6 +750,7 @@ impl Geom for LineGeom {
                     linewidth_px_for_marker,
                     marker_fill,
                     stroke_color,
+                    ctx.theme.geom.marker_outline_pt,
                     &solid_stroke_spec,
                     xform,
                     ctx.shapes,

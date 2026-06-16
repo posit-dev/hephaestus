@@ -227,6 +227,10 @@ required-features = ["vello", "png", "text"]
 name = "theme_legend_variants"
 required-features = ["vello", "png", "text"]
 
+[[example]]
+name = "theme_geom_defaults"
+required-features = ["vello", "png", "text"]
+
 [[test]]
 name = "smoke"
 required-features = ["vello"]

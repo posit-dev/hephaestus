@@ -389,11 +389,18 @@ pub struct GeomContext<'a> {
     /// touching geom code. Defaults to `Projection::Cartesian` for
     /// callers that construct a context via [`Self::new`].
     pub projection: &'a crate::plot::projection::Projection,
+    /// Effective theme — geoms read defaults (point size, linewidth,
+    /// fill / stroke style) from `theme.geom.*` when a channel
+    /// binding doesn't supply the value. Defaults to a
+    /// `Theme::default()` reference for callers that construct a
+    /// context via [`Self::new`].
+    pub theme: &'a crate::plot::theme::Theme,
 }
 
 impl<'a> GeomContext<'a> {
     /// Construct a per-draw context with the default Cartesian
-    /// projection. Use [`Self::with_projection`] to override.
+    /// projection and default theme. Use [`Self::with_projection`]
+    /// or [`Self::with_theme`] to override.
     pub fn new(
         panel_rect: Rect,
         dpi: f64,
@@ -406,6 +413,7 @@ impl<'a> GeomContext<'a> {
             shapes,
             scales,
             projection: &crate::plot::projection::Projection::Cartesian,
+            theme: default_theme_ref(),
         }
     }
 
@@ -425,13 +433,32 @@ impl<'a> GeomContext<'a> {
             shapes,
             scales,
             projection,
+            theme: default_theme_ref(),
         }
+    }
+
+    /// Builder-style override of the context's theme reference.
+    /// Returns the context with `theme` swapped in. Used by the
+    /// orchestrator to thread the resolved per-plot theme through to
+    /// every geom's `draw` call.
+    pub fn with_theme(mut self, theme: &'a crate::plot::theme::Theme) -> Self {
+        self.theme = theme;
+        self
     }
 
     /// Resolve a channel name to a scale, if one is bound.
     pub fn scale_for(&self, channel: &str) -> Option<&Scale> {
         self.scales.scale_for(channel)
     }
+}
+
+/// Static reference to a default `Theme` — used by `GeomContext::new`
+/// and `GeomContext::with_projection` so the test-side construction
+/// has a theme without forcing callers to supply one.
+fn default_theme_ref() -> &'static crate::plot::theme::Theme {
+    use std::sync::OnceLock;
+    static DEFAULT_THEME: OnceLock<crate::plot::theme::Theme> = OnceLock::new();
+    DEFAULT_THEME.get_or_init(crate::plot::theme::Theme::default)
 }
 
 // ─── Keys ────────────────────────────────────────────────────────────────────

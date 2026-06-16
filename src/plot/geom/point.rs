@@ -67,18 +67,19 @@
 //! skipped if `"stroke"` is unset). Both can be set, only one, or
 //! neither.
 
-use std::sync::Arc;
-
 use crate::brush::Brush;
 use crate::geometry::Affine;
 use crate::path::FillRule;
+#[cfg(test)]
 use crate::plot::value::Value;
 use crate::scene::{Glyph, GlyphRun, SceneBuilder};
 use crate::shape::{Shape, ShapeKind, ShapeStyle};
 use crate::stroke::Stroke;
+#[cfg(test)]
+use std::sync::Arc;
 
 use super::resolve::{
-    band_width_at, override_alpha, pt_to_px, resolve_angle_channel, resolve_color_channel,
+    band_width_at, override_alpha, pt_to_px, resolve_angle_channel, resolve_color_channel_or_theme,
     resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
     resolve_str_channel_or, smallest_nonzero,
 };
@@ -90,12 +91,12 @@ use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomConte
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
-/// Default glyph diameter when the user doesn't bind / set `"size"`.
-const DEFAULT_SIZE_PT: f64 = 5.0;
-/// Default glyph shape name.
-const DEFAULT_SHAPE: &str = "circle";
-/// Default stroke linewidth in pt when stroking a glyph outline.
-const DEFAULT_STROKE_WIDTH_PT: f64 = 1.0;
+// Style defaults — size, shape, stroke width — come from
+// `theme.geom.point` at draw time. The geom no longer injects
+// `Channel::Constant(...)` for missing channels in `build_from`; the
+// draw loop calls the `resolve_*_or` helpers with the theme value as
+// the fallback.
+
 /// Reference local-bbox height for built-in vector shapes (circle:
 /// r=0.8 → bbox 1.6×1.6). The glyph branch scales font-size by
 /// `GLYPH_BBOX_REFERENCE / em_bbox.height()` so a glyph shape at a given
@@ -141,7 +142,7 @@ crate::impl_geom_inherents!(PointGeom);
 
 impl BuildableGeom for PointGeom {
     fn build_from(builder: GeomBuilder<Self>) -> Self {
-        let (keys_opt, mut channels) = builder.into_parts();
+        let (keys_opt, channels) = builder.into_parts();
 
         // x and y are mandatory data columns. Row count = x.len(); all
         // other channels length-validated against it.
@@ -153,13 +154,8 @@ impl BuildableGeom for PointGeom {
         validate_channel_lengths(&channels, n, "PointGeom");
         validate_pick_id_channel(&channels, "PointGeom");
 
-        // Install defaults for size + shape if unset.
-        channels
-            .entry("size".to_string())
-            .or_insert_with(|| Channel::Constant(Value::Number(DEFAULT_SIZE_PT)));
-        channels
-            .entry("shape".to_string())
-            .or_insert_with(|| Channel::Constant(Value::String(Arc::from(DEFAULT_SHAPE))));
+        // Defaults for size + shape come from `theme.geom.point` at
+        // draw time. No `Channel::Constant` injection here.
 
         let declared = filter_declared(&channels, CHANNELS);
         let state = GeomState::from_builder(keys_opt, channels, n, KeysStrategy::PerRow, declared);
@@ -269,15 +265,28 @@ impl Geom for PointGeom {
 
             // ── Channel resolves ──
             let fill_color = override_alpha(
-                resolve_color_channel(fill_ch, fill_scale, i),
+                resolve_color_channel_or_theme(
+                    fill_ch,
+                    fill_scale,
+                    i,
+                    ctx.theme.geom.point.fill.as_ref(),
+                    &ctx.theme.palette,
+                ),
                 resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i),
             );
             let stroke_color = override_alpha(
-                resolve_color_channel(stroke_ch, stroke_scale, i),
+                resolve_color_channel_or_theme(
+                    stroke_ch,
+                    stroke_scale,
+                    i,
+                    ctx.theme.geom.point.stroke.as_ref(),
+                    &ctx.theme.palette,
+                ),
                 resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i),
             );
-            let size_pt = resolve_number_channel_or(size_ch, size_scale, i, DEFAULT_SIZE_PT);
-            let shape_name = resolve_str_channel_or(shape_ch, None, i, DEFAULT_SHAPE);
+            let size_pt =
+                resolve_number_channel_or(size_ch, size_scale, i, ctx.theme.geom.point.size_pt);
+            let shape_name = resolve_str_channel_or(shape_ch, None, i, &ctx.theme.geom.point.shape);
 
             // Glyph diameter: pt contribution + band contribution. band_px
             // is the smallest non-zero band width across x and y at the
@@ -327,15 +336,19 @@ impl Geom for PointGeom {
                                     );
                                 }
                                 if let Some(sc) = stroke_color {
-                                    let st =
-                                        Stroke::new(pt_to_px(DEFAULT_STROKE_WIDTH_PT, ctx.dpi));
+                                    let st = Stroke::new(pt_to_px(
+                                        ctx.theme.geom.point.stroke_width_pt,
+                                        ctx.dpi,
+                                    ));
                                     scene.stroke(&st, xform, &Brush::Solid(sc), None, sub, pick);
                                 }
                             }
                             ShapeStyle::Stroke => {
                                 if let Some(sc) = stroke_color {
-                                    let st =
-                                        Stroke::new(pt_to_px(DEFAULT_STROKE_WIDTH_PT, ctx.dpi));
+                                    let st = Stroke::new(pt_to_px(
+                                        ctx.theme.geom.point.stroke_width_pt,
+                                        ctx.dpi,
+                                    ));
                                     scene.stroke(&st, xform, &Brush::Solid(sc), None, sub, pick);
                                 }
                             }
@@ -499,20 +512,23 @@ mod tests {
     }
 
     #[test]
-    fn builder_installs_default_size_and_shape() {
+    fn builder_leaves_size_and_shape_unset_for_theme_fallback() {
+        // Defaults for size + shape now come from `theme.geom.point`
+        // at draw time. `build_from` no longer injects
+        // `Channel::Constant(...)` for missing channels — they stay
+        // absent, and the resolve helpers fall back to the theme.
         let g = PointGeom::builder()
             .set("x", vec![0.0_f64])
             .set("y", vec![0.0_f64])
             .build();
-        // Constants for size+shape live as Channel::Constant in state.
-        match g.state.channels.get("size") {
-            Some(Channel::Constant(Value::Number(n))) => assert_eq!(*n, 5.0),
-            other => panic!("expected default size constant, got {other:?}"),
-        }
-        match g.state.channels.get("shape") {
-            Some(Channel::Constant(Value::String(s))) => assert_eq!(&**s, "circle"),
-            other => panic!("expected default shape constant, got {other:?}"),
-        }
+        assert!(
+            !g.state.channels.contains_key("size"),
+            "expected no size channel (theme provides default at draw)"
+        );
+        assert!(
+            !g.state.channels.contains_key("shape"),
+            "expected no shape channel (theme provides default at draw)"
+        );
     }
 
     // ── Draw output ──
@@ -723,10 +739,15 @@ mod tests {
     #[test]
     fn declared_channels_sorted_and_classified() {
         use std::collections::HashMap;
+        // `declared_channels` now reflects user-bound channels only —
+        // theme-defaulted channels (size, shape when unbound) are
+        // absent because no `Channel::Constant` is injected at build.
         let g = PointGeom::builder()
             .set("x", vec![0.0_f64, 1.0])
             .set("y", vec![0.0_f64, 1.0])
             .set("fill", Color::new([1.0, 0.0, 0.0, 1.0]))
+            .set("shape", "circle")
+            .set("size", 5.0)
             .build();
         let decls = g.declared_channels();
         let names: Vec<_> = decls.iter().map(|d| d.name).collect();

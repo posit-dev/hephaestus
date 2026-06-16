@@ -27,6 +27,7 @@ pub mod builtin;
 pub mod cascade;
 pub mod element;
 pub mod font;
+pub mod geom;
 pub mod legend;
 pub mod length;
 pub mod palette;
@@ -43,6 +44,9 @@ pub use element::{
 };
 pub use font::{
     FontFamily, FontFeature, FontSpec, FontStyle, FontVariation, FontWeight, FontWidth,
+};
+pub use geom::{
+    GeomTheme, LineDefaults, PointDefaults, ShapeDefaults, TextDefaults, TextFitDefaults,
 };
 pub use legend::{BarTheme, Direction, KeyTheme, LegendTheme, ResolvedDirection};
 pub use length::{pt, rel, Length, Margin};

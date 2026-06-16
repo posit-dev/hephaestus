@@ -58,8 +58,9 @@ use crate::stroke::{Cap, Join, Stroke};
 use crate::text::{draw_text, Alignment, TextRun, TextStyle};
 
 use super::resolve::{
-    override_alpha, pt_to_px, resolve_angle_channel, resolve_color_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position,
+    override_alpha, pt_to_px, resolve_angle_channel, resolve_color_channel,
+    resolve_color_channel_or_theme, resolve_number_channel, resolve_number_channel_or,
+    resolve_pick_id, resolve_position,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -69,10 +70,8 @@ use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomConte
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
-const DEFAULT_MIN_FONT_PT: f64 = 6.0;
-const DEFAULT_MAX_FONT_PT: f64 = 96.0;
-const DEFAULT_WEIGHT: u16 = 400;
-const DEFAULT_BG_LINEWIDTH_PT: f64 = 1.0;
+// Style defaults (min/max font, weight, bg linewidth) live on
+// `theme.geom.text_fit` and are read via `ctx.theme.geom.text_fit.*`.
 /// Binary-search iteration count. At `[6, 96]` bounds the final font
 /// size is within `(96 - 6) / 2^4 ≈ 5.6` pt of optimum — fine for
 /// fitting visible text. Tighter bounds via `min_font_size` /
@@ -317,16 +316,24 @@ impl Geom for TextFitGeom {
             // ── Font style (size will be computed by the fit). ──
             let weight = resolve_number_channel(weight_ch, weight_scale, i)
                 .map(|w| (w.round() as i64).clamp(1, 1000) as u16)
-                .unwrap_or(DEFAULT_WEIGHT);
+                .unwrap_or(ctx.theme.geom.text_fit.weight);
             let italic = resolve_bool_or_italic_string(italic_ch, italic_scale, i);
             let family = resolve_str_channel(family_ch, family_scale, i);
 
-            let min_pt =
-                resolve_number_channel_or(min_font_ch, min_font_scale, i, DEFAULT_MIN_FONT_PT)
-                    .max(0.5);
-            let max_pt =
-                resolve_number_channel_or(max_font_ch, max_font_scale, i, DEFAULT_MAX_FONT_PT)
-                    .max(min_pt);
+            let min_pt = resolve_number_channel_or(
+                min_font_ch,
+                min_font_scale,
+                i,
+                ctx.theme.geom.text_fit.min_font_pt,
+            )
+            .max(0.5);
+            let max_pt = resolve_number_channel_or(
+                max_font_ch,
+                max_font_scale,
+                i,
+                ctx.theme.geom.text_fit.max_font_pt,
+            )
+            .max(min_pt);
             let min_px = pt_to_px(min_pt, ctx.dpi) as f32;
             let max_px = pt_to_px(max_pt, ctx.dpi) as f32;
 
@@ -389,7 +396,13 @@ impl Geom for TextFitGeom {
 
             // ── Fill colour. ──
             let fill_color = override_alpha(
-                resolve_color_channel(fill_ch, fill_scale, i),
+                resolve_color_channel_or_theme(
+                    fill_ch,
+                    fill_scale,
+                    i,
+                    ctx.theme.geom.text_fit.fill.as_ref(),
+                    &ctx.theme.palette,
+                ),
                 resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i),
             )
             .unwrap_or_else(default_fill);
@@ -469,7 +482,7 @@ impl Geom for TextFitGeom {
                             bg_linewidth_ch,
                             bg_linewidth_scale,
                             i,
-                            DEFAULT_BG_LINEWIDTH_PT,
+                            ctx.theme.geom.text_fit.bg_linewidth_pt,
                         );
                         let lw_px = pt_to_px(lw_pt, ctx.dpi);
                         if lw_px.is_finite() && lw_px > 0.0 {

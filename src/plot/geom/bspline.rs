@@ -83,16 +83,17 @@ use crate::primitives::{
     PolylineOptions, PolylineSampler, RibbonOptions,
 };
 use crate::scene::SceneBuilder;
-use crate::stroke::{Cap, Join, Stroke};
+use crate::stroke::Stroke;
 
 use super::linetype;
 use super::marks::{build_marks_from_column, MarkSlot};
 use super::resolve::{
     auto_endpoint_clip_pt, build_stroke_for_pattern, channel_varies_across,
     draw_linetype_with_markers, emit_endpoint_marker, endpoint_outward, override_alpha, pt_to_px,
-    resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
-    resolve_position, resolve_str_channel_or,
+    resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel,
+    resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
+    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
+    resolve_str_channel_or,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -103,10 +104,10 @@ use super::{
     Keys,
 };
 
-const DEFAULT_LINEWIDTH_PT: f64 = 1.0;
+// Style defaults (linewidth, cap, join) live on `theme.geom.bspline`.
+// DEGREE is a semantic default — the curve's order — and stays as a
+// per-geom constant.
 const DEFAULT_DEGREE: usize = 3;
-const DEFAULT_CAP: Cap = Cap::Butt;
-const DEFAULT_JOIN: Join = Join::Miter;
 
 use super::bspline_eval::{build_polyline_fallback, build_spline_flatten, InterpolationSpace};
 // `de_boor` and `CHORD_ERROR_PX` are referenced only inside the test
@@ -351,7 +352,13 @@ impl Geom for BSplineGeom {
             let i0 = mark.first_row;
 
             let stroke_color = override_alpha(
-                resolve_color_channel(stroke_ch, stroke_scale, i0),
+                resolve_color_channel_or_theme(
+                    stroke_ch,
+                    stroke_scale,
+                    i0,
+                    ctx.theme.geom.bspline.stroke.as_ref(),
+                    &ctx.theme.palette,
+                ),
                 resolve_number_channel(alpha_ch, alpha_scale, i0),
             );
             let stroke_color = match stroke_color {
@@ -359,8 +366,12 @@ impl Geom for BSplineGeom {
                 None => continue,
             };
 
-            let linewidth_pt =
-                resolve_number_channel_or(linewidth_ch, linewidth_scale, i0, DEFAULT_LINEWIDTH_PT);
+            let linewidth_pt = resolve_number_channel_or(
+                linewidth_ch,
+                linewidth_scale,
+                i0,
+                ctx.theme.geom.bspline.linewidth_pt,
+            );
             let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
             if !linewidth_px.is_finite() || linewidth_px <= 0.0 {
                 continue;
@@ -385,8 +396,8 @@ impl Geom for BSplineGeom {
             let dash_pattern_pt = resolve_linetype_channel(linetype_ch, linetype_scale, i0);
             let dash_offset_pt =
                 resolve_number_channel_or(dash_offset_ch, dash_offset_scale, i0, 0.0);
-            let cap = resolve_cap_channel(cap_ch, cap_scale, i0, DEFAULT_CAP);
-            let join = resolve_join_channel(join_ch, join_scale, i0, DEFAULT_JOIN);
+            let cap = resolve_cap_channel(cap_ch, cap_scale, i0, ctx.theme.geom.bspline.cap);
+            let join = resolve_join_channel(join_ch, join_scale, i0, ctx.theme.geom.bspline.join);
             let marker_fill =
                 resolve_color_channel(fill_ch, fill_scale, i0).unwrap_or(stroke_color);
             let has_markers = !linetype::is_marker_free(&dash_pattern_pt);
@@ -644,6 +655,7 @@ impl Geom for BSplineGeom {
                     linewidth_px_for_marker,
                     marker_fill,
                     stroke_color,
+                    ctx.theme.geom.marker_outline_pt,
                     &solid_stroke_spec,
                     Affine::IDENTITY,
                     ctx.shapes,

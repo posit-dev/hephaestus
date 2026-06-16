@@ -13,6 +13,7 @@ use std::sync::Arc;
 use super::axis::PerAxis;
 use super::cascade::{PerChannel, Sided};
 use super::element::{AlignTo, Element, LineElement, RectElement, TextElement};
+use super::geom::GeomTheme;
 use super::legend::LegendTheme;
 use super::length::{Length, Margin};
 use super::palette::{Palette, ThemeColor};
@@ -91,6 +92,11 @@ pub struct Theme {
     pub strip_text: Sided<TextElement>,
     /// Inner padding inside the strip rect.
     pub strip_padding: Margin,
+
+    // ── Geom defaults ──────────────────────────────────────────────
+    /// Per-geom default style values. Each geom reads from this when
+    /// a channel binding doesn't supply the value.
+    pub geom: GeomTheme,
 }
 
 impl Default for Theme {
@@ -204,6 +210,7 @@ impl Default for Theme {
                 ..TextElement::default()
             }),
             strip_padding: Margin::all(Length::Abs(4.0)),
+            geom: GeomTheme::default(),
         }
     }
 }
@@ -311,6 +318,10 @@ pub struct ThemePart {
     pub strip_text: Option<Sided<TextElement>>,
     /// Optional strip-padding override.
     pub strip_padding: Option<Margin>,
+
+    /// Optional geom defaults override (replaces the whole
+    /// `GeomTheme` wholesale).
+    pub geom: Option<GeomTheme>,
 }
 
 impl ThemePart {
@@ -344,6 +355,7 @@ impl ThemePart {
         set_field!(strip_background);
         set_field!(strip_text);
         set_field!(strip_padding);
+        set_field!(geom);
         for (k, v) in &self.legend_variants {
             theme.legend_variants.insert(k.clone(), v.clone());
         }

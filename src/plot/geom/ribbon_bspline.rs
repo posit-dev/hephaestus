@@ -118,8 +118,8 @@ use super::bspline_eval::{
 use super::marks::{build_marks_from_column, MarkSlot};
 use super::outline::{draw_curve_outline, resolve_outline_spec, OutlineChannels, OutlineScales};
 use super::resolve::{
-    override_alpha, resolve_color_channel, resolve_number_channel, resolve_number_channel_or,
-    resolve_pick_id, resolve_position, resolve_str_channel_or,
+    override_alpha, resolve_color_channel, resolve_color_channel_or_theme, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, resolve_position, resolve_str_channel_or,
 };
 use super::ribbon::{append_cap_fan_to_mesh, resolve_b_row, CapDirection, Orientation};
 use super::state::{
@@ -377,11 +377,19 @@ impl Geom for RibbonBSplineGeom {
             let i0 = mark.first_row;
 
             let mark_fill = override_alpha(
-                resolve_color_channel(fill_ch, fill_scale, i0),
+                resolve_color_channel_or_theme(
+                    fill_ch,
+                    fill_scale,
+                    i0,
+                    ctx.theme.geom.ribbon_bspline.fill.as_ref(),
+                    &ctx.theme.palette,
+                ),
                 resolve_number_channel(alpha_ch, alpha_scale, i0),
             );
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
             let outline_a_spec = resolve_outline_spec(
+                ctx,
+                &ctx.theme.geom.ribbon_bspline,
                 &outline_a_ch,
                 &outline_a_scales,
                 alpha_ch,
@@ -390,6 +398,8 @@ impl Geom for RibbonBSplineGeom {
                 pick,
             );
             let outline_b_spec = resolve_outline_spec(
+                ctx,
+                &ctx.theme.geom.ribbon_bspline,
                 &outline_b_ch,
                 &outline_b_scales,
                 alpha_ch,

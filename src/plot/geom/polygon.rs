@@ -62,14 +62,14 @@ use crate::primitives::{
     RibbonOptions,
 };
 use crate::scene::SceneBuilder;
-use crate::stroke::{Cap, Join, Stroke};
+use crate::stroke::Stroke;
 
 use super::linetype;
 use super::resolve::{
     build_stroke_for_pattern, channel_varies_across, draw_linetype_with_markers, override_alpha,
     pt_to_px, resolve_angle_channel, resolve_cap_channel, resolve_color_channel,
-    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position,
+    resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
+    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -82,9 +82,7 @@ use super::{
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
-const DEFAULT_LINEWIDTH_PT: f64 = 1.0;
-const DEFAULT_CAP: Cap = Cap::Butt;
-const DEFAULT_JOIN: Join = Join::Miter;
+// Style defaults (linewidth, cap, join) live on `theme.geom.polygon`.
 /// Miter clamp ratio passed to Clipper2 for `"expand"` offsets. Matches
 /// SVG's default `stroke-miterlimit`. Not user-configurable; drop to
 /// `primitives::offset_polygon` directly if a different clamp is needed.
@@ -419,11 +417,23 @@ impl Geom for PolygonGeom {
             let i0 = mark.first_row;
 
             let fill_color = override_alpha(
-                resolve_color_channel(fill_ch, fill_scale, i0),
+                resolve_color_channel_or_theme(
+                    fill_ch,
+                    fill_scale,
+                    i0,
+                    ctx.theme.geom.polygon.fill.as_ref(),
+                    &ctx.theme.palette,
+                ),
                 resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i0),
             );
             let stroke_color = override_alpha(
-                resolve_color_channel(stroke_ch, stroke_scale, i0),
+                resolve_color_channel_or_theme(
+                    stroke_ch,
+                    stroke_scale,
+                    i0,
+                    ctx.theme.geom.polygon.stroke.as_ref(),
+                    &ctx.theme.palette,
+                ),
                 resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i0),
             );
             if fill_color.is_none() && stroke_color.is_none() {
@@ -518,7 +528,7 @@ impl Geom for PolygonGeom {
                             linewidth_ch,
                             linewidth_scale,
                             i,
-                            DEFAULT_LINEWIDTH_PT,
+                            ctx.theme.geom.polygon.linewidth_pt,
                         );
                         let w_half_px = pt_to_px(w_pt, ctx.dpi) * 0.5;
                         let c = override_alpha(
@@ -707,7 +717,7 @@ impl Geom for PolygonGeom {
                     linewidth_ch,
                     linewidth_scale,
                     i0,
-                    DEFAULT_LINEWIDTH_PT,
+                    ctx.theme.geom.polygon.linewidth_pt,
                 );
                 let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
                 if linewidth_px.is_finite() && linewidth_px > 0.0 {
@@ -715,8 +725,10 @@ impl Geom for PolygonGeom {
                     // ribbon-mode decision; re-use it.
                     let dash_offset_pt =
                         resolve_number_channel_or(dash_offset_ch, dash_offset_scale, i0, 0.0);
-                    let cap = resolve_cap_channel(cap_ch, cap_scale, i0, DEFAULT_CAP);
-                    let join = resolve_join_channel(join_ch, join_scale, i0, DEFAULT_JOIN);
+                    let cap =
+                        resolve_cap_channel(cap_ch, cap_scale, i0, ctx.theme.geom.polygon.cap);
+                    let join =
+                        resolve_join_channel(join_ch, join_scale, i0, ctx.theme.geom.polygon.join);
                     if ribbon_mode {
                         // Per-ring ribbon mesh (Phase E.5). `offset_rings`
                         // is the un-modified `rings_pts` because
@@ -763,6 +775,7 @@ impl Geom for PolygonGeom {
                             linewidth_px,
                             sc,
                             sc,
+                            ctx.theme.geom.marker_outline_pt,
                             &solid_stroke_spec,
                             xform,
                             ctx.shapes,

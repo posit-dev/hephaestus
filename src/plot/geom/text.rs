@@ -105,7 +105,8 @@ use crate::text::{draw_text, Alignment, TextRun, TextStyle};
 
 use super::resolve::{
     band_width_at, override_alpha, pt_to_px, resolve_angle_channel, resolve_color_channel,
-    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
+    resolve_color_channel_or_theme, resolve_number_channel, resolve_number_channel_or,
+    resolve_pick_id, resolve_position,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -115,11 +116,8 @@ use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomConte
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
-const DEFAULT_SIZE_PT: f64 = 12.0;
-const DEFAULT_WEIGHT: u16 = 400;
-const DEFAULT_ANCHOR_X: f64 = 0.5;
-const DEFAULT_ANCHOR_Y: f64 = 0.5;
-const DEFAULT_BG_LINEWIDTH_PT: f64 = 1.0;
+// Style defaults (size, weight, anchor, bg linewidth) live on
+// `theme.geom.text` and are read via `ctx.theme.geom.text.*`.
 fn default_fill() -> crate::color::Color {
     crate::color::Color::new([0.0, 0.0, 0.0, 1.0])
 }
@@ -302,14 +300,15 @@ impl Geom for TextGeom {
             }
 
             // ── Resolve font style. ──
-            let size_pt = resolve_number_channel_or(size_ch, size_scale, i, DEFAULT_SIZE_PT);
+            let size_pt =
+                resolve_number_channel_or(size_ch, size_scale, i, ctx.theme.geom.text.size_pt);
             let size_px = pt_to_px(size_pt, ctx.dpi);
             if !size_px.is_finite() || size_px <= 0.0 {
                 continue;
             }
             let weight = resolve_number_channel(weight_ch, weight_scale, i)
                 .map(|w| (w.round() as i64).clamp(1, 1000) as u16)
-                .unwrap_or(DEFAULT_WEIGHT);
+                .unwrap_or(ctx.theme.geom.text.weight);
             let italic = resolve_bool_or_italic_string(italic_ch, italic_scale, i);
             let family = resolve_str_channel(family_ch, family_scale, i);
 
@@ -350,14 +349,28 @@ impl Geom for TextGeom {
                 (run.natural_width(), run.natural_height())
             };
 
-            let anchor_x =
-                resolve_number_channel_or(anchor_x_ch, anchor_x_scale, i, DEFAULT_ANCHOR_X);
-            let anchor_y =
-                resolve_number_channel_or(anchor_y_ch, anchor_y_scale, i, DEFAULT_ANCHOR_Y);
+            let anchor_x = resolve_number_channel_or(
+                anchor_x_ch,
+                anchor_x_scale,
+                i,
+                ctx.theme.geom.text.anchor_x,
+            );
+            let anchor_y = resolve_number_channel_or(
+                anchor_y_ch,
+                anchor_y_scale,
+                i,
+                ctx.theme.geom.text.anchor_y,
+            );
 
             // ── Fill colour. ──
             let fill_color = override_alpha(
-                resolve_color_channel(fill_ch, fill_scale, i),
+                resolve_color_channel_or_theme(
+                    fill_ch,
+                    fill_scale,
+                    i,
+                    ctx.theme.geom.text.fill.as_ref(),
+                    &ctx.theme.palette,
+                ),
                 resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i),
             )
             .unwrap_or_else(default_fill);
@@ -453,7 +466,7 @@ impl Geom for TextGeom {
                             bg_linewidth_ch,
                             bg_linewidth_scale,
                             i,
-                            DEFAULT_BG_LINEWIDTH_PT,
+                            ctx.theme.geom.text.bg_linewidth_pt,
                         );
                         let lw_px = pt_to_px(lw_pt, ctx.dpi);
                         if lw_px.is_finite() && lw_px > 0.0 {

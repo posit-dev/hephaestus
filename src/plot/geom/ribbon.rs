@@ -80,8 +80,8 @@ use crate::scene::SceneBuilder;
 use super::marks::{build_marks_from_column, MarkSlot};
 use super::outline::{draw_curve_outline, resolve_outline_spec, OutlineChannels, OutlineScales};
 use super::resolve::{
-    channel_varies_across, override_alpha, resolve_color_channel, resolve_number_channel,
-    resolve_pick_id, resolve_position,
+    channel_varies_across, override_alpha, resolve_color_channel, resolve_color_channel_or_theme,
+    resolve_number_channel, resolve_pick_id, resolve_position,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -363,11 +363,19 @@ impl Geom for RibbonGeom {
             // a fallback colour when building gradient stops if a row's
             // own fill is unresolved.
             let mark_fill = override_alpha(
-                resolve_color_channel(fill_ch, fill_scale, i0),
+                resolve_color_channel_or_theme(
+                    fill_ch,
+                    fill_scale,
+                    i0,
+                    ctx.theme.geom.ribbon.fill.as_ref(),
+                    &ctx.theme.palette,
+                ),
                 resolve_number_channel(alpha_ch, alpha_scale, i0),
             );
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
             let outline_a_spec = resolve_outline_spec(
+                ctx,
+                &ctx.theme.geom.ribbon,
                 &outline_a_ch,
                 &outline_a_scales,
                 alpha_ch,
@@ -376,6 +384,8 @@ impl Geom for RibbonGeom {
                 pick,
             );
             let outline_b_spec = resolve_outline_spec(
+                ctx,
+                &ctx.theme.geom.ribbon,
                 &outline_b_ch,
                 &outline_b_scales,
                 alpha_ch,
