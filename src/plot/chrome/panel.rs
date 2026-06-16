@@ -17,45 +17,20 @@
 //! shared across all projections.
 
 use crate::brush::Brush;
-use crate::color::{rgb, Color};
 use crate::geometry::{Affine, Point, Rect};
 use crate::path::{FillRule, Path};
 use crate::pick::PickId;
-use crate::plot::chrome::linear_axis::pt_to_px;
+use crate::plot::chrome::linear_axis::{stroke_from_line_element, stroke_from_rect_border};
 use crate::plot::projection::{PolarEdgeStyle, PolarProjection, Projection};
 use crate::plot::scale::Scale;
+use crate::plot::theme::{LineElement, RectElement, Theme};
 use crate::primitives::{
     annular_wedge, arc, circle, polygon, polyline, segment, wedge, PolygonOptions, PolylineOptions,
 };
 use crate::scales::breaks::DEFAULT_BREAK_COUNT;
 use crate::scales::value::Value;
 use crate::scene::SceneBuilder;
-use crate::stroke::Stroke;
 use kurbo::Shape;
-
-// ─── Style ──────────────────────────────────────────────────────────────────
-
-/// Background fill — very light grey, low contrast so data dominates.
-fn background_color() -> Color {
-    rgb(0.95, 0.95, 0.95)
-}
-/// Major grid line — medium grey.
-fn major_grid_color() -> Color {
-    rgb(0.78, 0.78, 0.78)
-}
-/// Minor grid line — lighter grey.
-fn minor_grid_color() -> Color {
-    rgb(0.88, 0.88, 0.88)
-}
-/// Panel outline — black, same ink as the axes.
-fn outline_color() -> Color {
-    rgb(0.0, 0.0, 0.0)
-}
-
-/// Grid line stroke width, pt.
-const GRID_STROKE_WIDTH_PT: f64 = 0.5;
-/// Panel outline stroke width, pt.
-const OUTLINE_STROKE_WIDTH_PT: f64 = 1.0;
 
 // ─── Entry point ────────────────────────────────────────────────────────────
 
@@ -70,115 +45,152 @@ pub struct PanelScales<'a> {
 
 /// Draw the in-panel chrome: background fill, minor + major grid
 /// lines for each channel, panel outline stroke. Drawn before the
-/// geoms so they paint on top.
+/// geoms so they paint on top. Every visual element is sourced from
+/// `theme` — `Element::Blank` skips that piece of chrome entirely.
 pub fn draw_panel_chrome(
     scene: &mut dyn SceneBuilder,
     projection: &Projection,
     panel: Rect,
     scales: PanelScales<'_>,
     dpi: f64,
+    theme: &Theme,
 ) {
     if panel.x1 <= panel.x0 || panel.y1 <= panel.y0 {
         return;
     }
     let outline_path = panel_outline_path(projection, panel);
 
-    let bg_brush = Brush::Solid(background_color());
-    scene.fill(
-        FillRule::NonZero,
-        Affine::IDENTITY,
-        &bg_brush,
-        None,
-        &outline_path,
-        PickId::Skip,
-    );
+    // Background fill — sourced from theme.panel_background.
+    if let Some(bg) = theme.panel_background.as_set() {
+        fill_rect_element(scene, bg, &theme.palette, &outline_path);
+    }
 
-    let grid_stroke = Stroke::new(pt_to_px(GRID_STROKE_WIDTH_PT, dpi));
-    let outline_stroke = Stroke::new(pt_to_px(OUTLINE_STROKE_WIDTH_PT, dpi));
-    let minor_brush = Brush::Solid(minor_grid_color());
-    let major_brush = Brush::Solid(major_grid_color());
-    let outline_brush = Brush::Solid(outline_color());
-
+    // Grid lines, per channel. Minors drawn first so majors layer on
+    // top at coincident fractions.
+    let major_0 = theme.panel_grid_major.resolve(0);
+    let minor_0 = theme.panel_grid_minor.resolve(0);
     if let Some(scale) = scales.channel_0 {
         draw_grid_lines(
             scene,
             scale,
             |frac| channel_grid_path(projection, panel, 0, frac),
-            &grid_stroke,
-            &minor_brush,
-            &major_brush,
+            major_0,
+            minor_0,
+            &theme.palette,
+            dpi,
         );
     }
+    let major_1 = theme.panel_grid_major.resolve(1);
+    let minor_1 = theme.panel_grid_minor.resolve(1);
     if let Some(scale) = scales.channel_1 {
         draw_grid_lines(
             scene,
             scale,
             |frac| channel_grid_path(projection, panel, 1, frac),
-            &grid_stroke,
-            &minor_brush,
-            &major_brush,
+            major_1,
+            minor_1,
+            &theme.palette,
+            dpi,
         );
     }
 
-    scene.stroke(
-        &outline_stroke,
+    // Panel outline.
+    if let Some(border) = theme.panel_border.as_set() {
+        stroke_rect_element_border(scene, border, &theme.palette, &outline_path, dpi);
+    }
+}
+
+fn fill_rect_element(
+    scene: &mut dyn SceneBuilder,
+    rect: &RectElement,
+    palette: &crate::plot::theme::Palette,
+    path: &Path,
+) {
+    let Some(fill) = &rect.fill else {
+        return;
+    };
+    let brush = Brush::Solid(fill.resolve(palette));
+    scene.fill(
+        FillRule::NonZero,
         Affine::IDENTITY,
-        &outline_brush,
+        &brush,
         None,
-        &outline_path,
+        path,
         PickId::Skip,
     );
 }
 
+fn stroke_rect_element_border(
+    scene: &mut dyn SceneBuilder,
+    rect: &RectElement,
+    palette: &crate::plot::theme::Palette,
+    path: &Path,
+    dpi: f64,
+) {
+    if rect.linewidth_pt.resolve(1.0) <= 0.0 {
+        return;
+    }
+    let stroke = stroke_from_rect_border(rect, dpi);
+    let brush = Brush::Solid(rect.color.resolve(palette));
+    scene.stroke(&stroke, Affine::IDENTITY, &brush, None, path, PickId::Skip);
+}
+
 /// Iterate the scale's minor and major breaks, stroking each
 /// returned path with the appropriate brush. Minors first so a
-/// major painted at the same frac wins on top.
+/// major painted at the same frac wins on top. `major` / `minor`
+/// are optional theme elements — `None` (Blank or unresolved)
+/// suppresses that level entirely.
+#[allow(clippy::too_many_arguments)]
 fn draw_grid_lines<F>(
     scene: &mut dyn SceneBuilder,
     scale: &Scale,
     mut path_at: F,
-    stroke: &Stroke,
-    minor_brush: &Brush,
-    major_brush: &Brush,
+    major: Option<&LineElement>,
+    minor: Option<&LineElement>,
+    palette: &crate::plot::theme::Palette,
+    dpi: f64,
 ) where
     F: FnMut(f64) -> Option<Path>,
 {
-    for v in scale.minor_breaks(DEFAULT_BREAK_COUNT) {
-        if matches!(v, Value::Null) {
-            continue;
-        }
-        let frac = match scale.map(&v).as_number() {
-            Some(f) if f.is_finite() && (0.0..=1.0).contains(&f) => f,
-            _ => continue,
-        };
-        if let Some(path) = path_at(frac) {
-            scene.stroke(
-                stroke,
-                Affine::IDENTITY,
-                minor_brush,
-                None,
-                &path,
-                PickId::Skip,
-            );
+    let minor_resolved = minor.map(|el| {
+        (
+            stroke_from_line_element(el, dpi),
+            Brush::Solid(el.color.resolve(palette)),
+        )
+    });
+    let major_resolved = major.map(|el| {
+        (
+            stroke_from_line_element(el, dpi),
+            Brush::Solid(el.color.resolve(palette)),
+        )
+    });
+
+    if let Some((stroke, brush)) = &minor_resolved {
+        for v in scale.minor_breaks(DEFAULT_BREAK_COUNT) {
+            if matches!(v, Value::Null) {
+                continue;
+            }
+            let frac = match scale.map(&v).as_number() {
+                Some(f) if f.is_finite() && (0.0..=1.0).contains(&f) => f,
+                _ => continue,
+            };
+            if let Some(path) = path_at(frac) {
+                scene.stroke(stroke, Affine::IDENTITY, brush, None, &path, PickId::Skip);
+            }
         }
     }
-    for v in scale.breaks(DEFAULT_BREAK_COUNT) {
-        if matches!(v, Value::Null) {
-            continue;
-        }
-        let frac = match scale.map(&v).as_number() {
-            Some(f) if f.is_finite() && (0.0..=1.0).contains(&f) => f,
-            _ => continue,
-        };
-        if let Some(path) = path_at(frac) {
-            scene.stroke(
-                stroke,
-                Affine::IDENTITY,
-                major_brush,
-                None,
-                &path,
-                PickId::Skip,
-            );
+    if let Some((stroke, brush)) = &major_resolved {
+        for v in scale.breaks(DEFAULT_BREAK_COUNT) {
+            if matches!(v, Value::Null) {
+                continue;
+            }
+            let frac = match scale.map(&v).as_number() {
+                Some(f) if f.is_finite() && (0.0..=1.0).contains(&f) => f,
+                _ => continue,
+            };
+            if let Some(path) = path_at(frac) {
+                scene.stroke(stroke, Affine::IDENTITY, brush, None, &path, PickId::Skip);
+            }
         }
     }
 }

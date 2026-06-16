@@ -31,6 +31,7 @@ pub mod geom;
 pub mod plot;
 pub mod projection;
 pub mod scale;
+pub mod theme;
 pub mod value;
 
 pub use composition::{PlotComposition, ValidationIssue};

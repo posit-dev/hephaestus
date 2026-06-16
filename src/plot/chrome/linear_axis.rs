@@ -21,28 +21,165 @@ use crate::geometry::{Affine, Point};
 use crate::layout::{Measure, WidthHint};
 use crate::path::Path;
 use crate::pick::PickId;
+use crate::plot::geom::resolve::build_stroke_for_pattern;
+use crate::plot::theme::{LineElement, Palette, RectElement, ResolvedAxis};
 use crate::scene::SceneBuilder;
-use crate::stroke::Stroke;
+use crate::stroke::{Cap, Join, Stroke};
 use crate::text::{draw_text, Alignment, TextRun, TextStyle};
 
-/// Major tick mark length, pt.
+/// Build a kurbo [`Stroke`] from a themed [`LineElement`] at `dpi`,
+/// honoring linewidth, linetype (dash pattern), cap, and join.
+/// Width and dash lengths are pt; converted to px via the standard
+/// `pt * dpi / 72` factor. Width resolves against 1.0 pt parent
+/// (the `theme.line` root width default).
+pub(crate) fn stroke_from_line_element(el: &LineElement, dpi: f64) -> Stroke {
+    let width_pt = el.linewidth_pt.resolve(1.0);
+    let width_px = pt_to_px(width_pt, dpi);
+    build_stroke_for_pattern(width_px, el.cap, el.join, &el.linetype, 0.0, width_pt, dpi)
+}
+
+/// Build a kurbo [`Stroke`] from a themed [`RectElement`]'s border
+/// fields — width + linetype. RectElement has no cap/join surface
+/// (closed paths don't expose endpoints); the helper picks
+/// `Cap::Butt` + `Join::Miter` (the kurbo defaults for closed
+/// strokes). Width resolves against the 1.0 pt root linewidth.
+pub(crate) fn stroke_from_rect_border(el: &RectElement, dpi: f64) -> Stroke {
+    let width_pt = el.linewidth_pt.resolve(1.0);
+    let width_px = pt_to_px(width_pt, dpi);
+    build_stroke_for_pattern(
+        width_px,
+        Cap::Butt,
+        Join::Miter,
+        &el.linetype,
+        0.0,
+        width_pt,
+        dpi,
+    )
+}
+
+/// Default major tick mark length, pt. Used by the axis-measure
+/// codepath that needs a size estimate before theme info is
+/// available; the actual stroke length at draw time is sourced from
+/// the resolved axis theme.
 pub(crate) const TICK_LENGTH_PT: f64 = 4.0;
-/// Minor tick mark length, pt (shorter than majors, unlabelled).
+/// Default minor tick mark length, pt.
 pub(crate) const MINOR_TICK_LENGTH_PT: f64 = 2.0;
-/// Gap between the tick mark end and the label's near edge, pt.
+/// Default gap between the tick mark end and the label's near edge, pt.
 pub(crate) const LABEL_GAP_PT: f64 = 2.0;
-/// Tick label font size, pt.
+/// Default tick label font size, pt.
 pub(crate) const LABEL_FONT_SIZE_PT: f32 = 10.0;
-/// Stroke width for baseline + tick marks, pt.
+/// Default stroke width for baseline + tick marks, pt.
 pub(crate) const STROKE_WIDTH_PT: f64 = 1.0;
 
-/// Black ink for axis chrome.
+/// Black ink for axis chrome — used as a fallback when no theme
+/// is available (legacy `axis_measure` codepaths).
 pub(crate) fn axis_ink() -> Color {
     rgb(0.0, 0.0, 0.0)
 }
 
 pub(crate) fn pt_to_px(pt: f64, dpi: f64) -> f64 {
     pt * dpi / 72.0
+}
+
+/// Resolved styling for one linear-axis draw call. Carries concrete
+/// colors + widths (palette already applied) so the draw routine
+/// itself touches no theme types.
+pub(crate) struct AxisChromeStyle {
+    pub line_brush: Option<Brush>,
+    pub line_stroke: Stroke,
+    pub tick_brush: Option<Brush>,
+    pub tick_stroke: Stroke,
+    pub minor_brush: Option<Brush>,
+    pub minor_stroke: Stroke,
+    pub tick_length_px: f64,
+    pub minor_tick_length_px: f64,
+    pub gap_px: f64,
+    pub text_style: TextStyle,
+    pub text_brush: Brush,
+    pub draw_labels: bool,
+}
+
+impl AxisChromeStyle {
+    /// Construct from a `ResolvedAxis` against the theme's palette
+    /// at the given dpi.
+    pub fn from_resolved(resolved: &ResolvedAxis<'_>, palette: &Palette, dpi: f64) -> Self {
+        let fallback_stroke = || Stroke::new(pt_to_px(STROKE_WIDTH_PT, dpi));
+        let mk_brush = |c: Color| Brush::Solid(c);
+
+        let (line_brush, line_stroke) = match resolved.line {
+            Some(el) => (
+                Some(mk_brush(el.color.resolve(palette))),
+                stroke_from_line_element(el, dpi),
+            ),
+            None => (None, fallback_stroke()),
+        };
+        let (tick_brush, tick_stroke) = match resolved.ticks {
+            Some(el) => (
+                Some(mk_brush(el.color.resolve(palette))),
+                stroke_from_line_element(el, dpi),
+            ),
+            None => (None, fallback_stroke()),
+        };
+        let (minor_brush, minor_stroke) = match resolved.ticks_minor {
+            Some(el) => (
+                Some(mk_brush(el.color.resolve(palette))),
+                stroke_from_line_element(el, dpi),
+            ),
+            None => (None, fallback_stroke()),
+        };
+
+        let (text_style, text_brush, draw_labels) = match resolved.text {
+            Some(el) => (
+                TextStyle::new(el.size_pt.resolve(LABEL_FONT_SIZE_PT as f64) as f32),
+                mk_brush(el.color.resolve(palette)),
+                true,
+            ),
+            None => (
+                TextStyle::new(LABEL_FONT_SIZE_PT),
+                mk_brush(axis_ink()),
+                false,
+            ),
+        };
+
+        Self {
+            line_brush,
+            line_stroke,
+            tick_brush,
+            tick_stroke,
+            minor_brush,
+            minor_stroke,
+            tick_length_px: pt_to_px(resolved.tick_length.resolve(TICK_LENGTH_PT), dpi),
+            minor_tick_length_px: pt_to_px(
+                resolved.tick_length_minor.resolve(MINOR_TICK_LENGTH_PT),
+                dpi,
+            ),
+            gap_px: pt_to_px(resolved.tick_gap.resolve(LABEL_GAP_PT), dpi),
+            text_style,
+            text_brush,
+            draw_labels,
+        }
+    }
+
+    /// Defaults matching the pre-theme axis chrome. Used by callers
+    /// without theme access (legacy axis_measure paths).
+    pub fn legacy_default(dpi: f64) -> Self {
+        let stroke = Stroke::new(pt_to_px(STROKE_WIDTH_PT, dpi));
+        let brush = Brush::Solid(axis_ink());
+        Self {
+            line_brush: Some(brush.clone()),
+            line_stroke: stroke.clone(),
+            tick_brush: Some(brush.clone()),
+            tick_stroke: stroke.clone(),
+            minor_brush: Some(brush.clone()),
+            minor_stroke: stroke,
+            tick_length_px: pt_to_px(TICK_LENGTH_PT, dpi),
+            minor_tick_length_px: pt_to_px(MINOR_TICK_LENGTH_PT, dpi),
+            gap_px: pt_to_px(LABEL_GAP_PT, dpi),
+            text_style: TextStyle::new(LABEL_FONT_SIZE_PT),
+            text_brush: brush,
+            draw_labels: true,
+        }
+    }
 }
 
 /// Draw a linear axis along the segment `start` → `end`. Tick marks
@@ -53,6 +190,7 @@ pub(crate) fn pt_to_px(pt: f64, dpi: f64) -> f64 {
 /// with a grid line drawn by the surrounding chrome — the axis line
 /// is intrinsic to "this is an axis", and cartesian + polar radius
 /// axes share that semantics.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_linear_axis_at(
     scene: &mut dyn SceneBuilder,
     start: Point,
@@ -60,50 +198,76 @@ pub(crate) fn draw_linear_axis_at(
     tick_direction: (f64, f64),
     majors: &[(f64, String)],
     minors: &[f64],
+    style: &AxisChromeStyle,
     dpi: f64,
 ) {
-    let tick_px = pt_to_px(TICK_LENGTH_PT, dpi);
-    let minor_tick_px = pt_to_px(MINOR_TICK_LENGTH_PT, dpi);
-    let gap_px = pt_to_px(LABEL_GAP_PT, dpi);
-    let stroke_px = pt_to_px(STROKE_WIDTH_PT, dpi);
-    let brush = Brush::Solid(axis_ink());
-    let stroke = Stroke::new(stroke_px);
-    let text_style = TextStyle::new(LABEL_FONT_SIZE_PT);
-
     let (tx, ty) = tick_direction;
 
-    stroke_line(scene, &stroke, &brush, start, end);
-
-    // Minor ticks first so a major drawn at the same frac wins.
-    for &frac in minors {
-        if !frac.is_finite() || !(0.0..=1.0).contains(&frac) {
-            continue;
-        }
-        let pos = lerp(start, end, frac);
-        let tick_end = Point::new(pos.x + minor_tick_px * tx, pos.y + minor_tick_px * ty);
-        stroke_line(scene, &stroke, &brush, pos, tick_end);
+    // Baseline.
+    if let Some(brush) = &style.line_brush {
+        stroke_line(scene, &style.line_stroke, brush, start, end);
     }
 
+    // Minor ticks first so a major drawn at the same frac wins.
+    if let Some(brush) = &style.minor_brush {
+        for &frac in minors {
+            if !frac.is_finite() || !(0.0..=1.0).contains(&frac) {
+                continue;
+            }
+            let pos = lerp(start, end, frac);
+            let tick_end = Point::new(
+                pos.x + style.minor_tick_length_px * tx,
+                pos.y + style.minor_tick_length_px * ty,
+            );
+            stroke_line(scene, &style.minor_stroke, brush, pos, tick_end);
+        }
+    }
+
+    // Major ticks + labels.
     for (frac, label) in majors {
         if !frac.is_finite() || !(0.0..=1.0).contains(frac) {
             continue;
         }
         let pos = lerp(start, end, *frac);
-        let tick_end = Point::new(pos.x + tick_px * tx, pos.y + tick_px * ty);
-        stroke_line(scene, &stroke, &brush, pos, tick_end);
-
-        let anchor = Point::new(tick_end.x + gap_px * tx, tick_end.y + gap_px * ty);
-        draw_axis_label(
-            scene,
-            label,
-            &text_style,
-            &brush,
-            AxisLabelAt {
-                anchor,
-                direction: (tx, ty),
-            },
-            dpi,
+        let tick_end = Point::new(
+            pos.x + style.tick_length_px * tx,
+            pos.y + style.tick_length_px * ty,
         );
+        if let Some(tick_brush) = &style.tick_brush {
+            stroke_line(scene, &style.tick_stroke, tick_brush, pos, tick_end);
+        }
+
+        if style.draw_labels {
+            // Labels sit on the side the tick extends to, with a
+            // small gap. Distinct from tick direction: if the tick
+            // length is negative (extends inward), labels still go
+            // outward — that's the user-visible side.
+            let outward_tx = if style.tick_length_px < 0.0 { -tx } else { tx };
+            let outward_ty = if style.tick_length_px < 0.0 { -ty } else { ty };
+            let outward_tick_end = if style.tick_length_px < 0.0 {
+                Point::new(
+                    pos.x - style.tick_length_px * tx,
+                    pos.y - style.tick_length_px * ty,
+                )
+            } else {
+                tick_end
+            };
+            let anchor = Point::new(
+                outward_tick_end.x + style.gap_px * outward_tx,
+                outward_tick_end.y + style.gap_px * outward_ty,
+            );
+            draw_axis_label(
+                scene,
+                label,
+                &style.text_style,
+                &style.text_brush,
+                AxisLabelAt {
+                    anchor,
+                    direction: (outward_tx, outward_ty),
+                },
+                dpi,
+            );
+        }
     }
 }
 

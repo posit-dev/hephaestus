@@ -20,9 +20,11 @@
 use crate::geometry::{Point, Rect};
 use crate::layout::{Measure, WidthHint};
 use crate::plot::chrome::linear_axis::{
-    draw_linear_axis_at, pt_to_px, LABEL_FONT_SIZE_PT, LABEL_GAP_PT, TICK_LENGTH_PT,
+    draw_linear_axis_at, pt_to_px, AxisChromeStyle, LABEL_FONT_SIZE_PT, LABEL_GAP_PT,
+    TICK_LENGTH_PT,
 };
 use crate::plot::scale::Scale;
+use crate::plot::theme::Theme;
 use crate::scales::breaks::DEFAULT_BREAK_COUNT;
 use crate::scales::value::Value;
 use crate::scene::SceneBuilder;
@@ -130,7 +132,7 @@ pub(crate) struct AxisMeasure {
 }
 
 impl AxisMeasure {
-    fn new(scale: &Scale, side: AxisSide, dpi: f64) -> Self {
+    fn new(scale: &Scale, side: AxisSide, _dpi: f64) -> Self {
         let style = TextStyle::new(LABEL_FONT_SIZE_PT);
         let breaks = scale.breaks(DEFAULT_BREAK_COUNT);
         let mut max_w: f64 = 0.0;
@@ -143,13 +145,11 @@ impl AxisMeasure {
             let run = TextRun::new(&label, &style);
             // Lay out unconstrained to get the natural single-line width.
             let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
-            // Width: ask for the min width (= longest unbreakable
-            // cluster), then for a single-line label that's effectively
-            // the label's full natural width.
-            let w = match run.width_hint(dpi) {
-                WidthHint::Min(w) => w,
-                WidthHint::NeedsHeight { seed } => seed,
-            };
+            // Tick labels render unwrapped — `natural_width` is the
+            // actual draw width. `width_hint` returns the longest-
+            // unbreakable-cluster bound (one word), which undershoots
+            // multi-word labels and clips them at draw.
+            let w = run.natural_width();
             max_w = max_w.max(w);
             max_h = max_h.max(h);
         }
@@ -227,6 +227,7 @@ impl Scale {
         panel_rect: Rect,
         side: AxisSide,
         dpi: f64,
+        theme: &Theme,
     ) {
         let breaks = self.breaks(DEFAULT_BREAK_COUNT);
         if breaks.is_empty() {
@@ -279,7 +280,40 @@ impl Scale {
             .filter(|f| f.is_finite())
             .collect();
 
-        draw_linear_axis_at(scene, start, end, tick_direction, &majors, &minors, dpi);
+        // Resolve the (channel, side) axis from the theme. Channel
+        // is determined by which axis side this is — Bottom/Top
+        // belong to channel 0 (x), Left/Right to channel 1 (y).
+        // Side 0 / 1 within the channel selects between the two
+        // possible axes for that channel.
+        let (ch, side_idx) = axis_side_to_channel_side(side);
+        let resolved = theme.axis.resolve(ch, side_idx);
+        let style = AxisChromeStyle::from_resolved(&resolved, &theme.palette, dpi);
+        draw_linear_axis_at(
+            scene,
+            start,
+            end,
+            tick_direction,
+            &majors,
+            &minors,
+            &style,
+            dpi,
+        );
+    }
+}
+
+/// Map an `AxisSide` to the projection-agnostic `(channel, side)`
+/// indices the theme stores axis chrome under.
+///
+/// - `Bottom` → (0, 0): x-axis, primary side.
+/// - `Top`    → (0, 1): x-axis, secondary side.
+/// - `Left`   → (1, 0): y-axis, primary side.
+/// - `Right`  → (1, 1): y-axis, secondary side.
+pub(crate) fn axis_side_to_channel_side(side: AxisSide) -> (u8, u8) {
+    match side {
+        AxisSide::Bottom => (0, 0),
+        AxisSide::Top => (0, 1),
+        AxisSide::Left => (1, 0),
+        AxisSide::Right => (1, 1),
     }
 }
 
@@ -381,7 +415,14 @@ mod tests {
         let slot = Rect::new(panel.x0, panel.y1, panel.x1, panel.y1 + chrome_h);
 
         let mut scene = RecordingScene::default();
-        s.draw_axis(&mut scene, slot, panel, AxisSide::Bottom, dpi_96());
+        s.draw_axis(
+            &mut scene,
+            slot,
+            panel,
+            AxisSide::Bottom,
+            dpi_96(),
+            &Theme::default(),
+        );
 
         let (strokes, glyphs) = count_strokes_and_glyph_runs(&scene);
         let breaks = s.breaks(DEFAULT_BREAK_COUNT);
@@ -412,7 +453,14 @@ mod tests {
         let slot = Rect::new(panel.x0 - chrome_w, panel.y0, panel.x0, panel.y1);
 
         let mut scene = RecordingScene::default();
-        s.draw_axis(&mut scene, slot, panel, AxisSide::Left, dpi_96());
+        s.draw_axis(
+            &mut scene,
+            slot,
+            panel,
+            AxisSide::Left,
+            dpi_96(),
+            &Theme::default(),
+        );
 
         let (strokes, glyphs) = count_strokes_and_glyph_runs(&scene);
         let breaks = s.breaks(DEFAULT_BREAK_COUNT);
@@ -432,7 +480,14 @@ mod tests {
         let slot = Rect::new(panel.x0, panel.y1, panel.x1, panel.y1 + 30.0);
 
         let mut scene = RecordingScene::default();
-        s.draw_axis(&mut scene, slot, panel, AxisSide::Bottom, dpi_96());
+        s.draw_axis(
+            &mut scene,
+            slot,
+            panel,
+            AxisSide::Bottom,
+            dpi_96(),
+            &Theme::default(),
+        );
         assert!(
             scene.ops.is_empty(),
             "expected no ops for empty breaks; got {}",
@@ -447,7 +502,14 @@ mod tests {
         let panel = Rect::new(0.0, 0.0, 0.0, 0.0);
         let slot = Rect::new(0.0, 0.0, 10.0, 10.0);
         let mut scene = RecordingScene::default();
-        s.draw_axis(&mut scene, slot, panel, AxisSide::Bottom, dpi_96());
+        s.draw_axis(
+            &mut scene,
+            slot,
+            panel,
+            AxisSide::Bottom,
+            dpi_96(),
+            &Theme::default(),
+        );
         assert!(scene.ops.is_empty());
     }
 }

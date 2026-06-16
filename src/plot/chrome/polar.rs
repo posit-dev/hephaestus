@@ -14,18 +14,18 @@ use crate::geometry::{Affine, Point, Rect, Vec2};
 use crate::layout::{Measure, WidthHint};
 use crate::pick::PickId;
 use crate::plot::chrome::linear_axis::{
-    axis_ink, draw_axis_label, draw_linear_axis_at, pt_to_px, AxisLabelAt, LABEL_FONT_SIZE_PT,
-    LABEL_GAP_PT, MINOR_TICK_LENGTH_PT, STROKE_WIDTH_PT, TICK_LENGTH_PT,
+    axis_ink, draw_axis_label, draw_linear_axis_at, pt_to_px, AxisChromeStyle, AxisLabelAt,
+    LABEL_FONT_SIZE_PT, LABEL_GAP_PT, TICK_LENGTH_PT,
 };
 use crate::plot::projection::PolarProjection;
 use crate::plot::scale::Scale;
+use crate::plot::theme::Theme;
 use crate::primitives::{segment, PolylineSampler};
 use crate::scales::breaks::DEFAULT_BREAK_COUNT;
 use crate::scales::chrome::AxisSide;
 use crate::scales::value::Value;
 use crate::scene::SceneBuilder;
 use crate::scene::{Glyph, GlyphRun};
-use crate::stroke::Stroke;
 use crate::text::run_layout_glyphs;
 use crate::text::{Alignment, TextRun, TextStyle};
 
@@ -35,6 +35,7 @@ use crate::text::{Alignment, TextRun, TextStyle};
 /// axes pixel-for-pixel. Endpoints use `polar.unit_position` so for
 /// chord-style projections (radar) they sit on the actual polygon
 /// edge rather than the inscribing circle.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_radius_axis(
     scene: &mut dyn SceneBuilder,
     panel: Rect,
@@ -43,6 +44,7 @@ pub fn draw_radius_axis(
     theta_frac: f64,
     dpi: f64,
     title: Option<&str>,
+    theme: &Theme,
 ) {
     let g = polar.geometry(panel);
     if g.r_outer <= 0.0 {
@@ -67,7 +69,19 @@ pub fn draw_radius_axis(
     let start = Point::new(g.cx + g.r_inner * ux, g.cy - g.r_inner * uy);
     let end = Point::new(g.cx + g.r_outer * ux, g.cy - g.r_outer * uy);
     let tick_direction = radius_axis_tick_direction(polar, theta_frac);
-    draw_linear_axis_at(scene, start, end, tick_direction, &majors, &minors, dpi);
+    // Polar radius axis = channel 1, primary spoke (side 0).
+    let resolved = theme.axis.resolve(1, 0);
+    let style = AxisChromeStyle::from_resolved(&resolved, &theme.palette, dpi);
+    draw_linear_axis_at(
+        scene,
+        start,
+        end,
+        tick_direction,
+        &majors,
+        &minors,
+        &style,
+        dpi,
+    );
 
     if let Some(title_text) = title {
         // Largest label width / height — used to budget the title's
@@ -107,6 +121,7 @@ pub fn draw_radius_axis(
 ///
 /// The inner variant is a no-op when `polar.inner_radius_frac == 0`
 /// — there's no inner ring to label.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_angular_axis(
     scene: &mut dyn SceneBuilder,
     panel: Rect,
@@ -115,6 +130,7 @@ pub fn draw_angular_axis(
     ring: AngularRing,
     dpi: f64,
     title: Option<&str>,
+    theme: &Theme,
 ) {
     let g = polar.geometry(panel);
     if g.r_outer <= 0.0 {
@@ -133,13 +149,18 @@ pub fn draw_angular_axis(
     let span = polar.theta_end - polar.theta_start;
     let is_full_circle = (span.abs() - std::f64::consts::TAU).abs() < 1e-6;
 
-    let stroke_px = pt_to_px(STROKE_WIDTH_PT, dpi);
-    let tick_px = pt_to_px(TICK_LENGTH_PT, dpi);
-    let minor_tick_px = pt_to_px(MINOR_TICK_LENGTH_PT, dpi);
-    let label_gap_px = pt_to_px(LABEL_GAP_PT, dpi);
-    let brush = Brush::Solid(axis_ink());
-    let stroke = Stroke::new(stroke_px);
-    let style = TextStyle::new(LABEL_FONT_SIZE_PT);
+    // Resolve from theme: angular axis = channel 0; outer ring is
+    // side 0 (the conventional "primary" side), inner ring is side 1.
+    let side_idx = match ring {
+        AngularRing::Outer => 0_u8,
+        AngularRing::Inner => 1_u8,
+    };
+    let resolved = theme.axis.resolve(0, side_idx);
+    let chrome_style = AxisChromeStyle::from_resolved(&resolved, &theme.palette, dpi);
+    let tick_px = chrome_style.tick_length_px;
+    let minor_tick_px = chrome_style.minor_tick_length_px;
+    let label_gap_px = chrome_style.gap_px;
+    let style = chrome_style.text_style.clone();
 
     // Minor ticks first so majors paint on top if they coincide.
     for v in scale.minor_breaks(DEFAULT_BREAK_COUNT) {
@@ -163,14 +184,16 @@ pub fn draw_angular_axis(
             on_ring.x + minor_tick_px * rx,
             on_ring.y + minor_tick_px * ry,
         );
-        scene.stroke(
-            &stroke,
-            Affine::IDENTITY,
-            &brush,
-            None,
-            &segment(on_ring, tick_end),
-            PickId::Skip,
-        );
+        if let Some(minor_brush) = chrome_style.minor_brush.as_ref() {
+            scene.stroke(
+                &chrome_style.minor_stroke,
+                Affine::IDENTITY,
+                minor_brush,
+                None,
+                &segment(on_ring, tick_end),
+                PickId::Skip,
+            );
+        }
     }
 
     for v in &scale.breaks(DEFAULT_BREAK_COUNT) {
@@ -191,14 +214,18 @@ pub fn draw_angular_axis(
         let on_ring = Point::new(g.cx + ring_r * theta.cos(), g.cy - ring_r * theta.sin());
         let (rx, ry) = (tick_sign * theta.cos(), -tick_sign * theta.sin());
         let tick_end = Point::new(on_ring.x + tick_px * rx, on_ring.y + tick_px * ry);
-        scene.stroke(
-            &stroke,
-            Affine::IDENTITY,
-            &brush,
-            None,
-            &segment(on_ring, tick_end),
-            PickId::Skip,
-        );
+        if let (Some(tick_brush), tick_stroke) =
+            (chrome_style.tick_brush.as_ref(), &chrome_style.tick_stroke)
+        {
+            scene.stroke(
+                tick_stroke,
+                Affine::IDENTITY,
+                tick_brush,
+                None,
+                &segment(on_ring, tick_end),
+                PickId::Skip,
+            );
+        }
         let anchor = Point::new(
             tick_end.x + label_gap_px * rx,
             tick_end.y + label_gap_px * ry,
@@ -208,7 +235,7 @@ pub fn draw_angular_axis(
             scene,
             &text,
             &style,
-            &brush,
+            &chrome_style.text_brush,
             AxisLabelAt {
                 anchor,
                 direction: (rx, ry),

@@ -130,6 +130,12 @@ pub struct Plot {
     /// Ignored when the projection is non-cartesian — polar
     /// projections compute their own aspect from their bounding box.
     cartesian_aspect_ratio: Option<f64>,
+
+    /// Optional per-plot theme override. When set, the orchestrator
+    /// merges this on top of the composition's theme before
+    /// rendering this plot. `None` (the default) means the plot
+    /// uses the composition's theme unchanged.
+    theme_override: Option<crate::plot::theme::ThemePart>,
 }
 
 impl Plot {
@@ -164,7 +170,26 @@ impl Plot {
             background_color: None,
             dirty: true,
             cartesian_aspect_ratio: None,
+            theme_override: None,
         }
+    }
+
+    /// Install a per-plot theme override. The orchestrator merges
+    /// this on top of the composition's theme before rendering this
+    /// plot. Chainable builder form of [`Self::set_theme_override`].
+    pub fn theme_override(mut self, part: crate::plot::theme::ThemePart) -> Self {
+        self.theme_override = Some(part);
+        self
+    }
+
+    /// Install or clear the per-plot theme override.
+    pub fn set_theme_override(&mut self, part: Option<crate::plot::theme::ThemePart>) {
+        self.theme_override = part;
+    }
+
+    /// Borrow the per-plot theme override, if any.
+    pub fn theme_override_ref(&self) -> Option<&crate::plot::theme::ThemePart> {
+        self.theme_override.as_ref()
     }
 
     /// Lock the panel's data-space aspect ratio to `ratio` (x-unit to
@@ -475,6 +500,7 @@ impl Plot {
         layout: &crate::composition::CompositionLayout,
         registry: &ScaleRegistry,
         dpi: f64,
+        theme: &crate::plot::theme::Theme,
     ) {
         let panel = match layout.get(&self.patch_id, Slot::Panel) {
             Some(r) => r,
@@ -503,11 +529,12 @@ impl Plot {
                     channel_1,
                 },
                 dpi,
+                theme,
             );
         }
         // Suppress unused-vars under no-text.
         #[cfg(not(feature = "text"))]
-        let _ = (scene, panel, registry, dpi);
+        let _ = (scene, panel, registry, dpi, theme);
     }
 
     /// Draw geoms into the panel slot. Installs a clip layer using
@@ -524,7 +551,9 @@ impl Plot {
         layout: &crate::composition::CompositionLayout,
         registry: &ScaleRegistry,
         dpi: f64,
+        theme: &crate::plot::theme::Theme,
     ) {
+        let _ = theme; // Consumed by task #4 geom-defaults / chrome migration.
         let panel = match layout.get(&self.patch_id, Slot::Panel) {
             Some(r) => r,
             None => return,
@@ -588,9 +617,10 @@ impl Plot {
         layout: &crate::composition::CompositionLayout,
         registry: &ScaleRegistry,
         dpi: f64,
+        theme: &crate::plot::theme::Theme,
     ) {
-        self.draw_panel_chrome_into(scene, layout, registry, dpi);
-        self.draw_geoms_into(scene, layout, registry, dpi);
+        self.draw_panel_chrome_into(scene, layout, registry, dpi, theme);
+        self.draw_geoms_into(scene, layout, registry, dpi, theme);
     }
 }
 
@@ -700,7 +730,13 @@ impl Plot {
     /// Unbound channels (e.g. no `"x"` binding) skip their slot.
     /// Unknown scale names also skip — `wire` is lenient by design;
     /// `PlotComposition::validate()` (Phase 7) surfaces such mismatches.
-    pub fn wire(&self, mut patch: Patch, registry: &ScaleRegistry, dpi: f64) -> Patch {
+    pub fn wire(
+        &self,
+        mut patch: Patch,
+        registry: &ScaleRegistry,
+        dpi: f64,
+        theme: &crate::plot::theme::Theme,
+    ) -> Patch {
         // Aspect lock from the projection's natural geometry — see
         // `Self::desired_panel_aspect`. Cartesian plots return
         // `None`; polar plots return either the projection bbox
@@ -713,15 +749,22 @@ impl Plot {
             patch = patch.aspect(w, h);
         }
 
-        // Title row + variants.
+        // Title row + variants — styles come from the theme.
+        let root_pt = theme.text.size_pt.resolve(10.0);
         if let Some(t) = &self.title {
-            patch = patch.slot(Slot::Title, text_cell(t, title_style()));
+            if let Some(el) = effective_text(&theme.plot_title, &theme.text) {
+                patch = patch.slot(Slot::Title, text_cell(t, text_style_from(el, root_pt)));
+            }
         }
         if let Some(t) = &self.subtitle {
-            patch = patch.slot(Slot::Subtitle, text_cell(t, subtitle_style()));
+            if let Some(el) = effective_text(&theme.plot_subtitle, &theme.text) {
+                patch = patch.slot(Slot::Subtitle, text_cell(t, text_style_from(el, root_pt)));
+            }
         }
         if let Some(t) = &self.caption {
-            patch = patch.slot(Slot::Caption, text_cell(t, caption_style()));
+            if let Some(el) = effective_text(&theme.plot_caption, &theme.text) {
+                patch = patch.slot(Slot::Caption, text_cell(t, text_style_from(el, root_pt)));
+            }
         }
         // Axes — explicitly composed by the caller via
         // `Plot::add_axis`. Each cartesian axis contributes a rail
@@ -729,7 +772,7 @@ impl Plot {
         // (when its `title` is set) to the matching anatomical
         // slots. Polar axes wire nothing here; they render in-panel
         // from `draw_chrome_into`.
-        patch = self.wire_axes(patch, registry, dpi);
+        patch = self.wire_axes(patch, registry, dpi, theme);
 
         // Legends — explicitly composed by the caller via
         // `Plot::add_legend{,_separate}`. Each attached side's
@@ -737,13 +780,19 @@ impl Plot {
         // through `legend_stack_measure`. In-panel legends reserve
         // zero chrome space and render against the resolved panel
         // rect from `draw_chrome_into`.
-        patch = self.wire_legends(patch, registry, dpi);
+        patch = self.wire_legends(patch, registry, dpi, theme);
 
         // Panel is always present (the geom panel lives here).
         self.wire_panel(patch)
     }
 
-    fn wire_axes(&self, mut patch: Patch, registry: &ScaleRegistry, dpi: f64) -> Patch {
+    fn wire_axes(
+        &self,
+        mut patch: Patch,
+        registry: &ScaleRegistry,
+        dpi: f64,
+        theme: &crate::plot::theme::Theme,
+    ) -> Patch {
         use crate::plot::chrome::axis::AxisPlacement;
         for axis in &self.axes {
             match axis.placement {
@@ -765,7 +814,7 @@ impl Plot {
                     // unrotated TextRun measure.
                     if let Some(title) = &axis.title {
                         let slot = cartesian_axis_title_slot(side);
-                        patch = patch.slot(slot, axis_title_cell(title, side));
+                        patch = patch.slot(slot, axis_title_cell(title, side, theme));
                     }
                 }
                 AxisPlacement::PolarRadius { .. } | AxisPlacement::PolarAngular(_) => {
@@ -959,6 +1008,7 @@ impl Plot {
         panel: Option<Rect>,
         registry: &ScaleRegistry,
         dpi: f64,
+        theme: &crate::plot::theme::Theme,
     ) {
         use crate::plot::chrome::axis::{AxisPlacement, PolarRing};
         for axis in &self.axes {
@@ -968,7 +1018,7 @@ impl Plot {
                         if let (Some(panel_rect), Some(scale)) = (panel, registry.get(scale_name)) {
                             let slot = cartesian_axis_slot(side);
                             if let Some(slot_rect) = layout.get(&self.patch_id, slot) {
-                                scale.draw_axis(scene, slot_rect, panel_rect, side, dpi);
+                                scale.draw_axis(scene, slot_rect, panel_rect, side, dpi, theme);
                             }
                         }
                     }
@@ -990,6 +1040,7 @@ impl Plot {
                                 theta_frac,
                                 dpi,
                                 axis.title.as_deref(),
+                                theme,
                             );
                         }
                     }
@@ -1011,6 +1062,7 @@ impl Plot {
                                 ring,
                                 dpi,
                                 axis.title.as_deref(),
+                                theme,
                             );
                         }
                     }
@@ -1019,7 +1071,13 @@ impl Plot {
         }
     }
 
-    fn wire_legends(&self, mut patch: Patch, registry: &ScaleRegistry, dpi: f64) -> Patch {
+    fn wire_legends(
+        &self,
+        mut patch: Patch,
+        registry: &ScaleRegistry,
+        dpi: f64,
+        theme: &crate::plot::theme::Theme,
+    ) -> Patch {
         for (side, slot, group) in legends_grouped_by_side(&self.legends) {
             if group.is_empty() {
                 continue;
@@ -1027,7 +1085,9 @@ impl Plot {
             patch = patch.slot(
                 slot,
                 Cell::measured(BoxMeasure::new(
-                    crate::plot::chrome::legend::legend_stack_measure(&group, side, registry, dpi),
+                    crate::plot::chrome::legend::legend_stack_measure(
+                        &group, side, registry, dpi, theme,
+                    ),
                 )),
             );
         }
@@ -1043,15 +1103,14 @@ impl Plot {
         layout: &crate::composition::CompositionLayout,
         registry: &ScaleRegistry,
         dpi: f64,
+        theme: &crate::plot::theme::Theme,
     ) {
         use crate::brush::Brush;
-        use crate::color::Color;
-        use crate::text::{draw_text_in_rect, TextRun, TextStyle};
-        type StyleFn = fn() -> TextStyle;
+        use crate::text::{draw_text_in_rect, TextRun};
 
         // Axes — explicit, no defaults.
         let panel = layout.get(&self.patch_id, Slot::Panel);
-        self.draw_axes_into(scene, layout, panel, registry, dpi);
+        self.draw_axes_into(scene, layout, panel, registry, dpi, theme);
 
         // Legends — render each side's stack of attached legends
         // into the matching slot. Mirrors the wiring loop.
@@ -1068,6 +1127,7 @@ impl Plot {
                     &self.shapes,
                     scene,
                     dpi,
+                    theme,
                 );
             }
         }
@@ -1081,8 +1141,9 @@ impl Plot {
                     continue;
                 }
                 let inset_px = inset_pt * dpi / 72.0;
-                let (w, h) =
-                    crate::plot::chrome::legend::legend_stack_natural_size(&group, registry, dpi);
+                let (w, h) = crate::plot::chrome::legend::legend_stack_natural_size(
+                    &group, registry, dpi, theme,
+                );
                 if w <= 0.0 || h <= 0.0 {
                     continue;
                 }
@@ -1096,22 +1157,35 @@ impl Plot {
                     &self.shapes,
                     scene,
                     dpi,
+                    theme,
                 );
             }
         }
 
-        // Plot-level text slots — title / subtitle / caption.
-        let ink = Brush::Solid(Color::new([0.0, 0.0, 0.0, 1.0]));
-        let entries: [(Slot, Option<&String>, StyleFn); 3] = [
-            (Slot::Title, self.title.as_ref(), title_style),
-            (Slot::Subtitle, self.subtitle.as_ref(), subtitle_style),
-            (Slot::Caption, self.caption.as_ref(), caption_style),
+        // Plot-level text slots — title / subtitle / caption. Style
+        // and ink come from the theme.
+        let root_pt = theme.text.size_pt.resolve(10.0);
+        let entries: [(
+            Slot,
+            Option<&String>,
+            &crate::plot::theme::Element<crate::plot::theme::TextElement>,
+        ); 3] = [
+            (Slot::Title, self.title.as_ref(), &theme.plot_title),
+            (Slot::Subtitle, self.subtitle.as_ref(), &theme.plot_subtitle),
+            (Slot::Caption, self.caption.as_ref(), &theme.plot_caption),
         ];
-        for (slot, text, style_fn) in entries {
-            if let (Some(text), Some(rect)) = (text, layout.get(&self.patch_id, slot)) {
-                let run = TextRun::new(text, &style_fn());
-                draw_text_in_rect(scene, &run, rect, &ink, crate::pick::PickId::Skip);
-            }
+        for (slot, text, theme_slot) in entries {
+            let (Some(text), Some(rect), Some(el)) = (
+                text,
+                layout.get(&self.patch_id, slot),
+                effective_text(theme_slot, &theme.text),
+            ) else {
+                continue;
+            };
+            let style = text_style_from(el, root_pt);
+            let brush = Brush::Solid(el.color.resolve(&theme.palette));
+            let run = TextRun::new(text, &style);
+            draw_text_in_rect(scene, &run, rect, &brush, crate::pick::PickId::Skip);
         }
 
         // Axis title slots — sourced from `Axis::title` on each
@@ -1120,7 +1194,7 @@ impl Plot {
         // centre along the panel row so the title parallels the
         // axis it labels. Polar axis titles render inline through
         // `draw_axes_into` and don't participate in slot rendering.
-        use crate::plot::chrome::axis::AxisPlacement;
+        use crate::plot::chrome::axis::{axis_side_to_channel_side, AxisPlacement};
         for axis in &self.axes {
             let Some(title) = axis.title.as_ref() else {
                 continue;
@@ -1129,9 +1203,14 @@ impl Plot {
                 continue;
             };
             let slot = cartesian_axis_title_slot(side);
+            let (ch, side_idx) = axis_side_to_channel_side(side);
+            let resolved = theme.axis.resolve(ch, side_idx);
+            let Some(el) = resolved.title else { continue };
             if let Some(rect) = layout.get(&self.patch_id, slot) {
-                let run = TextRun::new(title, &axis_title_style());
-                draw_axis_title(scene, &run, rect, side, &ink);
+                let style = text_style_from(el, root_pt);
+                let brush = Brush::Solid(el.color.resolve(&theme.palette));
+                let run = TextRun::new(title, &style);
+                draw_axis_title(scene, &run, rect, side, &brush);
             }
         }
     }
@@ -1142,24 +1221,49 @@ fn text_cell(s: &str, style: crate::text::TextStyle) -> Cell {
     Cell::measured(crate::text::TextRun::new(s, &style))
 }
 
-#[cfg(feature = "text")]
-fn title_style() -> crate::text::TextStyle {
-    crate::text::TextStyle::new(16.0).weight(700)
-}
-
-#[cfg(feature = "text")]
-fn subtitle_style() -> crate::text::TextStyle {
-    crate::text::TextStyle::new(12.0)
-}
-
-#[cfg(feature = "text")]
-fn caption_style() -> crate::text::TextStyle {
-    crate::text::TextStyle::new(10.0).italic(true)
-}
-
+/// Default axis-title style — 12pt, matching the historical
+/// hardcoded value. Used by polar chrome helpers that haven't yet
+/// been threaded with a `&Theme`; theme-aware call sites should
+/// derive the style via [`text_style_from`] from the resolved axis
+/// title element.
 #[cfg(feature = "text")]
 pub(crate) fn axis_title_style() -> crate::text::TextStyle {
     crate::text::TextStyle::new(12.0)
+}
+
+/// Convert a theme [`TextElement`](crate::plot::theme::TextElement)
+/// into a shaper-facing [`crate::text::TextStyle`]. Resolves the
+/// element's `size_pt` against `parent_pt` (typically the root
+/// text size) and folds in weight + italic. Full FontSpec
+/// (family / width / OpenType features / variations) lands when
+/// the host shaper integration grows; for now only size / weight /
+/// italic are consumed.
+#[cfg(feature = "text")]
+pub(crate) fn text_style_from(
+    el: &crate::plot::theme::TextElement,
+    parent_pt: f64,
+) -> crate::text::TextStyle {
+    use crate::plot::theme::FontStyle;
+    let size = el.size_pt.resolve(parent_pt) as f32;
+    let mut style = crate::text::TextStyle::new(size);
+    if let Some(weight) = el.font.weight {
+        style = style.weight(weight.0);
+    }
+    if matches!(el.font.style, Some(FontStyle::Italic)) {
+        style = style.italic(true);
+    }
+    style
+}
+
+/// Resolve the effective [`TextElement`](crate::plot::theme::TextElement)
+/// for an `Element<TextElement>` slot, cascading to `theme.text`
+/// when `Inherit`. Returns `None` if the slot is `Blank`.
+#[cfg(feature = "text")]
+pub(crate) fn effective_text<'a>(
+    slot: &'a crate::plot::theme::Element<crate::plot::theme::TextElement>,
+    root: &'a crate::plot::theme::TextElement,
+) -> Option<&'a crate::plot::theme::TextElement> {
+    slot.cascade(Some(root))
 }
 
 /// Build the `Cell` for a cartesian axis title slot. Vertical sides
@@ -1168,8 +1272,15 @@ pub(crate) fn axis_title_style() -> crate::text::TextStyle {
 /// (one font line height) rather than the natural string width.
 /// Horizontal sides reuse the unrotated `TextRun` measure directly.
 #[cfg(feature = "text")]
-fn axis_title_cell(title: &str, side: AxisSide) -> Cell {
-    let run = crate::text::TextRun::new(title, &axis_title_style());
+fn axis_title_cell(title: &str, side: AxisSide, theme: &crate::plot::theme::Theme) -> Cell {
+    let (ch, side_idx) = crate::plot::chrome::axis::axis_side_to_channel_side(side);
+    let resolved = theme.axis.resolve(ch, side_idx);
+    let root_pt = theme.text.size_pt.resolve(10.0);
+    let style = match resolved.title {
+        Some(el) => text_style_from(el, root_pt),
+        None => return Cell::empty(),
+    };
+    let run = crate::text::TextRun::new(title, &style);
     if side.is_vertical() {
         Cell::measured(RotatedAxisTitleMeasure {
             rotated_w: run.natural_height(),
@@ -1371,6 +1482,11 @@ mod tests {
     use crate::plot::geom::PointGeom;
     #[cfg(feature = "text")]
     use crate::plot::scale;
+    use crate::plot::theme::Theme;
+
+    fn default_theme() -> Theme {
+        Theme::default()
+    }
 
     fn comp_with_two() -> Composition {
         beside(CompPatch::new("a"), CompPatch::new("b"))
@@ -1505,7 +1621,7 @@ mod tests {
         let layout = c.solve(crate::geometry::Size::new(400.0, 300.0), 96.0);
         let mut scene = crate::scene::recording::RecordingScene::default();
         let registry = ScaleRegistry::new();
-        p.draw_panel_into(&mut scene, &layout, &registry, 96.0);
+        p.draw_panel_into(&mut scene, &layout, &registry, 96.0, &default_theme());
         // The composition itself emits no ops; only checking that we
         // didn't panic.
         let _ = scene.ops.len();
@@ -1534,7 +1650,7 @@ mod tests {
         let layout = comp.solve(crate::geometry::Size::new(400.0, 300.0), 96.0);
         let mut scene = crate::scene::recording::RecordingScene::default();
         let registry = ScaleRegistry::new();
-        p.draw_panel_into(&mut scene, &layout, &registry, 96.0);
+        p.draw_panel_into(&mut scene, &layout, &registry, 96.0, &default_theme());
         let ids: Vec<u32> = scene
             .ops
             .iter()
@@ -1569,7 +1685,7 @@ mod tests {
             use crate::plot::chrome::axis::{Axis, AxisPlacement};
             let (_c, registry, mut plot) = make_with_x();
             plot.add_axis(Axis::rail("x", AxisPlacement::Cartesian(AxisSide::Bottom)));
-            let patch = plot.wire(CompPatch::new("a"), &registry, 96.0);
+            let patch = plot.wire(CompPatch::new("a"), &registry, 96.0, &default_theme());
             let comp = beside(patch, CompPatch::new("b"));
             let layout = comp.solve(crate::geometry::Size::new(400.0, 300.0), 96.0);
             assert!(layout.get("a", Slot::AxisBottom).is_some());
@@ -1582,7 +1698,7 @@ mod tests {
             let c = beside(CompPatch::new("a"), CompPatch::new("b"));
             let plot = Plot::new(&c, "a").title("Hello");
             let registry = ScaleRegistry::new();
-            let patch = plot.wire(CompPatch::new("a"), &registry, 96.0);
+            let patch = plot.wire(CompPatch::new("a"), &registry, 96.0, &default_theme());
             let comp = beside(patch, CompPatch::new("b"));
             let layout = comp.solve(crate::geometry::Size::new(400.0, 300.0), 96.0);
             assert!(layout.get("a", Slot::Title).is_some());
@@ -1593,7 +1709,7 @@ mod tests {
             let c = beside(CompPatch::new("a"), CompPatch::new("b"));
             let plot = Plot::new(&c, "a"); // no bindings
             let registry = ScaleRegistry::new();
-            let patch = plot.wire(CompPatch::new("a"), &registry, 96.0);
+            let patch = plot.wire(CompPatch::new("a"), &registry, 96.0, &default_theme());
             let comp = beside(patch, CompPatch::new("b"));
             let layout = comp.solve(crate::geometry::Size::new(400.0, 300.0), 96.0);
             // Only Panel; no axes / titles.
@@ -1620,9 +1736,10 @@ mod tests {
                 "time",
                 AxisPlacement::Cartesian(AxisSide::Bottom),
             ));
+            let theme = default_theme();
             let comp = beside(
-                plot_a.wire(CompPatch::new("a"), &registry, 96.0),
-                plot_b.wire(CompPatch::new("b"), &registry, 96.0),
+                plot_a.wire(CompPatch::new("a"), &registry, 96.0, &theme),
+                plot_b.wire(CompPatch::new("b"), &registry, 96.0, &theme),
             );
             let layout = comp.solve(crate::geometry::Size::new(1000.0, 300.0), 96.0);
             let axis_a = layout.get("a", Slot::AxisBottom).unwrap();

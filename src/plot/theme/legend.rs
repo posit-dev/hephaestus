@@ -1,0 +1,164 @@
+//! [`LegendTheme`] and its two type-specific sub-themes: [`KeyTheme`]
+//! (standard / discrete legends) and [`BarTheme`] (colorbar + binned
+//! legends).
+//!
+//! The legend also reuses [`super::axis::AxisTheme`] for its tick-
+//! labels-and-ticks component. `axis.title` is ignored — the
+//! legend's overall title sits on `LegendTheme.title` instead.
+
+use super::axis::AxisTheme;
+use super::element::{Element, TextElement};
+use super::length::{Length, Margin};
+use super::RectElement;
+
+/// Direction in which keys / bar flow within a legend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Direction {
+    /// Pick direction from the legend's placement side: `Horizontal`
+    /// for Top / Bottom (key stacks form a row beneath the title),
+    /// `Vertical` for Left / Right (key stacks form a column).
+    /// In-panel legends fall back to `Vertical`. The default — most
+    /// users want this.
+    #[default]
+    Auto,
+    /// Keys stack left-to-right (one row, multiple columns).
+    Horizontal,
+    /// Keys stack top-to-bottom (one column, multiple rows).
+    Vertical,
+}
+
+impl Direction {
+    /// Resolve `Auto` against a placement side; concrete variants pass
+    /// through unchanged.
+    pub fn resolve(self, side: crate::scales::chrome::LegendSide) -> ResolvedDirection {
+        use crate::scales::chrome::LegendSide;
+        match self {
+            Direction::Horizontal => ResolvedDirection::Horizontal,
+            Direction::Vertical => ResolvedDirection::Vertical,
+            Direction::Auto => match side {
+                LegendSide::Top | LegendSide::Bottom => ResolvedDirection::Horizontal,
+                LegendSide::Left | LegendSide::Right => ResolvedDirection::Vertical,
+                LegendSide::InPanel { .. } => ResolvedDirection::Vertical,
+            },
+        }
+    }
+}
+
+/// Concrete flow direction after `Auto` has been resolved against
+/// the legend's placement side. Returned by [`Direction::resolve`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResolvedDirection {
+    /// Keys flow left-to-right.
+    Horizontal,
+    /// Keys flow top-to-bottom.
+    Vertical,
+}
+
+/// Theme for the discrete-key portion of a legend (standard legend).
+/// Symmetric with [`BarTheme`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeyTheme {
+    /// Frame around each key cell — fill + border combined.
+    /// `RectElement` carries both `fill` (Option<ThemeColor>) and
+    /// `linewidth_pt`, so a single element covers backgrounds, borders,
+    /// or both. Set `fill = None` for no background, `linewidth_pt =
+    /// Abs(0.0)` for no border.
+    pub frame: Element<RectElement>,
+    /// Key cell width, pt.
+    pub width: Length,
+    /// Key cell height, pt.
+    pub height: Length,
+    /// Gap between adjacent keys within a single legend (intra-legend
+    /// spacing). Spacing **between** legends lives on
+    /// `Theme::legend_spacing`.
+    pub spacing: Length,
+}
+
+impl Default for KeyTheme {
+    /// 12×12pt keys, 4pt spacing, no frame.
+    fn default() -> Self {
+        Self {
+            frame: Element::Blank,
+            width: Length::Abs(12.0),
+            height: Length::Abs(12.0),
+            spacing: Length::Abs(4.0),
+        }
+    }
+}
+
+/// Theme for the bar portion of a legend (colorbar + binned).
+/// Symmetric with [`KeyTheme`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct BarTheme {
+    /// Bar dimension along the legend's [`Direction`], pt.
+    pub length: Length,
+    /// Bar dimension perpendicular to the legend's [`Direction`], pt.
+    pub width: Length,
+    /// Outline around the bar. Fill is ignored — the bar's own
+    /// gradient / bin colors fill the interior.
+    pub frame: Element<RectElement>,
+}
+
+impl Default for BarTheme {
+    /// 100pt × 12pt bar with a thin ink outline.
+    fn default() -> Self {
+        Self {
+            length: Length::Abs(100.0),
+            width: Length::Abs(12.0),
+            frame: Element::Set(RectElement {
+                fill: None,
+                ..RectElement::default()
+            }),
+        }
+    }
+}
+
+/// Theme for a complete legend — overall framing, an axis-like
+/// component, plus the type-specific [`KeyTheme`] and [`BarTheme`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct LegendTheme {
+    /// Background rect around the whole legend.
+    pub background: Element<RectElement>,
+    /// The legend's overall title — labels the legend itself.
+    /// Distinct from `axis.title`, which lives on `AxisTheme` and is
+    /// ignored by legends.
+    pub title: Element<TextElement>,
+    /// Outer margin around the whole legend.
+    pub margin: Margin,
+    /// Inner padding inside the background.
+    pub padding: Margin,
+    /// Direction keys / bar flow within the legend.
+    pub direction: Direction,
+    /// Shared axis-like component reused from plot axes. Covers tick
+    /// labels (used as key labels in standard legends), ticks,
+    /// baseline, tick lengths, tick gap. `axis.title` is ignored;
+    /// the legend's overall title is `LegendTheme.title` above.
+    pub axis: AxisTheme,
+    /// Discrete-key styling.
+    pub key: KeyTheme,
+    /// Bar-legend styling.
+    pub bar: BarTheme,
+}
+
+impl Default for LegendTheme {
+    fn default() -> Self {
+        Self {
+            background: Element::Blank,
+            title: Element::Set(TextElement {
+                size_pt: Length::Abs(11.0),
+                ..TextElement::default()
+            }),
+            margin: Margin::ZERO,
+            padding: Margin::all(Length::Abs(6.0)),
+            direction: Direction::default(),
+            axis: AxisTheme {
+                line: Element::Blank,
+                ticks: Element::Blank,
+                ticks_minor: Element::Blank,
+                ..AxisTheme::default()
+            },
+            key: KeyTheme::default(),
+            bar: BarTheme::default(),
+        }
+    }
+}

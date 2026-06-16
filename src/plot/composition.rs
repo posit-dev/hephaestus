@@ -34,6 +34,7 @@ use crate::scene::SceneBuilder;
 
 use super::plot::Plot;
 use super::scale::{Scale, ScaleRegistry};
+use super::theme::Theme;
 
 // ─── Template ────────────────────────────────────────────────────────────────
 
@@ -108,6 +109,7 @@ impl CompositionTemplate {
         plots: &HashMap<String, Vec<Plot>>,
         registry: &ScaleRegistry,
         dpi: f64,
+        comp_theme: &Theme,
     ) -> Composition {
         let mut c = Composition::empty(self.rows, self.cols);
         if !self.widths.is_empty() {
@@ -117,7 +119,7 @@ impl CompositionTemplate {
             c = c.heights(self.heights.clone());
         }
         for p in &self.placements {
-            let element = p.element.rebuild(plots, registry, dpi);
+            let element = p.element.rebuild(plots, registry, dpi, comp_theme);
             c = c.place(p.row, p.col, p.span, element);
         }
         c
@@ -142,15 +144,16 @@ impl ElementTemplate {
         plots: &HashMap<String, Vec<Plot>>,
         registry: &ScaleRegistry,
         dpi: f64,
+        comp_theme: &Theme,
     ) -> Element {
         match self {
             ElementTemplate::NamedPatch(id) => {
-                let patch = wire_into_patch(id, plots, registry, dpi);
+                let patch = wire_into_patch(id, plots, registry, dpi, comp_theme);
                 Element::Patch(patch)
             }
             ElementTemplate::Spacer => Element::Patch(spacer()),
             ElementTemplate::Composition(inner) => {
-                Element::Composition(inner.rebuild(plots, registry, dpi))
+                Element::Composition(inner.rebuild(plots, registry, dpi, comp_theme))
             }
         }
     }
@@ -169,18 +172,20 @@ fn wire_into_patch(
     plots: &HashMap<String, Vec<Plot>>,
     registry: &ScaleRegistry,
     dpi: f64,
+    comp_theme: &Theme,
 ) -> Patch {
     let plot_list = plots.get(id);
     #[cfg(feature = "text")]
     {
         if let Some(list) = plot_list {
             if !list.is_empty() {
-                return wire_merged_patch(id, list, registry, dpi);
+                return wire_merged_patch(id, list, registry, dpi, comp_theme);
             }
         }
     }
     let _ = registry;
     let _ = dpi;
+    let _ = comp_theme;
     // Unattached patches, or non-text builds: just attach a Panel
     // slot so the layout still places a rect for that patch.
     let p = Patch::new(id);
@@ -194,7 +199,13 @@ fn wire_into_patch(
 /// fresh patch; we then group the resulting placements by region
 /// across plots, max-merging the underlying [`Measure`]s.
 #[cfg(feature = "text")]
-fn wire_merged_patch(id: &str, plots: &[Plot], registry: &ScaleRegistry, dpi: f64) -> Patch {
+fn wire_merged_patch(
+    id: &str,
+    plots: &[Plot],
+    registry: &ScaleRegistry,
+    dpi: f64,
+    comp_theme: &Theme,
+) -> Patch {
     use crate::composition::PatchPlacement;
     use crate::layout::{Cell, MaxMergeMeasure, Placement};
 
@@ -206,7 +217,11 @@ fn wire_merged_patch(id: &str, plots: &[Plot], registry: &ScaleRegistry, dpi: f6
     type RegionEntry = (String, Placement, Vec<Box<dyn crate::layout::Measure>>);
     let mut by_region: Vec<RegionEntry> = Vec::new();
     for plot in plots {
-        let per_plot = plot.wire(Patch::new(id), registry, dpi);
+        let effective_theme = match plot.theme_override_ref() {
+            Some(part) => comp_theme.merge(part),
+            None => comp_theme.clone(),
+        };
+        let per_plot = plot.wire(Patch::new(id), registry, dpi, &effective_theme);
         for PatchPlacement {
             placement,
             region,
@@ -312,6 +327,10 @@ pub enum ValidationIssue {
 pub struct PlotComposition {
     template: CompositionTemplate,
     scales: ScaleRegistry,
+    /// Shared theme applied to every attached plot at render time.
+    /// Each plot can override with its own [`ThemePart`]; the
+    /// orchestrator merges per plot before drawing.
+    theme: Arc<Theme>,
     /// Plots attached to each patch id, in attach order. Multiple
     /// plots per patch are supported — each draws its own chrome
     /// into the same patch slots, with later plots overlaying
@@ -341,6 +360,7 @@ impl PlotComposition {
         Self {
             template,
             scales: ScaleRegistry::new(),
+            theme: Arc::new(Theme::default()),
             plots: HashMap::new(),
             plot_dirty: HashMap::new(),
             scale_dirty: HashMap::new(),
@@ -348,6 +368,48 @@ impl PlotComposition {
             last_layout: None,
             last_size: None,
             last_dpi: None,
+        }
+    }
+
+    // ── Theme ─────────────────────────────────────────────────────────
+
+    /// Install a [`Theme`] on this composition. Chainable builder form
+    /// of [`Self::set_theme`]. Replaces any previously installed
+    /// theme; flags the layout dirty.
+    pub fn theme(mut self, theme: Theme) -> Self {
+        self.set_theme(theme);
+        self
+    }
+
+    /// Install a [`Theme`] on this composition. Flags the layout
+    /// dirty so the next render re-solves with the new chrome
+    /// styling.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = Arc::new(theme);
+        self.layout_dirty = true;
+    }
+
+    /// Mutate the active theme through a closure. Flags the layout
+    /// dirty. Clones the theme if it's currently shared elsewhere
+    /// (Arc-on-write).
+    pub fn update_theme(&mut self, f: impl FnOnce(&mut Theme)) {
+        let theme = Arc::make_mut(&mut self.theme);
+        f(theme);
+        self.layout_dirty = true;
+    }
+
+    /// Borrow the active theme. Cheap — `Arc` deref.
+    pub fn theme_ref(&self) -> &Theme {
+        &self.theme
+    }
+
+    /// Compute the effective theme for a specific plot — the
+    /// composition's theme with the plot's `ThemePart` override
+    /// (if any) applied on top.
+    fn effective_theme_for(&self, plot: &Plot) -> Theme {
+        match plot.theme_override_ref() {
+            Some(part) => self.theme.merge(part),
+            None => (*self.theme).clone(),
         }
     }
 
@@ -517,7 +579,9 @@ impl PlotComposition {
 
         // Re-solve when needed.
         if self.layout_dirty || self.last_layout.is_none() {
-            let comp = self.template.rebuild(&self.plots, &self.scales, dpi);
+            let comp = self
+                .template
+                .rebuild(&self.plots, &self.scales, dpi, &self.theme);
             self.last_layout = Some(comp.solve(size, dpi));
             self.last_size = Some(size);
             self.last_dpi = Some(dpi);
@@ -545,7 +609,8 @@ impl PlotComposition {
         // neighbour's panel chrome in a later step.
         for list in self.plots.values() {
             for plot in list {
-                plot.draw_panel_chrome_into(scene, layout, &self.scales, dpi);
+                let effective = self.effective_theme_for(plot);
+                plot.draw_panel_chrome_into(scene, layout, &self.scales, dpi, &effective);
             }
         }
 
@@ -554,9 +619,24 @@ impl PlotComposition {
         // in attach order. Picking is opt-in per geom via the
         // `"pick_id"` channel; the orchestrator does no ticket
         // allocation.
+        //
+        // The borrow checker prevents a single read of
+        // `self.effective_theme_for(plot)` here (which borrows
+        // `&self.theme`) while we also need `&mut plot`. Resolve the
+        // theme into an owned `Theme` first, then mutate.
+        let plot_themes: Vec<Theme> = self
+            .plots
+            .values()
+            .flat_map(|list| list.iter())
+            .map(|plot| self.effective_theme_for(plot))
+            .collect();
+        let mut theme_iter = plot_themes.into_iter();
         for list in self.plots.values_mut() {
             for plot in list {
-                plot.draw_geoms_into(scene, layout, &self.scales, dpi);
+                let effective = theme_iter
+                    .next()
+                    .expect("plot/theme iteration must stay in sync");
+                plot.draw_geoms_into(scene, layout, &self.scales, dpi, &effective);
             }
         }
 
@@ -568,7 +648,8 @@ impl PlotComposition {
         #[cfg(feature = "text")]
         for list in self.plots.values() {
             for plot in list {
-                plot.draw_chrome_into(scene, layout, &self.scales, dpi);
+                let effective = self.effective_theme_for(plot);
+                plot.draw_chrome_into(scene, layout, &self.scales, dpi, &effective);
             }
         }
 

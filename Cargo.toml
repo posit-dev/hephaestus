@@ -211,6 +211,22 @@ required-features = ["vello", "png", "text"]
 name = "legends"
 required-features = ["vello", "png", "text"]
 
+[[example]]
+name = "theme_dark"
+required-features = ["vello", "png", "text"]
+
+[[example]]
+name = "theme_brand"
+required-features = ["vello", "png", "text"]
+
+[[example]]
+name = "theme_blank"
+required-features = ["vello", "png", "text"]
+
+[[example]]
+name = "theme_legend_variants"
+required-features = ["vello", "png", "text"]
+
 [[test]]
 name = "smoke"
 required-features = ["vello"]

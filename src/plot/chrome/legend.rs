@@ -145,16 +145,24 @@ pub fn legend_stack_natural_size(
     legends: &[&Legend],
     registry: &ScaleRegistry,
     dpi: f64,
+    theme: &crate::plot::theme::Theme,
 ) -> (f64, f64) {
     let measures: Vec<LegendMeasure> = legends
         .iter()
-        .map(|l| LegendMeasure::new(l, registry, dpi))
+        .map(|l| {
+            LegendMeasure::new(
+                l,
+                registry,
+                dpi,
+                theme.legend_for(l.theme_variant.as_deref()),
+            )
+        })
         .filter(|m| !m.is_empty())
         .collect();
     if measures.is_empty() {
         return (0.0, 0.0);
     }
-    let gap_px = pt_to_px(LEGEND_GAP_PT, dpi);
+    let gap_px = pt_to_px(theme.legend_spacing.resolve(LEGEND_GAP_PT), dpi);
     let primary = measures
         .iter()
         .map(|m| m.primary_dim_px(dpi))
@@ -317,6 +325,13 @@ pub struct Legend {
     /// break span (the default) or give every bin the same extent
     /// along the bar.
     pub bin_spacing: BinSpacing,
+    /// Optional named theme variant. When set, the legend renderer
+    /// resolves
+    /// `theme.legend_variants.get(name).unwrap_or(&theme.legend)` to
+    /// pick the [`LegendTheme`](crate::plot::theme::LegendTheme)
+    /// that styles this legend. `None` (the default) uses the
+    /// theme's default `legend`.
+    pub theme_variant: Option<String>,
 }
 
 /// How a binned legend distributes its bins along the bar.
@@ -431,6 +446,7 @@ impl Legend {
             open_lower: false,
             open_upper: false,
             bin_spacing: BinSpacing::Proportional,
+            theme_variant: None,
         }
     }
     /// Continuous colorbar legend: gradient bar sampled from
@@ -445,7 +461,16 @@ impl Legend {
             open_lower: false,
             open_upper: false,
             bin_spacing: BinSpacing::Proportional,
+            theme_variant: None,
         }
+    }
+    /// Opt into a named theme variant. The renderer looks up
+    /// `theme.legend_variants.get(name)` and uses that
+    /// `LegendTheme` to style this legend (falling back to
+    /// `theme.legend` if the variant isn't registered).
+    pub fn theme_variant(mut self, name: impl Into<String>) -> Self {
+        self.theme_variant = Some(name.into());
+        self
     }
     /// Override the side (default `Right`).
     pub fn side(mut self, s: LegendSide) -> Self {
@@ -627,8 +652,18 @@ impl ResolvedKey {
 /// can reserve space for its slot. Same machinery (peak resolved
 /// aesthetics + per-key swatch dims) drives the draw step, so what
 /// is reserved matches what is drawn.
-pub fn legend_measure(legend: &Legend, registry: &ScaleRegistry, dpi: f64) -> Box<dyn Measure> {
-    Box::new(LegendMeasure::new(legend, registry, dpi))
+pub fn legend_measure(
+    legend: &Legend,
+    registry: &ScaleRegistry,
+    dpi: f64,
+    theme: &crate::plot::theme::Theme,
+) -> Box<dyn Measure> {
+    Box::new(LegendMeasure::new(
+        legend,
+        registry,
+        dpi,
+        theme.legend_for(legend.theme_variant.as_deref()),
+    ))
 }
 
 /// Pre-shape a stack of legends sharing the same side. Reserves the
@@ -641,14 +676,24 @@ pub fn legend_stack_measure(
     side: LegendSide,
     registry: &ScaleRegistry,
     dpi: f64,
+    theme: &crate::plot::theme::Theme,
 ) -> Box<dyn Measure> {
+    let gap_px = pt_to_px(theme.legend_spacing.resolve(LEGEND_GAP_PT), dpi);
     let children: Vec<LegendMeasure> = legends
         .iter()
-        .map(|l| LegendMeasure::new(l, registry, dpi))
+        .map(|l| {
+            LegendMeasure::new(
+                l,
+                registry,
+                dpi,
+                theme.legend_for(l.theme_variant.as_deref()),
+            )
+        })
         .collect();
     Box::new(LegendStackMeasure {
         side: cardinal_side(side),
         children,
+        gap_px,
     })
 }
 
@@ -659,6 +704,7 @@ pub fn legend_stack_measure(
 /// slot; the full primary extent is available to every child.
 /// `shapes` lets [`LegendKey::Point`] resolve a `shape` aesthetic
 /// to a registered marker.
+#[allow(clippy::too_many_arguments)]
 pub fn render_legend_stack(
     legends: &[&Legend],
     side: LegendSide,
@@ -667,12 +713,23 @@ pub fn render_legend_stack(
     shapes: &ShapeRegistry,
     scene: &mut dyn SceneBuilder,
     dpi: f64,
+    theme: &crate::plot::theme::Theme,
 ) {
-    let gap_px = pt_to_px(LEGEND_GAP_PT, dpi);
+    let gap_px = pt_to_px(theme.legend_spacing.resolve(LEGEND_GAP_PT), dpi);
     let measures: Vec<(usize, LegendMeasure)> = legends
         .iter()
         .enumerate()
-        .map(|(i, l)| (i, LegendMeasure::new(l, registry, dpi)))
+        .map(|(i, l)| {
+            (
+                i,
+                LegendMeasure::new(
+                    l,
+                    registry,
+                    dpi,
+                    theme.legend_for(l.theme_variant.as_deref()),
+                ),
+            )
+        })
         .filter(|(_, m)| !m.is_empty())
         .collect();
     if measures.is_empty() {
@@ -691,7 +748,15 @@ pub fn render_legend_stack(
         } else {
             Rect::new(cursor, slot_rect.y0, cursor + cross, slot_rect.y1)
         };
-        render_legend(legends[*orig_idx], registry, shapes, sub_rect, scene, dpi);
+        render_legend(
+            legends[*orig_idx],
+            registry,
+            shapes,
+            sub_rect,
+            scene,
+            dpi,
+            theme,
+        );
         cursor += cross + gap_px;
     }
 }
@@ -702,6 +767,7 @@ pub fn render_legend_stack(
 /// rail. The legend block hugs the panel-facing edge of the slot
 /// regardless of how much extra space the layout solver leaves on
 /// the far side.
+#[allow(clippy::too_many_arguments)]
 pub fn render_legend(
     legend: &Legend,
     registry: &ScaleRegistry,
@@ -709,11 +775,18 @@ pub fn render_legend(
     slot_rect: Rect,
     scene: &mut dyn SceneBuilder,
     dpi: f64,
+    theme: &crate::plot::theme::Theme,
 ) {
-    let measure = LegendMeasure::new(legend, registry, dpi);
+    let lt = theme.legend_for(legend.theme_variant.as_deref());
+    let measure = LegendMeasure::new(legend, registry, dpi, lt);
     if measure.is_empty() {
         return;
     }
+    // Background fill + border, sourced from the resolved
+    // LegendTheme. Painted under the legend body so keys + text layer
+    // on top.
+    paint_legend_background(scene, lt, &theme.palette, slot_rect, dpi);
+
     match &legend.body {
         LegendBody::Stack(stack) if stack.binned => render_binned_stack_body(
             legend,
@@ -724,6 +797,8 @@ pub fn render_legend(
             slot_rect,
             scene,
             dpi,
+            lt,
+            &theme.palette,
         ),
         LegendBody::Stack(stack) => render_stack_body(
             legend,
@@ -734,10 +809,92 @@ pub fn render_legend(
             slot_rect,
             scene,
             dpi,
+            lt,
+            &theme.palette,
         ),
-        LegendBody::Colorbar(spec) => {
-            render_colorbar_body(legend, spec, &measure, registry, slot_rect, scene, dpi)
-        }
+        LegendBody::Colorbar(spec) => render_colorbar_body(
+            legend,
+            spec,
+            &measure,
+            registry,
+            slot_rect,
+            scene,
+            dpi,
+            lt,
+            &theme.palette,
+        ),
+    }
+}
+
+/// Resolved per-legend text styling — title and label styles +
+/// brushes — pulled out of the LegendTheme so each render body
+/// reads the same values without duplicating the resolution logic.
+struct LegendTextStyles {
+    title_style: TextStyle,
+    title_brush: Brush,
+    label_style: TextStyle,
+    label_brush: Brush,
+}
+
+fn legend_text_styles(
+    lt: &crate::plot::theme::LegendTheme,
+    palette: &crate::plot::theme::Palette,
+) -> LegendTextStyles {
+    let root_pt = 10.0_f64;
+    let (title_style, title_brush) = match lt.title.as_set() {
+        Some(el) => (
+            crate::plot::plot::text_style_from(el, root_pt),
+            Brush::Solid(el.color.resolve(palette)),
+        ),
+        None => (
+            TextStyle::new(LABEL_FONT_SIZE_PT).weight(700),
+            Brush::Solid(ink()),
+        ),
+    };
+    let (label_style, label_brush) = match lt.axis.text.as_set() {
+        Some(el) => (
+            crate::plot::plot::text_style_from(el, root_pt),
+            Brush::Solid(el.color.resolve(palette)),
+        ),
+        None => (TextStyle::new(LABEL_FONT_SIZE_PT), Brush::Solid(ink())),
+    };
+    LegendTextStyles {
+        title_style,
+        title_brush,
+        label_style,
+        label_brush,
+    }
+}
+
+/// Paint the legend's background rect (fill + border) into
+/// `slot_rect`. Sourced from `lt.background`. `Blank` skips.
+fn paint_legend_background(
+    scene: &mut dyn SceneBuilder,
+    lt: &crate::plot::theme::LegendTheme,
+    palette: &crate::plot::theme::Palette,
+    slot_rect: Rect,
+    dpi: f64,
+) {
+    let Some(bg) = lt.background.as_set() else {
+        return;
+    };
+    use kurbo::Shape;
+    let path: crate::path::Path = slot_rect.to_path(0.0);
+    if let Some(fill) = &bg.fill {
+        let brush = Brush::Solid(fill.resolve(palette));
+        scene.fill(
+            crate::path::FillRule::NonZero,
+            Affine::IDENTITY,
+            &brush,
+            None,
+            &path,
+            PickId::Skip,
+        );
+    }
+    if bg.linewidth_pt.resolve(1.0) > 0.0 {
+        let stroke = crate::plot::chrome::linear_axis::stroke_from_rect_border(bg, dpi);
+        let brush = Brush::Solid(bg.color.resolve(palette));
+        scene.stroke(&stroke, Affine::IDENTITY, &brush, None, &path, PickId::Skip);
     }
 }
 
@@ -751,6 +908,8 @@ fn render_stack_body(
     slot_rect: Rect,
     scene: &mut dyn SceneBuilder,
     dpi: f64,
+    lt: &crate::plot::theme::LegendTheme,
+    palette: &crate::plot::theme::Palette,
 ) {
     let side = cardinal_side(legend.side);
     let domain = match registry.get(&legend.domain_scale) {
@@ -770,9 +929,9 @@ fn render_stack_body(
     } else {
         0.0
     };
-    let label_style = TextStyle::new(LABEL_FONT_SIZE_PT);
-    let title_style = TextStyle::new(LABEL_FONT_SIZE_PT).weight(700);
-    let ink_brush = Brush::Solid(ink());
+    let styles = legend_text_styles(lt, palette);
+    let label_style = &styles.label_style;
+    let label_brush = &styles.label_brush;
 
     let breaks = domain.breaks(DEFAULT_BREAK_COUNT);
     let entries: Vec<&Value> = breaks
@@ -793,14 +952,14 @@ fn render_stack_body(
     };
 
     if let Some(title) = &legend.title {
-        let run = TextRun::new(title, &title_style);
+        let run = TextRun::new(title, &styles.title_style);
         let _ = run.set_max_width(f32::INFINITY, Alignment::Start);
         draw_text(
             scene,
             &run,
             title_x,
             title_y,
-            &ink_brush,
+            &styles.title_brush,
             Affine::IDENTITY,
             PickId::Skip,
         );
@@ -827,8 +986,8 @@ fn render_stack_body(
         draw_axis_label(
             scene,
             &label,
-            &label_style,
-            &ink_brush,
+            label_style,
+            label_brush,
             AxisLabelAt {
                 anchor,
                 direction: (1.0, 0.0),
@@ -859,7 +1018,10 @@ fn render_binned_stack_body(
     slot_rect: Rect,
     scene: &mut dyn SceneBuilder,
     dpi: f64,
+    lt: &crate::plot::theme::LegendTheme,
+    palette: &crate::plot::theme::Palette,
 ) {
+    let styles = legend_text_styles(lt, palette);
     let domain = match registry.get(&legend.domain_scale) {
         Some(s) => s,
         None => return,
@@ -890,8 +1052,6 @@ fn render_binned_stack_body(
     } else {
         0.0
     };
-    let title_style = TextStyle::new(LABEL_FONT_SIZE_PT).weight(700);
-    let ink_brush = Brush::Solid(ink());
     let block_h = measure.primary_dim_px(dpi);
     let n_bins = breaks.len() - 1;
     let bar_len = n_bins as f64 * swatch_dim_px;
@@ -906,14 +1066,14 @@ fn render_binned_stack_body(
         swatch_dim_px,
     );
     if let Some(title) = &legend.title {
-        let run = TextRun::new(title, &title_style);
+        let run = TextRun::new(title, &styles.title_style);
         let _ = run.set_max_width(f32::INFINITY, Alignment::Start);
         draw_text(
             scene,
             &run,
             title_x,
             title_y,
-            &ink_brush,
+            &styles.title_brush,
             Affine::IDENTITY,
             PickId::Skip,
         );
@@ -995,6 +1155,7 @@ fn render_binned_stack_body(
         majors_owned
     };
     let majors = open_end_trim(&majors_owned, legend.open_lower, legend.open_upper);
+    let style = crate::plot::chrome::linear_axis::AxisChromeStyle::legacy_default(dpi);
     crate::plot::chrome::linear_axis::draw_linear_axis_at(
         scene,
         axis_start,
@@ -1002,6 +1163,7 @@ fn render_binned_stack_body(
         tick_direction,
         majors,
         &[],
+        &style,
         dpi,
     );
 }
@@ -1011,6 +1173,7 @@ fn render_binned_stack_body(
 /// scale's colour output range); the tick rail goes through the
 /// shared [`draw_linear_axis_at`] so it stays visually consistent
 /// with the cartesian + polar radius axes.
+#[allow(clippy::too_many_arguments)]
 fn render_colorbar_body(
     legend: &Legend,
     spec: &ColorbarSpec,
@@ -1019,7 +1182,10 @@ fn render_colorbar_body(
     slot_rect: Rect,
     scene: &mut dyn SceneBuilder,
     dpi: f64,
+    lt: &crate::plot::theme::LegendTheme,
+    palette: &crate::plot::theme::Palette,
 ) {
+    let styles = legend_text_styles(lt, palette);
     let domain = match registry.get(&legend.domain_scale) {
         Some(s) => s,
         None => return,
@@ -1039,8 +1205,6 @@ fn render_colorbar_body(
     } else {
         0.0
     };
-    let title_style = TextStyle::new(LABEL_FONT_SIZE_PT).weight(700);
-    let ink_brush = Brush::Solid(ink());
     let block_h = measure.primary_dim_px(dpi);
 
     // Anchor the colorbar block to the panel-facing slot edge.
@@ -1054,14 +1218,14 @@ fn render_colorbar_body(
     );
 
     if let Some(title) = &legend.title {
-        let run = TextRun::new(title, &title_style);
+        let run = TextRun::new(title, &styles.title_style);
         let _ = run.set_max_width(f32::INFINITY, Alignment::Start);
         draw_text(
             scene,
             &run,
             title_x,
             title_y,
-            &ink_brush,
+            &styles.title_brush,
             Affine::IDENTITY,
             PickId::Skip,
         );
@@ -1127,6 +1291,7 @@ fn render_colorbar_body(
         majors_owned
     };
     let majors = open_end_trim(&majors_owned, legend.open_lower, legend.open_upper);
+    let style = crate::plot::chrome::linear_axis::AxisChromeStyle::legacy_default(dpi);
     crate::plot::chrome::linear_axis::draw_linear_axis_at(
         scene,
         axis_start,
@@ -1134,6 +1299,7 @@ fn render_colorbar_body(
         tick_direction,
         majors,
         &[],
+        &style,
         dpi,
     );
 }
@@ -1411,8 +1577,23 @@ enum BodyMeasure {
 }
 
 impl LegendMeasure {
-    fn new(legend: &Legend, registry: &ScaleRegistry, dpi: f64) -> Self {
-        let label_style = TextStyle::new(LABEL_FONT_SIZE_PT);
+    fn new(
+        legend: &Legend,
+        registry: &ScaleRegistry,
+        dpi: f64,
+        lt: &crate::plot::theme::LegendTheme,
+    ) -> Self {
+        // Label + title styles come from the LegendTheme so measure
+        // and draw size identical glyph runs.
+        let root_pt = 10.0_f64;
+        let label_style = match lt.axis.text.as_set() {
+            Some(el) => crate::plot::plot::text_style_from(el, root_pt),
+            None => TextStyle::new(LABEL_FONT_SIZE_PT),
+        };
+        let title_style = match lt.title.as_set() {
+            Some(el) => crate::plot::plot::text_style_from(el, root_pt),
+            None => TextStyle::new(LABEL_FONT_SIZE_PT).weight(700),
+        };
         let domain = registry.get(&legend.domain_scale);
         let breaks = domain
             .map(|s| s.breaks(DEFAULT_BREAK_COUNT))
@@ -1428,10 +1609,11 @@ impl LegendMeasure {
             let label = domain.map(|s| s.format(v)).unwrap_or_default();
             let run = TextRun::new(&label, &label_style);
             let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
-            let w = match run.width_hint(dpi) {
-                WidthHint::Min(w) => w,
-                WidthHint::NeedsHeight { seed } => seed,
-            };
+            // Labels render unwrapped, so the slot needs the full
+            // single-line width — `width_hint` returns the
+            // longest-unbreakable-cluster bound (one word), which
+            // undershoots multi-word labels and clips them at draw.
+            let w = run.natural_width();
             max_label_w = max_label_w.max(w);
             max_label_h = max_label_h.max(h);
             entry_count += 1;
@@ -1460,13 +1642,12 @@ impl LegendMeasure {
 
         let (title_w_px, title_h_px) = match &legend.title {
             Some(text) if !text.is_empty() => {
-                let title_style = TextStyle::new(LABEL_FONT_SIZE_PT).weight(700);
                 let run = TextRun::new(text, &title_style);
                 let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
-                let w = match run.width_hint(dpi) {
-                    WidthHint::Min(w) => w,
-                    WidthHint::NeedsHeight { seed } => seed,
-                };
+                // Titles render unwrapped — `natural_width` is the
+                // actual draw width; `width_hint` would undershoot
+                // for multi-word titles like "Category (hero)".
+                let w = run.natural_width();
                 (w, h)
             }
             _ => (0.0, 0.0),
@@ -1707,6 +1888,15 @@ impl Measure for LegendMeasure {
 struct LegendStackMeasure {
     side: LegendSide,
     children: Vec<LegendMeasure>,
+    /// Resolved inter-legend gap in pixels — sourced from
+    /// `Theme.legend_spacing` at construction; used by
+    /// `cross_dim_for_layout` to size the slot for the stack +
+    /// gaps. (Not currently consumed for the cross dim sizing
+    /// because the layout reserves max(primary) and the renderer
+    /// stacks children using this gap; the field exists so the
+    /// renderer and measure share the same gap value.)
+    #[allow(dead_code)]
+    gap_px: f64,
 }
 
 impl LegendStackMeasure {
@@ -2026,10 +2216,15 @@ fn render_rect(resolved: &ResolvedKey, cell: Rect, scene: &mut dyn SceneBuilder,
 mod tests {
     use super::*;
     use crate::plot::scale;
+    use crate::plot::theme::Theme;
     use crate::scene::recording::{Op, RecordingScene};
 
     fn dpi_96() -> f64 {
         96.0
+    }
+
+    fn default_theme() -> Theme {
+        Theme::default()
     }
 
     fn build_registry() -> ScaleRegistry {
@@ -2063,7 +2258,7 @@ mod tests {
     fn empty_legend_reports_zero_size() {
         let legend = Legend::new("category_color");
         let reg = build_registry();
-        let m = legend_measure(&legend, &reg, dpi_96());
+        let m = legend_measure(&legend, &reg, dpi_96(), &default_theme());
         assert_eq!(m.width_hint(dpi_96()), WidthHint::Min(0.0));
         assert_eq!(m.height_at(100.0, dpi_96()), 0.0);
     }
@@ -2074,7 +2269,7 @@ mod tests {
             .title("Category")
             .key(LegendKeySpec::point().scaled("fill", "category_color"));
         let reg = build_registry();
-        let m = legend_measure(&legend, &reg, dpi_96());
+        let m = legend_measure(&legend, &reg, dpi_96(), &default_theme());
         let w = match m.width_hint(dpi_96()) {
             WidthHint::Min(w) => w,
             WidthHint::NeedsHeight { seed } => seed,
@@ -2102,6 +2297,7 @@ mod tests {
             Rect::new(0.0, 0.0, 200.0, 200.0),
             &mut scene,
             dpi_96(),
+            &default_theme(),
         );
         let fills = scene
             .ops
@@ -2134,6 +2330,7 @@ mod tests {
             Rect::new(0.0, 0.0, 200.0, 200.0),
             &mut scene,
             dpi_96(),
+            &default_theme(),
         );
         let strokes = scene
             .ops
@@ -2171,14 +2368,16 @@ mod tests {
                 .scaled("size", "category_size"),
         );
         let reg = build_registry();
-        let s_w = match legend_measure(&small, &reg, dpi_96()).width_hint(dpi_96()) {
-            WidthHint::Min(w) => w,
-            _ => 0.0,
-        };
-        let l_w = match legend_measure(&large, &reg, dpi_96()).width_hint(dpi_96()) {
-            WidthHint::Min(w) => w,
-            _ => 0.0,
-        };
+        let s_w =
+            match legend_measure(&small, &reg, dpi_96(), &default_theme()).width_hint(dpi_96()) {
+                WidthHint::Min(w) => w,
+                _ => 0.0,
+            };
+        let l_w =
+            match legend_measure(&large, &reg, dpi_96(), &default_theme()).width_hint(dpi_96()) {
+                WidthHint::Min(w) => w,
+                _ => 0.0,
+            };
         assert!(
             l_w > s_w,
             "legend with scaled size up to 12pt should be wider than fixed-4pt: {s_w} vs {l_w}"
@@ -2334,7 +2533,7 @@ mod tests {
             })
             .key(LegendKeySpec::point().scaled("fill", "category_color"));
         let reg = build_registry();
-        let (w, h) = legend_stack_natural_size(&[&legend], &reg, dpi_96());
+        let (w, h) = legend_stack_natural_size(&[&legend], &reg, dpi_96(), &default_theme());
         assert!(w > 0.0);
         assert!(h > 0.0);
     }
@@ -2346,7 +2545,7 @@ mod tests {
             inset_pt: 6.0,
         });
         let reg = build_registry();
-        let (w, h) = legend_stack_natural_size(&[&legend], &reg, dpi_96());
+        let (w, h) = legend_stack_natural_size(&[&legend], &reg, dpi_96(), &default_theme());
         assert_eq!(w, 0.0);
         assert_eq!(h, 0.0);
     }
