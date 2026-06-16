@@ -1139,7 +1139,7 @@ fn render_stack_body(
     let entries_y = title_y + measure.title_h_px + title_gap;
 
     if let Some(title) = &legend.title {
-        let run = TextRun::new(title, &styles.title_style);
+        let run = TextRun::new(title, &styles.title_style, dpi);
         let _ = run.set_max_width(f32::INFINITY, Alignment::Start);
         draw_text(
             scene,
@@ -1256,7 +1256,7 @@ fn render_binned_stack_body(
         bar_thickness,
     );
     if let Some(title) = &legend.title {
-        let run = TextRun::new(title, &styles.title_style);
+        let run = TextRun::new(title, &styles.title_style, dpi);
         let _ = run.set_max_width(f32::INFINITY, Alignment::Start);
         draw_text(
             scene,
@@ -1407,7 +1407,7 @@ fn render_colorbar_body(
     );
 
     if let Some(title) = &legend.title {
-        let run = TextRun::new(title, &styles.title_style);
+        let run = TextRun::new(title, &styles.title_style, dpi);
         let _ = run.set_max_width(f32::INFINITY, Alignment::Start);
         draw_text(
             scene,
@@ -1813,7 +1813,7 @@ impl LegendMeasure {
                 continue;
             }
             let label = domain.map(|s| s.format(v)).unwrap_or_default();
-            let run = TextRun::new(&label, &label_style);
+            let run = TextRun::new(&label, &label_style, dpi);
             let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
             // Labels render unwrapped, so the slot needs the full
             // single-line width — `width_hint` returns the
@@ -1885,7 +1885,7 @@ impl LegendMeasure {
                         floor_h_px: key_h_floor,
                     };
                     let label_text = domain.map(|s| s.format(v)).unwrap_or_default();
-                    let run = TextRun::new(&label_text, &label_style);
+                    let run = TextRun::new(&label_text, &label_style, dpi);
                     let nat_h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
                     let nat_w = run.natural_width();
                     let label = LabelMeasure {
@@ -1914,7 +1914,7 @@ impl LegendMeasure {
 
         let (title_w_px, title_h_px) = match &legend.title {
             Some(text) if !text.is_empty() => {
-                let run = TextRun::new(text, &title_style);
+                let run = TextRun::new(text, &title_style, dpi);
                 let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
                 // Titles render unwrapped — `natural_width` is the
                 // actual draw width; `width_hint` would undershoot

@@ -23,7 +23,7 @@ use hephaestus::{Affine, Brush, FillRule, Path, PickId, Renderer, SceneBuilder};
 use kurbo::Shape;
 
 fn text_cell(text: &str, size: f32) -> Cell {
-    Cell::measured(TextRun::new(text, &TextStyle::new(size)))
+    Cell::measured(TextRun::new(text, &TextStyle::new(size), 96.0))
 }
 
 fn plain(id: &str) -> Patch {
@@ -113,11 +113,11 @@ fn main() {
         }
 
         if let Some(rect) = layout.get("leaf_l", Slot::AxisTop) {
-            let run = TextRun::new("axis_top from deepest leaf", &TextStyle::new(14.0));
+            let run = TextRun::new("axis_top from deepest leaf", &TextStyle::new(14.0), 96.0);
             draw_text_in_rect(scene, &run, rect, &text_brush, PickId::Skip);
         }
         if let Some(rect) = layout.get("leaf_l", Slot::AxisBottom) {
-            let run = TextRun::new("axis_bottom from leaf", &TextStyle::new(11.0));
+            let run = TextRun::new("axis_bottom from leaf", &TextStyle::new(11.0), 96.0);
             draw_text_in_rect(scene, &run, rect, &text_brush, PickId::Skip);
         }
     }

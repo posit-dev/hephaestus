@@ -41,7 +41,7 @@ use hephaestus::{Affine, Brush, FillRule, Path, PickId, Renderer, SceneBuilder};
 use kurbo::Shape;
 
 fn text_cell(text: &str, size: f32) -> Cell {
-    Cell::measured(TextRun::new(text, &TextStyle::new(size)))
+    Cell::measured(TextRun::new(text, &TextStyle::new(size), 96.0))
 }
 
 fn plain(id: &str) -> Patch {
@@ -152,14 +152,14 @@ fn main() {
             } else {
                 format!("{id}\nflex\n{w:.0}×{h:.0}")
             };
-            let run = TextRun::new(&label, &TextStyle::new(13.0).weight(500));
+            let run = TextRun::new(&label, &TextStyle::new(13.0).weight(500), 96.0);
             let brush: Brush = rgb8(255, 255, 255).into();
             draw_text_in_rect(scene, &run, rect, &brush, PickId::Skip);
         }
         // Axis-top labels on the two fixed patches.
         for id in &["fixed_l", "fixed_r"] {
             if let Some(rect) = layout.get(id, Slot::AxisTop) {
-                let run = TextRun::new(&format!("{id} 1:1"), &TextStyle::new(12.0));
+                let run = TextRun::new(&format!("{id} 1:1"), &TextStyle::new(12.0), 96.0);
                 draw_text_in_rect(scene, &run, rect, &text_brush, PickId::Skip);
             }
         }

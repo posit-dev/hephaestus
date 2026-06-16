@@ -297,7 +297,7 @@ pub(crate) fn draw_axis_label(
     at: AxisLabelAt,
     dpi: f64,
 ) {
-    let run = TextRun::new(text, style);
+    let run = TextRun::new(text, style, dpi);
     let label_h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
     let label_w = match run.width_hint(dpi) {
         WidthHint::Min(w) => w,

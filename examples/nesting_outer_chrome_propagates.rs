@@ -39,7 +39,7 @@ use hephaestus::{Affine, Brush, FillRule, Path, PickId, Renderer, SceneBuilder};
 use kurbo::Shape;
 
 fn text_cell(text: &str, size: f32) -> Cell {
-    Cell::measured(TextRun::new(text, &TextStyle::new(size)))
+    Cell::measured(TextRun::new(text, &TextStyle::new(size), 96.0))
 }
 
 fn plain_plot(id: &str) -> Patch {
@@ -138,6 +138,7 @@ fn main() {
             let run = TextRun::new(
                 "axis_top on the outer SIBLING patch\nspans multiple lines\nto propagate INTO the nested composition",
                 &TextStyle::new(14.0),
+                96.0,
             );
             draw_text_in_rect(scene, &run, rect, &text_brush, PickId::Skip);
         }

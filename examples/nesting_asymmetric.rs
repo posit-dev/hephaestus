@@ -19,7 +19,7 @@ use hephaestus::{Affine, Brush, FillRule, Path, PickId, Renderer, SceneBuilder};
 use kurbo::Shape;
 
 fn text_cell(text: &str, size: f32) -> Cell {
-    Cell::measured(TextRun::new(text, &TextStyle::new(size)))
+    Cell::measured(TextRun::new(text, &TextStyle::new(size), 96.0))
 }
 
 fn plot(id: &str, title: &str, axis_left: &str, axis_bottom: &str) -> Patch {
@@ -140,7 +140,7 @@ fn main() {
                 _ => continue,
             };
             let size = if region == "title" { 16.0 } else { 11.0 };
-            let run = TextRun::new(text, &TextStyle::new(size));
+            let run = TextRun::new(text, &TextStyle::new(size), 96.0);
             draw_text_in_rect(scene, &run, rect, &text_brush, PickId::Skip);
         }
     }

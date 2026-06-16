@@ -30,11 +30,15 @@ use hephaestus::{Affine, Brush, FillRule, Path, PickId, Renderer, SceneBuilder};
 use kurbo::Shape;
 
 fn text_cell(text: &str, size: f32) -> Cell {
-    Cell::measured(TextRun::new(text, &TextStyle::new(size)))
+    Cell::measured(TextRun::new(text, &TextStyle::new(size), 96.0))
 }
 
 fn weighted_text_cell(text: &str, size: f32, weight: u16) -> Cell {
-    Cell::measured(TextRun::new(text, &TextStyle::new(size).weight(weight)))
+    Cell::measured(TextRun::new(
+        text,
+        &TextStyle::new(size).weight(weight),
+        96.0,
+    ))
 }
 
 fn facet(id: &str, axis_left: &str, axis_bottom: &str) -> Patch {
@@ -172,7 +176,7 @@ fn main() {
                 (_, "axis_bottom") => ("0  25  50", 11.0, 400),
                 _ => continue,
             };
-            let run = TextRun::new(text, &TextStyle::new(size).weight(weight));
+            let run = TextRun::new(text, &TextStyle::new(size).weight(weight), 96.0);
             draw_text_in_rect(scene, &run, rect, &text_brush, PickId::Skip);
         }
     }

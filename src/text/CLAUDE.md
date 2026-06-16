@@ -6,8 +6,8 @@
 
 Provides just enough text infrastructure to render axis labels, legends, plot titles, and the `TextGeom` / `TextFitGeom` / `TextPathGeom` plot geoms. Three exposed types:
 
-- **`TextStyle`** — minimal style descriptor (`size_px`, optional `family`, CSS-style `weight`, `italic`). Build with `TextStyle::new(size).family("Helvetica").weight(700).italic(true)`.
-- **`TextRun`** — shaped string + cached parley `Layout`. Implements `crate::layout::Measure`, so it drops directly into a `Cell::measured(run)` and participates in Auto-track sizing in `layout/`. `set_max_width(px)` re-breaks lines cheaply (parley keeps the shaping result; only line breaking re-runs).
+- **`TextStyle`** — style descriptor covering size (pt, DPI-independent), family chain, CSS-style weight / width, italic / oblique, OpenType features, variable-font variations. Build with `TextStyle::new(size_pt).family("Helvetica").weight(700).italic(true)`.
+- **`TextRun`** — shaped string + cached parley `Layout`. Implements `crate::layout::Measure`, so it drops directly into a `Cell::measured(run)` and participates in Auto-track sizing in `layout/`. Constructed via `TextRun::new(text, &style, dpi)` — the DPI converts the style's `size_pt` to pixels before shaping. `set_max_width(px)` re-breaks lines cheaply (parley keeps the shaping result; only line breaking re-runs).
 - **`draw_text`** — bridge from a positioned `TextRun` to `SceneBuilder::draw_glyphs`.
 
 Plus `Alignment` (re-exported from parley) for line justification — geom-facing string aliases (`"start"`, `"center"`, `"end"`, `"justify"`) parse through the `justify_x` channel.

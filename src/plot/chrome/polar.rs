@@ -91,7 +91,7 @@ pub fn draw_radius_axis(
             majors
                 .iter()
                 .fold((0.0_f64, 0.0_f64), |(mw, mh), (_, label)| {
-                    let run = TextRun::new(label, &style);
+                    let run = TextRun::new(label, &style, dpi);
                     let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
                     let w = run.natural_width();
                     (mw.max(w), mh.max(h))
@@ -253,7 +253,7 @@ pub fn draw_angular_axis(
             .filter(|v| !matches!(v, Value::Null))
             .fold((0.0_f64, 0.0_f64), |(mw, mh), v| {
                 let label = scale.format(v);
-                let run = TextRun::new(&label, &style);
+                let run = TextRun::new(&label, &style, dpi);
                 let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
                 let w = run.natural_width();
                 (mw.max(w), mh.max(h))
@@ -398,7 +398,7 @@ pub fn compute_polar_bleed(axes: &[BleedAxis], dpi: f64) -> PolarBleed {
     const CARDINAL_EPS: f64 = 0.05;
     for axis in axes {
         for label in &axis.labels {
-            let run = TextRun::new(&label.text, &style);
+            let run = TextRun::new(&label.text, &style, dpi);
             let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
             let w = match run.width_hint(dpi) {
                 WidthHint::Min(w) => w,
@@ -446,7 +446,7 @@ pub fn compute_polar_bleed(axes: &[BleedAxis], dpi: f64) -> PolarBleed {
                     direction: (dx, dy),
                     label_max_px,
                 } => {
-                    let run = TextRun::new(&title.text, &title_style);
+                    let run = TextRun::new(&title.text, &title_style, dpi);
                     let title_h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
                     let title_w = run.natural_width();
                     // Radial extent past r_outer at the arc midpoint.
@@ -602,7 +602,7 @@ fn draw_radius_title(
     let mut theta_spoke = sy.atan2(sx);
 
     let style = crate::plot::plot::axis_title_style();
-    let run = crate::text::TextRun::new(title, &style);
+    let run = crate::text::TextRun::new(title, &style, dpi);
     let title_w = run.natural_width();
     let title_h = run.set_max_width(f32::INFINITY, crate::text::Alignment::Start) as f64;
     let glyphs = run_layout_glyphs(&run);
@@ -698,7 +698,7 @@ fn draw_angular_title(
         return;
     }
     let style = crate::plot::plot::axis_title_style();
-    let run = crate::text::TextRun::new(title, &style);
+    let run = crate::text::TextRun::new(title, &style, dpi);
     let text_w = run.natural_width();
     let _title_h = run.set_max_width(f32::INFINITY, crate::text::Alignment::Start) as f64;
     let glyphs = run_layout_glyphs(&run);

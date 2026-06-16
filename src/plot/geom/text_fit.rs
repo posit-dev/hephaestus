@@ -334,8 +334,8 @@ impl Geom for TextFitGeom {
                 ctx.theme.geom.text_fit.max_font_pt,
             )
             .max(min_pt);
-            let min_px = pt_to_px(min_pt, ctx.dpi) as f32;
-            let max_px = pt_to_px(max_pt, ctx.dpi) as f32;
+            let min_pt_f32 = min_pt as f32;
+            let max_pt_f32 = max_pt as f32;
 
             // ── Justification — locked before the fit; affects line
             // alignment inside the wrap box at every search iteration.
@@ -343,21 +343,21 @@ impl Geom for TextFitGeom {
             let justify_y_frac = resolve_justify_y_frac(justify_y_ch, justify_y_scale, i);
 
             // ── Binary-search the font size. ──
-            let make_style = |size_px: f32| {
-                let mut s = TextStyle::new(size_px).weight(weight).italic(italic);
+            let make_style = |size_pt: f32| {
+                let mut s = TextStyle::new(size_pt).weight(weight).italic(italic);
                 if let Some(f) = &family {
                     s = s.family(f);
                 }
                 s
             };
 
-            let mut lo = min_px;
-            let mut hi = max_px;
+            let mut lo = min_pt_f32;
+            let mut hi = max_pt_f32;
             let mut best: Option<(TextRun, f64, f64, f32)> = None;
             for _ in 0..MAX_ITERS {
                 let mid = 0.5 * (lo + hi);
                 let style = make_style(mid);
-                let run = TextRun::new(&text, &style);
+                let run = TextRun::new(&text, &style, ctx.dpi);
                 run.set_max_width(rect_w as f32, justify_x);
                 let w = run.content_width();
                 let h = run.current_height();
@@ -370,15 +370,15 @@ impl Geom for TextFitGeom {
             }
 
             // If no candidate fit, draw at min and clip to the rect.
-            let (run, content_w, content_h, _size_px, fits) = match best {
+            let (run, content_w, content_h, _size_pt, fits) = match best {
                 Some((r, w, h, s)) => (r, w, h, s, true),
                 None => {
-                    let style = make_style(min_px);
-                    let run = TextRun::new(&text, &style);
+                    let style = make_style(min_pt_f32);
+                    let run = TextRun::new(&text, &style, ctx.dpi);
                     run.set_max_width(rect_w as f32, justify_x);
                     let w = run.content_width();
                     let h = run.current_height();
-                    (run, w, h, min_px, false)
+                    (run, w, h, min_pt_f32, false)
                 }
             };
 

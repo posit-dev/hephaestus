@@ -132,7 +132,7 @@ pub(crate) struct AxisMeasure {
 }
 
 impl AxisMeasure {
-    fn new(scale: &Scale, side: AxisSide, _dpi: f64) -> Self {
+    fn new(scale: &Scale, side: AxisSide, dpi: f64) -> Self {
         let style = TextStyle::new(LABEL_FONT_SIZE_PT);
         let breaks = scale.breaks(DEFAULT_BREAK_COUNT);
         let mut max_w: f64 = 0.0;
@@ -142,7 +142,7 @@ impl AxisMeasure {
                 continue;
             }
             let label = scale.format(v);
-            let run = TextRun::new(&label, &style);
+            let run = TextRun::new(&label, &style, dpi);
             // Lay out unconstrained to get the natural single-line width.
             let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
             // Tick labels render unwrapped — `natural_width` is the

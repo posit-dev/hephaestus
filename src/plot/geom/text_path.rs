@@ -282,8 +282,7 @@ impl Geom for TextPathGeom {
                 i0,
                 ctx.theme.geom.text_path.size_pt,
             );
-            let size_px = pt_to_px(size_pt, ctx.dpi);
-            if !size_px.is_finite() || size_px <= 0.0 {
+            if !size_pt.is_finite() || size_pt <= 0.0 {
                 continue;
             }
             let weight = resolve_number_channel(weight_ch, weight_scale, i0)
@@ -355,11 +354,11 @@ impl Geom for TextPathGeom {
             }
 
             // ── Shape the text. Single-line only — no set_max_width. ──
-            let mut style = TextStyle::new(size_px as f32).weight(weight).italic(italic);
+            let mut style = TextStyle::new(size_pt as f32).weight(weight).italic(italic);
             if let Some(fam) = family {
                 style = style.family(fam);
             }
-            let run = TextRun::new(&text, &style);
+            let run = TextRun::new(&text, &style, ctx.dpi);
             let text_w = run.natural_width();
             let glyphs = run_layout_glyphs(&run);
             if glyphs.is_empty() {

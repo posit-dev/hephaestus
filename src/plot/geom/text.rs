@@ -302,8 +302,7 @@ impl Geom for TextGeom {
             // ── Resolve font style. ──
             let size_pt =
                 resolve_number_channel_or(size_ch, size_scale, i, ctx.theme.geom.text.size_pt);
-            let size_px = pt_to_px(size_pt, ctx.dpi);
-            if !size_px.is_finite() || size_px <= 0.0 {
+            if !size_pt.is_finite() || size_pt <= 0.0 {
                 continue;
             }
             let weight = resolve_number_channel(weight_ch, weight_scale, i)
@@ -313,11 +312,11 @@ impl Geom for TextGeom {
             let family = resolve_str_channel(family_ch, family_scale, i);
 
             // ── Build TextStyle + TextRun. ──
-            let mut style = TextStyle::new(size_px as f32).weight(weight).italic(italic);
+            let mut style = TextStyle::new(size_pt as f32).weight(weight).italic(italic);
             if let Some(fam) = family {
                 style = style.family(fam);
             }
-            let run = TextRun::new(&text, &style);
+            let run = TextRun::new(&text, &style, ctx.dpi);
 
             // ── Soft-wrap. ──
             //
@@ -998,8 +997,8 @@ mod tests {
         );
         let bb = fill_bbox(&scene).expect("fill");
         // Build a TextRun the same way to get the metrics we expect.
-        let style = TextStyle::new(12.0 * 96.0 / 72.0).weight(400);
-        let probe = TextRun::new("men", &style);
+        let style = TextStyle::new(12.0).weight(400);
+        let probe = TextRun::new("men", &style, 96.0);
         let text_h = probe.natural_height();
         let descender = probe.last_line_descender();
         // bg height = text_h + descender + 0.

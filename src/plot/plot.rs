@@ -754,17 +754,23 @@ impl Plot {
         let root_pt = theme.text.size_pt.resolve(10.0);
         if let Some(t) = &self.title {
             if let Some(el) = effective_text(&theme.plot_title, &theme.text) {
-                patch = patch.slot(Slot::Title, text_cell(t, text_style_from(el, root_pt)));
+                patch = patch.slot(Slot::Title, text_cell(t, text_style_from(el, root_pt), dpi));
             }
         }
         if let Some(t) = &self.subtitle {
             if let Some(el) = effective_text(&theme.plot_subtitle, &theme.text) {
-                patch = patch.slot(Slot::Subtitle, text_cell(t, text_style_from(el, root_pt)));
+                patch = patch.slot(
+                    Slot::Subtitle,
+                    text_cell(t, text_style_from(el, root_pt), dpi),
+                );
             }
         }
         if let Some(t) = &self.caption {
             if let Some(el) = effective_text(&theme.plot_caption, &theme.text) {
-                patch = patch.slot(Slot::Caption, text_cell(t, text_style_from(el, root_pt)));
+                patch = patch.slot(
+                    Slot::Caption,
+                    text_cell(t, text_style_from(el, root_pt), dpi),
+                );
             }
         }
         // Axes — explicitly composed by the caller via
@@ -815,7 +821,7 @@ impl Plot {
                     // unrotated TextRun measure.
                     if let Some(title) = &axis.title {
                         let slot = cartesian_axis_title_slot(side);
-                        patch = patch.slot(slot, axis_title_cell(title, side, theme));
+                        patch = patch.slot(slot, axis_title_cell(title, side, theme, dpi));
                     }
                 }
                 AxisPlacement::PolarRadius { .. } | AxisPlacement::PolarAngular(_) => {
@@ -904,7 +910,7 @@ impl Plot {
                             continue;
                         }
                         let text = scale.format(&v);
-                        let run = TextRun::new(&text, &label_style);
+                        let run = TextRun::new(&text, &label_style, dpi);
                         let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
                         let w = run.natural_width();
                         max_label_w = max_label_w.max(w);
@@ -933,7 +939,7 @@ impl Plot {
                         }
                         let theta = polar.theta_for_frac(frac);
                         let text = scale.format(&v);
-                        let run = TextRun::new(&text, &label_style);
+                        let run = TextRun::new(&text, &label_style, dpi);
                         let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
                         let w = run.natural_width();
                         max_label_w = max_label_w.max(w);
@@ -1185,7 +1191,7 @@ impl Plot {
             };
             let style = text_style_from(el, root_pt);
             let brush = Brush::Solid(el.color.resolve(&theme.palette));
-            let run = TextRun::new(text, &style);
+            let run = TextRun::new(text, &style, dpi);
             draw_text_in_rect(scene, &run, rect, &brush, crate::pick::PickId::Skip);
         }
 
@@ -1210,7 +1216,7 @@ impl Plot {
             if let Some(rect) = layout.get(&self.patch_id, slot) {
                 let style = text_style_from(el, root_pt);
                 let brush = Brush::Solid(el.color.resolve(&theme.palette));
-                let run = TextRun::new(title, &style);
+                let run = TextRun::new(title, &style, dpi);
                 draw_axis_title(scene, &run, rect, side, &brush);
             }
         }
@@ -1218,8 +1224,8 @@ impl Plot {
 }
 
 #[cfg(feature = "text")]
-fn text_cell(s: &str, style: crate::text::TextStyle) -> Cell {
-    Cell::measured(crate::text::TextRun::new(s, &style))
+fn text_cell(s: &str, style: crate::text::TextStyle, dpi: f64) -> Cell {
+    Cell::measured(crate::text::TextRun::new(s, &style, dpi))
 }
 
 /// Default axis-title style — 12pt, matching the historical
@@ -1233,25 +1239,86 @@ pub(crate) fn axis_title_style() -> crate::text::TextStyle {
 }
 
 /// Convert a theme [`TextElement`](crate::plot::theme::TextElement)
-/// into a shaper-facing [`crate::text::TextStyle`]. Resolves the
-/// element's `size_pt` against `parent_pt` (typically the root
-/// text size) and folds in weight + italic. Full FontSpec
-/// (family / width / OpenType features / variations) lands when
-/// the host shaper integration grows; for now only size / weight /
-/// italic are consumed.
+/// into a shaper-facing [`crate::text::TextStyle`]. Resolves
+/// `size_pt` against `parent_pt` (typically the root text size) and
+/// translates every `FontSpec` axis into the matching `TextStyle`
+/// field: family chain (named + generic fallbacks), weight, width,
+/// style (italic / oblique angle), OpenType feature toggles, and
+/// variable-font axis assignments. Empty / `None` `FontSpec` fields
+/// leave the corresponding `TextStyle` field at its default.
 #[cfg(feature = "text")]
 pub(crate) fn text_style_from(
     el: &crate::plot::theme::TextElement,
     parent_pt: f64,
 ) -> crate::text::TextStyle {
-    use crate::plot::theme::FontStyle;
+    use crate::plot::theme::{FontFamily, FontStyle, FontWidth};
+    use crate::text::{
+        FontFamilyEntry, FontFeatureSetting, FontStyleKind, FontVariationSetting, GenericFamilyKind,
+    };
     let size = el.size_pt.resolve(parent_pt) as f32;
     let mut style = crate::text::TextStyle::new(size);
     if let Some(weight) = el.font.weight {
         style = style.weight(weight.0);
     }
-    if matches!(el.font.style, Some(FontStyle::Italic)) {
-        style = style.italic(true);
+    if let Some(width) = el.font.width {
+        style = style.width(match width {
+            FontWidth::UltraCondensed => 0.5,
+            FontWidth::ExtraCondensed => 0.625,
+            FontWidth::Condensed => 0.75,
+            FontWidth::SemiCondensed => 0.875,
+            FontWidth::Normal => 1.0,
+            FontWidth::SemiExpanded => 1.125,
+            FontWidth::Expanded => 1.25,
+            FontWidth::ExtraExpanded => 1.5,
+            FontWidth::UltraExpanded => 2.0,
+        });
+    }
+    style = style.style(match el.font.style {
+        Some(FontStyle::Italic) => FontStyleKind::Italic,
+        Some(FontStyle::Oblique(angle)) => FontStyleKind::Oblique(angle),
+        Some(FontStyle::Normal) | None => FontStyleKind::Normal,
+    });
+    if let Some(family) = &el.font.family {
+        let entries: Vec<FontFamilyEntry> = match family {
+            FontFamily::Named(names) => names
+                .iter()
+                .map(|n| FontFamilyEntry::Named(n.clone()))
+                .collect(),
+            FontFamily::Serif => vec![FontFamilyEntry::Generic(GenericFamilyKind::Serif)],
+            FontFamily::SansSerif => vec![FontFamilyEntry::Generic(GenericFamilyKind::SansSerif)],
+            FontFamily::Mono => vec![FontFamilyEntry::Generic(GenericFamilyKind::Mono)],
+            FontFamily::Cursive => vec![FontFamilyEntry::Generic(GenericFamilyKind::Cursive)],
+            FontFamily::Fantasy => vec![FontFamilyEntry::Generic(GenericFamilyKind::Fantasy)],
+            FontFamily::SystemUi => vec![FontFamilyEntry::Generic(GenericFamilyKind::SystemUi)],
+        };
+        style = style.families(entries);
+    }
+    if !el.font.features.is_empty() {
+        let features: Vec<FontFeatureSetting> = el
+            .font
+            .features
+            .iter()
+            .map(|f| FontFeatureSetting {
+                tag: f.tag,
+                // Theme stores feature values as u32 to accommodate any
+                // future encoding; parley uses u16, which covers every
+                // OpenType feature value in practice.
+                value: f.value.min(u16::MAX as u32) as u16,
+            })
+            .collect();
+        style = style.features(features);
+    }
+    if !el.font.variations.is_empty() {
+        let variations: Vec<FontVariationSetting> = el
+            .font
+            .variations
+            .iter()
+            .map(|v| FontVariationSetting {
+                tag: v.tag,
+                value: v.value,
+            })
+            .collect();
+        style = style.variations(variations);
     }
     style
 }
@@ -1273,7 +1340,12 @@ pub(crate) fn effective_text<'a>(
 /// (one font line height) rather than the natural string width.
 /// Horizontal sides reuse the unrotated `TextRun` measure directly.
 #[cfg(feature = "text")]
-fn axis_title_cell(title: &str, side: AxisSide, theme: &crate::plot::theme::Theme) -> Cell {
+fn axis_title_cell(
+    title: &str,
+    side: AxisSide,
+    theme: &crate::plot::theme::Theme,
+    dpi: f64,
+) -> Cell {
     let (ch, side_idx) = crate::plot::chrome::axis::axis_side_to_channel_side(side);
     let resolved = theme.axis.resolve(ch, side_idx);
     let root_pt = theme.text.size_pt.resolve(10.0);
@@ -1281,7 +1353,7 @@ fn axis_title_cell(title: &str, side: AxisSide, theme: &crate::plot::theme::Them
         Some(el) => text_style_from(el, root_pt),
         None => return Cell::empty(),
     };
-    let run = crate::text::TextRun::new(title, &style);
+    let run = crate::text::TextRun::new(title, &style, dpi);
     if side.is_vertical() {
         Cell::measured(RotatedAxisTitleMeasure {
             rotated_w: run.natural_height(),
@@ -1491,6 +1563,63 @@ mod tests {
 
     fn comp_with_two() -> Composition {
         beside(CompPatch::new("a"), CompPatch::new("b"))
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn text_style_from_propagates_full_font_spec() {
+        use crate::plot::theme::{
+            FontFamily, FontFeature, FontSpec, FontStyle, FontVariation, FontWeight, FontWidth,
+            Length, TextElement,
+        };
+        use crate::text::{FontFamilyEntry, FontStyleKind, GenericFamilyKind};
+
+        let element = TextElement {
+            size_pt: Length::Abs(12.0),
+            font: FontSpec {
+                family: Some(FontFamily::Named(vec!["Helvetica".into(), "Arial".into()])),
+                weight: Some(FontWeight::BOLD),
+                width: Some(FontWidth::Condensed),
+                style: Some(FontStyle::Oblique(12.0)),
+                features: vec![FontFeature::new(*b"tnum", 1), FontFeature::new(*b"ss01", 1)],
+                variations: vec![FontVariation::new(*b"wght", 650.0)],
+            },
+            ..TextElement::default()
+        };
+        let style = text_style_from(&element, 10.0);
+        assert!((style.size_pt - 12.0).abs() < 1e-3);
+        assert_eq!(style.weight, 700);
+        assert!((style.width - 0.75).abs() < 1e-6);
+        assert_eq!(style.style, FontStyleKind::Oblique(12.0));
+        assert_eq!(
+            style.families,
+            vec![
+                FontFamilyEntry::Named("Helvetica".into()),
+                FontFamilyEntry::Named("Arial".into()),
+            ]
+        );
+        assert_eq!(style.features.len(), 2);
+        assert_eq!(style.features[0].tag, *b"tnum");
+        assert_eq!(style.features[0].value, 1);
+        assert_eq!(style.features[1].tag, *b"ss01");
+        assert_eq!(style.variations.len(), 1);
+        assert_eq!(style.variations[0].tag, *b"wght");
+        assert!((style.variations[0].value - 650.0).abs() < 1e-6);
+
+        let serif = TextElement {
+            size_pt: Length::Abs(11.0),
+            font: FontSpec {
+                family: Some(FontFamily::Serif),
+                ..FontSpec::default()
+            },
+            ..TextElement::default()
+        };
+        let s2 = text_style_from(&serif, 10.0);
+        assert_eq!(
+            s2.families,
+            vec![FontFamilyEntry::Generic(GenericFamilyKind::Serif)]
+        );
+        assert_eq!(s2.style, FontStyleKind::Normal);
     }
 
     #[test]

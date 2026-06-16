@@ -4,7 +4,8 @@
 //! crate is expected to bring its own shaper. While this module exists it
 //! provides:
 //!
-//! - [`TextStyle`] — a minimal font/size/weight/italic style descriptor.
+//! - [`TextStyle`] — font / size (pt, DPI-independent) / weight / width /
+//!   style (italic / oblique) / OpenType features / variations descriptor.
 //! - [`TextRun`] — a shaped string + cached parley layout that implements
 //!   [`crate::layout::Measure`], so it drops into a
 //!   [`crate::composition::Patch`] slot directly.
@@ -51,35 +52,130 @@ fn font_context() -> &'static Mutex<FontContext> {
 
 // ─── TextStyle ───────────────────────────────────────────────────────────────
 
-/// Minimal text style: size in pixels, optional family, weight, italic.
+/// Generic font-family categories mirroring the CSS surface. The host
+/// shaper resolves each to a concrete face — independent of any specific
+/// named family.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GenericFamilyKind {
+    /// Serifed faces — Times-like.
+    Serif,
+    /// Sans-serif faces — Helvetica-like.
+    SansSerif,
+    /// Monospaced faces.
+    Mono,
+    /// Cursive / script faces.
+    Cursive,
+    /// Decorative / fantasy faces.
+    Fantasy,
+    /// Operating-system UI font.
+    SystemUi,
+}
+
+/// One entry in a [`TextStyle::families`] fallback chain. Named entries
+/// reference a specific face by string; generic entries pick a CSS-style
+/// category.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FontFamilyEntry {
+    /// A specific named family (e.g. `"Helvetica"`).
+    Named(String),
+    /// A generic family category.
+    Generic(GenericFamilyKind),
+}
+
+/// Style axis — upright, italic, or oblique with a slant angle in degrees.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum FontStyleKind {
+    /// Upright glyphs.
+    #[default]
+    Normal,
+    /// Italic — a distinct set of slanted glyphs.
+    Italic,
+    /// Oblique — upright glyphs slanted by the given angle in degrees.
+    Oblique(f32),
+}
+
+/// OpenType feature setting (4-byte tag + `u16` value).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FontFeatureSetting {
+    /// OpenType feature tag — e.g. `*b"liga"`.
+    pub tag: [u8; 4],
+    /// Feature value (0 = off, 1 = on, stylistic-set indices for `ssXX`).
+    pub value: u16,
+}
+
+/// Variable-font axis assignment (4-byte tag + `f32` value).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FontVariationSetting {
+    /// Variable-font axis tag — e.g. `*b"wght"`.
+    pub tag: [u8; 4],
+    /// Axis position (units are axis-specific).
+    pub value: f32,
+}
+
+/// Shaper-facing text style. Carries every axis the scaffolding shaper
+/// can plumb through to parley — size, family chain, weight, width
+/// (CSS `font-width` ratio), style (italic / oblique), OpenType feature
+/// toggles, and variable-font variations.
 ///
-/// More properties (letter spacing, line height, decorations) belong in a
-/// real shaper. Add them here only if a composition test actually needs them
-/// before the user's shaper lands.
+/// Sizes are in **points** (1pt = 1/72 inch) — DPI-independent. The
+/// conversion to pixels happens inside [`TextRun::new`] using the DPI
+/// passed at shaping time.
+///
+/// Letter spacing, line height, decorations belong in the host shaper —
+/// add them here only if a composition test or chrome path actually
+/// needs them while this scaffolding is still in place.
 #[derive(Clone, Debug)]
 pub struct TextStyle {
-    pub size_px: f32,
-    pub family: Option<String>,
+    /// Font size in points (1pt = 1/72 inch).
+    pub size_pt: f32,
+    /// Ordered fallback chain of font families. Empty falls back to a
+    /// generic sans-serif at shape time.
+    pub families: Vec<FontFamilyEntry>,
     /// CSS-style font weight (400 = normal, 700 = bold).
     pub weight: u16,
-    pub italic: bool,
+    /// CSS `font-width` ratio — 1.0 = normal, 0.5 = ultra-condensed,
+    /// 2.0 = ultra-expanded.
+    pub width: f32,
+    /// Style axis — upright, italic, or oblique with a slant angle.
+    pub style: FontStyleKind,
+    /// OpenType feature toggles applied to the whole run.
+    pub features: Vec<FontFeatureSetting>,
+    /// Variable-font axis values applied to the whole run.
+    pub variations: Vec<FontVariationSetting>,
 }
 
 impl TextStyle {
-    /// Construct a style with the given pixel size, default family,
-    /// weight `400`, and italic `false`.
-    pub fn new(size_px: f32) -> Self {
+    /// Construct a style with the given point size, empty family chain
+    /// (defaults to sans-serif at shape time), weight `400`, normal
+    /// width and style, no features, no variations.
+    pub fn new(size_pt: f32) -> Self {
         Self {
-            size_px,
-            family: None,
+            size_pt,
+            families: Vec::new(),
             weight: 400,
-            italic: false,
+            width: 1.0,
+            style: FontStyleKind::Normal,
+            features: Vec::new(),
+            variations: Vec::new(),
         }
     }
 
-    /// Set the preferred font family.
+    /// Set the preferred font family to a single named face. Replaces
+    /// any previously-set chain.
     pub fn family(mut self, name: impl Into<String>) -> Self {
-        self.family = Some(name.into());
+        self.families = vec![FontFamilyEntry::Named(name.into())];
+        self
+    }
+
+    /// Replace the family fallback chain with the given iterator.
+    pub fn families(mut self, entries: impl IntoIterator<Item = FontFamilyEntry>) -> Self {
+        self.families = entries.into_iter().collect();
+        self
+    }
+
+    /// Append a generic family category to the fallback chain.
+    pub fn generic_family(mut self, kind: GenericFamilyKind) -> Self {
+        self.families.push(FontFamilyEntry::Generic(kind));
         self
     }
 
@@ -89,9 +185,38 @@ impl TextStyle {
         self
     }
 
-    /// Toggle italic.
+    /// Set the CSS `font-width` ratio (1.0 = normal).
+    pub fn width(mut self, ratio: f32) -> Self {
+        self.width = ratio;
+        self
+    }
+
+    /// Convenience — toggle the `Italic` style. `true` sets the style
+    /// to `Italic`; `false` sets it back to `Normal`.
     pub fn italic(mut self, yes: bool) -> Self {
-        self.italic = yes;
+        self.style = if yes {
+            FontStyleKind::Italic
+        } else {
+            FontStyleKind::Normal
+        };
+        self
+    }
+
+    /// Set the style axis directly (Normal / Italic / Oblique).
+    pub fn style(mut self, kind: FontStyleKind) -> Self {
+        self.style = kind;
+        self
+    }
+
+    /// Replace the OpenType feature settings.
+    pub fn features(mut self, items: impl IntoIterator<Item = FontFeatureSetting>) -> Self {
+        self.features = items.into_iter().collect();
+        self
+    }
+
+    /// Replace the variable-font axis assignments.
+    pub fn variations(mut self, items: impl IntoIterator<Item = FontVariationSetting>) -> Self {
+        self.variations = items.into_iter().collect();
         self
     }
 }
@@ -99,6 +224,18 @@ impl TextStyle {
 impl Default for TextStyle {
     fn default() -> Self {
         Self::new(14.0)
+    }
+}
+
+/// Translate a local [`GenericFamilyKind`] to parley's [`GenericFamily`].
+fn generic_family_to_parley(kind: GenericFamilyKind) -> GenericFamily {
+    match kind {
+        GenericFamilyKind::Serif => GenericFamily::Serif,
+        GenericFamilyKind::SansSerif => GenericFamily::SansSerif,
+        GenericFamilyKind::Mono => GenericFamily::Monospace,
+        GenericFamilyKind::Cursive => GenericFamily::Cursive,
+        GenericFamilyKind::Fantasy => GenericFamily::Fantasy,
+        GenericFamilyKind::SystemUi => GenericFamily::SystemUi,
     }
 }
 
@@ -126,26 +263,75 @@ pub struct TextRun {
 }
 
 impl TextRun {
-    /// Shape `text` with `style`. The full shaping cost is paid here; later
-    /// calls to [`Measure::height_at`] and [`draw_text`] only re-break lines.
-    pub fn new(text: &str, style: &TextStyle) -> Self {
+    /// Shape `text` with `style` at `dpi` (typically 96 for screen output).
+    /// The point-size on `style` is converted to pixels via
+    /// `size_px = size_pt * dpi / 72` before parley shapes the glyphs.
+    /// Full shaping cost is paid here; later calls to
+    /// [`Measure::height_at`] and [`draw_text`] only re-break lines.
+    pub fn new(text: &str, style: &TextStyle, dpi: f64) -> Self {
         let fcx_mutex = font_context();
         let mut fcx = fcx_mutex.lock().expect("font context poisoned");
         let mut lcx = LayoutContext::<B>::new();
         let mut builder = lcx.ranged_builder(&mut fcx, text, 1.0, true);
 
-        builder.push_default(StyleProperty::FontSize(style.size_px));
+        let size_px = (style.size_pt as f64 * dpi / 72.0) as f32;
+        builder.push_default(StyleProperty::FontSize(size_px));
         builder.push_default(StyleProperty::FontWeight(FontWeight::new(
             style.weight as f32,
         )));
-        if style.italic {
-            builder.push_default(StyleProperty::FontStyle(FontStyle::Italic));
-        }
-        if let Some(family) = &style.family {
-            builder.push_default(StyleProperty::FontFamily(FontFamily::named(family)));
-        } else {
+        builder.push_default(StyleProperty::FontWidth(parley::FontWidth::from_ratio(
+            style.width,
+        )));
+        let parley_style = match style.style {
+            FontStyleKind::Normal => FontStyle::Normal,
+            FontStyleKind::Italic => FontStyle::Italic,
+            FontStyleKind::Oblique(angle) => FontStyle::Oblique(Some(angle)),
+        };
+        builder.push_default(StyleProperty::FontStyle(parley_style));
+        // Owned families list — parley borrows from us via `Cow`s, so
+        // the source strings must outlive `build()`. Constructing the
+        // names eagerly and pushing them keeps the lifetimes local.
+        if style.families.is_empty() {
             builder.push_default(StyleProperty::FontFamily(FontFamily::Single(
                 FontFamilyName::Generic(GenericFamily::SansSerif),
+            )));
+        } else {
+            let names: Vec<FontFamilyName<'_>> = style
+                .families
+                .iter()
+                .map(|entry| match entry {
+                    FontFamilyEntry::Named(name) => FontFamilyName::named(name),
+                    FontFamilyEntry::Generic(kind) => {
+                        FontFamilyName::Generic(generic_family_to_parley(*kind))
+                    }
+                })
+                .collect();
+            builder.push_default(StyleProperty::FontFamily(if names.len() == 1 {
+                FontFamily::Single(names[0].clone())
+            } else {
+                FontFamily::List(std::borrow::Cow::Owned(names))
+            }));
+        }
+        if !style.features.is_empty() {
+            let parley_features: Vec<parley::FontFeature> = style
+                .features
+                .iter()
+                .map(|f| parley::FontFeature::new(parley::setting::Tag::from_bytes(f.tag), f.value))
+                .collect();
+            builder.push_default(StyleProperty::FontFeatures(parley::FontFeatures::List(
+                std::borrow::Cow::Owned(parley_features),
+            )));
+        }
+        if !style.variations.is_empty() {
+            let parley_variations: Vec<parley::FontVariation> = style
+                .variations
+                .iter()
+                .map(|v| {
+                    parley::FontVariation::new(parley::setting::Tag::from_bytes(v.tag), v.value)
+                })
+                .collect();
+            builder.push_default(StyleProperty::FontVariations(parley::FontVariations::List(
+                std::borrow::Cow::Owned(parley_variations),
             )));
         }
 
@@ -340,14 +526,22 @@ pub fn run_layout_glyphs(run: &TextRun) -> Vec<LaidGlyph> {
 /// will trip this — marker shapes are intentionally restricted to a
 /// single glyph.
 pub fn glyph_marker(text: &str, style: &TextStyle) -> Shape {
+    // Probe shapes at a known pixel size so the returned em-space
+    // bbox divides cleanly back to em units; the marker is resampled
+    // to the caller's `size_pt` at draw time. Shape with DPI = 96 so
+    // `PROBE_PT * 96 / 72 = PROBE_PX = 64`.
     const PROBE_PX: f32 = 64.0;
+    const PROBE_PT: f32 = PROBE_PX * 72.0 / 96.0;
     let probe = TextStyle {
-        size_px: PROBE_PX,
-        family: style.family.clone(),
+        size_pt: PROBE_PT,
+        families: style.families.clone(),
         weight: style.weight,
-        italic: style.italic,
+        width: style.width,
+        style: style.style,
+        features: style.features.clone(),
+        variations: style.variations.clone(),
     };
-    let run = TextRun::new(text, &probe);
+    let run = TextRun::new(text, &probe, 96.0);
     let laid = run_layout_glyphs(&run);
     assert_eq!(
         laid.len(),
@@ -476,7 +670,7 @@ mod tests {
     #[test]
     fn text_run_has_finite_min_width() {
         let style = TextStyle::new(16.0);
-        let run = TextRun::new("Hello, world!", &style);
+        let run = TextRun::new("Hello, world!", &style, 96.0);
         assert!(
             run.min_width.is_finite() && run.min_width > 0.0,
             "min width should be positive and finite (got {})",
@@ -491,8 +685,8 @@ mod tests {
     #[test]
     fn text_run_height_is_font_metric_not_ink() {
         let style = TextStyle::new(16.0);
-        let men = TextRun::new("men", &style);
-        let jay = TextRun::new("jay", &style);
+        let men = TextRun::new("men", &style, 96.0);
+        let jay = TextRun::new("jay", &style, 96.0);
         assert!(
             (men.natural_height() - jay.natural_height()).abs() < 0.01,
             "expected font-metric height (descender always reserved): \
@@ -505,7 +699,7 @@ mod tests {
     #[test]
     fn text_run_natural_width_is_positive() {
         let style = TextStyle::new(16.0);
-        let run = TextRun::new("Hello", &style);
+        let run = TextRun::new("Hello", &style, 96.0);
         assert!(
             run.natural_width() > 0.0 && run.natural_width().is_finite(),
             "natural_width = {}",
@@ -521,6 +715,7 @@ mod tests {
             "Lorem ipsum dolor sit amet, consectetur adipiscing elit, \
              sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.",
             &style,
+            96.0,
         );
         let tall = run.height_at(60.0, 96.0);
         let short = run.height_at(2000.0, 96.0);
@@ -537,7 +732,10 @@ mod tests {
 
         let style = TextStyle::new(20.0);
         let p = Patch::new("p")
-            .slot(Slot::AxisLeft, Cell::measured(TextRun::new("8888", &style)))
+            .slot(
+                Slot::AxisLeft,
+                Cell::measured(TextRun::new("8888", &style, 96.0)),
+            )
             .slot(Slot::Panel, Cell::empty());
         let layout = p.solve(crate::geometry::Size::new(400.0, 200.0), 96.0);
         let panel = layout.get("p", Slot::Panel).unwrap();
