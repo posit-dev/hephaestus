@@ -754,23 +754,17 @@ impl Plot {
         let root_pt = theme.text.size_pt.resolve(10.0);
         if let Some(t) = &self.title {
             if let Some(el) = effective_text(&theme.plot_title, &theme.text) {
-                patch = patch.slot(Slot::Title, text_cell(t, text_style_from(el, root_pt), dpi));
+                patch = patch.slot(Slot::Title, text_cell_for_element(t, el, root_pt, dpi));
             }
         }
         if let Some(t) = &self.subtitle {
             if let Some(el) = effective_text(&theme.plot_subtitle, &theme.text) {
-                patch = patch.slot(
-                    Slot::Subtitle,
-                    text_cell(t, text_style_from(el, root_pt), dpi),
-                );
+                patch = patch.slot(Slot::Subtitle, text_cell_for_element(t, el, root_pt, dpi));
             }
         }
         if let Some(t) = &self.caption {
             if let Some(el) = effective_text(&theme.plot_caption, &theme.text) {
-                patch = patch.slot(
-                    Slot::Caption,
-                    text_cell(t, text_style_from(el, root_pt), dpi),
-                );
+                patch = patch.slot(Slot::Caption, text_cell_for_element(t, el, root_pt, dpi));
             }
         }
         // Axes — explicitly composed by the caller via
@@ -1113,7 +1107,7 @@ impl Plot {
         theme: &crate::plot::theme::Theme,
     ) {
         use crate::brush::Brush;
-        use crate::text::{draw_text_in_rect, TextRun};
+        use crate::text::TextRun;
 
         // Axes — explicit, no defaults.
         let panel = layout.get(&self.patch_id, Slot::Panel);
@@ -1189,10 +1183,16 @@ impl Plot {
             ) else {
                 continue;
             };
-            let style = text_style_from(el, root_pt);
-            let brush = Brush::Solid(el.color.resolve(&theme.palette));
-            let run = TextRun::new(text, &style, dpi);
-            draw_text_in_rect(scene, &run, rect, &brush, crate::pick::PickId::Skip);
+            draw_text_element_in_rect(
+                scene,
+                text,
+                el,
+                rect,
+                &theme.palette,
+                root_pt,
+                dpi,
+                crate::pick::PickId::Skip,
+            );
         }
 
         // Axis title slots — sourced from `Axis::title` on each
@@ -1217,15 +1217,33 @@ impl Plot {
                 let style = text_style_from(el, root_pt);
                 let brush = Brush::Solid(el.color.resolve(&theme.palette));
                 let run = TextRun::new(title, &style, dpi);
-                draw_axis_title(scene, &run, rect, side, &brush);
+                draw_axis_title(scene, &run, rect, side, &brush, el.angle);
             }
         }
     }
 }
 
+/// Build a chrome text cell whose measure includes both the shaped
+/// run **and** the element's margin. The slot the layout solver
+/// reserves is therefore sized to text + margin; the draw helper
+/// then insets back to position the text inside.
 #[cfg(feature = "text")]
-fn text_cell(s: &str, style: crate::text::TextStyle, dpi: f64) -> Cell {
-    Cell::measured(crate::text::TextRun::new(s, &style, dpi))
+fn text_cell_for_element(
+    s: &str,
+    el: &crate::plot::theme::TextElement,
+    parent_pt: f64,
+    dpi: f64,
+) -> Cell {
+    let style = text_style_from(el, parent_pt);
+    let run = crate::text::TextRun::new(s, &style, dpi);
+    let (mt, mr, mb, ml) = el.margin.resolve(parent_pt);
+    let pt_to_px = dpi / 72.0;
+    let margins_px = (mt * pt_to_px, mr * pt_to_px, mb * pt_to_px, ml * pt_to_px);
+    if margins_px.0 == 0.0 && margins_px.1 == 0.0 && margins_px.2 == 0.0 && margins_px.3 == 0.0 {
+        Cell::measured(run)
+    } else {
+        Cell::measured(crate::text::WithMargin::new(Box::new(run), margins_px))
+    }
 }
 
 /// Default axis-title style — 12pt, matching the historical
@@ -1251,12 +1269,20 @@ pub(crate) fn text_style_from(
     el: &crate::plot::theme::TextElement,
     parent_pt: f64,
 ) -> crate::text::TextStyle {
-    use crate::plot::theme::{FontFamily, FontStyle, FontWidth};
+    use crate::plot::theme::{FontFamily, FontStyle, FontWidth, Length};
     use crate::text::{
-        FontFamilyEntry, FontFeatureSetting, FontStyleKind, FontVariationSetting, GenericFamilyKind,
+        FontFamilyEntry, FontFeatureSetting, FontStyleKind, FontVariationSetting,
+        GenericFamilyKind, LineHeight,
     };
     let size = el.size_pt.resolve(parent_pt) as f32;
     let mut style = crate::text::TextStyle::new(size);
+    // Line height: `Length::Rel(m)` → font-size multiplier; `Abs(pt)`
+    // → absolute pt. Preserves the resolved-vs-relative semantics
+    // across DPI changes.
+    style = style.line_height(match el.lineheight {
+        Length::Rel(mult) => LineHeight::Relative(mult as f32),
+        Length::Abs(pt) => LineHeight::Absolute(pt as f32),
+    });
     if let Some(weight) = el.font.weight {
         style = style.weight(weight.0);
     }
@@ -1395,32 +1421,123 @@ impl crate::layout::Measure for RotatedAxisTitleMeasure {
 /// drop the rotated centre at the slot rect's centre so it parallels
 /// the axis it labels.
 #[cfg(feature = "text")]
+/// Render `text` styled by `el` inside `rect`, honoring every
+/// layout-affecting field on the [`TextElement`]: `margin` insets the
+/// rect before wrapping, `align` controls horizontal justification
+/// (parley `Alignment`), `valign` positions the wrapped block
+/// vertically (Top / Middle / Bottom; `Baseline` treated as Top),
+/// `angle` rotates the rendered block around its own centre (only
+/// `Rotation::Degrees(_)` resolves here — `Along` / `Across` need a
+/// baseline context and are deferred to per-side helpers like
+/// [`draw_axis_title`]). `lineheight` flows through the cached
+/// `TextRun` via [`text_style_from`].
+#[cfg(feature = "text")]
+#[allow(clippy::too_many_arguments)]
+fn draw_text_element_in_rect(
+    scene: &mut dyn SceneBuilder,
+    text: &str,
+    el: &crate::plot::theme::TextElement,
+    rect: Rect,
+    palette: &crate::plot::theme::Palette,
+    parent_pt: f64,
+    dpi: f64,
+    pick_id: crate::pick::PickId,
+) {
+    use crate::brush::Brush;
+    use crate::geometry::{Affine, Vec2};
+    use crate::plot::theme::{HAlign, Rotation, VAlign};
+    use crate::text::{draw_text, Alignment, TextRun};
+
+    // Inset by margin (pt → px).
+    let (mt, mr, mb, ml) = el.margin.resolve(parent_pt);
+    let pt_to_px = dpi / 72.0;
+    let inset = Rect::new(
+        rect.x0 + ml * pt_to_px,
+        rect.y0 + mt * pt_to_px,
+        (rect.x1 - mr * pt_to_px).max(rect.x0 + ml * pt_to_px),
+        (rect.y1 - mb * pt_to_px).max(rect.y0 + mt * pt_to_px),
+    );
+    let style = text_style_from(el, parent_pt);
+    let brush = Brush::Solid(el.color.resolve(palette));
+    let run = TextRun::new(text, &style, dpi);
+    let alignment = match el.align {
+        HAlign::Start => Alignment::Start,
+        HAlign::Center => Alignment::Center,
+        HAlign::End => Alignment::End,
+        HAlign::Justify => Alignment::Justify,
+    };
+    let inner_w = (inset.x1 - inset.x0) as f32;
+    let block_h = run.set_max_width(inner_w, alignment) as f64;
+    let inner_h = inset.y1 - inset.y0;
+    let y_offset = match el.valign {
+        VAlign::Top | VAlign::Baseline => 0.0,
+        VAlign::Middle => ((inner_h - block_h) * 0.5).max(0.0),
+        VAlign::Bottom => (inner_h - block_h).max(0.0),
+    };
+    let angle_rad = match el.angle {
+        Rotation::Degrees(d) => (d as f64).to_radians(),
+        // Along / Across need a baseline orientation — chrome that
+        // knows the baseline (axis titles, polar rails) handles those
+        // variants in its own helper. Default to no rotation here.
+        Rotation::Along | Rotation::Across => 0.0,
+    };
+    if angle_rad.abs() < 1e-9 {
+        draw_text(
+            scene,
+            &run,
+            inset.x0,
+            inset.y0 + y_offset,
+            &brush,
+            Affine::IDENTITY,
+            pick_id,
+        );
+    } else {
+        let content_w = run.content_width();
+        let pivot_x = inset.x0 + (inner_w as f64) * 0.5;
+        let pivot_y = inset.y0 + y_offset + block_h * 0.5;
+        let transform = Affine::translate(Vec2::new(pivot_x, pivot_y))
+            * Affine::rotate(angle_rad)
+            * Affine::translate(Vec2::new(-content_w * 0.5, -block_h * 0.5));
+        draw_text(scene, &run, 0.0, 0.0, &brush, transform, pick_id);
+    }
+}
+
+/// Draw an axis title into `rect`, honoring `angle` from the theme.
+/// `Along` and `Across` resolve against the per-side baseline
+/// direction: Top / Bottom baselines run horizontally (0°), Left
+/// rotates -90° (text reads bottom-to-top), Right rotates +90°. A
+/// concrete `Rotation::Degrees(_)` bypasses that and uses the
+/// absolute angle.
+#[cfg(feature = "text")]
 fn draw_axis_title(
     scene: &mut dyn SceneBuilder,
     run: &crate::text::TextRun,
     rect: Rect,
     side: AxisSide,
     brush: &crate::brush::Brush,
+    angle: crate::plot::theme::Rotation,
 ) {
     use crate::geometry::{Affine, Vec2};
     use crate::text::{draw_text, Alignment};
     let cx = (rect.x0 + rect.x1) * 0.5;
     let cy = (rect.y0 + rect.y1) * 0.5;
     let pid = crate::pick::PickId::Skip;
-    if side.is_horizontal() {
+    let baseline_deg: f32 = match side {
+        AxisSide::Top | AxisSide::Bottom => 0.0,
+        AxisSide::Left => -90.0,
+        AxisSide::Right => 90.0,
+    };
+    let resolved_deg = angle.resolve(baseline_deg);
+    let theta = (resolved_deg as f64).to_radians();
+    if theta.abs() < 1e-9 {
         let w = (rect.x1 - rect.x0) as f32;
         run.set_max_width(w, Alignment::Center);
         draw_text(scene, run, rect.x0, rect.y0, brush, Affine::IDENTITY, pid);
     } else {
         // Lay out unconstrained so the run stays single-line; the
-        // panel row drives how tall the rotated text can grow.
+        // surrounding slot drives how much the rotated text can grow.
         let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
         let w = run.content_width();
-        let theta = match side {
-            AxisSide::Left => -std::f64::consts::FRAC_PI_2,
-            AxisSide::Right => std::f64::consts::FRAC_PI_2,
-            _ => unreachable!("draw_axis_title vertical branch reached with horizontal side"),
-        };
         let transform = Affine::translate(Vec2::new(cx, cy))
             * Affine::rotate(theta)
             * Affine::translate(Vec2::new(-w * 0.5, -h * 0.5));
@@ -1620,6 +1737,29 @@ mod tests {
             vec![FontFamilyEntry::Generic(GenericFamilyKind::Serif)]
         );
         assert_eq!(s2.style, FontStyleKind::Normal);
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn text_style_from_propagates_lineheight() {
+        use crate::plot::theme::{Length, TextElement};
+        use crate::text::LineHeight;
+        let rel = TextElement {
+            lineheight: Length::Rel(1.4),
+            ..TextElement::default()
+        };
+        assert_eq!(
+            text_style_from(&rel, 10.0).line_height,
+            LineHeight::Relative(1.4)
+        );
+        let abs = TextElement {
+            lineheight: Length::Abs(14.0),
+            ..TextElement::default()
+        };
+        assert_eq!(
+            text_style_from(&abs, 10.0).line_height,
+            LineHeight::Absolute(14.0)
+        );
     }
 
     #[test]

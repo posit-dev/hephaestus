@@ -112,6 +112,25 @@ pub struct FontVariationSetting {
     pub value: f32,
 }
 
+/// Line-height specification. Mirrors parley's `LineHeight` minus the
+/// metrics-relative variant — chrome callers either want a font-size
+/// multiplier (the CSS `line-height: 1.2` style) or an absolute pt
+/// value, never the metrics-relative form.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LineHeight {
+    /// Multiplier of the font size. `Relative(1.2)` = 120% of `size_pt`.
+    Relative(f32),
+    /// Absolute line height in points (DPI-independent).
+    Absolute(f32),
+}
+
+impl Default for LineHeight {
+    /// `Relative(1.2)` — matches the CSS / typesetting default.
+    fn default() -> Self {
+        LineHeight::Relative(1.2)
+    }
+}
+
 /// Shaper-facing text style. Carries every axis the scaffolding shaper
 /// can plumb through to parley — size, family chain, weight, width
 /// (CSS `font-width` ratio), style (italic / oblique), OpenType feature
@@ -138,6 +157,8 @@ pub struct TextStyle {
     pub width: f32,
     /// Style axis — upright, italic, or oblique with a slant angle.
     pub style: FontStyleKind,
+    /// Line height — relative-to-size multiplier or absolute pt.
+    pub line_height: LineHeight,
     /// OpenType feature toggles applied to the whole run.
     pub features: Vec<FontFeatureSetting>,
     /// Variable-font axis values applied to the whole run.
@@ -155,6 +176,7 @@ impl TextStyle {
             weight: 400,
             width: 1.0,
             style: FontStyleKind::Normal,
+            line_height: LineHeight::default(),
             features: Vec::new(),
             variations: Vec::new(),
         }
@@ -205,6 +227,12 @@ impl TextStyle {
     /// Set the style axis directly (Normal / Italic / Oblique).
     pub fn style(mut self, kind: FontStyleKind) -> Self {
         self.style = kind;
+        self
+    }
+
+    /// Set the line height.
+    pub fn line_height(mut self, lh: LineHeight) -> Self {
+        self.line_height = lh;
         self
     }
 
@@ -288,6 +316,13 @@ impl TextRun {
             FontStyleKind::Oblique(angle) => FontStyle::Oblique(Some(angle)),
         };
         builder.push_default(StyleProperty::FontStyle(parley_style));
+        let line_height = match style.line_height {
+            LineHeight::Relative(mult) => parley::LineHeight::FontSizeRelative(mult),
+            LineHeight::Absolute(pt) => {
+                parley::LineHeight::Absolute((pt as f64 * dpi / 72.0) as f32)
+            }
+        };
+        builder.push_default(StyleProperty::LineHeight(line_height));
         // Owned families list — parley borrows from us via `Cow`s, so
         // the source strings must outlive `build()`. Constructing the
         // names eagerly and pushing them keeps the lifetimes local.
@@ -538,6 +573,7 @@ pub fn glyph_marker(text: &str, style: &TextStyle) -> Shape {
         weight: style.weight,
         width: style.width,
         style: style.style,
+        line_height: style.line_height,
         features: style.features.clone(),
         variations: style.variations.clone(),
     };
@@ -636,6 +672,49 @@ pub fn draw_text<S: SceneBuilder + ?Sized>(
             };
             scene.draw_glyphs(&glyph_run, pick_id);
         }
+    }
+}
+
+/// [`Measure`] adapter that pads an inner measure with per-edge
+/// margins (in pixels). Reported widths include `left + right`;
+/// reported heights include `top + bottom`. The inner measure sees
+/// the constrained inner width when `height_at` queries it.
+///
+/// Used by chrome text slots so the layout solver reserves space for
+/// the text **plus** its theme-defined margin, rather than shrinking
+/// the text area inside an unchanged slot.
+pub struct WithMargin {
+    inner: Box<dyn Measure>,
+    /// Margins in pixels: `(top, right, bottom, left)`.
+    pub margins_px: (f64, f64, f64, f64),
+}
+
+impl WithMargin {
+    /// Wrap `inner` with per-edge px margins.
+    pub fn new(inner: Box<dyn Measure>, margins_px: (f64, f64, f64, f64)) -> Self {
+        Self { inner, margins_px }
+    }
+}
+
+impl Measure for WithMargin {
+    fn width_hint(&self, dpi: f64) -> WidthHint {
+        let (_, r, _, l) = self.margins_px;
+        match self.inner.width_hint(dpi) {
+            WidthHint::Min(w) => WidthHint::Min(w + l + r),
+            WidthHint::NeedsHeight { seed } => WidthHint::NeedsHeight { seed: seed + l + r },
+        }
+    }
+
+    fn height_at(&self, width: f64, dpi: f64) -> f64 {
+        let (t, r, b, l) = self.margins_px;
+        let inner_w = (width - l - r).max(0.0);
+        self.inner.height_at(inner_w, dpi) + t + b
+    }
+
+    fn width_at(&self, height: f64, dpi: f64) -> f64 {
+        let (t, r, b, l) = self.margins_px;
+        let inner_h = (height - t - b).max(0.0);
+        self.inner.width_at(inner_h, dpi) + l + r
     }
 }
 
