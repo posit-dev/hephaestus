@@ -22,8 +22,8 @@ use std::sync::Arc;
 
 use crate::brush::Brush;
 use crate::color::{rgb, Color};
-use crate::geometry::{Affine, Point, Rect};
-use crate::layout::{Measure, WidthHint};
+use crate::geometry::{Affine, Point, Rect, Size};
+use crate::layout::{Cell, CellId, Grid, Measure, Placement, Track, WidthHint};
 use crate::path::{FillRule, Path};
 use crate::pick::PickId;
 use crate::plot::chrome::linear_axis::{
@@ -180,26 +180,18 @@ use kurbo::Shape;
 
 // ─── Style constants (pt) ───────────────────────────────────────────────────
 
-/// Default swatch cell size in pt — used for everything except
-/// markers whose size is explicitly scaled (e.g. a Point key with a
-/// `scaled("size", …)` binding, where the cell grows to fit the
-/// biggest marker).
-const SWATCH_SIZE_PT: f64 = 12.0;
-/// Default line length for `Line` swatches, pt.
-const LINE_SWATCH_LEN_PT: f64 = 18.0;
-/// Default Point marker diameter when no size is bound, pt.
+/// Default Point marker diameter when no size is bound, pt. Used
+/// as a fallback in `render_point` and `swatch_dim_for`; the geom
+/// theme's `geom.point.size_pt` will eventually subsume this.
 const DEFAULT_POINT_DIAMETER_PT: f64 = 8.0;
 /// Default linewidth for stroke outlines / line swatches, pt.
+/// Fallback used when a resolved key carries no explicit
+/// linewidth; routed through theme.geom.line in a follow-up.
 const DEFAULT_LINEWIDTH_PT: f64 = 1.0;
-/// Gap between a row's swatch and its label, pt.
-const SWATCH_LABEL_GAP_PT: f64 = 4.0;
-/// Vertical gap between stacked rows in a Right/Left legend, pt.
-const ROW_GAP_PT: f64 = 4.0;
-/// Gap between adjacent legends in a stack (same-side multi-legend), pt.
+/// Fallback gap between adjacent legends — used as the resolution
+/// floor when `Theme::legend_spacing.resolve(LEGEND_GAP_PT)` lacks
+/// an absolute value to fall back to.
 const LEGEND_GAP_PT: f64 = 10.0;
-/// Outer padding around the legend so it doesn't butt against the
-/// panel or adjacent slot, pt.
-const PADDING_PT: f64 = 6.0;
 /// The default `circle` point shape's intrinsic radius (in shape
 /// coordinates). Mirrored from `crate::shape::builtins::circle` so
 /// the legend's Point key renders at the same diameter the geom
@@ -214,6 +206,200 @@ const GLYPH_BBOX_REFERENCE: f64 = 1.6;
 
 fn ink() -> Color {
     rgb(0.0, 0.0, 0.0)
+}
+
+// ─── Internal Measure helpers used by the legend's inner Grid ──────────────
+
+/// Reports a swatch cell's intrinsic dimensions to the layout solver.
+/// Combines the natural marker extent of every key drawn into a single
+/// row with the [`KeyTheme`](crate::plot::theme::KeyTheme) cell floor —
+/// the cell is the per-axis max of intrinsic content and the theme
+/// minimum. Two-axis independent: a row with a tall point and a short
+/// rect grows in height but stays at floor width.
+struct SwatchCellMeasure {
+    /// Per-row intrinsic width (max across keys), already in pixels.
+    intrinsic_w_px: f64,
+    /// Per-row intrinsic height (max across keys), already in pixels.
+    intrinsic_h_px: f64,
+    /// `KeyTheme.width` resolved to pixels — floor below which the cell
+    /// will not shrink even if every key is zero-sized.
+    floor_w_px: f64,
+    /// `KeyTheme.height` resolved to pixels — height floor counterpart.
+    floor_h_px: f64,
+}
+
+impl Measure for SwatchCellMeasure {
+    fn width_hint(&self, _dpi: f64) -> WidthHint {
+        WidthHint::Min(self.intrinsic_w_px.max(self.floor_w_px))
+    }
+    fn height_at(&self, _width: f64, _dpi: f64) -> f64 {
+        self.intrinsic_h_px.max(self.floor_h_px)
+    }
+}
+
+/// Reports a legend label's intrinsic dimensions, sized at the text's
+/// **natural** (single-line) width. Labels never wrap inside legend
+/// cells — `TextRun`'s default `Measure` impl would undershoot for
+/// multi-word labels because it reports the longest-unbreakable-cluster
+/// bound; this wrapper substitutes `natural_width`.
+struct LabelMeasure {
+    natural_w_px: f64,
+    natural_h_px: f64,
+}
+
+impl Measure for LabelMeasure {
+    fn width_hint(&self, _dpi: f64) -> WidthHint {
+        WidthHint::Min(self.natural_w_px)
+    }
+    fn height_at(&self, _width: f64, _dpi: f64) -> f64 {
+        self.natural_h_px
+    }
+}
+
+/// Pre-solved layout for a discrete-stack legend body — the swatch +
+/// label cells for every row, plus the block's natural extent. The
+/// renderer translates each cached rect by the slot-anchor offset and
+/// draws.
+struct DiscreteStackLayout {
+    /// One `(swatch, label)` pair per non-null break, in iteration
+    /// order. Rect origins are in the layout's local coordinate space
+    /// (top-left of the entries block at 0, 0).
+    entries: Vec<(Rect, Rect)>,
+    /// Total content width of the entries block (max x1 across rects).
+    entries_w_px: f64,
+    /// Total content height of the entries block.
+    entries_h_px: f64,
+}
+
+impl DiscreteStackLayout {
+    fn empty() -> Self {
+        Self {
+            entries: Vec::new(),
+            entries_w_px: 0.0,
+            entries_h_px: 0.0,
+        }
+    }
+}
+
+/// Build the discrete-stack legend's inner grid, solve it, and capture
+/// the resulting cell rects. The grid is one row × `(swatch / gap /
+/// label) × N` cols for horizontal legends, or N rows × 3 cols for
+/// vertical — the layout solver handles per-row auto sizing for free,
+/// so the cross-axis dimensions match the largest row while each row's
+/// along-axis dimension fits its own content.
+fn build_discrete_stack_layout(
+    horizontal: bool,
+    rows: Vec<(SwatchCellMeasure, LabelMeasure)>,
+    swatch_label_gap_px: f64,
+    row_gap_px: f64,
+    dpi: f64,
+) -> DiscreteStackLayout {
+    if rows.is_empty() {
+        return DiscreteStackLayout::empty();
+    }
+    let n = rows.len();
+    let mut next_id: u64 = 1;
+    let mut entry_ids: Vec<(CellId, CellId)> = Vec::with_capacity(n);
+    let grid: Grid = if horizontal {
+        let mut cols: Vec<Track> = Vec::with_capacity(n * 4);
+        let mut entry_cols: Vec<(u16, u16)> = Vec::with_capacity(n);
+        for i in 0..n {
+            if i > 0 {
+                cols.push(Track::Fixed(crate::layout::Length::px(row_gap_px)));
+            }
+            cols.push(Track::Auto);
+            let sw_col = cols.len() as u16;
+            cols.push(Track::Fixed(crate::layout::Length::px(swatch_label_gap_px)));
+            cols.push(Track::Auto);
+            let lb_col = cols.len() as u16;
+            entry_cols.push((sw_col, lb_col));
+        }
+        let mut grid = Grid::new(cols, [Track::Auto]);
+        for (i, (swatch, label)) in rows.into_iter().enumerate() {
+            let (sw_col, lb_col) = entry_cols[i];
+            let sw_id = CellId(next_id);
+            next_id += 1;
+            let lb_id = CellId(next_id);
+            next_id += 1;
+            grid.place(Placement::at(1, sw_col), Cell::measured(swatch).id(sw_id));
+            grid.place(Placement::at(1, lb_col), Cell::measured(label).id(lb_id));
+            entry_ids.push((sw_id, lb_id));
+        }
+        grid
+    } else {
+        let mut row_tracks: Vec<Track> = Vec::with_capacity(n * 2);
+        let mut entry_rows: Vec<u16> = Vec::with_capacity(n);
+        for i in 0..n {
+            if i > 0 {
+                row_tracks.push(Track::Fixed(crate::layout::Length::px(row_gap_px)));
+            }
+            row_tracks.push(Track::Auto);
+            entry_rows.push(row_tracks.len() as u16);
+        }
+        let cols = vec![
+            Track::Auto,
+            Track::Fixed(crate::layout::Length::px(swatch_label_gap_px)),
+            Track::Auto,
+        ];
+        let mut grid = Grid::new(cols, row_tracks);
+        for (i, (swatch, label)) in rows.into_iter().enumerate() {
+            let row = entry_rows[i];
+            let sw_id = CellId(next_id);
+            next_id += 1;
+            let lb_id = CellId(next_id);
+            next_id += 1;
+            grid.place(Placement::at(row, 1), Cell::measured(swatch).id(sw_id));
+            grid.place(Placement::at(row, 3), Cell::measured(label).id(lb_id));
+            entry_ids.push((sw_id, lb_id));
+        }
+        grid
+    };
+
+    // Solve at a generous container so every Auto track sizes to its
+    // content. Fr tracks would stretch, but the grid has none — every
+    // track is Auto or Fixed. The solver positions auto-sized content
+    // inside the container without anchoring to (0, 0), so the cell
+    // rects come back offset by a constant — normalise to put the
+    // entries block's top-left at the local origin.
+    let solved = grid.solve(Size::new(1.0e7, 1.0e7), dpi);
+    let mut raw: Vec<(Rect, Rect)> = Vec::with_capacity(n);
+    let mut min_x0 = f64::INFINITY;
+    let mut min_y0 = f64::INFINITY;
+    let mut max_x1 = f64::NEG_INFINITY;
+    let mut max_y1 = f64::NEG_INFINITY;
+    for (sw_id, lb_id) in &entry_ids {
+        let sw = solved.rect(*sw_id).unwrap_or(Rect::ZERO);
+        let lb = solved.rect(*lb_id).unwrap_or(Rect::ZERO);
+        min_x0 = min_x0.min(sw.x0).min(lb.x0);
+        min_y0 = min_y0.min(sw.y0).min(lb.y0);
+        max_x1 = max_x1.max(sw.x1).max(lb.x1);
+        max_y1 = max_y1.max(sw.y1).max(lb.y1);
+        raw.push((sw, lb));
+    }
+    if !min_x0.is_finite() {
+        return DiscreteStackLayout::empty();
+    }
+    let entries: Vec<(Rect, Rect)> = raw
+        .into_iter()
+        .map(|(sw, lb)| {
+            (
+                translate_rect(sw, -min_x0, -min_y0),
+                translate_rect(lb, -min_x0, -min_y0),
+            )
+        })
+        .collect();
+    DiscreteStackLayout {
+        entries,
+        entries_w_px: max_x1 - min_x0,
+        entries_h_px: max_y1 - min_y0,
+    }
+}
+
+/// Translate a rect by `(dx, dy)` pixels — the discrete stack layout
+/// is solved at the legend's local origin, then offset to the slot's
+/// anchored corner at draw time.
+fn translate_rect(r: Rect, dx: f64, dy: f64) -> Rect {
+    Rect::new(r.x0 + dx, r.y0 + dy, r.x1 + dx, r.y1 + dy)
 }
 
 // ─── Public types ───────────────────────────────────────────────────────────
@@ -916,40 +1102,41 @@ fn render_stack_body(
         Some(s) => s,
         None => return,
     };
-    let swatch_dim_px = match measure.body {
-        BodyMeasure::Stack { swatch_dim_px, .. } => swatch_dim_px,
+    let layout = match &measure.body {
+        BodyMeasure::Stack { layout, .. } => layout,
         _ => return,
     };
 
-    let padding = pt_to_px(PADDING_PT, dpi);
-    let swatch_label_gap = pt_to_px(SWATCH_LABEL_GAP_PT, dpi);
-    let row_gap = pt_to_px(ROW_GAP_PT, dpi);
+    let padding = measure.padding_px;
     let title_gap = if legend.title.is_some() && measure.title_h_px > 0.0 {
-        pt_to_px(ROW_GAP_PT, dpi)
+        measure.row_gap_px
     } else {
         0.0
     };
     let styles = legend_text_styles(lt, palette);
-    let label_style = &styles.label_style;
-    let label_brush = &styles.label_brush;
 
-    let breaks = domain.breaks(DEFAULT_BREAK_COUNT);
-    let entries: Vec<&Value> = breaks
+    let entries = domain.breaks(DEFAULT_BREAK_COUNT);
+    let entries: Vec<&Value> = entries
         .iter()
         .filter(|v| !matches!(v, Value::Null))
         .collect();
 
-    let row_h = measure.max_label_h_px.max(swatch_dim_px);
-    let row_w = swatch_dim_px + swatch_label_gap + measure.max_label_w_px;
-    let block_h = measure.primary_dim_px(dpi);
-
-    let (title_x, title_y) =
-        title_anchor(side, slot_rect, padding, block_h, measure.title_w_px, row_w);
-    let entries_y = title_y + measure.title_h_px + title_gap;
-    let entries_x = match side {
-        LegendSide::Left => slot_rect.x1 - padding - row_w,
+    // Anchor the legend block to the panel-facing slot edge. The
+    // entries grid was solved at local origin (0, 0); compute a
+    // single `(dx, dy)` offset and translate every cached cell rect
+    // by it at draw time.
+    let block_w = layout.entries_w_px.max(measure.title_w_px);
+    let block_h = measure.title_h_px + title_gap + layout.entries_h_px;
+    let title_x = match side {
+        LegendSide::Left => slot_rect.x1 - padding - block_w,
         _ => slot_rect.x0 + padding,
     };
+    let title_y = match side {
+        LegendSide::Top => slot_rect.y1 - padding - block_h,
+        _ => slot_rect.y0 + padding,
+    };
+    let entries_x = title_x;
+    let entries_y = title_y + measure.title_h_px + title_gap;
 
     if let Some(title) = &legend.title {
         let run = TextRun::new(title, &styles.title_style);
@@ -965,41 +1152,30 @@ fn render_stack_body(
         );
     }
 
-    let (mut cursor_x, mut cursor_y) = (entries_x, entries_y);
-    for v in entries {
-        let swatch_cell = Rect::new(
-            cursor_x,
-            cursor_y + (row_h - swatch_dim_px) * 0.5,
-            cursor_x + swatch_dim_px,
-            cursor_y + (row_h + swatch_dim_px) * 0.5,
-        );
+    for (idx, v) in entries.iter().enumerate() {
+        if idx >= layout.entries.len() {
+            break;
+        }
+        let (swatch_local, label_local) = &layout.entries[idx];
+        let swatch_rect = translate_rect(*swatch_local, entries_x, entries_y);
+        let label_rect = translate_rect(*label_local, entries_x, entries_y);
         for key in keys {
             let resolved = resolve_key(key, registry, v);
-            render_key(key.kind, &resolved, swatch_cell, shapes, scene, dpi);
+            render_key(key.kind, &resolved, swatch_rect, shapes, scene, dpi);
         }
-
         let label = domain.format(v);
-        let anchor = Point::new(
-            cursor_x + swatch_dim_px + swatch_label_gap,
-            cursor_y + row_h * 0.5,
-        );
+        let anchor = Point::new(label_rect.x0, (label_rect.y0 + label_rect.y1) * 0.5);
         draw_axis_label(
             scene,
             &label,
-            label_style,
-            label_brush,
+            &styles.label_style,
+            &styles.label_brush,
             AxisLabelAt {
                 anchor,
                 direction: (1.0, 0.0),
             },
             dpi,
         );
-
-        match side {
-            LegendSide::Right | LegendSide::Left => cursor_y += row_h + row_gap,
-            LegendSide::Top | LegendSide::Bottom => cursor_x += row_w + row_gap,
-            LegendSide::InPanel { .. } => unreachable!("cardinal_side flattens InPanel"),
-        }
     }
 }
 
@@ -1027,8 +1203,8 @@ fn render_binned_stack_body(
         None => return,
     };
     let side = cardinal_side(legend.side);
-    let swatch_dim_px = match measure.body {
-        BodyMeasure::Stack { swatch_dim_px, .. } => swatch_dim_px,
+    let row_cells_px: &[(f64, f64)] = match &measure.body {
+        BodyMeasure::BinnedStack { row_cells_px, .. } => row_cells_px.as_slice(),
         _ => return,
     };
     let breaks: Vec<f64> = domain
@@ -1046,15 +1222,29 @@ fn render_binned_stack_body(
         return;
     }
 
-    let padding = pt_to_px(PADDING_PT, dpi);
+    let padding = measure.padding_px;
     let title_gap = if legend.title.is_some() && measure.title_h_px > 0.0 {
-        pt_to_px(ROW_GAP_PT, dpi)
+        measure.row_gap_px
     } else {
         0.0
     };
     let block_h = measure.primary_dim_px(dpi);
     let n_bins = breaks.len() - 1;
-    let bar_len = n_bins as f64 * swatch_dim_px;
+    // For binned legends the bar's bins touch each other. Vertical
+    // legends use each row's height for the bin along-extent and
+    // the max width as the bar thickness; horizontal legends swap
+    // (max heights = thickness, each row's width = along-extent).
+    let horizontal = matches!(side, LegendSide::Top | LegendSide::Bottom);
+    let bar_thickness = if horizontal {
+        row_cells_px.iter().map(|(_, h)| *h).fold(0.0_f64, f64::max)
+    } else {
+        row_cells_px.iter().map(|(w, _)| *w).fold(0.0_f64, f64::max)
+    };
+    let bar_len: f64 = if horizontal {
+        row_cells_px.iter().map(|(w, _)| *w).sum()
+    } else {
+        row_cells_px.iter().map(|(_, h)| *h).sum()
+    };
 
     // Anchor the legend block to the panel-facing slot edge.
     let (title_x, title_y) = title_anchor(
@@ -1063,7 +1253,7 @@ fn render_binned_stack_body(
         padding,
         block_h,
         measure.title_w_px,
-        swatch_dim_px,
+        bar_thickness,
     );
     if let Some(title) = &legend.title {
         let run = TextRun::new(title, &styles.title_style);
@@ -1080,23 +1270,23 @@ fn render_binned_stack_body(
     }
 
     // Bar rect = the stack of touching swatches. Long axis runs
-    // along the slot's cross direction; short axis = swatch_dim_px.
+    // along the slot's cross direction; short axis = bar_thickness.
     let bar_rect = match side {
         LegendSide::Right => Rect::new(
             slot_rect.x0 + padding,
             title_y + measure.title_h_px + title_gap,
-            slot_rect.x0 + padding + swatch_dim_px,
+            slot_rect.x0 + padding + bar_thickness,
             title_y + measure.title_h_px + title_gap + bar_len,
         ),
         LegendSide::Left => Rect::new(
-            slot_rect.x1 - padding - swatch_dim_px,
+            slot_rect.x1 - padding - bar_thickness,
             title_y + measure.title_h_px + title_gap,
             slot_rect.x1 - padding,
             title_y + measure.title_h_px + title_gap + bar_len,
         ),
         LegendSide::Top => Rect::new(
             slot_rect.x0 + padding,
-            slot_rect.y1 - padding - swatch_dim_px,
+            slot_rect.y1 - padding - bar_thickness,
             slot_rect.x0 + padding + bar_len,
             slot_rect.y1 - padding,
         ),
@@ -1104,11 +1294,10 @@ fn render_binned_stack_body(
             slot_rect.x0 + padding,
             title_y + measure.title_h_px + title_gap,
             slot_rect.x0 + padding + bar_len,
-            title_y + measure.title_h_px + title_gap + swatch_dim_px,
+            title_y + measure.title_h_px + title_gap + bar_thickness,
         ),
         LegendSide::InPanel { .. } => unreachable!("cardinal_side flattens InPanel"),
     };
-    let horizontal = matches!(side, LegendSide::Top | LegendSide::Bottom);
 
     // For Right/Left the bar runs BOTTOM (low frac) to TOP (high
     // frac) — matches the cartesian y convention. For Top/Bottom
@@ -1199,9 +1388,9 @@ fn render_colorbar_body(
         _ => return,
     };
 
-    let padding = pt_to_px(PADDING_PT, dpi);
+    let padding = measure.padding_px;
     let title_gap = if legend.title.is_some() && measure.title_h_px > 0.0 {
-        pt_to_px(ROW_GAP_PT, dpi)
+        measure.row_gap_px
     } else {
         0.0
     };
@@ -1555,18 +1744,35 @@ struct LegendMeasure {
     title_h_px: f64,
     /// Number of non-null breaks the domain scale produces.
     entry_count: usize,
+    // ── Layout sizes resolved from the LegendTheme at construction
+    // so the `Measure` trait impl can use them without needing
+    // `&LegendTheme` at width_hint/height_at call time.
+    /// Inner padding in px (uniform — uses `lt.padding.left`).
+    padding_px: f64,
+    /// Gap between adjacent keys in a single legend, px.
+    row_gap_px: f64,
+    /// Gap between a key swatch and its label, px.
+    swatch_label_gap_px: f64,
 }
 
 enum BodyMeasure {
-    /// Discrete stack — `swatch_dim_px` is the cell size for the
-    /// biggest marker in the stack; `no_keys` short-circuits the
-    /// measure to zero when the stack is empty; `binned` switches
-    /// to N-bins-from-N+1-breaks layout with a between-row tick
-    /// rail.
+    /// Discrete stack — entries area pre-solved by the layout grid.
+    /// The grid handles per-row auto sizing for free: vertical legend
+    /// rows pick the widest swatch as the uniform column width while
+    /// each row's height tracks its own marker, horizontal legends
+    /// transpose. `no_keys` short-circuits the measure to zero when
+    /// the stack is empty.
     Stack {
-        swatch_dim_px: f64,
+        layout: DiscreteStackLayout,
         no_keys: bool,
-        binned: bool,
+    },
+    /// Binned stack — N-bins-from-N+1-breaks layout with a between-row
+    /// tick rail. Per-row dimensions live in `row_cells_px` (binned
+    /// rows touch, so the row gap doesn't apply). `no_keys`
+    /// short-circuits the measure to zero when the stack is empty.
+    BinnedStack {
+        row_cells_px: Vec<(f64, f64)>,
+        no_keys: bool,
     },
     /// Colorbar — `bar_thickness_px` is the bar's perpendicular
     /// extent; `samples` is forwarded to the renderer.
@@ -1619,19 +1825,85 @@ impl LegendMeasure {
             entry_count += 1;
         }
 
+        // Resolve LegendTheme layout sizes to px once. The
+        // swatch-to-label gap uses the legend's axis `tick_gap` — same
+        // semantic as an axis tick → label gap. Pulled forward of the
+        // body match so the grid build below sees the resolved px.
+        let padding_px = pt_to_px(lt.padding.left.resolve(0.0), dpi);
+        let row_gap_px = pt_to_px(lt.key.spacing.resolve(0.0), dpi);
+        let swatch_label_gap_px = pt_to_px(lt.axis.tick_gap.resolve(0.0), dpi);
+
         let body = match &legend.body {
-            LegendBody::Stack(stack) => {
-                let peak = peak_resolved_for_stack(&stack.keys, registry, &breaks);
-                let swatch_dim_px = stack
-                    .keys
+            LegendBody::Stack(stack) if stack.binned => {
+                let key_w_floor = pt_to_px(lt.key.width.resolve(0.0), dpi);
+                let key_h_floor = pt_to_px(lt.key.height.resolve(0.0), dpi);
+                let row_cells_px: Vec<(f64, f64)> = breaks
                     .iter()
-                    .map(|k| swatch_dim_for(k.kind, &peak, dpi))
-                    .fold(0.0_f64, f64::max)
-                    .max(pt_to_px(SWATCH_SIZE_PT, dpi));
-                BodyMeasure::Stack {
-                    swatch_dim_px,
+                    .filter(|v| !matches!(v, Value::Null))
+                    .map(|v| {
+                        let (mut row_w, mut row_h) = (0.0_f64, 0.0_f64);
+                        for key in &stack.keys {
+                            let resolved = resolve_key(key, registry, v);
+                            let (w, h) = swatch_dim_for(key.kind, &resolved, dpi);
+                            row_w = row_w.max(w);
+                            row_h = row_h.max(h);
+                        }
+                        (row_w.max(key_w_floor), row_h.max(key_h_floor))
+                    })
+                    .collect();
+                BodyMeasure::BinnedStack {
+                    row_cells_px,
                     no_keys: stack.keys.is_empty(),
-                    binned: stack.binned,
+                }
+            }
+            LegendBody::Stack(stack) => {
+                // Build the discrete-stack layout via the grid solver.
+                // Each row contributes a SwatchCellMeasure (max of its
+                // keys' intrinsic dims, floored at KeyTheme) and a
+                // LabelMeasure (natural single-line width / height).
+                // The grid's Auto tracks resolve to content, giving
+                // per-row auto sizing with cross-axis uniformity.
+                let key_w_floor = pt_to_px(lt.key.width.resolve(0.0), dpi);
+                let key_h_floor = pt_to_px(lt.key.height.resolve(0.0), dpi);
+                let horizontal = matches!(
+                    cardinal_side(legend.side),
+                    LegendSide::Top | LegendSide::Bottom
+                );
+                let mut rows: Vec<(SwatchCellMeasure, LabelMeasure)> = Vec::new();
+                for v in breaks.iter().filter(|v| !matches!(v, Value::Null)) {
+                    let (mut row_w, mut row_h) = (0.0_f64, 0.0_f64);
+                    for key in &stack.keys {
+                        let resolved = resolve_key(key, registry, v);
+                        let (w, h) = swatch_dim_for(key.kind, &resolved, dpi);
+                        row_w = row_w.max(w);
+                        row_h = row_h.max(h);
+                    }
+                    let swatch = SwatchCellMeasure {
+                        intrinsic_w_px: row_w,
+                        intrinsic_h_px: row_h,
+                        floor_w_px: key_w_floor,
+                        floor_h_px: key_h_floor,
+                    };
+                    let label_text = domain.map(|s| s.format(v)).unwrap_or_default();
+                    let run = TextRun::new(&label_text, &label_style);
+                    let nat_h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+                    let nat_w = run.natural_width();
+                    let label = LabelMeasure {
+                        natural_w_px: nat_w,
+                        natural_h_px: nat_h,
+                    };
+                    rows.push((swatch, label));
+                }
+                let layout = build_discrete_stack_layout(
+                    horizontal,
+                    rows,
+                    swatch_label_gap_px,
+                    row_gap_px,
+                    dpi,
+                );
+                BodyMeasure::Stack {
+                    layout,
+                    no_keys: stack.keys.is_empty(),
                 }
             }
             LegendBody::Colorbar(spec) => BodyMeasure::Colorbar {
@@ -1664,6 +1936,9 @@ impl LegendMeasure {
             max_label_h_px: max_label_h,
             title_w_px,
             title_h_px,
+            padding_px,
+            row_gap_px,
+            swatch_label_gap_px,
         }
     }
 
@@ -1671,16 +1946,19 @@ impl LegendMeasure {
         if self.entry_count == 0 {
             return true;
         }
-        matches!(self.body, BodyMeasure::Stack { no_keys: true, .. })
+        matches!(
+            self.body,
+            BodyMeasure::Stack { no_keys: true, .. }
+                | BodyMeasure::BinnedStack { no_keys: true, .. }
+        )
     }
 
     /// Block dimension along the side's primary axis: column width
     /// for Right/Left, row height for Top/Bottom.
     fn primary_dim_px(&self, dpi: f64) -> f64 {
-        let padding = pt_to_px(PADDING_PT, dpi);
-        let gap = pt_to_px(SWATCH_LABEL_GAP_PT, dpi);
+        let padding = self.padding_px;
         let title_gap = if self.title_h_px > 0.0 {
-            pt_to_px(ROW_GAP_PT, dpi)
+            self.row_gap_px
         } else {
             0.0
         };
@@ -1688,69 +1966,60 @@ impl LegendMeasure {
         let label_gap_axis = pt_to_px(crate::plot::chrome::linear_axis::LABEL_GAP_PT, dpi);
 
         match (&self.body, self.side) {
-            (
-                BodyMeasure::Stack {
-                    swatch_dim_px,
-                    binned: false,
-                    ..
-                },
-                LegendSide::Right | LegendSide::Left,
-            ) => {
-                let row_w = swatch_dim_px + gap + self.max_label_w_px;
-                row_w.max(self.title_w_px) + 2.0 * padding
+            (BodyMeasure::Stack { layout, .. }, LegendSide::Right | LegendSide::Left) => {
+                // Vertical legend column width comes straight from
+                // the inner grid's resolved entries width.
+                layout.entries_w_px.max(self.title_w_px) + 2.0 * padding
+            }
+            (BodyMeasure::Stack { layout, .. }, LegendSide::Top | LegendSide::Bottom) => {
+                // Horizontal legend row height: title above + entries
+                // block height.
+                self.title_h_px + title_gap + layout.entries_h_px + 2.0 * padding
             }
             (
-                BodyMeasure::Stack {
-                    swatch_dim_px,
-                    binned: false,
-                    ..
-                },
-                LegendSide::Top | LegendSide::Bottom,
-            ) => {
-                let row_h = self.max_label_h_px.max(*swatch_dim_px);
-                self.title_h_px + title_gap + row_h + 2.0 * padding
-            }
-            (
-                BodyMeasure::Stack {
-                    swatch_dim_px,
-                    binned: true,
-                    ..
-                },
-                LegendSide::Right | LegendSide::Left,
-            )
-            | (
-                BodyMeasure::Colorbar {
-                    bar_thickness_px: swatch_dim_px,
-                    ..
-                },
+                BodyMeasure::BinnedStack { row_cells_px, .. },
                 LegendSide::Right | LegendSide::Left,
             ) => {
-                // Column width = swatch/bar + tick + gap + label_w
-                // (or title_w, whichever is wider). Binned stack and
-                // colorbar share the same axis-arm layout — only the
-                // contents of the "bar column" differ.
-                let axis_arm = swatch_dim_px + tick_px + label_gap_axis + self.max_label_w_px;
+                // Binned vertical: bar thickness = max of row widths.
+                let thickness = row_cells_px.iter().map(|(w, _)| *w).fold(0.0_f64, f64::max);
+                let axis_arm = thickness + tick_px + label_gap_axis + self.max_label_w_px;
                 axis_arm.max(self.title_w_px) + 2.0 * padding
             }
             (
-                BodyMeasure::Stack {
-                    swatch_dim_px,
-                    binned: true,
+                BodyMeasure::BinnedStack { row_cells_px, .. },
+                LegendSide::Top | LegendSide::Bottom,
+            ) => {
+                // Binned horizontal: bar thickness = max of row heights.
+                let thickness = row_cells_px.iter().map(|(_, h)| *h).fold(0.0_f64, f64::max);
+                self.title_h_px
+                    + title_gap
+                    + thickness
+                    + tick_px
+                    + label_gap_axis
+                    + self.max_label_h_px
+                    + 2.0 * padding
+            }
+            (
+                BodyMeasure::Colorbar {
+                    bar_thickness_px: thickness,
                     ..
                 },
-                LegendSide::Top | LegendSide::Bottom,
-            )
-            | (
+                LegendSide::Right | LegendSide::Left,
+            ) => {
+                let axis_arm = thickness + tick_px + label_gap_axis + self.max_label_w_px;
+                axis_arm.max(self.title_w_px) + 2.0 * padding
+            }
+            (
                 BodyMeasure::Colorbar {
-                    bar_thickness_px: swatch_dim_px,
+                    bar_thickness_px: thickness,
                     ..
                 },
                 LegendSide::Top | LegendSide::Bottom,
             ) => {
-                // Row height = title + gap + swatch/bar + tick + gap + label_h.
+                // Row height = title + gap + bar thickness + tick + gap + label_h.
                 self.title_h_px
                     + title_gap
-                    + swatch_dim_px
+                    + thickness
                     + tick_px
                     + label_gap_axis
                     + self.max_label_h_px
@@ -1766,68 +2035,42 @@ impl LegendMeasure {
     /// Used by [`LegendStackMeasure`] to split the slot rect among
     /// stacked legends.
     fn cross_dim_px(&self, dpi: f64) -> f64 {
-        let padding = pt_to_px(PADDING_PT, dpi);
-        let row_gap = pt_to_px(ROW_GAP_PT, dpi);
-        let gap = pt_to_px(SWATCH_LABEL_GAP_PT, dpi);
+        let _ = dpi;
+        let padding = self.padding_px;
+        let row_gap = self.row_gap_px;
+        let gap = self.swatch_label_gap_px;
         let title_gap = if self.title_h_px > 0.0 {
-            pt_to_px(ROW_GAP_PT, dpi)
+            self.row_gap_px
         } else {
             0.0
         };
         let n = self.entry_count as f64;
 
         match (&self.body, self.side) {
-            (
-                BodyMeasure::Stack {
-                    swatch_dim_px,
-                    binned: false,
-                    ..
-                },
-                LegendSide::Right | LegendSide::Left,
-            ) => {
-                let row_h = self.max_label_h_px.max(*swatch_dim_px);
-                self.title_h_px
-                    + title_gap
-                    + n * row_h
-                    + (n - 1.0).max(0.0) * row_gap
-                    + 2.0 * padding
+            (BodyMeasure::Stack { layout, .. }, LegendSide::Right | LegendSide::Left) => {
+                // Vertical legend along-axis: entries block height
+                // already accounts for per-row heights + inter-row
+                // gaps via the grid's Fixed gap rows.
+                self.title_h_px + title_gap + layout.entries_h_px + 2.0 * padding
+            }
+            (BodyMeasure::Stack { layout, .. }, LegendSide::Top | LegendSide::Bottom) => {
+                // Horizontal legend along-axis: entries block width.
+                layout.entries_w_px.max(self.title_w_px) + 2.0 * padding
             }
             (
-                BodyMeasure::Stack {
-                    swatch_dim_px,
-                    binned: false,
-                    ..
-                },
-                LegendSide::Top | LegendSide::Bottom,
-            ) => {
-                let row_w = swatch_dim_px + gap + self.max_label_w_px;
-                let entries_w = n * row_w + (n - 1.0).max(0.0) * row_gap;
-                entries_w.max(self.title_w_px) + 2.0 * padding
-            }
-            (
-                BodyMeasure::Stack {
-                    swatch_dim_px,
-                    binned: true,
-                    ..
-                },
+                BodyMeasure::BinnedStack { row_cells_px, .. },
                 LegendSide::Right | LegendSide::Left,
             ) => {
-                // Binned: N bins from N+1 breaks → N rows touching
-                // vertically. Bar length = (n_breaks − 1) × swatch_h.
-                let n_bins = (n - 1.0).max(1.0);
-                let bar_len = n_bins * swatch_dim_px;
+                // Binned vertical: rows touch, bar length = sum of
+                // each bin's own h.
+                let bar_len: f64 = row_cells_px.iter().map(|(_, h)| *h).sum();
                 self.title_h_px + title_gap + bar_len + 2.0 * padding
             }
             (
-                BodyMeasure::Stack {
-                    swatch_dim_px,
-                    binned: true,
-                    ..
-                },
+                BodyMeasure::BinnedStack { row_cells_px, .. },
                 LegendSide::Top | LegendSide::Bottom,
             ) => {
-                let n_bins = (n - 1.0).max(1.0);
-                let bar_len = n_bins * swatch_dim_px;
+                let bar_len: f64 = row_cells_px.iter().map(|(w, _)| *w).sum();
                 bar_len.max(self.title_w_px) + 2.0 * padding
             }
             (BodyMeasure::Colorbar { .. }, LegendSide::Right | LegendSide::Left) => {
@@ -1939,44 +2182,25 @@ impl Measure for LegendStackMeasure {
     }
 }
 
-/// Walk a stack's keys + breaks and produce a `ResolvedKey` whose
-/// numeric fields hold the peak (max) value any key would see. Used
-/// to size the swatch cell so the largest marker fits.
-fn peak_resolved_for_stack(
-    keys: &[LegendKeySpec],
-    registry: &ScaleRegistry,
-    breaks: &[Value],
-) -> ResolvedKey {
-    let mut peak = ResolvedKey::default();
-    for key in keys {
-        for v in breaks {
-            if matches!(v, Value::Null) {
-                continue;
-            }
-            let resolved = resolve_key(key, registry, v);
-            if let Some(s) = resolved.size_pt {
-                peak.size_pt = Some(peak.size_pt.map_or(s, |p| p.max(s)));
-            }
-            if let Some(lw) = resolved.linewidth_pt {
-                peak.linewidth_pt = Some(peak.linewidth_pt.map_or(lw, |p| p.max(lw)));
-            }
-        }
-    }
-    peak
-}
-
 // ─── Per-key swatch dim + render ───────────────────────────────────────────
 
-fn swatch_dim_for(kind: LegendKey, peak: &ResolvedKey, dpi: f64) -> f64 {
+/// Per-key minimum cell dimensions `(w, h)` in px. The legend takes
+/// the max across keys to size the cell, then floors at the
+/// `LegendTheme.key` width / height. Lines never grow the cell —
+/// they render at the resolved cell's width via relative
+/// coordinates (line spans 0..1 horizontally, sits at 0.5
+/// vertically). Points grow the cell by their marker diameter.
+/// Rects don't impose a minimum beyond the theme floor.
+fn swatch_dim_for(kind: LegendKey, peak: &ResolvedKey, dpi: f64) -> (f64, f64) {
     match kind {
         LegendKey::Point => {
             let size_pt = peak.size_pt.unwrap_or(DEFAULT_POINT_DIAMETER_PT);
             // Match PointGeom's circle path (radius 0.8) so the
             // rendered marker matches the geom for the same size.
-            pt_to_px(size_pt * 2.0 * POINT_SHAPE_RADIUS, dpi)
+            let d = pt_to_px(size_pt * 2.0 * POINT_SHAPE_RADIUS, dpi);
+            (d, d)
         }
-        LegendKey::Line => pt_to_px(LINE_SWATCH_LEN_PT, dpi),
-        LegendKey::Rect => pt_to_px(SWATCH_SIZE_PT, dpi),
+        LegendKey::Line | LegendKey::Rect => (0.0, 0.0),
     }
 }
 

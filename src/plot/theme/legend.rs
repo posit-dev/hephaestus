@@ -64,18 +64,28 @@ pub struct KeyTheme {
     /// or both. Set `fill = None` for no background, `linewidth_pt =
     /// Abs(0.0)` for no border.
     pub frame: Element<RectElement>,
-    /// Key cell width, pt.
+    /// Key cell width in pt. Every key kind sits inside this cell:
+    /// line keys run the full width as a horizontal rule; point
+    /// keys render their marker (sized by
+    /// `theme.geom.point.size_pt` or a bound size scale) centered
+    /// within the cell; rect keys fill the cell.
     pub width: Length,
-    /// Key cell height, pt.
+    /// Key cell height in pt.
     pub height: Length,
     /// Gap between adjacent keys within a single legend (intra-legend
     /// spacing). Spacing **between** legends lives on
-    /// `Theme::legend_spacing`.
+    /// `Theme::legend_spacing`. The gap between a key swatch and
+    /// its label uses [`LegendTheme::axis`]'s `tick_gap` — same
+    /// semantic as the gap between an axis tick mark and its
+    /// label, so users tune one knob for both.
     pub spacing: Length,
 }
 
 impl Default for KeyTheme {
-    /// 12×12pt keys, 4pt spacing, no frame.
+    /// 12×12pt square cells (matches ggplot2's
+    /// `legend.key.size = unit(1.2, 'lines')` default at the
+    /// standard 11pt base size). 4pt intra-legend key spacing,
+    /// no frame.
     fn default() -> Self {
         Self {
             frame: Element::Blank,
