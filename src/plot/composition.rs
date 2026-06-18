@@ -185,14 +185,63 @@ fn wire_into_patch(
     }
     let _ = registry;
     let _ = dpi;
-    let _ = comp_theme;
     // Unattached patches, or non-text builds: just attach a Panel
-    // slot so the layout still places a rect for that patch.
-    let p = Patch::new(id);
+    // slot so the layout still places a rect for that patch. The
+    // outer margin band is still sized from `theme.plot_margin` so
+    // an empty patch sits within the same chrome rhythm as a
+    // populated one.
+    let p = apply_plot_chrome(Patch::new(id), comp_theme);
     match plot_list.and_then(|list| list.first()) {
         Some(pl) => pl.wire_panel(p),
         None => pl_wire_panel_fallback(p),
     }
+}
+
+/// Stitch the theme's outer-chrome fields onto the patch:
+///
+/// - `theme.plot_margin` → `Patch::margin` (outermost ring tracks).
+/// - `theme.plot_padding` → `Patch::padding` (second-ring tracks).
+/// - `theme.plot_background` → if `Set`, drop an empty cell into
+///   `Slot::Background` so the solver emits a rect for it (the cell
+///   has no size opinion of its own; the slot's anatomical span
+///   takes whatever the surrounding tracks allow). When `Blank`,
+///   the slot is left out — `draw_patch_background_into` then
+///   no-ops via the `as_set()` short-circuit.
+fn apply_plot_chrome(patch: Patch, theme: &Theme) -> Patch {
+    use crate::composition::Slot;
+    use crate::layout::{Cell, Inset, Length as LayoutLength};
+    let root_pt = theme.text.size_pt.resolve(10.0);
+    let margin_inset = {
+        let (mt, mr, mb, ml) = theme.plot_margin.resolve(root_pt);
+        (mt != 0.0 || mr != 0.0 || mb != 0.0 || ml != 0.0).then(|| {
+            Inset::default()
+                .top(LayoutLength::pt(mt))
+                .right(LayoutLength::pt(mr))
+                .bottom(LayoutLength::pt(mb))
+                .left(LayoutLength::pt(ml))
+        })
+    };
+    let padding_inset = {
+        let (pt, pr, pb, pl) = theme.plot_padding.resolve(root_pt);
+        (pt != 0.0 || pr != 0.0 || pb != 0.0 || pl != 0.0).then(|| {
+            Inset::default()
+                .top(LayoutLength::pt(pt))
+                .right(LayoutLength::pt(pr))
+                .bottom(LayoutLength::pt(pb))
+                .left(LayoutLength::pt(pl))
+        })
+    };
+    let mut patch = patch;
+    if let Some(inset) = margin_inset {
+        patch = patch.margin(inset);
+    }
+    if let Some(inset) = padding_inset {
+        patch = patch.padding(inset);
+    }
+    if theme.plot_background.as_set().is_some() {
+        patch = patch.slot(Slot::Background, Cell::empty());
+    }
+    patch
 }
 
 /// Per-plot harvest + max-merge. Each plot wires into its own
@@ -237,7 +286,7 @@ fn wire_merged_patch(
     }
 
     // Emit one cell per region with a max-merged measure.
-    let mut patch = Patch::new(id);
+    let mut patch = apply_plot_chrome(Patch::new(id), comp_theme);
     // Cross-plot aspect agreement: every plot that has an opinion
     // on the panel aspect (polar projections, today) contributes
     // its `desired_panel_aspect`. If all opinions agree on the
@@ -594,11 +643,15 @@ impl PlotComposition {
             .expect("layout must be cached by this point");
 
         // Phase 1: patch backgrounds. Every plot lays down its
-        // `Slot::Background` fill (if it has one) before any panel
-        // chrome / geom / axis is drawn.
+        // `Slot::Background` fill from `theme.plot_background`.
+        // Slot::Background's rect already excludes the margin band
+        // sized via `theme.plot_margin` — the patch anatomy
+        // automatically gives the margin space without any manual
+        // translation.
         for list in self.plots.values() {
             for plot in list {
-                plot.draw_patch_background_into(scene, layout);
+                let effective = self.effective_theme_for(plot);
+                plot.draw_patch_background_into(scene, layout, &effective, dpi);
             }
         }
 

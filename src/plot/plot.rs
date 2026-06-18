@@ -113,7 +113,6 @@ pub struct Plot {
     /// fill; the canvas colour shows through). Painted in the
     /// orchestrator's first render pass across all plots, before
     /// any panel chrome / geom is drawn.
-    background_color: Option<crate::color::Color>,
 
     /// Tracked for the orchestrator's partial-repaint heuristics; not
     /// currently consulted by the draw path.
@@ -167,7 +166,6 @@ impl Plot {
             next_legend_id: 0,
             projection: crate::plot::projection::Projection::Cartesian,
             clip: true,
-            background_color: None,
             dirty: true,
             cartesian_aspect_ratio: None,
             theme_override: None,
@@ -215,15 +213,6 @@ impl Plot {
     /// past the panel boundary.
     pub fn clip(mut self, clip: bool) -> Self {
         self.clip = clip;
-        self
-    }
-
-    /// Set the patch-wide background fill colour. Drawn in the
-    /// orchestrator's first render pass; covers panel + axes +
-    /// titles + padding, but not the outer margin. Pass `None`
-    /// (the default) to skip the fill entirely.
-    pub fn background_color(mut self, color: Option<crate::color::Color>) -> Self {
-        self.background_color = color;
         self
     }
 
@@ -455,18 +444,21 @@ impl<'a> ScaleResolver for PlotScaleResolver<'a> {
 // panel rect.
 
 impl Plot {
-    /// Paint this plot's [`Slot::Background`] fill — the patch-wide
-    /// background covering panel + axes + titles + padding (but not
-    /// the outer margin). `None` background colour skips the fill.
-    /// Called by the orchestrator in a first pass across all plots
-    /// so backgrounds settle before any panel chrome / geom draws
-    /// on top — important when multiple plots share a patch.
+    /// Paint this plot's [`Slot::Background`] from
+    /// `theme.plot_background` — the patch-wide background covering
+    /// panel + axes + titles + padding, but not the outer margin
+    /// sized by `theme.plot_margin`. `Element::Blank` skips both
+    /// fill and border. Called by the orchestrator in a first pass
+    /// across all plots so backgrounds settle before any panel
+    /// chrome / geom draws on top.
     pub fn draw_patch_background_into(
         &self,
         scene: &mut dyn SceneBuilder,
         layout: &crate::composition::CompositionLayout,
+        theme: &crate::plot::theme::Theme,
+        dpi: f64,
     ) {
-        let Some(color) = self.background_color else {
+        let Some(bg) = theme.plot_background.as_set() else {
             return;
         };
         let Some(rect) = layout.get(&self.patch_id, Slot::Background) else {
@@ -477,14 +469,33 @@ impl Plot {
         }
         use kurbo::Shape;
         let path: crate::path::Path = rect.to_path(0.0);
-        scene.fill(
-            crate::path::FillRule::NonZero,
-            crate::geometry::Affine::IDENTITY,
-            &crate::brush::Brush::Solid(color),
-            None,
-            &path,
-            crate::pick::PickId::Skip,
-        );
+        if let Some(fill) = &bg.fill {
+            let brush = crate::brush::Brush::Solid(fill.resolve(&theme.palette));
+            scene.fill(
+                crate::path::FillRule::NonZero,
+                crate::geometry::Affine::IDENTITY,
+                &brush,
+                None,
+                &path,
+                crate::pick::PickId::Skip,
+            );
+        }
+        let width_pt = bg.linewidth_pt.resolve(1.0);
+        if width_pt > 0.0 {
+            use crate::stroke::{Cap, Join, Stroke};
+            let stroke = Stroke::new(width_pt * dpi / 72.0)
+                .with_caps(Cap::Butt)
+                .with_join(Join::Miter);
+            let brush = crate::brush::Brush::Solid(bg.color.resolve(&theme.palette));
+            scene.stroke(
+                &stroke,
+                crate::geometry::Affine::IDENTITY,
+                &brush,
+                None,
+                &path,
+                crate::pick::PickId::Skip,
+            );
+        }
     }
 
     /// Paint the projection's panel chrome — background fill, grid

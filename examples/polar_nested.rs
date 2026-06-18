@@ -105,10 +105,7 @@ fn main() {
     let mut p_inner = Plot::new(&comp(), "panel")
         .projection(inner_projection)
         .bind("x", "theta_unit")
-        .bind("y", "radius_unit")
-        // Only the FIRST attached plot paints the patch background,
-        // so attach this one first.
-        .background_color(Some(rgb8(252, 252, 252)));
+        .bind("y", "radius_unit");
     p_inner.add_geom(
         PointGeom::builder()
             .set("x", inner_theta)

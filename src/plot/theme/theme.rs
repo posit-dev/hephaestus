@@ -56,8 +56,14 @@ pub struct Theme {
     /// Plot background rect — fills the entire plot area behind every
     /// other element.
     pub plot_background: Element<RectElement>,
-    /// Margin around the plot's outer edge.
+    /// Margin around the plot's outer edge. Sizes the patch anatomy's
+    /// outermost ring of tracks; sits **outside** [`Self::plot_background`].
     pub plot_margin: Margin,
+    /// Padding inside the plot background, between the background's
+    /// edge and the start of chrome (title, axes, legends). Sizes the
+    /// second-from-outermost ring of tracks; sits **inside**
+    /// [`Self::plot_background`].
+    pub plot_padding: Margin,
 
     // ── Panel chrome ───────────────────────────────────────────────
     /// Panel background — the plotting area's fill.
@@ -154,6 +160,7 @@ impl Default for Theme {
             plot_text_align_to: AlignTo::default(),
             plot_background: Element::Blank,
             plot_margin: Margin::ZERO,
+            plot_padding: Margin::ZERO,
 
             // Panel: rgb(.95) paper fill, ink border at 1pt, major
             // grid mixed 22% toward ink, minor 12% toward ink at
@@ -290,6 +297,8 @@ pub struct ThemePart {
     pub plot_background: Option<Element<RectElement>>,
     /// Optional plot-margin override.
     pub plot_margin: Option<Margin>,
+    /// Optional plot-padding override.
+    pub plot_padding: Option<Margin>,
 
     /// Optional panel-background override.
     pub panel_background: Option<Element<RectElement>>,
@@ -345,6 +354,7 @@ impl ThemePart {
         set_field!(plot_text_align_to);
         set_field!(plot_background);
         set_field!(plot_margin);
+        set_field!(plot_padding);
         set_field!(panel_background);
         set_field!(panel_border);
         set_field!(panel_grid_major);
