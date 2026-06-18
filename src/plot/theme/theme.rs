@@ -231,8 +231,14 @@ impl Default for Theme {
                 linewidth_pt: Some(Length::Abs(0.5)),
                 ..RectElement::default()
             }),
+            // `Rotation::Along` makes strip text follow the panel
+            // edge — horizontal on top / bottom, vertical on left /
+            // right — so a vertical strip's column stays narrow.
+            // Users wanting horizontal labels everywhere set
+            // `angle = Some(Rotation::Degrees(0.0))`.
             strip_text: Sided::new(TextElement {
                 size_pt: Some(Length::Abs(10.0)),
+                angle: Some(super::element::Rotation::Along),
                 ..TextElement::default()
             }),
             strip_padding: Margin::all(Length::Abs(4.0)),

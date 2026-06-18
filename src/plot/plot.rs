@@ -135,7 +135,39 @@ pub struct Plot {
     /// rendering this plot. `None` (the default) means the plot
     /// uses the composition's theme unchanged.
     theme_override: Option<crate::plot::theme::ThemePart>,
+
+    /// Facet-strip labels, one per [`AxisSide`]. Indexed by
+    /// [`axis_side_index`]; `None` = no strip on that side. Each
+    /// `Some(text)` reserves the matching `StripTop` / `StripRight` /
+    /// `StripBottom` / `StripLeft` slot and renders against the
+    /// theme's `strip_background` / `strip_text` / `strip_padding`.
+    #[cfg(feature = "text")]
+    strips: [Option<String>; 4],
 }
+
+/// Index into [`Plot::strips`] for the given [`AxisSide`]. Order is
+/// Top / Right / Bottom / Left so iteration follows the same
+/// clockwise convention used for wire / draw passes.
+#[cfg(feature = "text")]
+pub(crate) fn axis_side_index(side: AxisSide) -> usize {
+    match side {
+        AxisSide::Top => 0,
+        AxisSide::Right => 1,
+        AxisSide::Bottom => 2,
+        AxisSide::Left => 3,
+    }
+}
+
+/// Iteration order over all four `AxisSide` variants — used by the
+/// strip wire / draw passes so the per-side loops match
+/// [`axis_side_index`].
+#[cfg(feature = "text")]
+pub(crate) const STRIP_SIDES: [AxisSide; 4] = [
+    AxisSide::Top,
+    AxisSide::Right,
+    AxisSide::Bottom,
+    AxisSide::Left,
+];
 
 impl Plot {
     /// Bind a plot to the named patch in `composition`. Panics if no
@@ -169,6 +201,8 @@ impl Plot {
             dirty: true,
             cartesian_aspect_ratio: None,
             theme_override: None,
+            #[cfg(feature = "text")]
+            strips: [None, None, None, None],
         }
     }
 
@@ -318,6 +352,37 @@ impl Plot {
     pub fn caption(mut self, s: impl Into<String>) -> Self {
         self.caption = Some(s.into());
         self
+    }
+
+    /// Set the facet-strip label on `side`. Each side has at most one
+    /// strip; calling again with the same side replaces the previous
+    /// label. Rendered in the matching `StripTop` / `StripRight` /
+    /// `StripBottom` / `StripLeft` slot against the theme's
+    /// `strip_background` / `strip_text` / `strip_padding`. Available
+    /// only with the `text` feature, because the strip's label needs
+    /// the shaper.
+    #[cfg(feature = "text")]
+    pub fn strip(mut self, side: AxisSide, text: impl Into<String>) -> Self {
+        self.strips[axis_side_index(side)] = Some(text.into());
+        self
+    }
+
+    /// Install or clear the facet-strip label for `side`. `None`
+    /// removes the strip (no slot reserved); `Some` installs the
+    /// label. Flips the plot's dirty flag.
+    #[cfg(feature = "text")]
+    pub fn set_strip(&mut self, side: AxisSide, text: Option<String>) {
+        let idx = axis_side_index(side);
+        if self.strips[idx] != text {
+            self.strips[idx] = text;
+            self.dirty = true;
+        }
+    }
+
+    /// Read the facet-strip label for `side`, if any.
+    #[cfg(feature = "text")]
+    pub fn strip_at(&self, side: AxisSide) -> Option<&str> {
+        self.strips[axis_side_index(side)].as_deref()
     }
 
     /// Install a channel → scale-name binding. `channel` is an arbitrary
@@ -824,8 +889,28 @@ impl Plot {
         // rect from `draw_chrome_into`.
         patch = self.wire_legends(patch, registry, dpi, theme);
 
+        // Strips — facet labels populated via `Plot::strip(side, _)`.
+        // Each side that has a label reserves a `StripTop` / `StripRight`
+        // / `StripBottom` / `StripLeft` slot sized to the rotated text
+        // dim plus `theme.strip_padding`.
+        patch = self.wire_strips(patch, theme, dpi);
+
         // Panel is always present (the geom panel lives here).
         self.wire_panel(patch)
+    }
+
+    fn wire_strips(&self, mut patch: Patch, theme: &crate::plot::theme::Theme, dpi: f64) -> Patch {
+        use crate::plot::chrome::strip::{strip_slot, StripMeasure};
+        for side in STRIP_SIDES {
+            let Some(text) = self.strip_at(side) else {
+                continue;
+            };
+            let Some(measure) = StripMeasure::new(text, side, theme, dpi) else {
+                continue;
+            };
+            patch = patch.slot(strip_slot(side), Cell::measured(measure));
+        }
+        patch
     }
 
     fn wire_axes(
@@ -1136,6 +1221,25 @@ impl Plot {
         }
     }
 
+    fn draw_strips_into(
+        &self,
+        scene: &mut dyn SceneBuilder,
+        layout: &crate::composition::CompositionLayout,
+        dpi: f64,
+        theme: &crate::plot::theme::Theme,
+    ) {
+        use crate::plot::chrome::strip::{draw_strip, strip_slot};
+        for side in STRIP_SIDES {
+            let Some(text) = self.strip_at(side) else {
+                continue;
+            };
+            let Some(rect) = layout.get(&self.patch_id, strip_slot(side)) else {
+                continue;
+            };
+            draw_strip(scene, text, rect, side, theme, dpi);
+        }
+    }
+
     fn wire_legends(
         &self,
         mut patch: Patch,
@@ -1176,6 +1280,11 @@ impl Plot {
         // Axes — explicit, no defaults.
         let panel = layout.get(&self.patch_id, Slot::Panel);
         self.draw_axes_into(scene, layout, panel, registry, dpi, theme);
+
+        // Facet strips — one per side with a label installed via
+        // `Plot::strip`. The chrome helper paints the background +
+        // shaped text into the matching slot rect.
+        self.draw_strips_into(scene, layout, dpi, theme);
 
         // Legends — render each side's stack of attached legends
         // into the matching slot. Mirrors the wiring loop.
@@ -1592,7 +1701,7 @@ impl crate::layout::Measure for RotatedAxisTitleMeasure {
 /// `TextRun` via [`text_style_from`].
 #[cfg(feature = "text")]
 #[allow(clippy::too_many_arguments)]
-fn draw_text_element_in_rect(
+pub(crate) fn draw_text_element_in_rect(
     scene: &mut dyn SceneBuilder,
     text: &str,
     el: &crate::plot::theme::TextElement,

@@ -15,3 +15,5 @@ pub(crate) mod linear_axis;
 pub mod panel;
 #[cfg(feature = "text")]
 pub mod polar;
+#[cfg(feature = "text")]
+pub mod strip;
