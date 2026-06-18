@@ -18,6 +18,18 @@ use super::legend::LegendTheme;
 use super::length::{Length, Margin};
 use super::palette::{Palette, ThemeColor};
 
+/// Default gap between stacked legends on the same plot side, pt.
+/// Shared by [`Theme::default`] (which wraps it in `Length::Abs`) and
+/// any chrome site that needs the bottom-of-cascade parent value to
+/// resolve a `Length::Rel`.
+pub const DEFAULT_LEGEND_SPACING_PT: f64 = 10.0;
+
+/// Default gap between the panel-facing edge of the legend slot and
+/// the legend's outer block, pt. Separate from
+/// [`DEFAULT_LEGEND_SPACING_PT`]: this is the panel ↔ legend gap, that
+/// one is legend ↔ legend.
+pub const DEFAULT_LEGEND_GAP_PT: f64 = 10.0;
+
 /// The full theme.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
@@ -90,6 +102,10 @@ pub struct Theme {
     pub legend_variants: HashMap<String, LegendTheme>,
     /// Gap between stacked legends on the same plot side.
     pub legend_spacing: Length,
+    /// Gap between the panel-facing edge of the legend's slot and the
+    /// legend block. Distinct from [`Self::legend_spacing`] (inter-
+    /// legend) so users can tighten one without changing the other.
+    pub legend_gap: Length,
 
     // ── Strip chrome (facet labels) ────────────────────────────────
     /// Strip background rect, per (channel, side).
@@ -203,7 +219,8 @@ impl Default for Theme {
             // the existing legend visual surface.
             legend: LegendTheme::default(),
             legend_variants: HashMap::new(),
-            legend_spacing: Length::Abs(10.0),
+            legend_spacing: Length::Abs(DEFAULT_LEGEND_SPACING_PT),
+            legend_gap: Length::Abs(DEFAULT_LEGEND_GAP_PT),
 
             // Strips: default to inheriting from rect / text roots,
             // with a small inner padding so labels don't butt
@@ -322,6 +339,8 @@ pub struct ThemePart {
     pub legend_variants: HashMap<String, LegendTheme>,
     /// Optional legend-spacing override.
     pub legend_spacing: Option<Length>,
+    /// Optional legend-gap override (panel ↔ legend rail).
+    pub legend_gap: Option<Length>,
 
     /// Optional strip-background override.
     pub strip_background: Option<Sided<RectElement>>,
@@ -364,6 +383,7 @@ impl ThemePart {
         set_field!(axis);
         set_field!(legend);
         set_field!(legend_spacing);
+        set_field!(legend_gap);
         set_field!(strip_background);
         set_field!(strip_text);
         set_field!(strip_padding);

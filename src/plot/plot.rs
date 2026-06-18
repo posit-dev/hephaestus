@@ -840,12 +840,18 @@ impl Plot {
             match axis.placement {
                 AxisPlacement::Cartesian(side) => {
                     // Rail cell → matching AxisBottom/Top/Left/Right slot.
+                    // `axis_measure` resolves the chrome style from the
+                    // theme internally, so the measure (which reserves
+                    // the slot) and the draw call (which renders into
+                    // it) shape labels at the same size.
                     if let Some(scale_name) = &axis.scale_name {
                         if let Some(scale) = registry.get(scale_name) {
                             let slot = cartesian_axis_slot(side);
                             patch = patch.slot(
                                 slot,
-                                Cell::measured(BoxMeasure::new(scale.axis_measure(side, dpi))),
+                                Cell::measured(BoxMeasure::new(
+                                    scale.axis_measure(side, dpi, theme),
+                                )),
                             );
                         }
                     }
@@ -891,12 +897,18 @@ impl Plot {
             self.projection.chrome_strategy(),
             crate::plot::projection::ChromeStrategy::InsidePanel
         ) {
-            patch = self.wire_chrome_bleed(patch, registry, dpi);
+            patch = self.wire_chrome_bleed(patch, registry, dpi, theme);
         }
         patch
     }
 
-    fn wire_chrome_bleed(&self, mut patch: Patch, registry: &ScaleRegistry, dpi: f64) -> Patch {
+    fn wire_chrome_bleed(
+        &self,
+        mut patch: Patch,
+        registry: &ScaleRegistry,
+        dpi: f64,
+        theme: &crate::plot::theme::Theme,
+    ) -> Patch {
         use crate::plot::chrome::axis::{AxisPlacement, PolarRing};
         use crate::plot::chrome::polar::{
             BleedAxis, BleedLabel, BleedLabelKind, BleedTitle, BleedTitleKind, PolarBleedMeasure,
@@ -1035,7 +1047,7 @@ impl Plot {
         if axes.is_empty() {
             return patch;
         }
-        let bleed = crate::plot::chrome::polar::compute_polar_bleed(&axes, dpi);
+        let bleed = crate::plot::chrome::polar::compute_polar_bleed(&axes, dpi, theme);
         for side in [
             AxisSide::Top,
             AxisSide::Right,
@@ -1384,16 +1396,6 @@ fn text_cell_for_element(
     } else {
         Cell::measured(crate::text::WithMargin::new(Box::new(run), margins_px))
     }
-}
-
-/// Default axis-title style — 12pt, matching the historical
-/// hardcoded value. Used by polar chrome helpers that haven't yet
-/// been threaded with a `&Theme`; theme-aware call sites should
-/// derive the style via [`text_style_from`] from the resolved axis
-/// title element.
-#[cfg(feature = "text")]
-pub(crate) fn axis_title_style() -> crate::text::TextStyle {
-    crate::text::TextStyle::new(12.0)
 }
 
 /// Convert a theme [`TextElement`](crate::plot::theme::TextElement)

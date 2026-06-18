@@ -66,9 +66,27 @@ pub struct AxisTheme {
     /// (always positive — labels sit on the side the tick extends
     /// to).
     pub tick_gap: Option<Length>,
+    /// Gap between the outer edge of the tick-label rail and the
+    /// near edge of the axis title. Distinct from the title element's
+    /// `margin` (which controls space around the title in its own
+    /// local frame) so polar / rotated chrome can position the
+    /// title at a known rail-distance regardless of orientation.
+    pub title_gap: Option<Length>,
     /// Where the axis title sits relative to the panel.
     pub title_location: Option<TitleLocation>,
 }
+
+/// Default major tick mark length, pt.
+pub const DEFAULT_TICK_LENGTH_PT: f64 = 4.0;
+/// Default minor tick mark length, pt.
+pub const DEFAULT_MINOR_TICK_LENGTH_PT: f64 = 2.0;
+/// Default gap between tick mark end and label near edge, pt.
+pub const DEFAULT_TICK_GAP_PT: f64 = 2.0;
+/// Default gap between tick-label rail outer edge and axis-title
+/// near edge, pt.
+pub const DEFAULT_TITLE_GAP_PT: f64 = 6.0;
+/// Default axis-title font size, pt.
+pub const DEFAULT_AXIS_TITLE_SIZE_PT: f64 = 12.0;
 
 /// Concrete fallback values for an `AxisTheme` — 4pt major ticks,
 /// 2pt minor, 2pt label gap, `TitleLocation::Outside`, plus 12pt
@@ -81,14 +99,14 @@ pub fn axis_concrete_defaults() -> AxisTheme {
         // Left / Right (text reads up the column) without the
         // renderer special-casing vertical sides.
         title: Element::Set(TextElement {
-            size_pt: Some(Length::Abs(12.0)),
+            size_pt: Some(Length::Abs(DEFAULT_AXIS_TITLE_SIZE_PT)),
             angle: Some(Rotation::Along),
             color: Some(ThemeColor::Ink),
             font: FontSpec::default(),
             ..TextElement::default()
         }),
         text: Element::Set(TextElement {
-            size_pt: Some(Length::Abs(10.0)),
+            size_pt: Some(Length::Abs(super::element::DEFAULT_TEXT_SIZE_PT)),
             color: Some(ThemeColor::Ink),
             font: FontSpec::default(),
             ..TextElement::default()
@@ -96,9 +114,10 @@ pub fn axis_concrete_defaults() -> AxisTheme {
         line: Element::Set(super::element::line_concrete_defaults()),
         ticks: Element::Set(super::element::line_concrete_defaults()),
         ticks_minor: Element::Set(super::element::line_concrete_defaults()),
-        tick_length: Some(Length::Abs(4.0)),
-        tick_length_minor: Some(Length::Abs(2.0)),
-        tick_gap: Some(Length::Abs(2.0)),
+        tick_length: Some(Length::Abs(DEFAULT_TICK_LENGTH_PT)),
+        tick_length_minor: Some(Length::Abs(DEFAULT_MINOR_TICK_LENGTH_PT)),
+        tick_gap: Some(Length::Abs(DEFAULT_TICK_GAP_PT)),
+        title_gap: Some(Length::Abs(DEFAULT_TITLE_GAP_PT)),
         title_location: Some(TitleLocation::Outside),
     }
 }
@@ -196,6 +215,12 @@ impl PerAxis {
             .or(self.all.tick_gap)
             .or(defaults.tick_gap)
             .expect("axis_concrete_defaults sets tick_gap");
+        let title_gap = by_cs
+            .title_gap
+            .or(by_ch.title_gap)
+            .or(self.all.title_gap)
+            .or(defaults.title_gap)
+            .expect("axis_concrete_defaults sets title_gap");
         let title_location = by_cs
             .title_location
             .or(by_ch.title_location)
@@ -212,6 +237,7 @@ impl PerAxis {
             tick_length,
             tick_length_minor,
             tick_gap,
+            title_gap,
             title_location,
         }
     }
@@ -220,6 +246,16 @@ impl PerAxis {
 impl Default for PerAxis {
     fn default() -> Self {
         Self::new(AxisTheme::default())
+    }
+}
+
+impl AxisTheme {
+    /// Resolve this single `AxisTheme` against the per-type concrete
+    /// defaults — useful when a caller holds one `AxisTheme` rather
+    /// than a [`PerAxis`] (legends, polar chrome). Equivalent to
+    /// `PerAxis::new(self.clone()).resolve(0, 0)` but allocates less.
+    pub fn resolved(&self) -> ResolvedAxis {
+        PerAxis::new(self.clone()).resolve(0, 0)
     }
 }
 
@@ -249,6 +285,9 @@ pub struct ResolvedAxis {
     pub tick_length_minor: Length,
     /// Gap between tick end and label near-edge.
     pub tick_gap: Length,
+    /// Gap between the outer edge of the label rail and the axis
+    /// title's near edge. Always positive.
+    pub title_gap: Length,
     /// Axis-title placement.
     pub title_location: TitleLocation,
 }

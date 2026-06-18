@@ -11,24 +11,23 @@
 //!
 //! - All tick labels are horizontal (no rotation). Wide labels on a
 //!   vertical axis grow the axis chrome column.
-//! - Tick mark length, label gap, and font size are fixed pt constants
-//!   defined below; not per-scale themable.
+//! - Tick mark length, label gap, and font size are pulled from the
+//!   theme's resolved [`AxisChromeStyle`] — the same style the renderer
+//!   uses at draw time, so the slot reservation matches the visible
+//!   chrome.
 //! - Tick labels use the scale's own [`Scale::format`], which renders
 //!   numeric values via `{n}` Display and temporal values in calendar
 //!   form (YYYY-MM-DD etc.).
 
 use crate::geometry::{Point, Rect};
 use crate::layout::{Measure, WidthHint};
-use crate::plot::chrome::linear_axis::{
-    draw_linear_axis_at, pt_to_px, AxisChromeStyle, LABEL_FONT_SIZE_PT, LABEL_GAP_PT,
-    TICK_LENGTH_PT,
-};
+use crate::plot::chrome::linear_axis::{draw_linear_axis_at, AxisChromeStyle};
 use crate::plot::scale::Scale;
 use crate::plot::theme::Theme;
 use crate::scales::breaks::DEFAULT_BREAK_COUNT;
 use crate::scales::value::Value;
 use crate::scene::SceneBuilder;
-use crate::text::{Alignment, TextRun, TextStyle};
+use crate::text::{Alignment, TextRun};
 use kurbo::Shape;
 
 use crate::scales::chrome::AxisSide;
@@ -129,11 +128,15 @@ pub(crate) struct AxisMeasure {
     /// (max label height across all ticks, in px at the dpi captured at
     /// construction). Computed once.
     max_label_h_px: f64,
+    /// Resolved tick length (px, absolute value — sign drives draw
+    /// direction but not reservation magnitude).
+    tick_length_px: f64,
+    /// Resolved gap between tick end and label near-edge, px.
+    gap_px: f64,
 }
 
 impl AxisMeasure {
-    fn new(scale: &Scale, side: AxisSide, dpi: f64) -> Self {
-        let style = TextStyle::new(LABEL_FONT_SIZE_PT);
+    fn new(scale: &Scale, side: AxisSide, dpi: f64, chrome_style: &AxisChromeStyle) -> Self {
         let breaks = scale.breaks(DEFAULT_BREAK_COUNT);
         let mut max_w: f64 = 0.0;
         let mut max_h: f64 = 0.0;
@@ -142,7 +145,7 @@ impl AxisMeasure {
                 continue;
             }
             let label = scale.format(v);
-            let run = TextRun::new(&label, &style, dpi);
+            let run = TextRun::new(&label, &chrome_style.text_style, dpi);
             // Lay out unconstrained to get the natural single-line width.
             let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
             // Tick labels render unwrapped — `natural_width` is the
@@ -157,37 +160,40 @@ impl AxisMeasure {
             side,
             max_label_w_px: max_w,
             max_label_h_px: max_h,
+            // Reservation uses the tick's magnitude — sign flips the
+            // tick's draw direction but the slot still needs to fit
+            // it either way.
+            tick_length_px: chrome_style.tick_length_px.abs(),
+            gap_px: chrome_style.gap_px,
         }
     }
 
     /// Total px contribution along the axis's perpendicular direction.
     /// For Left/Right axes this is the column width; for Bottom/Top it's
     /// the row height.
-    fn chrome_thickness_px(&self, dpi: f64) -> f64 {
-        let tick = pt_to_px(TICK_LENGTH_PT, dpi);
-        let gap = pt_to_px(LABEL_GAP_PT, dpi);
+    fn chrome_thickness_px(&self) -> f64 {
         let label_dim = if self.side.is_vertical() {
             self.max_label_w_px
         } else {
             self.max_label_h_px
         };
-        tick + gap + label_dim
+        self.tick_length_px + self.gap_px + label_dim
     }
 }
 
 impl Measure for AxisMeasure {
-    fn width_hint(&self, dpi: f64) -> WidthHint {
+    fn width_hint(&self, _dpi: f64) -> WidthHint {
         if self.side.is_vertical() {
-            WidthHint::Min(self.chrome_thickness_px(dpi))
+            WidthHint::Min(self.chrome_thickness_px())
         } else {
             // Horizontal axes don't constrain column width.
             WidthHint::Min(0.0)
         }
     }
 
-    fn height_at(&self, _width: f64, dpi: f64) -> f64 {
+    fn height_at(&self, _width: f64, _dpi: f64) -> f64 {
         if self.side.is_horizontal() {
-            self.chrome_thickness_px(dpi)
+            self.chrome_thickness_px()
         } else {
             // Vertical axes inherit panel height; their cell doesn't
             // contribute to row sizing.
@@ -201,10 +207,15 @@ impl Measure for AxisMeasure {
 impl Scale {
     /// Pre-shape this scale's tick labels into a [`Measure`] cell suitable
     /// for dropping into a [`composition::Patch`](crate::composition::Patch)
-    /// slot. The cell's dimensions reflect the scale's *current* state at
-    /// call time; mutate the scale and call again to refresh.
-    pub fn axis_measure(&self, side: AxisSide, dpi: f64) -> Box<dyn Measure> {
-        Box::new(AxisMeasure::new(self, side, dpi))
+    /// slot. The chrome style (label text style, tick / gap pixel sizes)
+    /// is resolved from `theme` against the channel + side derived from
+    /// `side`, so the slot reservation matches what [`Scale::draw_axis`]
+    /// emits at draw time.
+    pub fn axis_measure(&self, side: AxisSide, dpi: f64, theme: &Theme) -> Box<dyn Measure> {
+        let (ch, side_idx) = axis_side_to_channel_side(side);
+        let resolved = theme.axis.resolve(ch, side_idx);
+        let chrome_style = AxisChromeStyle::from_resolved(&resolved, &theme.palette, dpi);
+        Box::new(AxisMeasure::new(self, side, dpi, &chrome_style))
     }
 
     /// Stroke tick marks and draw tick labels into `slot_rect`, mapping
@@ -346,19 +357,21 @@ mod tests {
     #[test]
     fn bottom_axis_measure_reports_chrome_height() {
         let s = scale::continuous(0.0..=100.0);
-        let m = s.axis_measure(AxisSide::Bottom, dpi_96());
+        let theme = Theme::default();
+        let m = s.axis_measure(AxisSide::Bottom, dpi_96(), &theme);
         // Bottom axis: width contribution = 0, height = tick + gap + label_h.
         assert_eq!(m.width_hint(dpi_96()), WidthHint::Min(0.0));
         let h = m.height_at(400.0, dpi_96());
         assert!(h > 0.0, "axis height should be positive");
         // Sanity: at least the tick length in px.
-        assert!(h >= pt_to_px(TICK_LENGTH_PT, dpi_96()) - 0.5);
+        assert!(h >= 1.0);
     }
 
     #[test]
     fn left_axis_measure_reports_chrome_width() {
         let s = scale::continuous(0.0..=100.0);
-        let m = s.axis_measure(AxisSide::Left, dpi_96());
+        let theme = Theme::default();
+        let m = s.axis_measure(AxisSide::Left, dpi_96(), &theme);
         let w = match m.width_hint(dpi_96()) {
             WidthHint::Min(w) => w,
             WidthHint::NeedsHeight { seed } => seed,
@@ -374,8 +387,9 @@ mod tests {
         // produce a wider Left axis.
         let s_short = scale::continuous(0.0..=10.0);
         let s_long = scale::continuous(0.0..=100_000_000.0);
-        let m_short = s_short.axis_measure(AxisSide::Left, dpi_96());
-        let m_long = s_long.axis_measure(AxisSide::Left, dpi_96());
+        let theme = Theme::default();
+        let m_short = s_short.axis_measure(AxisSide::Left, dpi_96(), &theme);
+        let m_long = s_long.axis_measure(AxisSide::Left, dpi_96(), &theme);
         let w_short = match m_short.width_hint(dpi_96()) {
             WidthHint::Min(w) => w,
             WidthHint::NeedsHeight { seed } => seed,
@@ -410,7 +424,8 @@ mod tests {
         let s = scale::continuous(0.0..=10.0);
         let panel = panel_400_300();
         // Place the slot directly below the panel — height = chrome.
-        let m = s.axis_measure(AxisSide::Bottom, dpi_96());
+        let theme = Theme::default();
+        let m = s.axis_measure(AxisSide::Bottom, dpi_96(), &theme);
         let chrome_h = m.height_at(panel.x1 - panel.x0, dpi_96());
         let slot = Rect::new(panel.x0, panel.y1, panel.x1, panel.y1 + chrome_h);
 
@@ -445,7 +460,8 @@ mod tests {
     fn left_axis_draws_baseline_and_ticks() {
         let s = scale::continuous(0.0..=1.0);
         let panel = panel_400_300();
-        let m = s.axis_measure(AxisSide::Left, dpi_96());
+        let theme = Theme::default();
+        let m = s.axis_measure(AxisSide::Left, dpi_96(), &theme);
         let chrome_w = match m.width_hint(dpi_96()) {
             WidthHint::Min(w) => w,
             WidthHint::NeedsHeight { seed } => seed,

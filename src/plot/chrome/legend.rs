@@ -26,9 +26,7 @@ use crate::geometry::{Affine, Point, Rect, Size};
 use crate::layout::{Cell, CellId, Grid, Measure, Placement, Track, WidthHint};
 use crate::path::{FillRule, Path};
 use crate::pick::PickId;
-use crate::plot::chrome::linear_axis::{
-    draw_axis_label, pt_to_px, AxisLabelAt, LABEL_FONT_SIZE_PT,
-};
+use crate::plot::chrome::linear_axis::{draw_axis_label, pt_to_px, AxisLabelAt};
 use crate::plot::scale::ScaleRegistry;
 use crate::primitives::{circle, segment};
 use crate::scales::breaks::DEFAULT_BREAK_COUNT;
@@ -147,6 +145,7 @@ pub fn legend_stack_natural_size(
     dpi: f64,
     theme: &crate::plot::theme::Theme,
 ) -> (f64, f64) {
+    let gap_px = legend_gap_px(theme, dpi);
     let measures: Vec<LegendMeasure> = legends
         .iter()
         .map(|l| {
@@ -155,6 +154,8 @@ pub fn legend_stack_natural_size(
                 registry,
                 dpi,
                 theme.legend_for(l.theme_variant.as_deref()),
+                &theme.geom,
+                gap_px,
             )
         })
         .filter(|m| !m.is_empty())
@@ -180,29 +181,59 @@ use kurbo::Shape;
 
 // ─── Style constants (pt) ───────────────────────────────────────────────────
 
-/// Default Point marker diameter when no size is bound, pt. Used
-/// as a fallback in `render_point` and `swatch_dim_for`; the geom
-/// theme's `geom.point.size_pt` will eventually subsume this.
-const DEFAULT_POINT_DIAMETER_PT: f64 = 8.0;
-/// Default linewidth for stroke outlines / line swatches, pt.
-/// Fallback used when a resolved key carries no explicit
-/// linewidth; routed through theme.geom.line in a follow-up.
-const DEFAULT_LINEWIDTH_PT: f64 = 1.0;
-/// Fallback gap between adjacent legends — used as the resolution
-/// floor when `Theme::legend_spacing.resolve(LEGEND_GAP_PT)` lacks
-/// an absolute value to fall back to.
-const LEGEND_GAP_PT: f64 = 10.0;
-/// The default `circle` point shape's intrinsic radius (in shape
-/// coordinates). Mirrored from `crate::shape::builtins::circle` so
-/// the legend's Point key renders at the same diameter the geom
-/// would for an equal `size_pt`.
-const POINT_SHAPE_RADIUS: f64 = 0.8;
-/// Glyph normalisation target — height the glyph is rescaled to in
-/// shape space before the size scale is applied. Mirrors
-/// `crate::plot::geom::point::GLYPH_BBOX_REFERENCE` so a glyph
-/// marker at a given `size_pt` renders at the same visual extent in
-/// the legend as in the plot.
-const GLYPH_BBOX_REFERENCE: f64 = 1.6;
+// Inter-legend (and panel ↔ legend) gap parents — shared with
+// `Theme::default()` so the `Length::Rel` resolve parent matches the
+// bottom-of-cascade concrete value.
+use crate::plot::theme::{
+    DEFAULT_LEGEND_GAP_PT as PANEL_LEGEND_GAP_PT, DEFAULT_LEGEND_SPACING_PT as LEGEND_GAP_PT,
+};
+
+/// Resolved panel-to-legend gap in px against the theme.
+fn legend_gap_px(theme: &crate::plot::theme::Theme, dpi: f64) -> f64 {
+    pt_to_px(theme.legend_gap.resolve(PANEL_LEGEND_GAP_PT), dpi)
+}
+
+/// Shrink `slot_rect` by `gap_px` on the panel-facing edge for a
+/// cardinal-side legend. The shrunk rect is what the renderer draws
+/// into; the layout already reserved the full slot inclusive of the
+/// gap via [`LegendMeasure::primary_dim_px`].
+fn inset_for_panel_gap(slot_rect: Rect, side: LegendSide, gap_px: f64) -> Rect {
+    match side {
+        LegendSide::Right => Rect::new(
+            slot_rect.x0 + gap_px,
+            slot_rect.y0,
+            slot_rect.x1,
+            slot_rect.y1,
+        ),
+        LegendSide::Left => Rect::new(
+            slot_rect.x0,
+            slot_rect.y0,
+            slot_rect.x1 - gap_px,
+            slot_rect.y1,
+        ),
+        LegendSide::Bottom => Rect::new(
+            slot_rect.x0,
+            slot_rect.y0 + gap_px,
+            slot_rect.x1,
+            slot_rect.y1,
+        ),
+        LegendSide::Top => Rect::new(
+            slot_rect.x0,
+            slot_rect.y0,
+            slot_rect.x1,
+            slot_rect.y1 - gap_px,
+        ),
+        // In-panel legends use Anchor + inset_pt and don't go through
+        // the cardinal slot machinery, so the gap doesn't apply.
+        LegendSide::InPanel { .. } => slot_rect,
+    }
+}
+// The legend Point key marker mirrors the geom: same intrinsic
+// shape-space radius as the builtin `circle`, same glyph bbox
+// normalisation as `geom::point`. Sourced from the canonical
+// definitions so legend and panel markers can't drift.
+use crate::plot::geom::point::GLYPH_BBOX_REFERENCE;
+use crate::shape::builtin::REFERENCE_RADIUS as POINT_SHAPE_RADIUS;
 
 fn ink() -> Color {
     rgb(0.0, 0.0, 0.0)
@@ -849,6 +880,8 @@ pub fn legend_measure(
         registry,
         dpi,
         theme.legend_for(legend.theme_variant.as_deref()),
+        &theme.geom,
+        legend_gap_px(theme, dpi),
     ))
 }
 
@@ -864,7 +897,8 @@ pub fn legend_stack_measure(
     dpi: f64,
     theme: &crate::plot::theme::Theme,
 ) -> Box<dyn Measure> {
-    let gap_px = pt_to_px(theme.legend_spacing.resolve(LEGEND_GAP_PT), dpi);
+    let inter_gap_px = pt_to_px(theme.legend_spacing.resolve(LEGEND_GAP_PT), dpi);
+    let panel_gap_px = legend_gap_px(theme, dpi);
     let children: Vec<LegendMeasure> = legends
         .iter()
         .map(|l| {
@@ -873,13 +907,15 @@ pub fn legend_stack_measure(
                 registry,
                 dpi,
                 theme.legend_for(l.theme_variant.as_deref()),
+                &theme.geom,
+                panel_gap_px,
             )
         })
         .collect();
     Box::new(LegendStackMeasure {
         side: cardinal_side(side),
         children,
-        gap_px,
+        gap_px: inter_gap_px,
     })
 }
 
@@ -901,7 +937,8 @@ pub fn render_legend_stack(
     dpi: f64,
     theme: &crate::plot::theme::Theme,
 ) {
-    let gap_px = pt_to_px(theme.legend_spacing.resolve(LEGEND_GAP_PT), dpi);
+    let inter_gap_px = pt_to_px(theme.legend_spacing.resolve(LEGEND_GAP_PT), dpi);
+    let panel_gap_px = legend_gap_px(theme, dpi);
     let measures: Vec<(usize, LegendMeasure)> = legends
         .iter()
         .enumerate()
@@ -913,6 +950,8 @@ pub fn render_legend_stack(
                     registry,
                     dpi,
                     theme.legend_for(l.theme_variant.as_deref()),
+                    &theme.geom,
+                    panel_gap_px,
                 ),
             )
         })
@@ -943,7 +982,7 @@ pub fn render_legend_stack(
             dpi,
             theme,
         );
-        cursor += cross + gap_px;
+        cursor += cross + inter_gap_px;
     }
 }
 
@@ -964,14 +1003,19 @@ pub fn render_legend(
     theme: &crate::plot::theme::Theme,
 ) {
     let lt = theme.legend_for(legend.theme_variant.as_deref());
-    let measure = LegendMeasure::new(legend, registry, dpi, lt);
+    let gap_px = legend_gap_px(theme, dpi);
+    let measure = LegendMeasure::new(legend, registry, dpi, lt, &theme.geom, gap_px);
     if measure.is_empty() {
         return;
     }
+    // Shrink the slot on the panel-facing edge by `legend_gap` —
+    // `primary_dim_px` already reserved that strip, but we don't paint
+    // background, body, or chrome into it.
+    let draw_rect = inset_for_panel_gap(slot_rect, legend.side, gap_px);
     // Background fill + border, sourced from the resolved
     // LegendTheme. Painted under the legend body so keys + text layer
     // on top.
-    paint_legend_background(scene, lt, &theme.palette, slot_rect, dpi);
+    paint_legend_background(scene, lt, &theme.palette, draw_rect, dpi);
 
     match &legend.body {
         LegendBody::Stack(stack) if stack.binned => render_binned_stack_body(
@@ -980,11 +1024,12 @@ pub fn render_legend(
             &measure,
             registry,
             shapes,
-            slot_rect,
+            draw_rect,
             scene,
             dpi,
             lt,
             &theme.palette,
+            &theme.geom,
         ),
         LegendBody::Stack(stack) => render_stack_body(
             legend,
@@ -992,18 +1037,19 @@ pub fn render_legend(
             &measure,
             registry,
             shapes,
-            slot_rect,
+            draw_rect,
             scene,
             dpi,
             lt,
             &theme.palette,
+            &theme.geom,
         ),
         LegendBody::Colorbar(spec) => render_colorbar_body(
             legend,
             spec,
             &measure,
             registry,
-            slot_rect,
+            draw_rect,
             scene,
             dpi,
             lt,
@@ -1012,57 +1058,46 @@ pub fn render_legend(
     }
 }
 
-/// Resolved per-legend text styling — title and label styles +
-/// brushes — pulled out of the LegendTheme so each render body
-/// reads the same values without duplicating the resolution logic.
+/// Resolved per-legend text styling. Each slot is `None` when the
+/// matching `Element` is `Blank` — call sites use that to skip the
+/// draw entirely. `Inherit` and `Set` both resolve to `Some` with
+/// the appropriate cascaded values.
 struct LegendTextStyles {
-    title_style: TextStyle,
-    title_brush: Brush,
-    label_style: TextStyle,
-    label_brush: Brush,
+    title: Option<(TextStyle, Brush)>,
+    label: Option<(TextStyle, Brush)>,
 }
 
 fn legend_text_styles(
     lt: &crate::plot::theme::LegendTheme,
     palette: &crate::plot::theme::Palette,
 ) -> LegendTextStyles {
-    use crate::plot::theme::text_concrete_defaults;
-    let text_defaults = text_concrete_defaults();
+    use crate::plot::theme::{text_concrete_defaults, Element, TextElement};
+    let defaults = text_concrete_defaults();
     let root_pt = 10.0_f64;
-    fn resolve_color(
-        el: &crate::plot::theme::TextElement,
-        defaults: &crate::plot::theme::TextElement,
+    fn resolve(
+        el: &Element<TextElement>,
+        defaults: &TextElement,
         palette: &crate::plot::theme::Palette,
-    ) -> Brush {
-        let c = el
+        root_pt: f64,
+    ) -> Option<(TextStyle, Brush)> {
+        let merged = match el {
+            Element::Set(child) => child.cascade(defaults),
+            Element::Blank => return None,
+            Element::Inherit => defaults.clone(),
+        };
+        let color = merged
             .color
-            .clone()
-            .or_else(|| defaults.color.clone())
-            .expect("text color default");
-        Brush::Solid(c.resolve(palette))
+            .as_ref()
+            .expect("text color default")
+            .resolve(palette);
+        Some((
+            crate::plot::plot::text_style_from(&merged, root_pt),
+            Brush::Solid(color),
+        ))
     }
-    let (title_style, title_brush) = match lt.title.as_set() {
-        Some(el) => (
-            crate::plot::plot::text_style_from(el, root_pt),
-            resolve_color(el, &text_defaults, palette),
-        ),
-        None => (
-            TextStyle::new(LABEL_FONT_SIZE_PT).weight(700),
-            Brush::Solid(ink()),
-        ),
-    };
-    let (label_style, label_brush) = match lt.axis.text.as_set() {
-        Some(el) => (
-            crate::plot::plot::text_style_from(el, root_pt),
-            resolve_color(el, &text_defaults, palette),
-        ),
-        None => (TextStyle::new(LABEL_FONT_SIZE_PT), Brush::Solid(ink())),
-    };
     LegendTextStyles {
-        title_style,
-        title_brush,
-        label_style,
-        label_brush,
+        title: resolve(&lt.title, &defaults, palette, root_pt),
+        label: resolve(&lt.axis.text, &defaults, palette, root_pt),
     }
 }
 
@@ -1165,6 +1200,7 @@ fn render_stack_body(
     dpi: f64,
     lt: &crate::plot::theme::LegendTheme,
     palette: &crate::plot::theme::Palette,
+    geom: &crate::plot::theme::GeomTheme,
 ) {
     let side = cardinal_side(legend.side);
     let domain = match registry.get(&legend.domain_scale) {
@@ -1207,15 +1243,15 @@ fn render_stack_body(
     let entries_x = title_x;
     let entries_y = title_y + measure.title_h_px + title_gap;
 
-    if let Some(title) = &legend.title {
-        let run = TextRun::new(title, &styles.title_style, dpi);
+    if let (Some(title), Some((title_style, title_brush))) = (&legend.title, &styles.title) {
+        let run = TextRun::new(title, title_style, dpi);
         let _ = run.set_max_width(f32::INFINITY, Alignment::Start);
         draw_text(
             scene,
             &run,
             title_x,
             title_y,
-            &styles.title_brush,
+            title_brush,
             Affine::IDENTITY,
             PickId::Skip,
         );
@@ -1237,24 +1273,26 @@ fn render_stack_body(
         }
         for key in keys {
             let resolved = resolve_key(key, registry, v);
-            render_key(key.kind, &resolved, swatch_rect, shapes, scene, dpi);
+            render_key(key.kind, &resolved, swatch_rect, shapes, scene, dpi, geom);
         }
         if let Some(frame_el) = key_frame {
             paint_rect_frame(scene, frame_el, palette, swatch_rect, dpi, false, true);
         }
-        let label = domain.format(v);
-        let anchor = Point::new(label_rect.x0, (label_rect.y0 + label_rect.y1) * 0.5);
-        draw_axis_label(
-            scene,
-            &label,
-            &styles.label_style,
-            &styles.label_brush,
-            AxisLabelAt {
-                anchor,
-                direction: (1.0, 0.0),
-            },
-            dpi,
-        );
+        if let Some((label_style, label_brush)) = &styles.label {
+            let label = domain.format(v);
+            let anchor = Point::new(label_rect.x0, (label_rect.y0 + label_rect.y1) * 0.5);
+            draw_axis_label(
+                scene,
+                &label,
+                label_style,
+                label_brush,
+                AxisLabelAt {
+                    anchor,
+                    direction: (1.0, 0.0),
+                },
+                dpi,
+            );
+        }
     }
 }
 
@@ -1275,6 +1313,7 @@ fn render_binned_stack_body(
     dpi: f64,
     lt: &crate::plot::theme::LegendTheme,
     palette: &crate::plot::theme::Palette,
+    geom: &crate::plot::theme::GeomTheme,
 ) {
     let styles = legend_text_styles(lt, palette);
     let domain = match registry.get(&legend.domain_scale) {
@@ -1334,15 +1373,15 @@ fn render_binned_stack_body(
         measure.title_w_px,
         bar_thickness,
     );
-    if let Some(title) = &legend.title {
-        let run = TextRun::new(title, &styles.title_style, dpi);
+    if let (Some(title), Some((title_style, title_brush))) = (&legend.title, &styles.title) {
+        let run = TextRun::new(title, title_style, dpi);
         let _ = run.set_max_width(f32::INFINITY, Alignment::Start);
         draw_text(
             scene,
             &run,
             title_x,
             title_y,
-            &styles.title_brush,
+            title_brush,
             Affine::IDENTITY,
             PickId::Skip,
         );
@@ -1417,7 +1456,7 @@ fn render_binned_stack_body(
         };
         for key in keys {
             let resolved = resolve_key(key, registry, &midpoint);
-            render_key(key.kind, &resolved, cell, shapes, scene, dpi);
+            render_key(key.kind, &resolved, cell, shapes, scene, dpi, geom);
         }
     }
 
@@ -1437,7 +1476,11 @@ fn render_binned_stack_body(
         majors_owned
     };
     let majors = open_end_trim(&majors_owned, legend.open_lower, legend.open_upper);
-    let style = crate::plot::chrome::linear_axis::AxisChromeStyle::legacy_default(dpi);
+    let style = crate::plot::chrome::linear_axis::AxisChromeStyle::from_resolved(
+        &lt.axis.resolved(),
+        palette,
+        dpi,
+    );
     crate::plot::chrome::linear_axis::draw_linear_axis_at(
         scene,
         axis_start,
@@ -1499,15 +1542,15 @@ fn render_colorbar_body(
         bar_thickness_px,
     );
 
-    if let Some(title) = &legend.title {
-        let run = TextRun::new(title, &styles.title_style, dpi);
+    if let (Some(title), Some((title_style, title_brush))) = (&legend.title, &styles.title) {
+        let run = TextRun::new(title, title_style, dpi);
         let _ = run.set_max_width(f32::INFINITY, Alignment::Start);
         draw_text(
             scene,
             &run,
             title_x,
             title_y,
-            &styles.title_brush,
+            title_brush,
             Affine::IDENTITY,
             PickId::Skip,
         );
@@ -1592,7 +1635,11 @@ fn render_colorbar_body(
         majors_owned
     };
     let majors = open_end_trim(&majors_owned, legend.open_lower, legend.open_upper);
-    let style = crate::plot::chrome::linear_axis::AxisChromeStyle::legacy_default(dpi);
+    let style = crate::plot::chrome::linear_axis::AxisChromeStyle::from_resolved(
+        &lt.axis.resolved(),
+        palette,
+        dpi,
+    );
     crate::plot::chrome::linear_axis::draw_linear_axis_at(
         scene,
         axis_start,
@@ -1871,8 +1918,21 @@ struct LegendMeasure {
     padding_px: f64,
     /// Gap between adjacent keys in a single legend, px.
     row_gap_px: f64,
-    /// Gap between a key swatch and its label, px.
+    /// Gap between a key swatch and its label, px. Same value the
+    /// legend's axis renders for tick → label gap — pre-resolved
+    /// here only because [`build_discrete_stack_layout`] needs it as
+    /// a `Fixed` track gap during construction.
     swatch_label_gap_px: f64,
+    /// The legend's axis chrome — kept here so the binned + colorbar
+    /// primary dim can ask the axis for its own thickness instead of
+    /// re-summing tick / gap arms by hand. Cloned at construction
+    /// because the `Measure` trait impl outlives `&LegendTheme`.
+    axis: crate::plot::theme::AxisTheme,
+    /// Gap between the panel-facing slot edge and the legend's outer
+    /// block, px. Inflates the primary dim reservation; the renderer
+    /// shrinks the slot rect on the panel-facing side by the same
+    /// amount before drawing.
+    legend_gap_px: f64,
 }
 
 enum BodyMeasure {
@@ -1908,18 +1968,26 @@ impl LegendMeasure {
         registry: &ScaleRegistry,
         dpi: f64,
         lt: &crate::plot::theme::LegendTheme,
+        geom: &crate::plot::theme::GeomTheme,
+        legend_gap_px: f64,
     ) -> Self {
         // Label + title styles come from the LegendTheme so measure
-        // and draw size identical glyph runs.
+        // and draw size identical glyph runs. `Blank` short-circuits
+        // to `None` — the corresponding cell reserves zero space
+        // because the renderer won't draw it.
+        use crate::plot::theme::{text_concrete_defaults, Element};
+        let text_defaults = text_concrete_defaults();
         let root_pt = 10.0_f64;
-        let label_style = match lt.axis.text.as_set() {
-            Some(el) => crate::plot::plot::text_style_from(el, root_pt),
-            None => TextStyle::new(LABEL_FONT_SIZE_PT),
+        let resolve_style = |el: &Element<crate::plot::theme::TextElement>| match el {
+            Element::Set(child) => Some(crate::plot::plot::text_style_from(
+                &child.cascade(&text_defaults),
+                root_pt,
+            )),
+            Element::Blank => None,
+            Element::Inherit => Some(crate::plot::plot::text_style_from(&text_defaults, root_pt)),
         };
-        let title_style = match lt.title.as_set() {
-            Some(el) => crate::plot::plot::text_style_from(el, root_pt),
-            None => TextStyle::new(LABEL_FONT_SIZE_PT).weight(700),
-        };
+        let label_style = resolve_style(&lt.axis.text);
+        let title_style = resolve_style(&lt.title);
         let domain = registry.get(&legend.domain_scale);
         let breaks = domain
             .map(|s| s.breaks(DEFAULT_BREAK_COUNT))
@@ -1932,8 +2000,13 @@ impl LegendMeasure {
             if matches!(v, Value::Null) {
                 continue;
             }
+            entry_count += 1;
+            // Blank labels render nothing → no reserved label box.
+            let Some(label_style) = label_style.as_ref() else {
+                continue;
+            };
             let label = domain.map(|s| s.format(v)).unwrap_or_default();
-            let run = TextRun::new(&label, &label_style, dpi);
+            let run = TextRun::new(&label, label_style, dpi);
             let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
             // Labels render unwrapped, so the slot needs the full
             // single-line width — `width_hint` returns the
@@ -1942,23 +2015,14 @@ impl LegendMeasure {
             let w = run.natural_width();
             max_label_w = max_label_w.max(w);
             max_label_h = max_label_h.max(h);
-            entry_count += 1;
         }
 
-        // Resolve LegendTheme layout sizes to px once. The
-        // swatch-to-label gap uses the legend's axis `tick_gap` — same
-        // semantic as an axis tick → label gap. Pulled forward of the
-        // body match so the grid build below sees the resolved px.
+        // Resolve LegendTheme layout sizes the construction step needs
+        // as px. `swatch_label_gap_px` is pulled forward of the body
+        // match so the grid build below sees a `Fixed` gap track.
         let padding_px = pt_to_px(lt.padding.left.resolve(0.0), dpi);
         let row_gap_px = pt_to_px(lt.key.spacing.resolve(0.0), dpi);
-        let swatch_label_gap_px = pt_to_px(
-            lt.axis
-                .tick_gap
-                .or(crate::plot::theme::axis_concrete_defaults().tick_gap)
-                .expect("axis tick_gap default")
-                .resolve(0.0),
-            dpi,
-        );
+        let swatch_label_gap_px = pt_to_px(lt.axis.resolved().tick_gap.resolve(0.0), dpi);
 
         let body = match &legend.body {
             LegendBody::Stack(stack) if stack.binned => {
@@ -1971,7 +2035,7 @@ impl LegendMeasure {
                         let (mut row_w, mut row_h) = (0.0_f64, 0.0_f64);
                         for key in &stack.keys {
                             let resolved = resolve_key(key, registry, v);
-                            let (w, h) = swatch_dim_for(key.kind, &resolved, dpi);
+                            let (w, h) = swatch_dim_for(key.kind, &resolved, dpi, geom);
                             row_w = row_w.max(w);
                             row_h = row_h.max(h);
                         }
@@ -2001,7 +2065,7 @@ impl LegendMeasure {
                     let (mut row_w, mut row_h) = (0.0_f64, 0.0_f64);
                     for key in &stack.keys {
                         let resolved = resolve_key(key, registry, v);
-                        let (w, h) = swatch_dim_for(key.kind, &resolved, dpi);
+                        let (w, h) = swatch_dim_for(key.kind, &resolved, dpi, geom);
                         row_w = row_w.max(w);
                         row_h = row_h.max(h);
                     }
@@ -2011,13 +2075,23 @@ impl LegendMeasure {
                         floor_w_px: key_w_floor,
                         floor_h_px: key_h_floor,
                     };
-                    let label_text = domain.map(|s| s.format(v)).unwrap_or_default();
-                    let run = TextRun::new(&label_text, &label_style, dpi);
-                    let nat_h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
-                    let nat_w = run.natural_width();
-                    let label = LabelMeasure {
-                        natural_w_px: nat_w,
-                        natural_h_px: nat_h,
+                    // Blank labels → zero-extent LabelMeasure (no
+                    // draw, no reservation).
+                    let label = match label_style.as_ref() {
+                        Some(style) => {
+                            let label_text = domain.map(|s| s.format(v)).unwrap_or_default();
+                            let run = TextRun::new(&label_text, style, dpi);
+                            let nat_h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+                            let nat_w = run.natural_width();
+                            LabelMeasure {
+                                natural_w_px: nat_w,
+                                natural_h_px: nat_h,
+                            }
+                        }
+                        None => LabelMeasure {
+                            natural_w_px: 0.0,
+                            natural_h_px: 0.0,
+                        },
                     };
                     rows.push((swatch, label));
                 }
@@ -2039,9 +2113,9 @@ impl LegendMeasure {
             },
         };
 
-        let (title_w_px, title_h_px) = match &legend.title {
-            Some(text) if !text.is_empty() => {
-                let run = TextRun::new(text, &title_style, dpi);
+        let (title_w_px, title_h_px) = match (&legend.title, title_style.as_ref()) {
+            (Some(text), Some(style)) if !text.is_empty() => {
+                let run = TextRun::new(text, style, dpi);
                 let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
                 // Titles render unwrapped — `natural_width` is the
                 // actual draw width; `width_hint` would undershoot
@@ -2066,6 +2140,8 @@ impl LegendMeasure {
             padding_px,
             row_gap_px,
             swatch_label_gap_px,
+            axis: lt.axis.clone(),
+            legend_gap_px,
         }
     }
 
@@ -2081,7 +2157,9 @@ impl LegendMeasure {
     }
 
     /// Block dimension along the side's primary axis: column width
-    /// for Right/Left, row height for Top/Bottom.
+    /// for Right/Left, row height for Top/Bottom. Includes
+    /// [`Self::legend_gap_px`] — the renderer shrinks the slot by the
+    /// same amount on the panel-facing edge before drawing.
     fn primary_dim_px(&self, dpi: f64) -> f64 {
         let padding = self.padding_px;
         let title_gap = if self.title_h_px > 0.0 {
@@ -2089,10 +2167,17 @@ impl LegendMeasure {
         } else {
             0.0
         };
-        let tick_px = pt_to_px(crate::plot::chrome::linear_axis::TICK_LENGTH_PT, dpi);
-        let label_gap_axis = pt_to_px(crate::plot::chrome::linear_axis::LABEL_GAP_PT, dpi);
+        // Bar-style bodies (binned + colorbar) carry an axis arm:
+        // bar thickness + tick + gap + label. Tick + gap come from
+        // the legend's own AxisTheme — same source the legend's axis
+        // renderer reads, so the slot reservation matches the draw.
+        // Reservation uses the tick magnitude — sign flips draw
+        // direction but the slot fits the tick either way.
+        let axis_resolved = self.axis.resolved();
+        let tick_px = pt_to_px(axis_resolved.tick_length.resolve(0.0), dpi).abs();
+        let label_gap_axis = pt_to_px(axis_resolved.tick_gap.resolve(0.0), dpi);
 
-        match (&self.body, self.side) {
+        let body_dim = match (&self.body, self.side) {
             (BodyMeasure::Stack { layout, .. }, LegendSide::Right | LegendSide::Left) => {
                 // Vertical legend column width comes straight from
                 // the inner grid's resolved entries width.
@@ -2155,7 +2240,8 @@ impl LegendMeasure {
             (_, LegendSide::InPanel { .. }) => {
                 unreachable!("LegendMeasure stores cardinal side, never InPanel")
             }
-        }
+        };
+        body_dim + self.legend_gap_px
     }
 
     /// Cross-axis dim: height for Right/Left, width for Top/Bottom.
@@ -2318,10 +2404,15 @@ impl Measure for LegendStackMeasure {
 /// coordinates (line spans 0..1 horizontally, sits at 0.5
 /// vertically). Points grow the cell by their marker diameter.
 /// Rects don't impose a minimum beyond the theme floor.
-fn swatch_dim_for(kind: LegendKey, peak: &ResolvedKey, dpi: f64) -> (f64, f64) {
+fn swatch_dim_for(
+    kind: LegendKey,
+    peak: &ResolvedKey,
+    dpi: f64,
+    geom: &crate::plot::theme::GeomTheme,
+) -> (f64, f64) {
     match kind {
         LegendKey::Point => {
-            let size_pt = peak.size_pt.unwrap_or(DEFAULT_POINT_DIAMETER_PT);
+            let size_pt = peak.size_pt.unwrap_or(geom.point.size_pt);
             // Match PointGeom's circle path (radius 0.8) so the
             // rendered marker matches the geom for the same size.
             let d = pt_to_px(size_pt * 2.0 * POINT_SHAPE_RADIUS, dpi);
@@ -2338,11 +2429,12 @@ fn render_key(
     shapes: &ShapeRegistry,
     scene: &mut dyn SceneBuilder,
     dpi: f64,
+    geom: &crate::plot::theme::GeomTheme,
 ) {
     match kind {
-        LegendKey::Point => render_point(resolved, cell, shapes, scene, dpi),
-        LegendKey::Line => render_line(resolved, cell, scene, dpi),
-        LegendKey::Rect => render_rect(resolved, cell, scene, dpi),
+        LegendKey::Point => render_point(resolved, cell, shapes, scene, dpi, geom),
+        LegendKey::Line => render_line(resolved, cell, scene, dpi, geom),
+        LegendKey::Rect => render_rect(resolved, cell, scene, dpi, geom),
     }
 }
 
@@ -2363,8 +2455,9 @@ fn render_point(
     shapes: &ShapeRegistry,
     scene: &mut dyn SceneBuilder,
     dpi: f64,
+    geom: &crate::plot::theme::GeomTheme,
 ) {
-    let size_pt = resolved.size_pt.unwrap_or(DEFAULT_POINT_DIAMETER_PT);
+    let size_pt = resolved.size_pt.unwrap_or(geom.point.size_pt);
     let size_px = pt_to_px(size_pt, dpi);
     let centre = Point::new(
         cell.x0 + (cell.x1 - cell.x0) * 0.5,
@@ -2387,7 +2480,7 @@ fn render_point(
         .map(|c| Brush::Solid(apply_alpha(c, resolved.alpha)));
     let stroke = stroke_brush.as_ref().map(|_| {
         Stroke::new(pt_to_px(
-            resolved.linewidth_pt.unwrap_or(DEFAULT_LINEWIDTH_PT),
+            resolved.linewidth_pt.unwrap_or(geom.point.stroke_width_pt),
             dpi,
         ))
     });
@@ -2492,7 +2585,13 @@ fn render_point(
     }
 }
 
-fn render_line(resolved: &ResolvedKey, cell: Rect, scene: &mut dyn SceneBuilder, dpi: f64) {
+fn render_line(
+    resolved: &ResolvedKey,
+    cell: Rect,
+    scene: &mut dyn SceneBuilder,
+    dpi: f64,
+    geom: &crate::plot::theme::GeomTheme,
+) {
     // Pick stroke colour: explicit `stroke` channel wins, else fall
     // back to `fill` (callers sometimes write `color` → fill on the
     // ResolvedKey via the alias in `apply`).
@@ -2501,7 +2600,7 @@ fn render_line(resolved: &ResolvedKey, cell: Rect, scene: &mut dyn SceneBuilder,
         .or(resolved.fill)
         .map(|c| apply_alpha(c, resolved.alpha))
         .unwrap_or_else(ink);
-    let lw_pt = resolved.linewidth_pt.unwrap_or(DEFAULT_LINEWIDTH_PT);
+    let lw_pt = resolved.linewidth_pt.unwrap_or(geom.line.linewidth_pt);
     let mid_y = cell.y0 + (cell.y1 - cell.y0) * 0.5;
     let p0 = Point::new(cell.x0, mid_y);
     let p1 = Point::new(cell.x1, mid_y);
@@ -2524,7 +2623,13 @@ fn render_line(resolved: &ResolvedKey, cell: Rect, scene: &mut dyn SceneBuilder,
     );
 }
 
-fn render_rect(resolved: &ResolvedKey, cell: Rect, scene: &mut dyn SceneBuilder, dpi: f64) {
+fn render_rect(
+    resolved: &ResolvedKey,
+    cell: Rect,
+    scene: &mut dyn SceneBuilder,
+    dpi: f64,
+    geom: &crate::plot::theme::GeomTheme,
+) {
     let path: Path = cell.to_path(0.0);
     if let Some(fill) = resolved.fill {
         scene.fill(
@@ -2537,7 +2642,7 @@ fn render_rect(resolved: &ResolvedKey, cell: Rect, scene: &mut dyn SceneBuilder,
         );
     }
     if let Some(stroke_color) = resolved.stroke {
-        let lw = resolved.linewidth_pt.unwrap_or(DEFAULT_LINEWIDTH_PT);
+        let lw = resolved.linewidth_pt.unwrap_or(geom.rect.linewidth_pt);
         let stroke = Stroke::new(pt_to_px(lw, dpi));
         scene.stroke(
             &stroke,
@@ -2549,7 +2654,7 @@ fn render_rect(resolved: &ResolvedKey, cell: Rect, scene: &mut dyn SceneBuilder,
         );
     } else if resolved.fill.is_none() {
         // Placeholder outline so the row isn't visually empty.
-        let stroke = Stroke::new(pt_to_px(DEFAULT_LINEWIDTH_PT, dpi));
+        let stroke = Stroke::new(pt_to_px(geom.rect.linewidth_pt, dpi));
         scene.stroke(
             &stroke,
             Affine::IDENTITY,

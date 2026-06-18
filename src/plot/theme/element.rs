@@ -235,6 +235,15 @@ impl TextElement {
     }
 }
 
+/// Default text size, pt. Single source of truth shared by
+/// [`text_concrete_defaults`] (which wraps it in `Length::Abs`) and
+/// any chrome site that needs the bottom-of-cascade parent value to
+/// resolve a `Length::Rel`.
+pub const DEFAULT_TEXT_SIZE_PT: f64 = 10.0;
+/// Default text lineheight multiplier — applied as `Rel(_)` against
+/// the resolved text size.
+pub const DEFAULT_TEXT_LINEHEIGHT: f64 = 1.2;
+
 /// Concrete fallback values for a `TextElement` — 10pt regular ink
 /// text, centered, no rotation, 1.2× lineheight, zero margin. Used
 /// as the safety net for any field still `None` after cascading.
@@ -242,11 +251,11 @@ pub fn text_concrete_defaults() -> TextElement {
     TextElement {
         font: FontSpec::default(),
         color: Some(ThemeColor::Ink),
-        size_pt: Some(Length::Abs(10.0)),
+        size_pt: Some(Length::Abs(DEFAULT_TEXT_SIZE_PT)),
         align: Some(HAlign::Center),
         valign: Some(VAlign::Middle),
         angle: Some(Rotation::default()),
-        lineheight: Some(Length::Rel(1.2)),
+        lineheight: Some(Length::Rel(DEFAULT_TEXT_LINEHEIGHT)),
         margin: Some(Margin::ZERO),
     }
 }
@@ -287,13 +296,18 @@ impl LineElement {
     }
 }
 
+/// Default line width, pt. Shared by [`line_concrete_defaults`] and
+/// any chrome site that needs the bottom-of-cascade parent value to
+/// resolve a `Length::Rel`.
+pub const DEFAULT_LINEWIDTH_PT: f64 = 1.0;
+
 /// Concrete fallback values for a `LineElement` — 1pt solid ink
 /// line, butt cap, miter join. Used as the safety net for any
 /// field still `None` after cascading.
 pub fn line_concrete_defaults() -> LineElement {
     LineElement {
         color: Some(ThemeColor::Ink),
-        linewidth_pt: Some(Length::Abs(1.0)),
+        linewidth_pt: Some(Length::Abs(DEFAULT_LINEWIDTH_PT)),
         linetype: Some(Arc::from([])),
         cap: Some(Cap::Butt),
         join: Some(Join::Miter),

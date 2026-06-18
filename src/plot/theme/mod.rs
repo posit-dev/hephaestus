@@ -37,11 +37,16 @@ pub mod theme;
 #[cfg(test)]
 mod tests;
 
-pub use axis::{axis_concrete_defaults, AxisTheme, PerAxis, ResolvedAxis, TitleLocation};
+pub use axis::{
+    axis_concrete_defaults, AxisTheme, PerAxis, ResolvedAxis, TitleLocation,
+    DEFAULT_AXIS_TITLE_SIZE_PT, DEFAULT_MINOR_TICK_LENGTH_PT, DEFAULT_TICK_GAP_PT,
+    DEFAULT_TICK_LENGTH_PT, DEFAULT_TITLE_GAP_PT,
+};
 pub use cascade::{PerChannel, Sided};
 pub use element::{
     line_concrete_defaults, rect_concrete_defaults, text_concrete_defaults, AlignTo, Element,
-    HAlign, LineElement, RectElement, Rotation, TextElement, VAlign,
+    HAlign, LineElement, RectElement, Rotation, TextElement, VAlign, DEFAULT_LINEWIDTH_PT,
+    DEFAULT_TEXT_LINEHEIGHT, DEFAULT_TEXT_SIZE_PT,
 };
 pub use font::{
     FontFamily, FontFeature, FontSpec, FontStyle, FontVariation, FontWeight, FontWidth,
@@ -52,4 +57,4 @@ pub use geom::{
 pub use legend::{BarTheme, Direction, KeyTheme, LegendTheme, ResolvedDirection};
 pub use length::{pt, rel, Length, Margin};
 pub use palette::{Palette, ThemeColor};
-pub use theme::{SharedTheme, Theme, ThemePart};
+pub use theme::{SharedTheme, Theme, ThemePart, DEFAULT_LEGEND_GAP_PT, DEFAULT_LEGEND_SPACING_PT};

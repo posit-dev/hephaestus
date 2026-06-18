@@ -14,8 +14,7 @@ use crate::geometry::{Affine, Point, Rect, Vec2};
 use crate::layout::{Measure, WidthHint};
 use crate::pick::PickId;
 use crate::plot::chrome::linear_axis::{
-    axis_ink, draw_axis_label, draw_linear_axis_at, pt_to_px, AxisChromeStyle, AxisLabelAt,
-    LABEL_FONT_SIZE_PT, LABEL_GAP_PT, TICK_LENGTH_PT,
+    axis_ink, draw_axis_label, draw_linear_axis_at, AxisChromeStyle, AxisLabelAt,
 };
 use crate::plot::projection::PolarProjection;
 use crate::plot::scale::Scale;
@@ -84,32 +83,41 @@ pub fn draw_radius_axis(
     );
 
     if let Some(title_text) = title {
-        // Largest label width / height — used to budget the title's
-        // outward distance from the spoke's outer tip.
-        let style = TextStyle::new(LABEL_FONT_SIZE_PT);
-        let (max_label_w, max_label_h) =
-            majors
-                .iter()
-                .fold((0.0_f64, 0.0_f64), |(mw, mh), (_, label)| {
-                    let run = TextRun::new(label, &style, dpi);
-                    let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
-                    let w = run.natural_width();
-                    (mw.max(w), mh.max(h))
-                });
-        // Projecting the label's bbox onto the tick direction picks
-        // whichever axis the label is offset along. Equivalent to the
-        // cartesian title placement past the longest label.
-        let (tx, ty) = tick_direction;
-        let label_extent = max_label_w * tx.abs() + max_label_h * ty.abs();
-        draw_radius_title(
-            scene,
-            panel,
-            polar,
-            theta_frac,
-            label_extent,
-            title_text,
-            dpi,
-        );
+        if let Some(title_el) = resolved.title.as_ref() {
+            // Largest label width / height — used to budget the title's
+            // outward distance from the spoke's outer tip. Reuse the
+            // chrome-resolved label style so the label-extent
+            // calculation matches what the rail itself drew.
+            let label_style = style.text_style.clone();
+            let (max_label_w, max_label_h) =
+                majors
+                    .iter()
+                    .fold((0.0_f64, 0.0_f64), |(mw, mh), (_, label)| {
+                        let run = TextRun::new(label, &label_style, dpi);
+                        let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+                        let w = run.natural_width();
+                        (mw.max(w), mh.max(h))
+                    });
+            // Projecting the label's bbox onto the tick direction picks
+            // whichever axis the label is offset along. Equivalent to the
+            // cartesian title placement past the longest label.
+            let (tx, ty) = tick_direction;
+            let label_extent = max_label_w * tx.abs() + max_label_h * ty.abs();
+            draw_radius_title(
+                scene,
+                panel,
+                polar,
+                theta_frac,
+                label_extent,
+                title_text,
+                title_el,
+                &theme.palette,
+                style.tick_length_px,
+                style.gap_px,
+                style.title_gap_px,
+                dpi,
+            );
+        }
     }
 }
 
@@ -245,30 +253,44 @@ pub fn draw_angular_axis(
     }
 
     if let Some(title_text) = title {
-        // Largest label height — used to push the title beyond the
-        // angular tick labels.
-        let (max_label_w, max_label_h) = scale
-            .breaks(DEFAULT_BREAK_COUNT)
-            .iter()
-            .filter(|v| !matches!(v, Value::Null))
-            .fold((0.0_f64, 0.0_f64), |(mw, mh), v| {
-                let label = scale.format(v);
-                let run = TextRun::new(&label, &style, dpi);
-                let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
-                let w = run.natural_width();
-                (mw.max(w), mh.max(h))
-            });
-        let label_max = max_label_w.max(max_label_h);
-        // Outer ring titles sit further out past the label rail;
-        // inner ring titles sit further in (toward the centre).
-        match ring {
-            AngularRing::Outer => {
-                draw_angular_title(scene, panel, polar, label_max, title_text, dpi);
-            }
-            AngularRing::Inner => {
-                // Inner-ring title placement isn't implemented:
-                // labels point inward and a curved title there
-                // would compete for centre space. Silently skip.
+        if let Some(title_el) = resolved.title.as_ref() {
+            // Largest label height — used to push the title beyond
+            // the angular tick labels.
+            let (max_label_w, max_label_h) = scale
+                .breaks(DEFAULT_BREAK_COUNT)
+                .iter()
+                .filter(|v| !matches!(v, Value::Null))
+                .fold((0.0_f64, 0.0_f64), |(mw, mh), v| {
+                    let label = scale.format(v);
+                    let run = TextRun::new(&label, &style, dpi);
+                    let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+                    let w = run.natural_width();
+                    (mw.max(w), mh.max(h))
+                });
+            let label_max = max_label_w.max(max_label_h);
+            // Outer ring titles sit further out past the label rail;
+            // inner ring titles sit further in (toward the centre).
+            match ring {
+                AngularRing::Outer => {
+                    draw_angular_title(
+                        scene,
+                        panel,
+                        polar,
+                        label_max,
+                        title_text,
+                        title_el,
+                        &theme.palette,
+                        chrome_style.tick_length_px,
+                        chrome_style.gap_px,
+                        chrome_style.title_gap_px,
+                        dpi,
+                    );
+                }
+                AngularRing::Inner => {
+                    // Inner-ring title placement isn't implemented:
+                    // labels point inward and a curved title there
+                    // would compete for centre space. Silently skip.
+                }
             }
         }
     }
@@ -365,12 +387,18 @@ impl Measure for PolarBleedMeasure {
 /// midpoint, curving along an arc; their radial extent past `r_outer`
 /// is `tick + gap + label_max + title_gap + title_h` and is
 /// distributed to cardinal sides by the midpoint direction.
-pub fn compute_polar_bleed(axes: &[BleedAxis], dpi: f64) -> PolarBleed {
-    let tick_px = pt_to_px(TICK_LENGTH_PT, dpi);
-    let gap_px = pt_to_px(LABEL_GAP_PT, dpi);
-    let title_gap_px = pt_to_px(TITLE_GAP_PT, dpi);
-    let style = TextStyle::new(LABEL_FONT_SIZE_PT);
-    let title_style = crate::plot::plot::axis_title_style();
+pub fn compute_polar_bleed(axes: &[BleedAxis], dpi: f64, theme: &Theme) -> PolarBleed {
+    // Resolve each polar axis-type's chrome style once; pick per-label
+    // by `BleedLabelKind`. Angular labels (outer ring) live on
+    // channel 0 / side 0; radius labels live on channel 1 / side 0.
+    let angular_style =
+        AxisChromeStyle::from_resolved(&theme.axis.resolve(0, 0), &theme.palette, dpi);
+    let radial_style =
+        AxisChromeStyle::from_resolved(&theme.axis.resolve(1, 0), &theme.palette, dpi);
+    let title_style_for = |kind: &BleedLabelKind| match kind {
+        BleedLabelKind::Radius => &radial_style,
+        _ => &angular_style,
+    };
     let mut bleed = PolarBleed {
         top_px: 0.0,
         right_px: 0.0,
@@ -398,14 +426,17 @@ pub fn compute_polar_bleed(axes: &[BleedAxis], dpi: f64) -> PolarBleed {
     const CARDINAL_EPS: f64 = 0.05;
     for axis in axes {
         for label in &axis.labels {
-            let run = TextRun::new(&label.text, &style, dpi);
+            let label_style = title_style_for(&label.kind);
+            let run = TextRun::new(&label.text, &label_style.text_style, dpi);
             let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
             let w = match run.width_hint(dpi) {
                 WidthHint::Min(w) => w,
                 WidthHint::NeedsHeight { seed } => seed,
             };
             let anchor_offset = match label.kind {
-                BleedLabelKind::OuterAngular | BleedLabelKind::Radius => tick_px + gap_px,
+                BleedLabelKind::OuterAngular | BleedLabelKind::Radius => {
+                    label_style.tick_length_px + label_style.gap_px
+                }
                 BleedLabelKind::InnerAngular => continue,
             };
             let (dx, dy) = label.direction;
@@ -446,12 +477,26 @@ pub fn compute_polar_bleed(axes: &[BleedAxis], dpi: f64) -> PolarBleed {
                     direction: (dx, dy),
                     label_max_px,
                 } => {
-                    let run = TextRun::new(&title.text, &title_style, dpi);
+                    // Outer angular title — uses the angular axis's
+                    // resolved text style (and the resolved tick /
+                    // gap / title_gap) so measured bleed matches the
+                    // draw helper exactly. `Blank` short-circuits:
+                    // no draw → no bleed reservation.
+                    let Some(title_text_style) =
+                        angular_title_text_style(&theme.axis.resolve(0, 0))
+                    else {
+                        continue;
+                    };
+                    let run = TextRun::new(&title.text, &title_text_style, dpi);
                     let title_h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
                     let title_w = run.natural_width();
                     // Radial extent past r_outer at the arc midpoint.
                     // Mirrors `draw_angular_title`'s placement formula.
-                    let radial = tick_px + gap_px + label_max_px + title_gap_px + title_h;
+                    let radial = angular_style.tick_length_px
+                        + angular_style.gap_px
+                        + label_max_px
+                        + angular_style.title_gap_px
+                        + title_h;
                     // The title curves along an arc, but its dominant
                     // bleed is the radial component at the midpoint.
                     // Distribute to cardinal sides by direction sign.
@@ -563,11 +608,20 @@ fn radius_axis_tick_direction(polar: &PolarProjection, theta_frac: f64) -> (f64,
     (sign * theta.sin(), sign * theta.cos())
 }
 
-// Gap (pt) between the outermost axis label and the title text.
-const TITLE_GAP_PT: f64 = 6.0;
 // Number of segments to sample an angular title's arc into a polyline
 // for the text-along-path layout.
 const ANGULAR_TITLE_ARC_SEGMENTS: usize = 32;
+
+/// Build a `TextStyle` for the angular axis title from a
+/// `ResolvedAxis`. `None` when the title element is `Blank` — both
+/// the bleed measure and the draw site short-circuit instead of
+/// reserving / drawing nothing.
+fn angular_title_text_style(resolved: &crate::plot::theme::ResolvedAxis) -> Option<TextStyle> {
+    resolved
+        .title
+        .as_ref()
+        .map(|el| crate::plot::plot::text_style_from(el, 10.0))
+}
 
 /// Render a radius axis title past the outer end of the tick labels,
 /// offset perpendicular to the spoke (matching the cartesian Y-axis
@@ -579,6 +633,7 @@ const ANGULAR_TITLE_ARC_SEGMENTS: usize = 32;
 /// `label_extent_px` is the projected extent of the outermost tick
 /// label onto the tick direction — it pushes the title past the
 /// label rail.
+#[allow(clippy::too_many_arguments)]
 fn draw_radius_title(
     scene: &mut dyn SceneBuilder,
     panel: Rect,
@@ -586,6 +641,11 @@ fn draw_radius_title(
     theta_frac: f64,
     label_extent_px: f64,
     title: &str,
+    title_el: &crate::plot::theme::TextElement,
+    palette: &crate::plot::theme::Palette,
+    tick_px: f64,
+    label_gap_px: f64,
+    title_gap_px: f64,
     dpi: f64,
 ) {
     let g = polar.geometry(panel);
@@ -601,7 +661,8 @@ fn draw_radius_title(
     // Rotation angle (screen coords, y-down).
     let mut theta_spoke = sy.atan2(sx);
 
-    let style = crate::plot::plot::axis_title_style();
+    let root_pt = 10.0;
+    let style = crate::plot::plot::text_style_from(title_el, root_pt);
     let run = crate::text::TextRun::new(title, &style, dpi);
     let title_w = run.natural_width();
     let title_h = run.set_max_width(f32::INFINITY, crate::text::Alignment::Start) as f64;
@@ -611,13 +672,11 @@ fn draw_radius_title(
     }
     let baseline_ref = glyphs[0].y as f64;
 
-    let tick_px = pt_to_px(TICK_LENGTH_PT, dpi);
-    let label_gap_px = pt_to_px(LABEL_GAP_PT, dpi);
-    let title_gap_px = pt_to_px(TITLE_GAP_PT, dpi);
-    // Perpendicular distance from the spoke to the title's bbox
-    // centre: tick + label_gap + label extent + title_gap clears the
-    // label rail; the extra title_h / 2 puts the title's near edge
-    // at exactly title_gap past the labels.
+    let _ = palette; // title brush sourced below via title_el.color
+                     // Perpendicular distance from the spoke to the title's bbox
+                     // centre: tick + label_gap + label extent + title_gap clears the
+                     // label rail; the extra title_h / 2 puts the title's near edge
+                     // at exactly title_gap past the labels.
     let perp_distance = tick_px + label_gap_px + label_extent_px + title_gap_px + title_h * 0.5;
 
     // Midpoint of the visible spoke segment, offset perpendicular by
@@ -655,7 +714,12 @@ fn draw_radius_title(
     // the rotated baseline.
     let perp_offset = -title_h * 0.5 + baseline_ref;
 
-    let brush = Brush::Solid(axis_ink());
+    let title_color = title_el
+        .color
+        .clone()
+        .map(|c| c.resolve(palette))
+        .unwrap_or_else(axis_ink);
+    let brush = Brush::Solid(title_color);
     for g_glyph in &glyphs {
         let y_above_baseline = g_glyph.y as f64 - baseline_ref;
         let xform = Affine::translate(Vec2::new(origin_x, origin_y))
@@ -685,19 +749,26 @@ fn draw_radius_title(
 /// centred at the arc midpoint. Uses text-on-path layout with the
 /// `upright` flip so the title reads right-side-up regardless of
 /// which side of the panel the arc midpoint lands on.
+#[allow(clippy::too_many_arguments)]
 fn draw_angular_title(
     scene: &mut dyn SceneBuilder,
     panel: Rect,
     polar: &PolarProjection,
     label_max_px: f64,
     title: &str,
+    title_el: &crate::plot::theme::TextElement,
+    palette: &crate::plot::theme::Palette,
+    tick_px: f64,
+    label_gap_px: f64,
+    title_gap_px: f64,
     dpi: f64,
 ) {
     let g = polar.geometry(panel);
     if g.r_outer <= 0.0 {
         return;
     }
-    let style = crate::plot::plot::axis_title_style();
+    let root_pt = 10.0;
+    let style = crate::plot::plot::text_style_from(title_el, root_pt);
     let run = crate::text::TextRun::new(title, &style, dpi);
     let text_w = run.natural_width();
     let _title_h = run.set_max_width(f32::INFINITY, crate::text::Alignment::Start) as f64;
@@ -709,9 +780,6 @@ fn draw_angular_title(
     let descent_px = run.last_line_descender();
     let ascent_px = run.natural_height() - descent_px;
 
-    let tick_px = pt_to_px(TICK_LENGTH_PT, dpi);
-    let label_gap_px = pt_to_px(LABEL_GAP_PT, dpi);
-    let title_gap_px = pt_to_px(TITLE_GAP_PT, dpi);
     let r_title = g.r_outer + tick_px + label_gap_px + label_max_px + title_gap_px;
     if r_title <= 0.0 {
         return;
@@ -789,7 +857,12 @@ fn draw_angular_title(
     // matches the unflipped case.
     let effective_vjust = if flipped { ascent_px - descent_px } else { 0.0 };
 
-    let brush = Brush::Solid(axis_ink());
+    let title_color = title_el
+        .color
+        .clone()
+        .map(|c| c.resolve(palette))
+        .unwrap_or_else(axis_ink);
+    let brush = Brush::Solid(title_color);
     for gph in &glyphs {
         let half_advance = gph.advance as f64 * 0.5;
         let d_glyph = hjust_shift + gph.x as f64 + half_advance;

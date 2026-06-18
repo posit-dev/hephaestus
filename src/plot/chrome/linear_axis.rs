@@ -82,19 +82,17 @@ pub(crate) fn stroke_from_rect_border(el: &RectElement, dpi: f64) -> Stroke {
     )
 }
 
-/// Default major tick mark length, pt. Used by the axis-measure
-/// codepath that needs a size estimate before theme info is
-/// available; the actual stroke length at draw time is sourced from
-/// the resolved axis theme.
-pub(crate) const TICK_LENGTH_PT: f64 = 4.0;
-/// Default minor tick mark length, pt.
-pub(crate) const MINOR_TICK_LENGTH_PT: f64 = 2.0;
-/// Default gap between the tick mark end and the label's near edge, pt.
-pub(crate) const LABEL_GAP_PT: f64 = 2.0;
-/// Default tick label font size, pt.
-pub(crate) const LABEL_FONT_SIZE_PT: f32 = 10.0;
-/// Default stroke width for baseline + tick marks, pt.
-pub(crate) const STROKE_WIDTH_PT: f64 = 1.0;
+// Default measurements are the same constants the theme's concrete
+// defaults builders use — so the `Length::Rel(_)` resolution parent
+// at chrome time matches what `axis_concrete_defaults` / element
+// defaults built into the theme.
+pub(crate) use crate::plot::theme::{
+    DEFAULT_LINEWIDTH_PT as STROKE_WIDTH_PT, DEFAULT_MINOR_TICK_LENGTH_PT as MINOR_TICK_LENGTH_PT,
+    DEFAULT_TEXT_SIZE_PT, DEFAULT_TICK_GAP_PT as LABEL_GAP_PT,
+    DEFAULT_TICK_LENGTH_PT as TICK_LENGTH_PT, DEFAULT_TITLE_GAP_PT as TITLE_GAP_PT,
+};
+/// Default tick label font size, pt (f32 alias for shaper inputs).
+pub(crate) const LABEL_FONT_SIZE_PT: f32 = DEFAULT_TEXT_SIZE_PT as f32;
 
 /// Black ink for axis chrome — used as a fallback when no theme
 /// is available (legacy `axis_measure` codepaths).
@@ -119,6 +117,9 @@ pub(crate) struct AxisChromeStyle {
     pub tick_length_px: f64,
     pub minor_tick_length_px: f64,
     pub gap_px: f64,
+    /// Gap between the outer edge of the tick-label rail and the
+    /// near edge of the axis title, already converted to px.
+    pub title_gap_px: f64,
     pub text_style: TextStyle,
     pub text_brush: Brush,
     pub draw_labels: bool,
@@ -201,30 +202,10 @@ impl AxisChromeStyle {
                 dpi,
             ),
             gap_px: pt_to_px(resolved.tick_gap.resolve(LABEL_GAP_PT), dpi),
+            title_gap_px: pt_to_px(resolved.title_gap.resolve(TITLE_GAP_PT), dpi),
             text_style,
             text_brush,
             draw_labels,
-        }
-    }
-
-    /// Defaults matching the pre-theme axis chrome. Used by callers
-    /// without theme access (legacy axis_measure paths).
-    pub fn legacy_default(dpi: f64) -> Self {
-        let stroke = Stroke::new(pt_to_px(STROKE_WIDTH_PT, dpi));
-        let brush = Brush::Solid(axis_ink());
-        Self {
-            line_brush: Some(brush.clone()),
-            line_stroke: stroke.clone(),
-            tick_brush: Some(brush.clone()),
-            tick_stroke: stroke.clone(),
-            minor_brush: Some(brush.clone()),
-            minor_stroke: stroke,
-            tick_length_px: pt_to_px(TICK_LENGTH_PT, dpi),
-            minor_tick_length_px: pt_to_px(MINOR_TICK_LENGTH_PT, dpi),
-            gap_px: pt_to_px(LABEL_GAP_PT, dpi),
-            text_style: TextStyle::new(LABEL_FONT_SIZE_PT),
-            text_brush: brush,
-            draw_labels: true,
         }
     }
 }

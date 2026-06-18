@@ -109,7 +109,7 @@ use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomConte
 /// shape at the same `"size"`. (Visible glyph ink remains ~70% of its
 /// em-box due to font cap-height; that residual mismatch is documented
 /// but not corrected — would require per-font metric reads.)
-const GLYPH_BBOX_REFERENCE: f64 = 1.6;
+pub(crate) const GLYPH_BBOX_REFERENCE: f64 = 1.6;
 
 /// Catalog of channels this geom recognises, with their expected scale
 /// output type. New channels: add an entry here + handle the resolved

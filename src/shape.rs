@@ -283,6 +283,13 @@ pub mod builtin {
     use super::{Path, Point, Shape, ShapeStyle};
     use std::f64::consts::{FRAC_PI_2, PI, SQRT_2};
 
+    /// Outer radius of the builtin `circle` in shape-local coordinates.
+    /// Every other closed builtin is area-matched to a circle of this
+    /// radius. Chrome that mirrors the marker (e.g. the legend's Point
+    /// key fallback) references this constant so legend and panel
+    /// markers can't drift.
+    pub const REFERENCE_RADIUS: f64 = 0.8;
+
     fn polygon(points: &[(f64, f64)]) -> Path {
         let mut p = Path::new();
         let (x0, y0) = points[0];
@@ -325,12 +332,12 @@ pub mod builtin {
 
     // -------- point shapes (ported from posit-dev/ggsql) --------
 
-    /// Bezier circle, radius 0.8. Area ≈ 2.01 — reference for area-equalization
-    /// of the other closed point shapes.
+    /// Bezier circle at [`REFERENCE_RADIUS`]. Area ≈ 2.01 — reference for
+    /// area-equalization of the other closed point shapes.
     pub fn circle() -> Shape {
         use kurbo::Shape as _;
-        let path = kurbo::Circle::new(Point::ORIGIN, 0.8).to_path(0.01);
-        fill_one(path, Point::new(-0.8, 0.0))
+        let path = kurbo::Circle::new(Point::ORIGIN, REFERENCE_RADIUS).to_path(0.01);
+        fill_one(path, Point::new(-REFERENCE_RADIUS, 0.0))
     }
 
     /// Square, half-side 0.71. Area-matched to [`circle`].
