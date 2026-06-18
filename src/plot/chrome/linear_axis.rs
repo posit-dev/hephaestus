@@ -345,11 +345,22 @@ pub(crate) fn draw_axis_label(
     dpi: f64,
 ) {
     let run = TextRun::new(text, style, dpi);
-    let label_h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+    let _ = run.set_max_width(f32::INFINITY, Alignment::Start);
     let label_w = match run.width_hint(dpi) {
         WidthHint::Min(w) => w,
         WidthHint::NeedsHeight { seed } => seed,
     };
+    // Use the cap-height band as the "visible height" for vertical
+    // positioning — numeric and uppercase labels (the common case
+    // for ticks + discrete key labels) then centre on their ink
+    // rather than on the full font line-height (which reserves
+    // descender space the glyphs don't occupy and shifts the
+    // visual centre too low). `baseline - cap_h` is the distance
+    // from the layout's top edge to the cap-top; the baseline
+    // offset already absorbs any half-leading.
+    let baseline = run.baseline_offset();
+    let cap_h = run.cap_height();
+    let cap_top_offset = baseline - cap_h;
 
     // Dead-band around the cardinals so near-vertical / near-horizontal
     // directions don't jitter their alignment quadrant.
@@ -370,11 +381,15 @@ pub(crate) fn draw_axis_label(
         0.0
     };
 
+    // Anchor on the cap-band centre / edges:
+    //   dir_y =  0 → cap centre lands on anchor.y
+    //   dir_y >  0 → cap top    lands on anchor.y (label extends down)
+    //   dir_y <  0 → baseline   lands on anchor.y (label extends up)
     let label_cx = at.anchor.x + dir_x * label_w * 0.5;
-    let label_cy = at.anchor.y + dir_y * label_h * 0.5;
+    let label_cy = at.anchor.y + dir_y * cap_h * 0.5;
 
     let x = label_cx - label_w * 0.5;
-    let y = label_cy - label_h * 0.5;
+    let y = label_cy - cap_h * 0.5 - cap_top_offset;
     draw_text(scene, &run, x, y, brush, Affine::IDENTITY, PickId::Skip);
 }
 

@@ -448,6 +448,51 @@ impl TextRun {
         max_w as f64
     }
 
+    /// Offset from the layout's top edge to the baseline of the
+    /// first line, in pixels. Differs from the font's `ascent`
+    /// metric when the resolved line height includes leading — the
+    /// baseline sits below the typographic ascent by half the
+    /// leading. Used by chrome labels to convert between
+    /// baseline-anchored and top-anchored positioning.
+    pub fn baseline_offset(&self) -> f64 {
+        let layout = self.layout.borrow();
+        let mut iter = layout.lines();
+        match iter.next() {
+            Some(line) => line.metrics().baseline as f64,
+            None => 0.0,
+        }
+    }
+
+    /// Cap-height of the first run, in pixels — distance from the
+    /// baseline to the top of capital letters. Falls back to
+    /// `x_height` (and then `0.7 × ascent` as a last resort) when
+    /// the font doesn't report cap-height. Used by axis / legend
+    /// label centering: a numeric or uppercase label centered on
+    /// `cap_height` looks visually balanced against its tick or
+    /// swatch, whereas centering on the full `natural_height`
+    /// reserves descender space the glyphs don't occupy and shifts
+    /// the visual centre off-target.
+    pub fn cap_height(&self) -> f64 {
+        let layout = self.layout.borrow();
+        let mut lines_iter = layout.lines();
+        let line = match lines_iter.next() {
+            Some(l) => l,
+            None => return 0.0,
+        };
+        let ascent_fallback = line.metrics().ascent as f64;
+        let mut result: Option<f64> = None;
+        for item in line.items() {
+            if let PositionedLayoutItem::GlyphRun(gr) = item {
+                let m = gr.run().metrics();
+                if let Some(h) = m.cap_height.or(m.x_height) {
+                    result = Some(h as f64);
+                    break;
+                }
+            }
+        }
+        result.unwrap_or(ascent_fallback * 0.7)
+    }
+
     /// Font descender of the last line in the current layout, in
     /// pixels. Used by background-rect geoms to apply the
     /// ggplot2 `geom_label`-style padding rebalance — bump top padding
