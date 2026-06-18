@@ -156,6 +156,7 @@ pub fn legend_stack_natural_size(
                 theme.legend_for(l.theme_variant.as_deref()),
                 &theme.geom,
                 gap_px,
+                &theme.locale,
             )
         })
         .filter(|m| !m.is_empty())
@@ -866,6 +867,7 @@ pub fn legend_measure(
         theme.legend_for(legend.theme_variant.as_deref()),
         &theme.geom,
         legend_gap_px(theme, dpi),
+        &theme.locale,
     ))
 }
 
@@ -893,6 +895,7 @@ pub fn legend_stack_measure(
                 theme.legend_for(l.theme_variant.as_deref()),
                 &theme.geom,
                 panel_gap_px,
+                &theme.locale,
             )
         })
         .collect();
@@ -936,6 +939,7 @@ pub fn render_legend_stack(
                     theme.legend_for(l.theme_variant.as_deref()),
                     &theme.geom,
                     panel_gap_px,
+                    &theme.locale,
                 ),
             )
         })
@@ -988,7 +992,15 @@ pub fn render_legend(
 ) {
     let lt = theme.legend_for(legend.theme_variant.as_deref());
     let gap_px = legend_gap_px(theme, dpi);
-    let measure = LegendMeasure::new(legend, registry, dpi, lt, &theme.geom, gap_px);
+    let measure = LegendMeasure::new(
+        legend,
+        registry,
+        dpi,
+        lt,
+        &theme.geom,
+        gap_px,
+        &theme.locale,
+    );
     if measure.is_empty() {
         return;
     }
@@ -1014,6 +1026,7 @@ pub fn render_legend(
             lt,
             &theme.palette,
             &theme.geom,
+            &theme.locale,
         ),
         LegendBody::Stack(stack) => render_stack_body(
             legend,
@@ -1027,6 +1040,7 @@ pub fn render_legend(
             lt,
             &theme.palette,
             &theme.geom,
+            &theme.locale,
         ),
         LegendBody::Colorbar(spec) => render_colorbar_body(
             legend,
@@ -1038,6 +1052,7 @@ pub fn render_legend(
             dpi,
             lt,
             &theme.palette,
+            &theme.locale,
         ),
     }
 }
@@ -1185,6 +1200,7 @@ fn render_stack_body(
     lt: &crate::plot::theme::LegendTheme,
     palette: &crate::plot::theme::Palette,
     geom: &crate::plot::theme::GeomTheme,
+    locale: &crate::scales::Locale,
 ) {
     let side = cardinal_side(legend.side);
     let domain = match registry.get(&legend.domain_scale) {
@@ -1272,7 +1288,7 @@ fn render_stack_body(
             paint_rect_frame(scene, frame_el, palette, swatch_rect, dpi, false, true);
         }
         if let Some((label_style, label_brush)) = &styles.label {
-            let label = domain.format(v);
+            let label = domain.format(v, locale);
             let anchor = Point::new(label_rect.x0, (label_rect.y0 + label_rect.y1) * 0.5);
             draw_axis_label(
                 scene,
@@ -1307,6 +1323,7 @@ fn render_binned_stack_body(
     lt: &crate::plot::theme::LegendTheme,
     palette: &crate::plot::theme::Palette,
     geom: &crate::plot::theme::GeomTheme,
+    locale: &crate::scales::Locale,
 ) {
     let styles = legend_text_styles(lt, palette);
     let domain = match registry.get(&legend.domain_scale) {
@@ -1462,7 +1479,7 @@ fn render_binned_stack_body(
     // ticks at each break boundary. Reuse `draw_linear_axis_at` so
     // the rail matches the cartesian / colorbar axes pixel-for-pixel.
     let (axis_start, axis_end, tick_direction) = axis_baseline(side, bar_rect);
-    let majors_owned = colorbar_majors(domain);
+    let majors_owned = colorbar_majors(domain, locale);
     let majors_owned = if legend.bin_spacing == BinSpacing::Equal {
         colorbar_majors_remap_equal(&majors_owned)
     } else {
@@ -1502,6 +1519,7 @@ fn render_colorbar_body(
     dpi: f64,
     lt: &crate::plot::theme::LegendTheme,
     palette: &crate::plot::theme::Palette,
+    locale: &crate::scales::Locale,
 ) {
     let styles = legend_text_styles(lt, palette);
     let domain = match registry.get(&legend.domain_scale) {
@@ -1621,7 +1639,7 @@ fn render_colorbar_body(
     // radius axes pixel-for-pixel.
     let (axis_start, axis_end, tick_direction) = axis_baseline(side, bar_rect);
 
-    let majors_owned = colorbar_majors(domain);
+    let majors_owned = colorbar_majors(domain, locale);
     let majors_owned = if legend.bin_spacing == BinSpacing::Equal {
         colorbar_majors_remap_equal(&majors_owned)
     } else {
@@ -1688,7 +1706,10 @@ fn open_end_trim(majors: &[(f64, String)], open_lower: bool, open_upper: bool) -
 /// colorbar's tick rail. The frac is `(break - min) / (max - min)`
 /// — the position the break maps to along the bar regardless of the
 /// scale's output range.
-fn colorbar_majors(domain: &crate::plot::scale::Scale) -> Vec<(f64, String)> {
+fn colorbar_majors(
+    domain: &crate::plot::scale::Scale,
+    locale: &crate::scales::Locale,
+) -> Vec<(f64, String)> {
     let (min, max) = match domain.input_range() {
         Some(crate::scales::input::InputRange::Continuous { min, max }) => (*min, *max),
         _ => return Vec::new(),
@@ -1707,7 +1728,7 @@ fn colorbar_majors(domain: &crate::plot::scale::Scale) -> Vec<(f64, String)> {
                 return None;
             }
             let frac = (n - min) / span;
-            Some((frac, domain.format(v)))
+            Some((frac, domain.format(v, locale)))
         })
         .collect()
 }
@@ -1956,6 +1977,7 @@ enum BodyMeasure {
 }
 
 impl LegendMeasure {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         legend: &Legend,
         registry: &ScaleRegistry,
@@ -1963,6 +1985,7 @@ impl LegendMeasure {
         lt: &crate::plot::theme::LegendTheme,
         geom: &crate::plot::theme::GeomTheme,
         legend_gap_px: f64,
+        locale: &crate::scales::Locale,
     ) -> Self {
         // Label + title styles come from the LegendTheme so measure
         // and draw size identical glyph runs. `Blank` short-circuits
@@ -1998,7 +2021,7 @@ impl LegendMeasure {
             let Some(label_style) = label_style.as_ref() else {
                 continue;
             };
-            let label = domain.map(|s| s.format(v)).unwrap_or_default();
+            let label = domain.map(|s| s.format(v, locale)).unwrap_or_default();
             let run = TextRun::new(&label, label_style, dpi);
             let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
             // Labels render unwrapped, so the slot needs the full
@@ -2072,7 +2095,8 @@ impl LegendMeasure {
                     // draw, no reservation).
                     let label = match label_style.as_ref() {
                         Some(style) => {
-                            let label_text = domain.map(|s| s.format(v)).unwrap_or_default();
+                            let label_text =
+                                domain.map(|s| s.format(v, locale)).unwrap_or_default();
                             let run = TextRun::new(&label_text, style, dpi);
                             let nat_h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
                             let nat_w = run.natural_width();

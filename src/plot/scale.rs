@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use crate::color::Color;
 use crate::scales::value::{DataColumn, LinetypeStep, Value};
+use crate::scales::Locale;
 
 // Re-export scales-crate items so legacy `crate::plot::scale::*` paths
 // continue to resolve. The submodules (`breaks`, `transform`, etc.) are
@@ -42,8 +43,11 @@ pub use crate::scales::{
 pub use crate::plot::chrome::{axis, legend};
 
 /// Tick-label formatter closure stored on a [`Scale`]. Receives a break
-/// value and returns its rendered label.
-pub type LabelFormatter = dyn Fn(&Value) -> String;
+/// value and the active [`Locale`], and returns its rendered label.
+/// User formatters can ignore the locale, consult its decimal /
+/// grouping separators, or look up month / day names —
+/// [`Scale::default_format`] does the latter automatically.
+pub type LabelFormatter = dyn Fn(&Value, &Locale) -> String;
 
 // ─── BreaksSpec ──────────────────────────────────────────────────────────────
 
@@ -320,21 +324,25 @@ impl Scale {
     // ── Formatter override ──
 
     /// Set a custom formatter applied to each break value before
-    /// rendering. Overrides the default per-variant formatter. Explicit
-    /// labels set via [`Self::with_breaks_labeled`] still take priority
-    /// over this closure for the values they cover.
+    /// rendering. Overrides the default per-variant formatter. The
+    /// closure receives `(&Value, &Locale)` — consult the locale's
+    /// decimal / grouping separators or month / day arrays as needed,
+    /// or ignore it for locale-insensitive labels. Explicit labels
+    /// set via [`Self::with_breaks_labeled`] still take priority over
+    /// this closure for the values they cover.
     pub fn with_format<F>(mut self, f: F) -> Self
     where
-        F: Fn(&Value) -> String + 'static,
+        F: Fn(&Value, &Locale) -> String + 'static,
     {
         self.formatter = Some(Arc::new(f));
         self
     }
 
     /// Replace the formatter in place. Bumps the generation counter.
+    /// See [`Self::with_format`] for the closure shape.
     pub fn set_format<F>(&mut self, f: F)
     where
-        F: Fn(&Value) -> String + 'static,
+        F: Fn(&Value, &Locale) -> String + 'static,
     {
         self.formatter = Some(Arc::new(f));
         self.bump_generation();
@@ -508,25 +516,28 @@ impl Scale {
         }
     }
 
-    /// Format a value as its tick label.
+    /// Format a value as its tick label, in the given locale.
     ///
     /// Precedence (highest first): an explicit [`BreaksSpec::Labeled`]
-    /// label for `v`, a custom formatter set via [`Self::with_format`],
-    /// then the built-in per-variant default
+    /// label for `v`, a custom formatter set via [`Self::with_format`]
+    /// (passed `(v, locale)`), then the built-in per-variant default
     /// ([`Self::default_format`]). Numeric values render via Rust's
     /// shortest round-trip `Display` after a 12-sig-fig snap (so
-    /// `0.30000000000000004` reads as `"0.3"`); temporal variants
-    /// render compact `YYYY-MM-DD` / `HH:MM:SS` strings.
-    pub fn format(&self, v: &Value) -> String {
+    /// `0.30000000000000004` reads as `"0.3"`), then the decimal
+    /// mark is swapped to `locale.decimal`; temporal variants render
+    /// compact `YYYY-MM-DD` / `HH:MM:SS` strings (locale-insensitive
+    /// today; user formatters can build language-specific layouts
+    /// from the locale's `month_short` / `month_long` arrays).
+    pub fn format(&self, v: &Value, locale: &Locale) -> String {
         if let Some(BreaksSpec::Labeled { breaks, labels }) = &self.breaks_spec {
             if let Some(i) = breaks.iter().position(|b| b.key_eq(v)) {
                 return labels[i].clone();
             }
         }
         if let Some(f) = &self.formatter {
-            return f(v);
+            return f(v, locale);
         }
-        format_value(v)
+        format_value(v, locale)
     }
 
     /// Band width as a fraction of the panel (in `[0, 1]`). Continuous
@@ -583,18 +594,19 @@ impl Scale {
         self.breaks_spec.as_ref()
     }
 
-    /// Built-in per-variant tick-label formatter. Exposed so user
-    /// closures supplied to [`Self::with_format`] can fall through to
-    /// the default for variants they don't care to customise:
+    /// Built-in per-variant tick-label formatter, given a locale.
+    /// Exposed so user closures supplied to [`Self::with_format`]
+    /// can fall through to the default for variants they don't care
+    /// to customise:
     ///
     /// ```ignore
-    /// scale.with_format(|v| match v {
+    /// scale.with_format(|v, locale| match v {
     ///     Value::Number(n) => format!("${n:.2}"),
-    ///     other => Scale::default_format(other),
+    ///     other => Scale::default_format(other, locale),
     /// })
     /// ```
-    pub fn default_format(v: &Value) -> String {
-        format_value(v)
+    pub fn default_format(v: &Value, locale: &Locale) -> String {
+        format_value(v, locale)
     }
 
     /// Monotonic counter incremented on every mutation. Plumbed for
@@ -635,10 +647,10 @@ impl std::fmt::Debug for Scale {
 /// - `Duration(us)` → compact `Hh Mm Ss` or `MM:SS` depending on magnitude.
 /// - `String(s)` → `s`.
 /// - Others → debug-formatted.
-fn format_value(v: &Value) -> String {
+fn format_value(v: &Value, locale: &Locale) -> String {
     use crate::scales::value::Date;
     match v {
-        Value::Number(n) => format_number(*n),
+        Value::Number(n) => format_number(*n, locale),
         Value::String(s) => (**s).to_string(),
         Value::Bool(b) => format!("{b}"),
         Value::Null => "NA".to_string(),
@@ -712,17 +724,24 @@ fn format_value(v: &Value) -> String {
 /// The round-trip via 12-significant-digit scientific form snaps to a
 /// nearby f64 that Rust's shortest-round-trip `Display` then prints
 /// cleanly: `0.30000000000000004` → `"0.3"`; `0.6000000000001` → `"0.6"`.
-fn format_number(n: f64) -> String {
-    if !n.is_finite() {
-        return format!("{n}");
+fn format_number(n: f64, locale: &Locale) -> String {
+    let raw = if !n.is_finite() {
+        format!("{n}")
+    } else if n == 0.0 {
+        "0".to_string()
+    } else {
+        let cleaned: f64 = format!("{n:.11e}")
+            .parse()
+            .expect("formatted scientific f64 round-trips");
+        format!("{cleaned}")
+    };
+    if locale.decimal == '.' {
+        raw
+    } else {
+        // Tick-label numbers carry at most one decimal point (Rust's
+        // shortest-round-trip Display); a flat replace is correct.
+        raw.replace('.', &locale.decimal.to_string())
     }
-    if n == 0.0 {
-        return "0".to_string();
-    }
-    let cleaned: f64 = format!("{n:.11e}")
-        .parse()
-        .expect("formatted scientific f64 round-trips");
-    format!("{cleaned}")
 }
 
 /// Project a continuous-domain endpoint to its canonical f64. Accepts
@@ -1386,7 +1405,10 @@ mod tests {
     fn temporal_format_dates() {
         let s = continuous(Date::from_ymd(2024, 1, 1)..=Date::from_ymd(2024, 12, 31));
         assert_eq!(
-            s.format(&Value::Date(Date::from_ymd(2024, 1, 15).to_days())),
+            s.format(
+                &Value::Date(Date::from_ymd(2024, 1, 15).to_days()),
+                &Locale::EN_US
+            ),
             "2024-01-15"
         );
     }
@@ -1399,7 +1421,7 @@ mod tests {
         );
         let dt = DateTime::from_ymd_hms_micros(2024, 6, 15, 12, 34, 56, 0);
         assert_eq!(
-            s.format(&Value::DateTime(dt.to_micros())),
+            s.format(&Value::DateTime(dt.to_micros()), &Locale::EN_US),
             "2024-06-15 12:34:56"
         );
     }
@@ -1413,13 +1435,22 @@ mod tests {
             Time::from_hms_micros(0, 0, 0, 0)..=Time::from_hms_micros(23, 59, 59, 999_999),
         );
         let t = Time::from_hms_micros(7, 8, 9, 123_000);
-        assert_eq!(s.format(&Value::Time(t.to_nanos())), "07:08:09.123");
+        assert_eq!(
+            s.format(&Value::Time(t.to_nanos()), &Locale::EN_US),
+            "07:08:09.123"
+        );
         let t_exact = Time::from_hms_micros(7, 8, 9, 0);
-        assert_eq!(s.format(&Value::Time(t_exact.to_nanos())), "07:08:09");
+        assert_eq!(
+            s.format(&Value::Time(t_exact.to_nanos()), &Locale::EN_US),
+            "07:08:09"
+        );
 
         // ns-input constructor: 7:08:09 + 456 ns sub-second.
         let t_ns = Time::from_hms_nanos(7, 8, 9, 456_000_000);
-        assert_eq!(s.format(&Value::Time(t_ns.to_nanos())), "07:08:09.456");
+        assert_eq!(
+            s.format(&Value::Time(t_ns.to_nanos()), &Locale::EN_US),
+            "07:08:09.456"
+        );
     }
 
     #[test]
@@ -1447,13 +1478,20 @@ mod tests {
     fn temporal_format_duration() {
         let s = identity();
         assert_eq!(
-            s.format(&Value::Duration(
-                3 * 3600 * 1_000_000 + 25 * 60 * 1_000_000 + 12 * 1_000_000
-            )),
+            s.format(
+                &Value::Duration(3 * 3600 * 1_000_000 + 25 * 60 * 1_000_000 + 12 * 1_000_000),
+                &Locale::EN_US
+            ),
             "3h 25m 12s"
         );
-        assert_eq!(s.format(&Value::Duration(-90 * 1_000_000)), "-1m 30s");
-        assert_eq!(s.format(&Value::Duration(45 * 1_000_000)), "45s");
+        assert_eq!(
+            s.format(&Value::Duration(-90 * 1_000_000), &Locale::EN_US),
+            "-1m 30s"
+        );
+        assert_eq!(
+            s.format(&Value::Duration(45 * 1_000_000), &Locale::EN_US),
+            "45s"
+        );
     }
 
     // ── Generation counter ──
@@ -1778,50 +1816,62 @@ mod tests {
     #[test]
     fn default_number_formatter_scrubs_floating_point_noise() {
         let s = identity();
-        assert_eq!(s.format(&Value::Number(0.1 + 0.2)), "0.3");
-        assert_eq!(s.format(&Value::Number(0.6000000000001)), "0.6");
-        assert_eq!(s.format(&Value::Number(1.0)), "1");
-        assert_eq!(s.format(&Value::Number(1.5)), "1.5");
-        assert_eq!(s.format(&Value::Number(0.0)), "0");
-        assert_eq!(s.format(&Value::Number(-0.0)), "0");
+        assert_eq!(s.format(&Value::Number(0.1 + 0.2), &Locale::EN_US), "0.3");
+        assert_eq!(
+            s.format(&Value::Number(0.6000000000001), &Locale::EN_US),
+            "0.6"
+        );
+        assert_eq!(s.format(&Value::Number(1.0), &Locale::EN_US), "1");
+        assert_eq!(s.format(&Value::Number(1.5), &Locale::EN_US), "1.5");
+        assert_eq!(s.format(&Value::Number(0.0), &Locale::EN_US), "0");
+        assert_eq!(s.format(&Value::Number(-0.0), &Locale::EN_US), "0");
         // 12-sig-fig snap preserves real precision (9 sig figs here).
-        assert_eq!(s.format(&Value::Number(0.123456789)), "0.123456789");
+        assert_eq!(
+            s.format(&Value::Number(0.123456789), &Locale::EN_US),
+            "0.123456789"
+        );
         // Non-finite values pass through.
-        assert_eq!(s.format(&Value::Number(f64::INFINITY)), "inf");
-        assert_eq!(s.format(&Value::Number(f64::NEG_INFINITY)), "-inf");
-        assert_eq!(s.format(&Value::Number(f64::NAN)), "NaN");
+        assert_eq!(
+            s.format(&Value::Number(f64::INFINITY), &Locale::EN_US),
+            "inf"
+        );
+        assert_eq!(
+            s.format(&Value::Number(f64::NEG_INFINITY), &Locale::EN_US),
+            "-inf"
+        );
+        assert_eq!(s.format(&Value::Number(f64::NAN), &Locale::EN_US), "NaN");
     }
 
     // ── Custom formatter ──
 
     #[test]
     fn custom_formatter_overrides_default() {
-        let s = identity().with_format(|v| match v {
+        let s = identity().with_format(|v, locale| match v {
             Value::Number(n) => format!("${n:.2}"),
-            other => Scale::default_format(other),
+            other => Scale::default_format(other, locale),
         });
-        assert_eq!(s.format(&Value::Number(12.345)), "$12.35");
+        assert_eq!(s.format(&Value::Number(12.345), &Locale::EN_US), "$12.35");
         // Non-numeric variants fall through to the default delegate.
-        assert_eq!(s.format(&Value::from("abc")), "abc");
+        assert_eq!(s.format(&Value::from("abc"), &Locale::EN_US), "abc");
     }
 
     #[test]
     fn clear_format_reverts_to_default() {
-        let mut s = identity().with_format(|_| "X".to_string());
-        assert_eq!(s.format(&Value::Number(1.0)), "X");
+        let mut s = identity().with_format(|_, _| "X".to_string());
+        assert_eq!(s.format(&Value::Number(1.0), &Locale::EN_US), "X");
         s.clear_format();
-        assert_eq!(s.format(&Value::Number(1.0)), "1");
+        assert_eq!(s.format(&Value::Number(1.0), &Locale::EN_US), "1");
     }
 
     #[test]
     fn formatter_survives_clone() {
-        let s = identity().with_format(|v| match v {
+        let s = identity().with_format(|v, locale| match v {
             Value::Number(n) => format!("n={n}"),
-            other => Scale::default_format(other),
+            other => Scale::default_format(other, locale),
         });
         let s2 = s.clone();
-        assert_eq!(s.format(&Value::Number(3.0)), "n=3");
-        assert_eq!(s2.format(&Value::Number(3.0)), "n=3");
+        assert_eq!(s.format(&Value::Number(3.0), &Locale::EN_US), "n=3");
+        assert_eq!(s2.format(&Value::Number(3.0), &Locale::EN_US), "n=3");
     }
 
     // ── Explicit break overrides ──
@@ -1844,20 +1894,20 @@ mod tests {
             (Value::Number(0.0), "low".to_string()),
             (Value::Number(1.0), "high".to_string()),
         ]);
-        assert_eq!(s.format(&Value::Number(0.0)), "low");
-        assert_eq!(s.format(&Value::Number(1.0)), "high");
+        assert_eq!(s.format(&Value::Number(0.0), &Locale::EN_US), "low");
+        assert_eq!(s.format(&Value::Number(1.0), &Locale::EN_US), "high");
         // Unlisted values fall through to formatter / default.
-        assert_eq!(s.format(&Value::Number(0.5)), "0.5");
+        assert_eq!(s.format(&Value::Number(0.5), &Locale::EN_US), "0.5");
     }
 
     #[test]
     fn labeled_breaks_take_priority_over_formatter() {
         let s = continuous(0.0..=1.0)
-            .with_format(|_| "FORMATTED".to_string())
+            .with_format(|_, _| "FORMATTED".to_string())
             .with_breaks_labeled(vec![(Value::Number(0.5), "MID".to_string())]);
-        assert_eq!(s.format(&Value::Number(0.5)), "MID");
+        assert_eq!(s.format(&Value::Number(0.5), &Locale::EN_US), "MID");
         // Outside the labeled set, formatter wins.
-        assert_eq!(s.format(&Value::Number(0.7)), "FORMATTED");
+        assert_eq!(s.format(&Value::Number(0.7), &Locale::EN_US), "FORMATTED");
     }
 
     #[test]
@@ -1943,7 +1993,7 @@ mod tests {
         s.set_breaks(vec![Value::Number(5.0)]);
         assert!(s.generation() > g0);
         let g1 = s.generation();
-        s.set_format(|_| "X".to_string());
+        s.set_format(|_, _| "X".to_string());
         assert!(s.generation() > g1);
         let g2 = s.generation();
         s.set_interval(1.0);
@@ -1957,7 +2007,7 @@ mod tests {
     fn override_chained_builders_do_not_bump_generation() {
         let s = continuous(0.0..=10.0)
             .with_breaks(vec![Value::Number(5.0)])
-            .with_format(|_| "X".to_string())
+            .with_format(|_, _| "X".to_string())
             .with_interval(2.0);
         assert_eq!(s.generation(), 0);
     }

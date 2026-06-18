@@ -38,6 +38,7 @@
 pub mod breaks;
 pub mod chrome;
 pub mod input;
+pub mod locale;
 pub mod output;
 pub mod scale_type;
 pub mod transform;
@@ -68,6 +69,7 @@ pub use breaks::{
 };
 pub use chrome::{AxisSide, LegendSide};
 pub use input::InputRange;
+pub use locale::{Locale, Weekday};
 pub use output::OutputRange;
 pub use scale_type::{
     binned_band_width, binned_band_width_at, binned_breaks, binned_map, continuous_breaks,

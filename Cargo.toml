@@ -251,6 +251,10 @@ required-features = ["vello", "png", "text"]
 name = "facet_strips"
 required-features = ["vello", "png", "text"]
 
+[[example]]
+name = "locale_de"
+required-features = ["vello", "png", "text"]
+
 [[test]]
 name = "smoke"
 required-features = ["vello"]

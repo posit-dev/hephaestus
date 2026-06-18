@@ -37,6 +37,7 @@ pub mod theme;
 #[cfg(test)]
 mod tests;
 
+pub use crate::scales::{Locale, Weekday};
 pub use axis::{
     axis_concrete_defaults, AxisTheme, PerAxis, ResolvedAxis, TitleLocation,
     DEFAULT_AXIS_TITLE_SIZE_PT, DEFAULT_MINOR_TICK_LENGTH_PT, DEFAULT_TICK_GAP_PT,

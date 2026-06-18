@@ -1056,7 +1056,7 @@ impl Plot {
                         if matches!(v, Value::Null) {
                             continue;
                         }
-                        let text = scale.format(&v);
+                        let text = scale.format(&v, &theme.locale);
                         let run = TextRun::new(&text, &label_style, dpi);
                         let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
                         let w = run.natural_width();
@@ -1085,7 +1085,7 @@ impl Plot {
                             continue;
                         }
                         let theta = polar.theta_for_frac(frac);
-                        let text = scale.format(&v);
+                        let text = scale.format(&v, &theme.locale);
                         let run = TextRun::new(&text, &label_style, dpi);
                         let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
                         let w = run.natural_width();

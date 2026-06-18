@@ -14,7 +14,7 @@ use hephaestus::composition::{beside, Composition, Patch};
 use hephaestus::geometry::Size;
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::theme::{
-    Element, Length, Palette, RectElement, Theme, ThemeColor, ThemePart,
+    Element, Length, Locale, Palette, RectElement, Theme, ThemeColor, ThemePart,
 };
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom};
 use hephaestus::scales::chrome::AxisSide;
@@ -434,4 +434,59 @@ fn legend_key_frame_uses_theme_swatch_color() {
         swatch_fills >= 2,
         "expected at least 2 grey92 swatch fills (one per legend key), found {swatch_fills}"
     );
+}
+
+#[test]
+fn locale_de_renders_decimal_comma_in_axis_labels() {
+    // With `Locale::DE_DE`, the default numeric formatter swaps
+    // '.' → ',', so a continuous 0..1 axis emits glyph runs for
+    // "0,2", "0,4", … (not "0.2", "0.4", …). The test inspects
+    // recorded glyph runs by re-shaping each break and checking
+    // the locale-aware label.
+    let theme = Theme::default().with_locale(Locale::DE_DE);
+    let s = scale::continuous(0.0..=1.0);
+    let breaks = s.breaks(hephaestus::scales::DEFAULT_BREAK_COUNT);
+    let labels: Vec<String> = breaks.iter().map(|v| s.format(v, &theme.locale)).collect();
+    assert!(
+        labels.iter().any(|l| l.contains(',')),
+        "expected at least one DE_DE label with a decimal comma; got {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l.contains('.')),
+        "DE_DE labels must not contain decimal points; got {labels:?}"
+    );
+}
+
+#[test]
+fn locale_default_renders_decimal_point() {
+    // Default locale is `Locale::EN_US` → decimal point.
+    let theme = Theme::default();
+    let s = scale::continuous(0.0..=1.0);
+    let breaks = s.breaks(hephaestus::scales::DEFAULT_BREAK_COUNT);
+    let labels: Vec<String> = breaks.iter().map(|v| s.format(v, &theme.locale)).collect();
+    assert!(
+        !labels.iter().any(|l| l.contains(',')),
+        "EN_US labels must not contain decimal commas; got {labels:?}"
+    );
+}
+
+#[test]
+fn user_formatter_receives_locale() {
+    // A user-supplied formatter closure gets `(value, locale)` and
+    // can branch on it.
+    let s = scale::continuous(0.0..=1.0).with_format(|v, locale| match v {
+        hephaestus::scales::Value::Number(n) => {
+            format!(
+                "{n:.1}{}",
+                if locale.decimal == ',' { " DE" } else { " US" }
+            )
+        }
+        other => hephaestus::plot::Scale::default_format(other, locale),
+    });
+    assert!(s
+        .format(&hephaestus::scales::Value::Number(0.5), &Locale::EN_US)
+        .ends_with(" US"));
+    assert!(s
+        .format(&hephaestus::scales::Value::Number(0.5), &Locale::DE_DE)
+        .ends_with(" DE"));
 }

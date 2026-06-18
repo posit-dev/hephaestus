@@ -136,7 +136,13 @@ pub(crate) struct AxisMeasure {
 }
 
 impl AxisMeasure {
-    fn new(scale: &Scale, side: AxisSide, dpi: f64, chrome_style: &AxisChromeStyle) -> Self {
+    fn new(
+        scale: &Scale,
+        side: AxisSide,
+        dpi: f64,
+        chrome_style: &AxisChromeStyle,
+        locale: &crate::scales::Locale,
+    ) -> Self {
         let breaks = scale.breaks(DEFAULT_BREAK_COUNT);
         let mut max_w: f64 = 0.0;
         let mut max_h: f64 = 0.0;
@@ -144,7 +150,7 @@ impl AxisMeasure {
             if matches!(v, Value::Null) {
                 continue;
             }
-            let label = scale.format(v);
+            let label = scale.format(v, locale);
             let run = TextRun::new(&label, &chrome_style.text_style, dpi);
             // Lay out unconstrained to get the natural single-line width.
             let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
@@ -215,7 +221,13 @@ impl Scale {
         let (ch, side_idx) = axis_side_to_channel_side(side);
         let resolved = theme.axis.resolve(ch, side_idx);
         let chrome_style = AxisChromeStyle::from_resolved(&resolved, &theme.palette, dpi);
-        Box::new(AxisMeasure::new(self, side, dpi, &chrome_style))
+        Box::new(AxisMeasure::new(
+            self,
+            side,
+            dpi,
+            &chrome_style,
+            &theme.locale,
+        ))
     }
 
     /// Stroke tick marks and draw tick labels into `slot_rect`, mapping
@@ -280,7 +292,11 @@ impl Scale {
         let majors: Vec<(f64, String)> = breaks
             .iter()
             .filter(|v| !matches!(v, Value::Null))
-            .filter_map(|v| self.map(v).as_number().map(|f| (f, self.format(v))))
+            .filter_map(|v| {
+                self.map(v)
+                    .as_number()
+                    .map(|f| (f, self.format(v, &theme.locale)))
+            })
             .filter(|(f, _)| f.is_finite())
             .collect();
         let minors: Vec<f64> = self

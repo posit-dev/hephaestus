@@ -53,7 +53,12 @@ pub fn draw_radius_axis(
         .breaks(DEFAULT_BREAK_COUNT)
         .iter()
         .filter(|v| !matches!(v, Value::Null))
-        .filter_map(|v| scale.map(v).as_number().map(|f| (f, scale.format(v))))
+        .filter_map(|v| {
+            scale
+                .map(v)
+                .as_number()
+                .map(|f| (f, scale.format(v, &theme.locale)))
+        })
         .filter(|(f, _)| f.is_finite())
         .collect();
     let minors: Vec<f64> = scale
@@ -238,7 +243,7 @@ pub fn draw_angular_axis(
             tick_end.x + label_gap_px * rx,
             tick_end.y + label_gap_px * ry,
         );
-        let text = scale.format(v);
+        let text = scale.format(v, &theme.locale);
         draw_axis_label(
             scene,
             &text,
@@ -261,7 +266,7 @@ pub fn draw_angular_axis(
                 .iter()
                 .filter(|v| !matches!(v, Value::Null))
                 .fold((0.0_f64, 0.0_f64), |(mw, mh), v| {
-                    let label = scale.format(v);
+                    let label = scale.format(v, &theme.locale);
                     let run = TextRun::new(&label, &style, dpi);
                     let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
                     let w = run.natural_width();

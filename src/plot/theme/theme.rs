@@ -17,6 +17,7 @@ use super::geom::GeomTheme;
 use super::legend::LegendTheme;
 use super::length::{Length, Margin};
 use super::palette::{Palette, ThemeColor};
+use crate::scales::Locale;
 
 /// Default gap between stacked legends on the same plot side, pt.
 /// Shared by [`Theme::default`] (which wraps it in `Length::Abs`) and
@@ -119,6 +120,14 @@ pub struct Theme {
     /// Per-geom default style values. Each geom reads from this when
     /// a channel binding doesn't supply the value.
     pub geom: GeomTheme,
+
+    // ── Locale ─────────────────────────────────────────────────────
+    /// Locale-specific formatting hints (decimal / grouping
+    /// separators, month / day names, AM / PM, first-day-of-week).
+    /// Threaded into [`crate::plot::scale::Scale::format`] so tick
+    /// labels render in the configured locale without per-scale
+    /// configuration.
+    pub locale: Locale,
 }
 
 impl Default for Theme {
@@ -277,6 +286,7 @@ impl Default for Theme {
             }),
             strip_padding: Margin::all(Length::Abs(HALF_LINE_PT)),
             geom: GeomTheme::default(),
+            locale: Locale::default(),
         }
     }
 }
@@ -301,6 +311,13 @@ impl Theme {
     /// at next render.
     pub fn with_palette(mut self, palette: Palette) -> Self {
         self.palette = palette;
+        self
+    }
+
+    /// Replace the locale. Affects tick label formatting (decimal /
+    /// grouping marks, month / day names) at next render.
+    pub fn with_locale(mut self, locale: Locale) -> Self {
+        self.locale = locale;
         self
     }
 
@@ -392,6 +409,8 @@ pub struct ThemePart {
     /// Optional geom defaults override (replaces the whole
     /// `GeomTheme` wholesale).
     pub geom: Option<GeomTheme>,
+    /// Optional locale override.
+    pub locale: Option<Locale>,
 }
 
 impl ThemePart {
@@ -428,6 +447,7 @@ impl ThemePart {
         set_field!(strip_text);
         set_field!(strip_padding);
         set_field!(geom);
+        set_field!(locale);
         for (k, v) in &self.legend_variants {
             theme.legend_variants.insert(k.clone(), v.clone());
         }
