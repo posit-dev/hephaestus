@@ -472,7 +472,17 @@ impl Plot {
             return;
         }
         use kurbo::Shape;
-        let path: crate::path::Path = rect.to_path(0.0);
+        let radius_pt = bg
+            .corner_radius
+            .or(defaults.corner_radius)
+            .map(|l| l.resolve(0.0))
+            .unwrap_or(0.0);
+        let radius_px = (radius_pt * dpi / 72.0).max(0.0);
+        let path: crate::path::Path = if radius_px > 0.0 {
+            crate::primitives::rounded_rect(rect, radius_px)
+        } else {
+            rect.to_path(0.0)
+        };
         if let Some(fill) = bg.fill {
             let brush = crate::brush::Brush::Solid(fill.resolve(&theme.palette));
             scene.fill(
@@ -598,9 +608,11 @@ impl Plot {
         let clip_path: Option<crate::path::Path> = if self.clip {
             #[cfg(feature = "text")]
             {
+                let radius_px = crate::plot::chrome::panel::panel_corner_radius_px(theme, dpi);
                 Some(crate::plot::chrome::panel::panel_outline_path(
                     &self.projection,
                     panel,
+                    radius_px,
                 ))
             }
             #[cfg(not(feature = "text"))]

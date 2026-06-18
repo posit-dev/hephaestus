@@ -1066,6 +1066,78 @@ fn legend_text_styles(
     }
 }
 
+/// Paint a `RectElement` frame around `rect` — fill first (under any
+/// inner content), border stroke last (on top). Shared by every
+/// frame paint site (legend background, bar frame, per-row key
+/// frame) so corner-radius and the fill / stroke ordering stay
+/// consistent.
+fn paint_rect_frame(
+    scene: &mut dyn SceneBuilder,
+    frame: &crate::plot::theme::RectElement,
+    palette: &crate::plot::theme::Palette,
+    rect: Rect,
+    dpi: f64,
+    paint_fill: bool,
+    paint_stroke: bool,
+) {
+    use crate::plot::theme::rect_concrete_defaults;
+    let defaults = rect_concrete_defaults();
+    let path = path_for_rect_element(rect, frame, &defaults, dpi);
+    if paint_fill {
+        if let Some(fill) = frame.fill.clone() {
+            let brush = Brush::Solid(fill.resolve(palette));
+            scene.fill(
+                crate::path::FillRule::NonZero,
+                Affine::IDENTITY,
+                &brush,
+                None,
+                &path,
+                PickId::Skip,
+            );
+        }
+    }
+    if paint_stroke {
+        let lw = frame
+            .linewidth_pt
+            .or(defaults.linewidth_pt)
+            .expect("rect linewidth default");
+        if lw.resolve(1.0) > 0.0 {
+            let stroke = crate::plot::chrome::linear_axis::stroke_from_rect_border(frame, dpi);
+            let color = frame
+                .color
+                .clone()
+                .or(defaults.color)
+                .expect("rect color default");
+            let brush = Brush::Solid(color.resolve(palette));
+            scene.stroke(&stroke, Affine::IDENTITY, &brush, None, &path, PickId::Skip);
+        }
+    }
+}
+
+/// Resolve `el.corner_radius` to px and build either a sharp or
+/// rounded-rect path. Shared by every RectElement paint site in the
+/// legend renderer so corner_radius behaves consistently across the
+/// outer background, key frames, and bar frames.
+fn path_for_rect_element(
+    rect: Rect,
+    el: &crate::plot::theme::RectElement,
+    defaults: &crate::plot::theme::RectElement,
+    dpi: f64,
+) -> crate::path::Path {
+    use kurbo::Shape;
+    let radius_pt = el
+        .corner_radius
+        .or(defaults.corner_radius)
+        .map(|l| l.resolve(0.0))
+        .unwrap_or(0.0);
+    let radius_px = (radius_pt * dpi / 72.0).max(0.0);
+    if radius_px > 0.0 {
+        crate::primitives::rounded_rect(rect, radius_px)
+    } else {
+        rect.to_path(0.0)
+    }
+}
+
 /// Paint the legend's background rect (fill + border) into
 /// `slot_rect`. Sourced from `lt.background`. `Blank` skips.
 fn paint_legend_background(
@@ -1078,35 +1150,7 @@ fn paint_legend_background(
     let Some(bg) = lt.background.as_set() else {
         return;
     };
-    use crate::plot::theme::rect_concrete_defaults;
-    use kurbo::Shape;
-    let defaults = rect_concrete_defaults();
-    let path: crate::path::Path = slot_rect.to_path(0.0);
-    if let Some(fill) = bg.fill.clone() {
-        let brush = Brush::Solid(fill.resolve(palette));
-        scene.fill(
-            crate::path::FillRule::NonZero,
-            Affine::IDENTITY,
-            &brush,
-            None,
-            &path,
-            PickId::Skip,
-        );
-    }
-    let lw = bg
-        .linewidth_pt
-        .or(defaults.linewidth_pt)
-        .expect("rect linewidth default");
-    if lw.resolve(1.0) > 0.0 {
-        let stroke = crate::plot::chrome::linear_axis::stroke_from_rect_border(bg, dpi);
-        let color = bg
-            .color
-            .clone()
-            .or(defaults.color)
-            .expect("rect color default");
-        let brush = Brush::Solid(color.resolve(palette));
-        scene.stroke(&stroke, Affine::IDENTITY, &brush, None, &path, PickId::Skip);
-    }
+    paint_rect_frame(scene, bg, palette, slot_rect, dpi, true, true);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1177,6 +1221,7 @@ fn render_stack_body(
         );
     }
 
+    let key_frame = lt.key.frame.as_set();
     for (idx, v) in entries.iter().enumerate() {
         if idx >= layout.entries.len() {
             break;
@@ -1184,9 +1229,18 @@ fn render_stack_body(
         let (swatch_local, label_local) = &layout.entries[idx];
         let swatch_rect = translate_rect(*swatch_local, entries_x, entries_y);
         let label_rect = translate_rect(*label_local, entries_x, entries_y);
+        // Per-row key frame: fill paints under the key (so a key
+        // with a transparent rect / point shape lets the frame's
+        // fill show through), stroke paints on top.
+        if let Some(frame_el) = key_frame {
+            paint_rect_frame(scene, frame_el, palette, swatch_rect, dpi, true, false);
+        }
         for key in keys {
             let resolved = resolve_key(key, registry, v);
             render_key(key.kind, &resolved, swatch_rect, shapes, scene, dpi);
+        }
+        if let Some(frame_el) = key_frame {
+            paint_rect_frame(scene, frame_el, palette, swatch_rect, dpi, false, true);
         }
         let label = domain.format(v);
         let anchor = Point::new(label_rect.x0, (label_rect.y0 + label_rect.y1) * 0.5);
@@ -1324,6 +1378,15 @@ fn render_binned_stack_body(
         LegendSide::InPanel { .. } => unreachable!("cardinal_side flattens InPanel"),
     };
 
+    // Bar frame from LegendTheme.bar.frame — fill paints under the
+    // bins (so a bin with a transparent / semi-transparent colour
+    // lets the frame's fill show through), stroke paints last on top
+    // of the bins.
+    let bar_frame = lt.bar.frame.as_set();
+    if let Some(frame_el) = bar_frame {
+        paint_rect_frame(scene, frame_el, palette, bar_rect, dpi, true, false);
+    }
+
     // For Right/Left the bar runs BOTTOM (low frac) to TOP (high
     // frac) — matches the cartesian y convention. For Top/Bottom
     // it's left → right.
@@ -1356,6 +1419,11 @@ fn render_binned_stack_body(
             let resolved = resolve_key(key, registry, &midpoint);
             render_key(key.kind, &resolved, cell, shapes, scene, dpi);
         }
+    }
+
+    // Frame border on top of the bins.
+    if let Some(frame_el) = bar_frame {
+        paint_rect_frame(scene, frame_el, palette, bar_rect, dpi, false, true);
     }
 
     // Axis along the bar's long edge (away from the panel) with
@@ -1481,6 +1549,21 @@ fn render_colorbar_body(
         ),
         LegendSide::InPanel { .. } => unreachable!("cardinal_side flattens InPanel"),
     };
+    // Bar frame from LegendTheme.bar.frame — fill, gradient, stroke
+    // in that order. The frame's fill paints first so semi-transparent
+    // gradient stops let the background show through; the stroke
+    // paints last so the border sits on top of the gradient. Frame
+    // semantics mirror KeyTheme.frame exactly.
+    use crate::plot::theme::rect_concrete_defaults;
+    let rect_defaults = rect_concrete_defaults();
+    let frame = lt.bar.frame.as_set();
+    let bar_radius_px = frame
+        .and_then(|f| f.corner_radius.or(rect_defaults.corner_radius))
+        .map(|l| (l.resolve(0.0) * dpi / 72.0).max(0.0))
+        .unwrap_or(0.0);
+    if let Some(frame_el) = frame {
+        paint_rect_frame(scene, frame_el, palette, bar_rect, dpi, true, false);
+    }
     draw_gradient_bar(
         &legend.domain_scale,
         domain,
@@ -1489,8 +1572,12 @@ fn render_colorbar_body(
         registry,
         &bar_rect,
         side,
+        bar_radius_px,
         scene,
     );
+    if let Some(frame_el) = frame {
+        paint_rect_frame(scene, frame_el, palette, bar_rect, dpi, false, true);
+    }
     let _ = samples; // sample count carried on the spec, used inside draw_gradient_bar
 
     // Axis along the bar's long edge — uses the shared linear-axis
@@ -1600,6 +1687,7 @@ fn draw_gradient_bar(
     registry: &ScaleRegistry,
     bar: &Rect,
     side: LegendSide,
+    corner_radius_px: f64,
     scene: &mut dyn SceneBuilder,
 ) {
     let (min, max) = match domain.input_range() {
@@ -1725,7 +1813,14 @@ fn draw_gradient_bar(
     };
 
     let gradient = peniko::Gradient::new_linear(grad_start, grad_end).with_stops(stops.as_slice());
-    let path: Path = bar.to_path(0.0);
+    // Clip the gradient to the rounded bar shape — fill via the
+    // rounded path so the gradient never paints past the frame's
+    // rounded corners.
+    let path: Path = if corner_radius_px > 0.0 {
+        crate::primitives::rounded_rect(*bar, corner_radius_px)
+    } else {
+        bar.to_path(0.0)
+    };
     scene.fill(
         FillRule::NonZero,
         Affine::IDENTITY,

@@ -58,7 +58,8 @@ pub fn draw_panel_chrome(
     if panel.x1 <= panel.x0 || panel.y1 <= panel.y0 {
         return;
     }
-    let outline_path = panel_outline_path(projection, panel);
+    let corner_radius_px = panel_corner_radius_px(theme, dpi);
+    let outline_path = panel_outline_path(projection, panel, corner_radius_px);
 
     // Background fill — sourced from theme.panel_background.
     if let Some(bg) = theme.panel_background.as_set() {
@@ -211,12 +212,37 @@ fn draw_grid_lines<F>(
 // ─── Per-projection geometry ────────────────────────────────────────────────
 
 /// Closed path tracing the boundary of the plotting area. Used for
-/// background fill and the panel outline stroke.
-pub fn panel_outline_path(projection: &Projection, panel: Rect) -> Path {
+/// background fill, panel outline stroke, and the geom clip mask.
+/// `corner_radius_px` rounds the Cartesian panel's four corners; the
+/// polar panel is already curved and ignores it.
+pub fn panel_outline_path(projection: &Projection, panel: Rect, corner_radius_px: f64) -> Path {
     match projection {
-        Projection::Cartesian => panel.to_path(0.0),
+        Projection::Cartesian => {
+            if corner_radius_px > 0.0 {
+                crate::primitives::rounded_rect(panel, corner_radius_px)
+            } else {
+                panel.to_path(0.0)
+            }
+        }
         Projection::Polar(p) => polar_panel_outline(p, panel),
     }
+}
+
+/// Resolve the panel's corner radius from `theme.panel_background`'s
+/// `corner_radius` (falling through to the rect concrete defaults
+/// when None). Returns 0 for `Element::Blank` or sharp corners.
+pub fn panel_corner_radius_px(theme: &Theme, dpi: f64) -> f64 {
+    use crate::plot::theme::rect_concrete_defaults;
+    let Some(bg) = theme.panel_background.as_set() else {
+        return 0.0;
+    };
+    let defaults = rect_concrete_defaults();
+    let pt = bg
+        .corner_radius
+        .or(defaults.corner_radius)
+        .map(|l| l.resolve(0.0))
+        .unwrap_or(0.0);
+    (pt * dpi / 72.0).max(0.0)
 }
 
 /// Grid line for `channel` (0 or 1) at fraction `frac` ∈ [0, 1].
