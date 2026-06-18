@@ -36,6 +36,11 @@
 //!   Mirrors `WedgeGeom::radius_band`. Defaults to 0; the existing
 //!   5pt `"size"` default is unchanged, so callers wanting pure band
 //!   sizing also pass `size = 0`.
+//! - `"linewidth"` — stroke width in **pt** (optional; defaults to
+//!   `theme.geom.point.stroke_width_pt`, conventionally 1pt). Sets the
+//!   width of the marker's outline stroke when `"stroke"` is bound;
+//!   the rendered stroke is constant in output pixels regardless of
+//!   the marker's `"size"`.
 //! - `"shape"` — registered shape name (optional; defaults to "circle").
 //!   Glyph-backed shapes (constructed via [`crate::shape::Shape::glyph`]
 //!   or the [`crate::text::glyph_marker`] convenience) are valid here and
@@ -123,6 +128,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("stroke_opacity", ExpectedOutput::Numbers),
     ("size", ExpectedOutput::Numbers),
     ("size_band", ExpectedOutput::Numbers),
+    ("linewidth", ExpectedOutput::Numbers),
     ("shape", ExpectedOutput::Strings),
     ("angle", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
@@ -207,6 +213,7 @@ impl Geom for PointGeom {
         let y_band_scale = ctx.scale_for("y_band");
         let size_scale = ctx.scale_for("size");
         let size_band_scale = ctx.scale_for("size_band");
+        let linewidth_scale = ctx.scale_for("linewidth");
         let angle_scale = ctx.scale_for("angle");
         let pick_id_scale = ctx.scale_for("pick_id");
 
@@ -235,6 +242,7 @@ impl Geom for PointGeom {
         let y_band_ch = channels.get("y_band");
         let size_ch = channels.get("size");
         let size_band_ch = channels.get("size_band");
+        let linewidth_ch = channels.get("linewidth");
         let shape_ch = channels.get("shape");
         let angle_ch = channels.get("angle");
         let pick_id_ch = channels.get("pick_id");
@@ -320,6 +328,18 @@ impl Geom for PointGeom {
             };
 
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
+            // Stroke width: per-row `"linewidth"` channel takes
+            // precedence, otherwise theme default. Divided by
+            // `size_px` to invert the `Affine::scale(size_px)` on
+            // the path — the rendered stroke is then a constant
+            // width in output pixels regardless of marker size.
+            let stroke_width_pt = resolve_number_channel_or(
+                linewidth_ch,
+                linewidth_scale,
+                i,
+                ctx.theme.geom.point.stroke_width_pt,
+            );
+            let stroke_width_local = pt_to_px(stroke_width_pt, ctx.dpi) / size_px;
             match shape.kind() {
                 ShapeKind::Paths { paths, style } => {
                     for sub in paths {
@@ -336,19 +356,13 @@ impl Geom for PointGeom {
                                     );
                                 }
                                 if let Some(sc) = stroke_color {
-                                    let st = Stroke::new(pt_to_px(
-                                        ctx.theme.geom.point.stroke_width_pt,
-                                        ctx.dpi,
-                                    ));
+                                    let st = Stroke::new(stroke_width_local);
                                     scene.stroke(&st, xform, &Brush::Solid(sc), None, sub, pick);
                                 }
                             }
                             ShapeStyle::Stroke => {
                                 if let Some(sc) = stroke_color {
-                                    let st = Stroke::new(pt_to_px(
-                                        ctx.theme.geom.point.stroke_width_pt,
-                                        ctx.dpi,
-                                    ));
+                                    let st = Stroke::new(stroke_width_local);
                                     scene.stroke(&st, xform, &Brush::Solid(sc), None, sub, pick);
                                 }
                             }

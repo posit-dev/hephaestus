@@ -50,7 +50,7 @@ fn main() {
             .set("size", 8.0_f64)
             .set("fill", colours)
             .set("stroke", categories)
-            .set("linewidth", 1.5_f64)
+            .set("linewidth", 1.0_f64)
             .build(),
     );
     plot.add_axis(Axis::rail(
