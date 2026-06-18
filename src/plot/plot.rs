@@ -783,20 +783,29 @@ impl Plot {
         }
 
         // Title row + variants — styles come from the theme.
+        // `theme.plot_text_align_to` picks the column span: `Plot`
+        // (default) uses the full `Slot::Title` anatomical span
+        // (rows 3 / 4 / 14, cols PLOT_LEFT..=PLOT_RIGHT) so chrome
+        // text spans the whole plot interior; `Panel` narrows the
+        // span to just the panel column (`PANEL_COL`) so the title
+        // sits directly above / below the panel, regardless of how
+        // wide the side chrome (axes, legends, strips) grew. Same
+        // semantic as ggplot2's `plot.title.position`.
         let root_pt = theme.text.size_pt.map(|l| l.resolve(10.0)).unwrap_or(10.0);
-        if let Some(t) = &self.title {
-            if let Some(el) = effective_text(&theme.plot_title, &theme.text) {
-                patch = patch.slot(Slot::Title, text_cell_for_element(t, &el, root_pt, dpi));
-            }
-        }
-        if let Some(t) = &self.subtitle {
-            if let Some(el) = effective_text(&theme.plot_subtitle, &theme.text) {
-                patch = patch.slot(Slot::Subtitle, text_cell_for_element(t, &el, root_pt, dpi));
-            }
-        }
-        if let Some(t) = &self.caption {
-            if let Some(el) = effective_text(&theme.plot_caption, &theme.text) {
-                patch = patch.slot(Slot::Caption, text_cell_for_element(t, &el, root_pt, dpi));
+        for (slot, text_opt, theme_slot) in [
+            (Slot::Title, self.title.as_ref(), &theme.plot_title),
+            (Slot::Subtitle, self.subtitle.as_ref(), &theme.plot_subtitle),
+            (Slot::Caption, self.caption.as_ref(), &theme.plot_caption),
+        ] {
+            if let (Some(t), Some(el)) = (text_opt, effective_text(theme_slot, &theme.text)) {
+                let (r, c, rs, cs) = title_band_placement(slot, theme.plot_text_align_to);
+                patch = patch.place_at(
+                    slot.name(),
+                    r,
+                    c,
+                    crate::composition::Span::rc(rs, cs),
+                    text_cell_for_element(t, &el, root_pt, dpi),
+                );
             }
         }
         // Axes — explicitly composed by the caller via
@@ -1738,6 +1747,22 @@ impl crate::layout::Measure for BoxMeasure {
 /// Left, Top, Bottom) so the layout solver and the draw loop iterate
 /// in lockstep. Empty sides are still yielded — the caller checks
 /// `members.is_empty()` to skip.
+#[cfg(feature = "text")]
+/// Pick the `(row, col, row_span, col_span)` placement for a plot-
+/// level text slot (Title / Subtitle / Caption) based on the
+/// theme's [`crate::plot::theme::AlignTo`] setting. `Plot` uses the
+/// canonical anatomical span (PLOT_LEFT..=PLOT_RIGHT); `Panel`
+/// narrows the column span to just the panel column so chrome text
+/// aligns against the panel rather than the full plot interior.
+#[cfg(feature = "text")]
+fn title_band_placement(slot: Slot, align_to: crate::plot::theme::AlignTo) -> (u16, u16, u16, u16) {
+    let (row, col, rs, cs) = slot.placement();
+    match align_to {
+        crate::plot::theme::AlignTo::Plot => (row, col, rs, cs),
+        crate::plot::theme::AlignTo::Panel => (row, crate::composition::PANEL_COL, rs, 1),
+    }
+}
+
 #[cfg(feature = "text")]
 fn cartesian_axis_slot(side: AxisSide) -> Slot {
     match side {
