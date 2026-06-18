@@ -239,6 +239,10 @@ required-features = ["vello", "png", "text"]
 name = "theme_axis_title_inside"
 required-features = ["vello", "png", "text"]
 
+[[example]]
+name = "theme_polar_corner_radius"
+required-features = ["vello", "png", "text"]
+
 [[test]]
 name = "smoke"
 required-features = ["vello"]

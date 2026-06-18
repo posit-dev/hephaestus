@@ -19,8 +19,25 @@ fn main() {
     let dpi = 96.0;
 
     let comp = || Composition::empty(1, 1).place(1, 1, Span::cell(), Patch::new("p"));
-    let xs: Vec<f64> = (0..40).map(|i| i as f64 * 0.15).collect();
-    let ys: Vec<f64> = xs.iter().map(|x| (x * 0.7).sin() * 0.4 + 0.5).collect();
+    // Generate data that explicitly reaches the corners so the
+    // rounded clip is visibly exercised. The dense corner clusters
+    // get cropped by the rounded panel boundary.
+    let mut xs: Vec<f64> = Vec::new();
+    let mut ys: Vec<f64> = Vec::new();
+    for i in 0..40 {
+        let t = i as f64 / 39.0;
+        xs.push(t * 6.0);
+        ys.push((t * 4.4).sin() * 0.4 + 0.5);
+    }
+    // Add a corner-hugging cluster at all four corners to make clip
+    // behaviour visible.
+    for (cx, cy) in &[(0.05, 0.97), (5.95, 0.97), (0.05, 0.03), (5.95, 0.03)] {
+        for di in 0..8 {
+            let theta = di as f64 * 0.3;
+            xs.push(cx + theta.cos() * 0.15);
+            ys.push(cy + theta.sin() * 0.04);
+        }
+    }
 
     // Use the y values themselves as the colour-mapped channel so a
     // colorbar legend makes sense.

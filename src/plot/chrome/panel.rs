@@ -66,8 +66,19 @@ pub fn draw_panel_chrome(
         fill_rect_element(scene, bg, &theme.palette, &outline_path);
     }
 
-    // Grid lines, per channel. Minors drawn first so majors layer on
-    // top at coincident fractions.
+    // Grid lines, per channel. Wrapped in a `push_layer` clip so
+    // gridlines whose natural extent overshoots the panel edge
+    // (Cartesian: a vertical line spans the full panel height; the
+    // rounded corner trims its top + bottom — polar: radial spokes
+    // cross the corner rounding) get cropped to the panel's actual
+    // boundary. Minors drawn first so majors layer on top at
+    // coincident fractions.
+    scene.push_layer(
+        crate::blend::BlendMode::default(),
+        1.0,
+        crate::geometry::Affine::IDENTITY,
+        &outline_path,
+    );
     let major_0 = theme.panel_grid_major.resolve(0);
     let minor_0 = theme.panel_grid_minor.resolve(0);
     if let Some(scale) = scales.channel_0 {
@@ -94,6 +105,7 @@ pub fn draw_panel_chrome(
             dpi,
         );
     }
+    scene.pop_layer();
 
     // Panel outline.
     if let Some(border) = theme.panel_border.as_set() {
@@ -213,8 +225,11 @@ fn draw_grid_lines<F>(
 
 /// Closed path tracing the boundary of the plotting area. Used for
 /// background fill, panel outline stroke, and the geom clip mask.
-/// `corner_radius_px` rounds the Cartesian panel's four corners; the
-/// polar panel is already curved and ignores it.
+/// `corner_radius_px` rounds the Cartesian panel's four corners; for
+/// polar projections it rounds the line-to-arc joins of partial
+/// wedges (and the vertex-to-vertex joins of chord-style polygons) —
+/// full disks and full annuli have no corners and the radius is a
+/// no-op there.
 pub fn panel_outline_path(projection: &Projection, panel: Rect, corner_radius_px: f64) -> Path {
     match projection {
         Projection::Cartesian => {
@@ -224,7 +239,20 @@ pub fn panel_outline_path(projection: &Projection, panel: Rect, corner_radius_px
                 panel.to_path(0.0)
             }
         }
-        Projection::Polar(p) => polar_panel_outline(p, panel),
+        Projection::Polar(p) => {
+            let path = polar_panel_outline(p, panel);
+            if corner_radius_px > 0.0 {
+                crate::primitives::round_path_corners(
+                    &path,
+                    crate::primitives::CornerRounding {
+                        max_cut: corner_radius_px,
+                        ..crate::primitives::CornerRounding::default()
+                    },
+                )
+            } else {
+                path
+            }
+        }
     }
 }
 
