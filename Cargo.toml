@@ -262,3 +262,7 @@ required-features = ["vello"]
 [[test]]
 name = "picking"
 required-features = ["vello"]
+
+[[test]]
+name = "theme_render"
+required-features = ["text"]
