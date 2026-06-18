@@ -210,7 +210,7 @@ fn wire_into_patch(
 fn apply_plot_chrome(patch: Patch, theme: &Theme) -> Patch {
     use crate::composition::Slot;
     use crate::layout::{Cell, Inset, Length as LayoutLength};
-    let root_pt = theme.text.size_pt.resolve(10.0);
+    let root_pt = theme.text.size_pt.map(|l| l.resolve(10.0)).unwrap_or(10.0);
     let margin_inset = {
         let (mt, mr, mb, ml) = theme.plot_margin.resolve(root_pt);
         (mt != 0.0 || mr != 0.0 || mb != 0.0 || ml != 0.0).then(|| {

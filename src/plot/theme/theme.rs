@@ -110,21 +110,22 @@ impl Default for Theme {
     /// examples produce byte-identical PNGs against their baseline
     /// after this struct lands.
     fn default() -> Self {
-        use super::axis::AxisTheme;
-        use super::element::{HAlign, VAlign};
+        use super::axis::axis_concrete_defaults;
+        use super::element::{
+            line_concrete_defaults, rect_concrete_defaults, text_concrete_defaults, HAlign, VAlign,
+        };
         use super::font::{FontSpec, FontWeight};
 
         let palette = Palette::default();
 
-        // Root text: 10pt regular ink, centered.
-        let text = TextElement {
-            size_pt: Length::Abs(10.0),
-            ..TextElement::default()
-        };
-        // Root line: 1pt solid ink.
-        let line = LineElement::default();
-        // Root rect: paper fill, 1pt ink border.
-        let rect = RectElement::default();
+        // Root text / line / rect — fully populated so every
+        // downstream override has a concrete parent to fall through
+        // to. Sparse overrides (theme.plot_title, axis.text, etc.)
+        // cascade through these roots, then ultimately through the
+        // per-type concrete-default constants.
+        let text = text_concrete_defaults();
+        let line = line_concrete_defaults();
+        let rect = rect_concrete_defaults();
 
         Theme {
             palette,
@@ -136,21 +137,21 @@ impl Default for Theme {
             // italic, no plot background (the panel background is what
             // shows).
             plot_title: Element::Set(TextElement {
-                size_pt: Length::Abs(16.0),
+                size_pt: Some(Length::Abs(16.0)),
                 font: FontSpec {
                     weight: Some(FontWeight::BOLD),
                     ..FontSpec::default()
                 },
-                align: HAlign::Center,
-                valign: VAlign::Middle,
+                align: Some(HAlign::Center),
+                valign: Some(VAlign::Middle),
                 ..TextElement::default()
             }),
             plot_subtitle: Element::Set(TextElement {
-                size_pt: Length::Abs(12.0),
+                size_pt: Some(Length::Abs(12.0)),
                 ..TextElement::default()
             }),
             plot_caption: Element::Set(TextElement {
-                size_pt: Length::Abs(10.0),
+                size_pt: Some(Length::Abs(10.0)),
                 font: FontSpec {
                     style: Some(super::font::FontStyle::Italic),
                     ..FontSpec::default()
@@ -167,14 +168,14 @@ impl Default for Theme {
             // 0.5pt.
             panel_background: Element::Set(RectElement {
                 fill: Some(ThemeColor::Paper),
-                color: ThemeColor::Ink,
-                linewidth_pt: Length::Abs(1.0),
+                color: Some(ThemeColor::Ink),
+                linewidth_pt: Some(Length::Abs(1.0)),
                 ..RectElement::default()
             }),
             panel_border: Element::Set(RectElement {
                 fill: None,
-                color: ThemeColor::Ink,
-                linewidth_pt: Length::Abs(1.0),
+                color: Some(ThemeColor::Ink),
+                linewidth_pt: Some(Length::Abs(1.0)),
                 ..RectElement::default()
             }),
             // Grid colors expressed as palette mixes so `invert()`
@@ -182,20 +183,21 @@ impl Default for Theme {
             // theme: major lands ~rgb(0.779), minor ~rgb(0.874), close
             // to the historical 0.78 / 0.88 values.
             panel_grid_major: PerChannel::new(LineElement {
-                color: ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.18),
-                linewidth_pt: Length::Abs(0.5),
+                color: Some(ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.18)),
+                linewidth_pt: Some(Length::Abs(0.5)),
                 ..LineElement::default()
             }),
             panel_grid_minor: PerChannel::new(LineElement {
-                color: ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.08),
-                linewidth_pt: Length::Abs(0.5),
+                color: Some(ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.08)),
+                linewidth_pt: Some(Length::Abs(0.5)),
                 ..LineElement::default()
             }),
 
-            // Axis: default AxisTheme is already tuned to today's
-            // 4pt major / 2pt minor ticks, 2pt label gap, 10pt
-            // labels, 12pt title.
-            axis: PerAxis::new(AxisTheme::default()),
+            // Axis: root tuned to today's 4pt major / 2pt minor
+            // ticks, 2pt label gap, 10pt labels, 12pt title. Per-
+            // axis / per-side slots default to all-`None` so they
+            // cascade through this root.
+            axis: PerAxis::new(axis_concrete_defaults()),
 
             // Legend: defaults shipped with LegendTheme already match
             // the existing legend visual surface.
@@ -208,12 +210,12 @@ impl Default for Theme {
             // against the strip edges.
             strip_background: Sided::new(RectElement {
                 fill: Some(ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.10)),
-                color: ThemeColor::Ink,
-                linewidth_pt: Length::Abs(0.5),
+                color: Some(ThemeColor::Ink),
+                linewidth_pt: Some(Length::Abs(0.5)),
                 ..RectElement::default()
             }),
             strip_text: Sided::new(TextElement {
-                size_pt: Length::Abs(10.0),
+                size_pt: Some(Length::Abs(10.0)),
                 ..TextElement::default()
             }),
             strip_padding: Margin::all(Length::Abs(4.0)),

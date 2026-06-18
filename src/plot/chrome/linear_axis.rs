@@ -31,11 +31,25 @@ use crate::text::{draw_text, Alignment, TextRun, TextStyle};
 /// honoring linewidth, linetype (dash pattern), cap, and join.
 /// Width and dash lengths are pt; converted to px via the standard
 /// `pt * dpi / 72` factor. Width resolves against 1.0 pt parent
-/// (the `theme.line` root width default).
+/// (the `theme.line` root width default). Any `None` field falls
+/// through to `line_concrete_defaults()`.
 pub(crate) fn stroke_from_line_element(el: &LineElement, dpi: f64) -> Stroke {
-    let width_pt = el.linewidth_pt.resolve(1.0);
+    use crate::plot::theme::line_concrete_defaults;
+    let defaults = line_concrete_defaults();
+    let width_pt = el
+        .linewidth_pt
+        .or(defaults.linewidth_pt)
+        .expect("line linewidth default")
+        .resolve(1.0);
     let width_px = pt_to_px(width_pt, dpi);
-    build_stroke_for_pattern(width_px, el.cap, el.join, &el.linetype, 0.0, width_pt, dpi)
+    let cap = el.cap.or(defaults.cap).expect("line cap default");
+    let join = el.join.or(defaults.join).expect("line join default");
+    let linetype = el
+        .linetype
+        .clone()
+        .or(defaults.linetype)
+        .expect("line linetype default");
+    build_stroke_for_pattern(width_px, cap, join, &linetype, 0.0, width_pt, dpi)
 }
 
 /// Build a kurbo [`Stroke`] from a themed [`RectElement`]'s border
@@ -44,13 +58,24 @@ pub(crate) fn stroke_from_line_element(el: &LineElement, dpi: f64) -> Stroke {
 /// `Cap::Butt` + `Join::Miter` (the kurbo defaults for closed
 /// strokes). Width resolves against the 1.0 pt root linewidth.
 pub(crate) fn stroke_from_rect_border(el: &RectElement, dpi: f64) -> Stroke {
-    let width_pt = el.linewidth_pt.resolve(1.0);
+    use crate::plot::theme::rect_concrete_defaults;
+    let defaults = rect_concrete_defaults();
+    let width_pt = el
+        .linewidth_pt
+        .or(defaults.linewidth_pt)
+        .expect("rect linewidth default")
+        .resolve(1.0);
     let width_px = pt_to_px(width_pt, dpi);
+    let linetype = el
+        .linetype
+        .clone()
+        .or(defaults.linetype)
+        .expect("rect linetype default");
     build_stroke_for_pattern(
         width_px,
         Cap::Butt,
         Join::Miter,
-        &el.linetype,
+        &linetype,
         0.0,
         width_pt,
         dpi,
@@ -99,41 +124,63 @@ pub(crate) struct AxisChromeStyle {
     pub draw_labels: bool,
 }
 
+fn resolve_line_color(el: &LineElement, defaults: &LineElement) -> crate::plot::theme::ThemeColor {
+    el.color
+        .clone()
+        .or_else(|| defaults.color.clone())
+        .expect("line color default")
+}
+
 impl AxisChromeStyle {
     /// Construct from a `ResolvedAxis` against the theme's palette
     /// at the given dpi.
-    pub fn from_resolved(resolved: &ResolvedAxis<'_>, palette: &Palette, dpi: f64) -> Self {
+    pub fn from_resolved(resolved: &ResolvedAxis, palette: &Palette, dpi: f64) -> Self {
+        use crate::plot::theme::{line_concrete_defaults, text_concrete_defaults};
         let fallback_stroke = || Stroke::new(pt_to_px(STROKE_WIDTH_PT, dpi));
         let mk_brush = |c: Color| Brush::Solid(c);
+        let line_defaults = line_concrete_defaults();
+        let text_defaults = text_concrete_defaults();
 
-        let (line_brush, line_stroke) = match resolved.line {
+        let line_color =
+            |el: &LineElement| -> Color { resolve_line_color(el, &line_defaults).resolve(palette) };
+
+        let (line_brush, line_stroke) = match &resolved.line {
             Some(el) => (
-                Some(mk_brush(el.color.resolve(palette))),
+                Some(mk_brush(line_color(el))),
                 stroke_from_line_element(el, dpi),
             ),
             None => (None, fallback_stroke()),
         };
-        let (tick_brush, tick_stroke) = match resolved.ticks {
+        let (tick_brush, tick_stroke) = match &resolved.ticks {
             Some(el) => (
-                Some(mk_brush(el.color.resolve(palette))),
+                Some(mk_brush(line_color(el))),
                 stroke_from_line_element(el, dpi),
             ),
             None => (None, fallback_stroke()),
         };
-        let (minor_brush, minor_stroke) = match resolved.ticks_minor {
+        let (minor_brush, minor_stroke) = match &resolved.ticks_minor {
             Some(el) => (
-                Some(mk_brush(el.color.resolve(palette))),
+                Some(mk_brush(line_color(el))),
                 stroke_from_line_element(el, dpi),
             ),
             None => (None, fallback_stroke()),
         };
 
-        let (text_style, text_brush, draw_labels) = match resolved.text {
-            Some(el) => (
-                TextStyle::new(el.size_pt.resolve(LABEL_FONT_SIZE_PT as f64) as f32),
-                mk_brush(el.color.resolve(palette)),
-                true,
-            ),
+        let (text_style, text_brush, draw_labels) = match &resolved.text {
+            Some(el) => {
+                let size_pt = el
+                    .size_pt
+                    .or(text_defaults.size_pt)
+                    .expect("text size_pt default")
+                    .resolve(LABEL_FONT_SIZE_PT as f64) as f32;
+                let color = el
+                    .color
+                    .clone()
+                    .or_else(|| text_defaults.color.clone())
+                    .expect("text color default")
+                    .resolve(palette);
+                (TextStyle::new(size_pt), mk_brush(color), true)
+            }
             None => (
                 TextStyle::new(LABEL_FONT_SIZE_PT),
                 mk_brush(axis_ink()),

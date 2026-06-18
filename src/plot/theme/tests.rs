@@ -75,22 +75,28 @@ fn element_cascade_set_wins_over_parent() {
 
 #[test]
 fn per_channel_resolves_by_channel_then_root() {
-    let mut pc = PerChannel::new(LineElement::default());
+    let mut pc = PerChannel::new(LineElement {
+        linewidth_pt: Some(Length::Abs(1.0)),
+        ..LineElement::default()
+    });
     let override_line = LineElement {
-        linewidth_pt: Length::Abs(2.0),
+        linewidth_pt: Some(Length::Abs(2.0)),
         ..LineElement::default()
     };
     pc.by_channel[1] = Element::Set(override_line.clone());
 
     let ch0 = pc.resolve(0).unwrap();
     let ch1 = pc.resolve(1).unwrap();
-    assert_eq!(ch0.linewidth_pt, Length::Abs(1.0)); // from root
-    assert_eq!(ch1.linewidth_pt, Length::Abs(2.0)); // from override
+    assert_eq!(ch0.linewidth_pt, Some(Length::Abs(1.0))); // from root
+    assert_eq!(ch1.linewidth_pt, Some(Length::Abs(2.0))); // from override
 }
 
 #[test]
 fn per_channel_blank_overrides_root() {
-    let mut pc = PerChannel::new(LineElement::default());
+    let mut pc = PerChannel::new(LineElement {
+        linewidth_pt: Some(Length::Abs(1.0)),
+        ..LineElement::default()
+    });
     pc.by_channel[0] = Element::Blank;
 
     assert!(pc.resolve(0).is_none()); // Blank short-circuits
@@ -99,13 +105,16 @@ fn per_channel_blank_overrides_root() {
 
 #[test]
 fn sided_resolves_most_specific_first() {
-    let mut s = Sided::new(RectElement::default());
+    let mut s = Sided::new(RectElement {
+        linewidth_pt: Some(Length::Abs(1.0)),
+        ..RectElement::default()
+    });
     let ch_override = RectElement {
-        linewidth_pt: Length::Abs(2.0),
+        linewidth_pt: Some(Length::Abs(2.0)),
         ..RectElement::default()
     };
     let side_override = RectElement {
-        linewidth_pt: Length::Abs(3.0),
+        linewidth_pt: Some(Length::Abs(3.0)),
         ..RectElement::default()
     };
     s.by_channel[0] = Element::Set(ch_override);
@@ -115,14 +124,14 @@ fn sided_resolves_most_specific_first() {
     let r01 = s.resolve(0, 1).unwrap();
     let r10 = s.resolve(1, 0).unwrap();
 
-    assert_eq!(r00.linewidth_pt, Length::Abs(2.0)); // from by_channel
-    assert_eq!(r01.linewidth_pt, Length::Abs(3.0)); // from by_channel_side
-    assert_eq!(r10.linewidth_pt, Length::Abs(1.0)); // from root
+    assert_eq!(r00.linewidth_pt, Some(Length::Abs(2.0))); // from by_channel
+    assert_eq!(r01.linewidth_pt, Some(Length::Abs(3.0))); // from by_channel_side
+    assert_eq!(r10.linewidth_pt, Some(Length::Abs(1.0))); // from root
 }
 
 #[test]
 fn per_axis_resolves_per_field() {
-    let mut axis = PerAxis::default();
+    let mut axis = PerAxis::new(axis_concrete_defaults());
     axis.by_channel[0].tick_length = Some(Length::Abs(8.0));
     axis.by_channel_side[1][1].tick_gap = Some(Length::Abs(5.0));
 
@@ -130,9 +139,9 @@ fn per_axis_resolves_per_field() {
     let r11 = axis.resolve(1, 1);
 
     assert_eq!(r00.tick_length, Length::Abs(8.0)); // channel-0 override
-    assert_eq!(r00.tick_gap, axis.all.tick_gap); // unset — falls to root
+    assert_eq!(r00.tick_gap, axis.all.tick_gap.unwrap()); // unset — falls to root
     assert_eq!(r11.tick_gap, Length::Abs(5.0)); // (ch1, side1) override
-    assert_eq!(r11.tick_length, axis.all.tick_length); // unset — root
+    assert_eq!(r11.tick_length, axis.all.tick_length.unwrap()); // unset — root
 }
 
 #[test]
@@ -251,8 +260,8 @@ fn themed_grid_dash_pattern_reaches_stroke() {
     use std::sync::Arc;
 
     let element = LineElement {
-        linewidth_pt: Length::Abs(1.0),
-        linetype: Arc::from([LinetypeStep::Dash(4.0), LinetypeStep::Gap(2.0)]),
+        linewidth_pt: Some(Length::Abs(1.0)),
+        linetype: Some(Arc::from([LinetypeStep::Dash(4.0), LinetypeStep::Gap(2.0)])),
         ..LineElement::default()
     };
     let stroke = stroke_from_line_element(&element, 96.0);

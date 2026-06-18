@@ -55,10 +55,10 @@ fn main() {
                 Box::new(ThemeColor::Accent),
                 0.3,
             )),
-            color: ThemeColor::Ink,
-            linewidth_pt: Length::Abs(2.0),
-            linetype: std::sync::Arc::from([]),
-            corner_radius: Length::Abs(0.0),
+            color: Some(ThemeColor::Ink),
+            linewidth_pt: Some(Length::Abs(2.0)),
+            linetype: Some(std::sync::Arc::from([])),
+            corner_radius: Some(Length::Abs(0.0)),
         }),
         ..Theme::default()
     };

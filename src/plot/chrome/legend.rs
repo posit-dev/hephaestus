@@ -1026,11 +1026,25 @@ fn legend_text_styles(
     lt: &crate::plot::theme::LegendTheme,
     palette: &crate::plot::theme::Palette,
 ) -> LegendTextStyles {
+    use crate::plot::theme::text_concrete_defaults;
+    let text_defaults = text_concrete_defaults();
     let root_pt = 10.0_f64;
+    fn resolve_color(
+        el: &crate::plot::theme::TextElement,
+        defaults: &crate::plot::theme::TextElement,
+        palette: &crate::plot::theme::Palette,
+    ) -> Brush {
+        let c = el
+            .color
+            .clone()
+            .or_else(|| defaults.color.clone())
+            .expect("text color default");
+        Brush::Solid(c.resolve(palette))
+    }
     let (title_style, title_brush) = match lt.title.as_set() {
         Some(el) => (
             crate::plot::plot::text_style_from(el, root_pt),
-            Brush::Solid(el.color.resolve(palette)),
+            resolve_color(el, &text_defaults, palette),
         ),
         None => (
             TextStyle::new(LABEL_FONT_SIZE_PT).weight(700),
@@ -1040,7 +1054,7 @@ fn legend_text_styles(
     let (label_style, label_brush) = match lt.axis.text.as_set() {
         Some(el) => (
             crate::plot::plot::text_style_from(el, root_pt),
-            Brush::Solid(el.color.resolve(palette)),
+            resolve_color(el, &text_defaults, palette),
         ),
         None => (TextStyle::new(LABEL_FONT_SIZE_PT), Brush::Solid(ink())),
     };
@@ -1064,9 +1078,11 @@ fn paint_legend_background(
     let Some(bg) = lt.background.as_set() else {
         return;
     };
+    use crate::plot::theme::rect_concrete_defaults;
     use kurbo::Shape;
+    let defaults = rect_concrete_defaults();
     let path: crate::path::Path = slot_rect.to_path(0.0);
-    if let Some(fill) = &bg.fill {
+    if let Some(fill) = bg.fill.clone() {
         let brush = Brush::Solid(fill.resolve(palette));
         scene.fill(
             crate::path::FillRule::NonZero,
@@ -1077,9 +1093,18 @@ fn paint_legend_background(
             PickId::Skip,
         );
     }
-    if bg.linewidth_pt.resolve(1.0) > 0.0 {
+    let lw = bg
+        .linewidth_pt
+        .or(defaults.linewidth_pt)
+        .expect("rect linewidth default");
+    if lw.resolve(1.0) > 0.0 {
         let stroke = crate::plot::chrome::linear_axis::stroke_from_rect_border(bg, dpi);
-        let brush = Brush::Solid(bg.color.resolve(palette));
+        let color = bg
+            .color
+            .clone()
+            .or(defaults.color)
+            .expect("rect color default");
+        let brush = Brush::Solid(color.resolve(palette));
         scene.stroke(&stroke, Affine::IDENTITY, &brush, None, &path, PickId::Skip);
     }
 }
@@ -1831,7 +1856,14 @@ impl LegendMeasure {
         // body match so the grid build below sees the resolved px.
         let padding_px = pt_to_px(lt.padding.left.resolve(0.0), dpi);
         let row_gap_px = pt_to_px(lt.key.spacing.resolve(0.0), dpi);
-        let swatch_label_gap_px = pt_to_px(lt.axis.tick_gap.resolve(0.0), dpi);
+        let swatch_label_gap_px = pt_to_px(
+            lt.axis
+                .tick_gap
+                .or(crate::plot::theme::axis_concrete_defaults().tick_gap)
+                .expect("axis tick_gap default")
+                .resolve(0.0),
+            dpi,
+        );
 
         let body = match &legend.body {
             LegendBody::Stack(stack) if stack.binned => {

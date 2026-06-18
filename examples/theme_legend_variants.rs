@@ -79,8 +79,8 @@ fn main() {
     let hero = LegendTheme {
         background: Element::Set(RectElement {
             fill: Some(ThemeColor::mix(ThemeColor::Paper, ThemeColor::Accent, 0.18)),
-            color: ThemeColor::Accent,
-            linewidth_pt: Length::Abs(1.0),
+            color: Some(ThemeColor::Accent),
+            linewidth_pt: Some(Length::Abs(1.0)),
             ..RectElement::default()
         }),
         ..LegendTheme::default()

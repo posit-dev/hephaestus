@@ -106,7 +106,9 @@ fn fill_rect_element(
     palette: &crate::plot::theme::Palette,
     path: &Path,
 ) {
-    let Some(fill) = &rect.fill else {
+    // `rect.fill` is `Option<ThemeColor>` — `None` after cascade
+    // means an explicitly transparent interior (no fill drawn).
+    let Some(fill) = rect.fill.clone() else {
         return;
     };
     let brush = Brush::Solid(fill.resolve(palette));
@@ -127,11 +129,22 @@ fn stroke_rect_element_border(
     path: &Path,
     dpi: f64,
 ) {
-    if rect.linewidth_pt.resolve(1.0) <= 0.0 {
+    use crate::plot::theme::rect_concrete_defaults;
+    let defaults = rect_concrete_defaults();
+    let lw = rect
+        .linewidth_pt
+        .or(defaults.linewidth_pt)
+        .expect("rect linewidth default");
+    if lw.resolve(1.0) <= 0.0 {
         return;
     }
     let stroke = stroke_from_rect_border(rect, dpi);
-    let brush = Brush::Solid(rect.color.resolve(palette));
+    let color = rect
+        .color
+        .clone()
+        .or(defaults.color)
+        .expect("rect color default");
+    let brush = Brush::Solid(color.resolve(palette));
     scene.stroke(&stroke, Affine::IDENTITY, &brush, None, path, PickId::Skip);
 }
 
@@ -152,18 +165,18 @@ fn draw_grid_lines<F>(
 ) where
     F: FnMut(f64) -> Option<Path>,
 {
-    let minor_resolved = minor.map(|el| {
-        (
-            stroke_from_line_element(el, dpi),
-            Brush::Solid(el.color.resolve(palette)),
-        )
-    });
-    let major_resolved = major.map(|el| {
-        (
-            stroke_from_line_element(el, dpi),
-            Brush::Solid(el.color.resolve(palette)),
-        )
-    });
+    use crate::plot::theme::line_concrete_defaults;
+    let line_defaults = line_concrete_defaults();
+    let resolve_color = |el: &LineElement| {
+        let c = el
+            .color
+            .clone()
+            .or_else(|| line_defaults.color.clone())
+            .expect("line color default");
+        Brush::Solid(c.resolve(palette))
+    };
+    let minor_resolved = minor.map(|el| (stroke_from_line_element(el, dpi), resolve_color(el)));
+    let major_resolved = major.map(|el| (stroke_from_line_element(el, dpi), resolve_color(el)));
 
     if let Some((stroke, brush)) = &minor_resolved {
         for v in scale.minor_breaks(DEFAULT_BREAK_COUNT) {

@@ -66,11 +66,11 @@ impl Theme {
         // Re-derive grid colors against the new palette so they sit at
         // sensible intermediate grays.
         t.panel_grid_major = PerChannel::new(LineElement {
-            color: ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.22),
+            color: Some(ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.22)),
             ..LineElement::default()
         });
         t.panel_grid_minor = PerChannel::new(LineElement {
-            color: ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.10),
+            color: Some(ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.10)),
             ..LineElement::default()
         });
         t

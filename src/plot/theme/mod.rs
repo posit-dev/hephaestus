@@ -37,10 +37,11 @@ pub mod theme;
 #[cfg(test)]
 mod tests;
 
-pub use axis::{AxisTheme, AxisThemePart, PerAxis, ResolvedAxis, TitleLocation};
+pub use axis::{axis_concrete_defaults, AxisTheme, PerAxis, ResolvedAxis, TitleLocation};
 pub use cascade::{PerChannel, Sided};
 pub use element::{
-    AlignTo, Element, HAlign, LineElement, RectElement, Rotation, TextElement, VAlign,
+    line_concrete_defaults, rect_concrete_defaults, text_concrete_defaults, AlignTo, Element,
+    HAlign, LineElement, RectElement, Rotation, TextElement, VAlign,
 };
 pub use font::{
     FontFamily, FontFeature, FontSpec, FontStyle, FontVariation, FontWeight, FontWidth,

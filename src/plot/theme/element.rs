@@ -2,6 +2,13 @@
 //! `RectElement` — plus the `Element<T>` cascade wrapper and the
 //! alignment enums.
 //!
+//! Every field on these element types is `Option<...>` — a `Some`
+//! at any cascade layer wins, `None` falls through to the parent
+//! layer, and ultimately to a per-type `ABSOLUTE_*` safety-net
+//! constant. The cascade is per-field, so a `RectElement` that only
+//! sets `linewidth_pt` inherits every other field from its parent
+//! instead of clobbering them.
+//!
 //! ggplot2's `theme()` is built on a similar trio (`element_text`,
 //! `element_line`, `element_rect`); we keep the structure because it
 //! genuinely is the right factoring for chrome rendering. Where
@@ -180,103 +187,172 @@ impl Rotation {
 
 /// Text styling — font selection, colour, size, alignment, rotation,
 /// line height, margin.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Every field is `Option<...>` so an override can set just the
+/// fields it cares about, with the rest cascading through the
+/// parent chain. After cascading, callers fall through to
+/// [`text_concrete_defaults`] for any remaining `None`s.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TextElement {
     /// Font specification. Each `FontSpec` field cascades
     /// independently — a child can override weight while inheriting
     /// family.
     pub font: FontSpec,
     /// Ink colour. Resolved against the theme's palette at draw time.
-    pub color: ThemeColor,
+    pub color: Option<ThemeColor>,
     /// Font size. Resolves against the inherited parent's resolved
     /// size — `Rel(1.5)` = 1.5× the parent.
-    pub size_pt: Length,
+    pub size_pt: Option<Length>,
     /// Horizontal alignment within the slot.
-    pub align: HAlign,
+    pub align: Option<HAlign>,
     /// Vertical alignment within the slot.
-    pub valign: VAlign,
+    pub valign: Option<VAlign>,
     /// Rotation — absolute degrees, or `Along` / `Across` to follow
     /// the surface's baseline direction.
-    pub angle: Rotation,
+    pub angle: Option<Rotation>,
     /// Line height — typically `Rel(1.2)` (120% of the resolved size).
-    pub lineheight: Length,
+    pub lineheight: Option<Length>,
     /// Margin around the text block, each side independent.
-    pub margin: Margin,
+    pub margin: Option<Margin>,
 }
 
-impl Default for TextElement {
-    /// 10pt regular ink-colored text, centered, no rotation, 1.2×
-    /// lineheight, zero margin.
-    fn default() -> Self {
+impl TextElement {
+    /// Merge `self` over `parent`: per-field, `self`'s `Some` wins;
+    /// `None` falls through to `parent`'s value. `font` cascades
+    /// through [`FontSpec::cascade`] (each `FontSpec` field merges
+    /// independently; feature / variation lists merge by tag).
+    pub fn cascade(&self, parent: &Self) -> Self {
         Self {
-            font: FontSpec::default(),
-            color: ThemeColor::Ink,
-            size_pt: Length::Abs(10.0),
-            align: HAlign::Center,
-            valign: VAlign::Middle,
-            angle: Rotation::default(),
-            lineheight: Length::Rel(1.2),
-            margin: Margin::ZERO,
+            font: parent.font.cascade(&self.font),
+            color: self.color.clone().or_else(|| parent.color.clone()),
+            size_pt: self.size_pt.or(parent.size_pt),
+            align: self.align.or(parent.align),
+            valign: self.valign.or(parent.valign),
+            angle: self.angle.or(parent.angle),
+            lineheight: self.lineheight.or(parent.lineheight),
+            margin: self.margin.or(parent.margin),
         }
     }
 }
 
-/// Stroke styling — colour, width, dash pattern, cap, join.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LineElement {
-    /// Stroke colour.
-    pub color: ThemeColor,
-    /// Stroke width. Resolves against the inherited parent's resolved
-    /// linewidth — `Rel(2.0)` = twice the parent.
-    pub linewidth_pt: Length,
-    /// Dash pattern. Empty = solid stroke. Reuses the same
-    /// `LinetypeStep` machinery the geom layer already ships.
-    pub linetype: Arc<[LinetypeStep]>,
-    /// Line end cap.
-    pub cap: Cap,
-    /// Line join.
-    pub join: Join,
+/// Concrete fallback values for a `TextElement` — 10pt regular ink
+/// text, centered, no rotation, 1.2× lineheight, zero margin. Used
+/// as the safety net for any field still `None` after cascading.
+pub fn text_concrete_defaults() -> TextElement {
+    TextElement {
+        font: FontSpec::default(),
+        color: Some(ThemeColor::Ink),
+        size_pt: Some(Length::Abs(10.0)),
+        align: Some(HAlign::Center),
+        valign: Some(VAlign::Middle),
+        angle: Some(Rotation::default()),
+        lineheight: Some(Length::Rel(1.2)),
+        margin: Some(Margin::ZERO),
+    }
 }
 
-impl Default for LineElement {
-    /// 1pt solid ink line, butt cap, miter join.
-    fn default() -> Self {
+/// Stroke styling — colour, width, dash pattern, cap, join.
+///
+/// Every field is `Option<...>` so an override can set just the
+/// fields it cares about, with the rest cascading through the
+/// parent chain. After cascading, callers fall through to
+/// [`line_concrete_defaults`] for any remaining `None`s.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LineElement {
+    /// Stroke colour.
+    pub color: Option<ThemeColor>,
+    /// Stroke width. Resolves against the inherited parent's resolved
+    /// linewidth — `Rel(2.0)` = twice the parent.
+    pub linewidth_pt: Option<Length>,
+    /// Dash pattern. Empty = solid stroke. Reuses the same
+    /// `LinetypeStep` machinery the geom layer already ships.
+    pub linetype: Option<Arc<[LinetypeStep]>>,
+    /// Line end cap.
+    pub cap: Option<Cap>,
+    /// Line join.
+    pub join: Option<Join>,
+}
+
+impl LineElement {
+    /// Merge `self` over `parent`: per-field, `self`'s `Some` wins;
+    /// `None` falls through to `parent`'s value.
+    pub fn cascade(&self, parent: &Self) -> Self {
         Self {
-            color: ThemeColor::Ink,
-            linewidth_pt: Length::Abs(1.0),
-            linetype: Arc::from([]),
-            cap: Cap::Butt,
-            join: Join::Miter,
+            color: self.color.clone().or_else(|| parent.color.clone()),
+            linewidth_pt: self.linewidth_pt.or(parent.linewidth_pt),
+            linetype: self.linetype.clone().or_else(|| parent.linetype.clone()),
+            cap: self.cap.or(parent.cap),
+            join: self.join.or(parent.join),
         }
+    }
+}
+
+/// Concrete fallback values for a `LineElement` — 1pt solid ink
+/// line, butt cap, miter join. Used as the safety net for any
+/// field still `None` after cascading.
+pub fn line_concrete_defaults() -> LineElement {
+    LineElement {
+        color: Some(ThemeColor::Ink),
+        linewidth_pt: Some(Length::Abs(1.0)),
+        linetype: Some(Arc::from([])),
+        cap: Some(Cap::Butt),
+        join: Some(Join::Miter),
     }
 }
 
 /// Filled-rectangle styling — fill, border colour, border width, border
 /// dash, corner radius.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Every field is `Option<...>` so an override can set just the
+/// fields it cares about, with the rest cascading through the
+/// parent chain. After cascading, callers fall through to
+/// [`rect_concrete_defaults`] for any remaining `None`s.
+///
+/// **Fill semantics quirk:** `fill` after cascading represents the
+/// resolved fill colour. `None` after cascading means **no fill
+/// drawn** (transparent interior). [`rect_concrete_defaults`]
+/// preserves that semantic by leaving `fill` itself wrapped in
+/// `Some(Some(...))` — the inner `Option` carries the
+/// transparent-vs-paper distinction.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RectElement {
-    /// Fill colour. `None` = no fill (transparent interior).
+    /// Fill colour. Cascade resolves through layers per-field; the
+    /// final resolved `Option<ThemeColor>` is `None` → no fill (the
+    /// interior stays transparent), `Some(c)` → fill with `c`.
     pub fill: Option<ThemeColor>,
     /// Border colour. Ignored when `linewidth_pt` resolves to 0.
-    pub color: ThemeColor,
+    pub color: Option<ThemeColor>,
     /// Border width. `Abs(0.0)` = no border drawn.
-    pub linewidth_pt: Length,
+    pub linewidth_pt: Option<Length>,
     /// Border dash pattern. Empty = solid border.
-    pub linetype: Arc<[LinetypeStep]>,
+    pub linetype: Option<Arc<[LinetypeStep]>>,
     /// Corner radius. `Abs(0.0)` = sharp corners.
-    pub corner_radius: Length,
+    pub corner_radius: Option<Length>,
 }
 
-impl Default for RectElement {
-    /// Paper fill, ink border, 1pt border width, solid stroke, sharp
-    /// corners.
-    fn default() -> Self {
+impl RectElement {
+    /// Merge `self` over `parent`: per-field, `self`'s `Some` wins;
+    /// `None` falls through to `parent`'s value.
+    pub fn cascade(&self, parent: &Self) -> Self {
         Self {
-            fill: Some(ThemeColor::Paper),
-            color: ThemeColor::Ink,
-            linewidth_pt: Length::Abs(1.0),
-            linetype: Arc::from([]),
-            corner_radius: Length::Abs(0.0),
+            fill: self.fill.clone().or_else(|| parent.fill.clone()),
+            color: self.color.clone().or_else(|| parent.color.clone()),
+            linewidth_pt: self.linewidth_pt.or(parent.linewidth_pt),
+            linetype: self.linetype.clone().or_else(|| parent.linetype.clone()),
+            corner_radius: self.corner_radius.or(parent.corner_radius),
         }
+    }
+}
+
+/// Concrete fallback values for a `RectElement` — paper fill, ink
+/// border, 1pt border width, solid stroke, sharp corners. Used as
+/// the safety net for any field still `None` after cascading.
+pub fn rect_concrete_defaults() -> RectElement {
+    RectElement {
+        fill: Some(ThemeColor::Paper),
+        color: Some(ThemeColor::Ink),
+        linewidth_pt: Some(Length::Abs(1.0)),
+        linetype: Some(Arc::from([])),
+        corner_radius: Some(Length::Abs(0.0)),
     }
 }

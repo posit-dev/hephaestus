@@ -116,6 +116,8 @@ impl Default for BarTheme {
             length: Length::Abs(100.0),
             width: Length::Abs(12.0),
             frame: Element::Set(RectElement {
+                // Explicit None: the bar's own gradient fills the
+                // interior, so the frame stays unfilled.
                 fill: None,
                 ..RectElement::default()
             }),
@@ -155,12 +157,17 @@ impl Default for LegendTheme {
         Self {
             background: Element::Blank,
             title: Element::Set(TextElement {
-                size_pt: Length::Abs(11.0),
+                size_pt: Some(Length::Abs(11.0)),
                 ..TextElement::default()
             }),
             margin: Margin::ZERO,
             padding: Margin::all(Length::Abs(6.0)),
             direction: Direction::default(),
+            // Sparse AxisTheme: only override the slots that legends
+            // suppress (no baseline, no ticks). Everything else
+            // cascades through the resolver's per-type defaults at
+            // resolve time, so legend tick labels pick up the same
+            // 10pt sizing as axis tick labels.
             axis: AxisTheme {
                 line: Element::Blank,
                 ticks: Element::Blank,
