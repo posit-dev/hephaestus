@@ -9,6 +9,7 @@
 use super::axis::AxisTheme;
 use super::element::{Element, TextElement};
 use super::length::{Length, Margin};
+use super::palette::ThemeColor;
 use super::RectElement;
 
 /// Direction in which keys / bar flow within a legend.
@@ -82,15 +83,23 @@ pub struct KeyTheme {
 }
 
 impl Default for KeyTheme {
-    /// 12×12pt square cells (matches ggplot2's
-    /// `legend.key.size = unit(1.2, 'lines')` default at the
-    /// standard 11pt base size). 4pt intra-legend key spacing,
-    /// no frame.
+    /// Square cells matching ggplot2's `legend.key.size = unit(1.2,
+    /// "lines")`: 1.2 × the base text line-height at the default
+    /// 11pt size with the theme's 1.2× lineheight → ~15.8pt.
+    /// 4pt intra-legend key spacing. `frame` defaults to ggplot2's
+    /// `legend.key` — a grey92 swatch background with no border —
+    /// so individual keys read against a soft tinted square that
+    /// matches the panel.
     fn default() -> Self {
         Self {
-            frame: Element::Blank,
-            width: Length::Abs(12.0),
-            height: Length::Abs(12.0),
+            frame: Element::Set(RectElement {
+                fill: Some(ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.08)),
+                color: None,
+                linewidth_pt: Some(Length::Abs(0.0)),
+                ..RectElement::default()
+            }),
+            width: Length::Abs(15.84),
+            height: Length::Abs(15.84),
             spacing: Length::Abs(4.0),
         }
     }
@@ -110,11 +119,14 @@ pub struct BarTheme {
 }
 
 impl Default for BarTheme {
-    /// 100pt × 12pt bar with a thin ink outline.
+    /// 100pt × 15.84pt bar — width matches ggplot2's
+    /// `legend.key.width = unit(1.2, "lines")` at the default 11pt
+    /// base size with the theme's 1.2× lineheight, so a colorbar
+    /// sits visually in line with a discrete key column.
     fn default() -> Self {
         Self {
             length: Length::Abs(100.0),
-            width: Length::Abs(12.0),
+            width: Length::Abs(15.84),
             frame: Element::Set(RectElement {
                 // Explicit None: the bar's own gradient fills the
                 // interior, so the frame stays unfilled.

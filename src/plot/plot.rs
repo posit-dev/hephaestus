@@ -856,7 +856,11 @@ impl Plot {
         // sits directly above / below the panel, regardless of how
         // wide the side chrome (axes, legends, strips) grew. Same
         // semantic as ggplot2's `plot.title.position`.
-        let root_pt = theme.text.size_pt.map(|l| l.resolve(10.0)).unwrap_or(10.0);
+        let root_pt = theme
+            .text
+            .size_pt
+            .map(|l| l.resolve(crate::plot::theme::DEFAULT_TEXT_SIZE_PT))
+            .unwrap_or(crate::plot::theme::DEFAULT_TEXT_SIZE_PT);
         for (slot, text_opt, theme_slot) in [
             (Slot::Title, self.title.as_ref(), &theme.plot_title),
             (Slot::Subtitle, self.subtitle.as_ref(), &theme.plot_subtitle),
@@ -1338,7 +1342,11 @@ impl Plot {
 
         // Plot-level text slots — title / subtitle / caption. Style
         // and ink come from the theme.
-        let root_pt = theme.text.size_pt.map(|l| l.resolve(10.0)).unwrap_or(10.0);
+        let root_pt = theme
+            .text
+            .size_pt
+            .map(|l| l.resolve(crate::plot::theme::DEFAULT_TEXT_SIZE_PT))
+            .unwrap_or(crate::plot::theme::DEFAULT_TEXT_SIZE_PT);
         let entries: [(
             Slot,
             Option<&String>,
@@ -1642,7 +1650,11 @@ fn axis_title_cell(
 ) -> Cell {
     let (ch, side_idx) = crate::plot::chrome::axis::axis_side_to_channel_side(side);
     let resolved = theme.axis.resolve(ch, side_idx);
-    let root_pt = theme.text.size_pt.map(|l| l.resolve(10.0)).unwrap_or(10.0);
+    let root_pt = theme
+        .text
+        .size_pt
+        .map(|l| l.resolve(crate::plot::theme::DEFAULT_TEXT_SIZE_PT))
+        .unwrap_or(crate::plot::theme::DEFAULT_TEXT_SIZE_PT);
     let style = match resolved.title {
         Some(el) => text_style_from(&el, root_pt),
         None => return Cell::empty(),
@@ -1743,7 +1755,14 @@ pub(crate) fn draw_text_element_in_rect(
         HAlign::Justify => Alignment::Justify,
     };
     let inner_w = (inset.x1 - inset.x0) as f32;
-    let block_h = run.set_max_width(inner_w, alignment) as f64;
+    let _ = run.set_max_width(inner_w, alignment);
+    // Inked height (first-line ascender top → last-line descender
+    // bottom) drives layout. `ascender_offset` is the half-leading
+    // the parley layout reserves above the first line; the draw
+    // helper compensates by shifting the layout up by that much so
+    // the visible glyphs land flush with the slot edge.
+    let block_h = run.inked_height();
+    let ascender_offset = run.first_line_ascender_offset();
     let inner_h = inset.y1 - inset.y0;
     let valign = el.valign.or(defaults.valign).expect("valign default");
     let y_offset = match valign {
@@ -1764,7 +1783,7 @@ pub(crate) fn draw_text_element_in_rect(
             scene,
             &run,
             inset.x0,
-            inset.y0 + y_offset,
+            inset.y0 + y_offset - ascender_offset,
             &brush,
             Affine::IDENTITY,
             pick_id,
@@ -1772,10 +1791,17 @@ pub(crate) fn draw_text_element_in_rect(
     } else {
         let content_w = run.content_width();
         let pivot_x = inset.x0 + (inner_w as f64) * 0.5;
+        // Pivot is the inked centre — `y_offset + block_h/2` lands
+        // on the inked centre inside the inset, not the metric-box
+        // centre.
         let pivot_y = inset.y0 + y_offset + block_h * 0.5;
+        // The inner translate maps the layout's inked centre (at
+        // local `(content_w/2, ascender_offset + block_h/2)`) onto
+        // the pivot — i.e., translate by the negation of that.
+        let inked_centre_y = ascender_offset + block_h * 0.5;
         let transform = Affine::translate(Vec2::new(pivot_x, pivot_y))
             * Affine::rotate(angle_rad)
-            * Affine::translate(Vec2::new(-content_w * 0.5, -block_h * 0.5));
+            * Affine::translate(Vec2::new(-content_w * 0.5, -inked_centre_y));
         draw_text(scene, &run, 0.0, 0.0, &brush, transform, pick_id);
     }
 }

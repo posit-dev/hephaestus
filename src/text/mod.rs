@@ -507,6 +507,47 @@ impl TextRun {
             .map(|line| line.metrics().descent as f64)
             .unwrap_or(0.0)
     }
+
+    /// Y position of the first line's ascender top, relative to the
+    /// layout's top edge. Equivalent to the top half-leading on the
+    /// first line — the empty pixels above the visible glyphs that
+    /// the line-box reserves on its way to `line-height`.
+    pub fn first_line_ascender_offset(&self) -> f64 {
+        let layout = self.layout.borrow();
+        let result = layout
+            .lines()
+            .next()
+            .map(|line| {
+                let m = line.metrics();
+                (m.baseline as f64) - (m.ascent as f64)
+            })
+            .unwrap_or(0.0);
+        result
+    }
+
+    /// Y position of the last line's descender bottom, relative to
+    /// the layout's top edge. Equivalent to `current_height - bottom
+    /// half-leading on the last line`.
+    pub fn last_line_descender_offset_from_top(&self) -> f64 {
+        let layout = self.layout.borrow();
+        let result = layout
+            .lines()
+            .last()
+            .map(|line| {
+                let m = line.metrics();
+                (m.baseline as f64) + (m.descent as f64)
+            })
+            .unwrap_or(0.0);
+        result
+    }
+
+    /// Inked height of the current layout — from the first line's
+    /// ascender top to the last line's descender bottom, with
+    /// leading appearing only *between* lines (not above the first
+    /// or below the last). The natural text box.
+    pub fn inked_height(&self) -> f64 {
+        (self.last_line_descender_offset_from_top() - self.first_line_ascender_offset()).max(0.0)
+    }
 }
 
 impl Measure for TextRun {
@@ -518,10 +559,14 @@ impl Measure for TextRun {
     }
 
     fn height_at(&self, width: f64, _dpi: f64) -> f64 {
-        // Measure is alignment-agnostic — solver only cares about layout
-        // height. Alignment is reapplied at draw time by callers that
-        // care.
-        self.set_max_width(width as f32, Alignment::Start) as f64
+        // Re-break at the requested width, then report the *inked*
+        // height (first-line ascender top → last-line descender
+        // bottom). Leading lives only between lines, not above the
+        // first or below the last, so a chrome slot sized off this
+        // measure hugs the visible glyphs instead of inheriting the
+        // empty half-leading the line-box reserves.
+        let _ = self.set_max_width(width as f32, Alignment::Start);
+        self.inked_height()
     }
 }
 

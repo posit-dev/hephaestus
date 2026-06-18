@@ -235,10 +235,6 @@ fn inset_for_panel_gap(slot_rect: Rect, side: LegendSide, gap_px: f64) -> Rect {
 use crate::plot::geom::point::GLYPH_BBOX_REFERENCE;
 use crate::shape::builtin::REFERENCE_RADIUS as POINT_SHAPE_RADIUS;
 
-fn ink() -> Color {
-    rgb(0.0, 0.0, 0.0)
-}
-
 // ─── Internal Measure helpers used by the legend's inner Grid ──────────────
 
 /// Reports a swatch cell's intrinsic dimensions to the layout solver.
@@ -614,10 +610,6 @@ pub struct StackBody {
 /// ```
 #[derive(Clone, Debug)]
 pub struct ColorbarSpec {
-    /// Thickness of the bar (perpendicular to the domain axis), pt.
-    /// For Right/Left legends this is the bar's width; for
-    /// Top/Bottom it's the height.
-    pub thickness_pt: f64,
     /// Number of gradient stops sampled along the bar in continuous
     /// mode. Ignored when `stepped` is true (the breaks then drive
     /// the stop count directly).
@@ -638,7 +630,6 @@ pub struct ColorbarSpec {
 impl Default for ColorbarSpec {
     fn default() -> Self {
         Self {
-            thickness_pt: 12.0,
             samples: 64,
             stepped: false,
             bindings: HashMap::new(),
@@ -746,13 +737,6 @@ impl Legend {
     /// binned-stack and stepped-colorbar bodies; ignored elsewhere.
     pub fn bin_spacing(mut self, spacing: BinSpacing) -> Self {
         self.bin_spacing = spacing;
-        self
-    }
-    /// Set the colorbar's bar thickness (pt). No-op on stack legends.
-    pub fn thickness(mut self, pt: f64) -> Self {
-        if let LegendBody::Colorbar(spec) = &mut self.body {
-            spec.thickness_pt = pt;
-        }
         self
     }
     /// Set the colorbar's gradient sample count. No-op on stack legends.
@@ -1071,9 +1055,9 @@ fn legend_text_styles(
     lt: &crate::plot::theme::LegendTheme,
     palette: &crate::plot::theme::Palette,
 ) -> LegendTextStyles {
-    use crate::plot::theme::{text_concrete_defaults, Element, TextElement};
+    use crate::plot::theme::{text_concrete_defaults, Element, TextElement, DEFAULT_TEXT_SIZE_PT};
     let defaults = text_concrete_defaults();
-    let root_pt = 10.0_f64;
+    let root_pt = DEFAULT_TEXT_SIZE_PT;
     fn resolve(
         el: &Element<TextElement>,
         defaults: &TextElement,
@@ -1273,7 +1257,16 @@ fn render_stack_body(
         }
         for key in keys {
             let resolved = resolve_key(key, registry, v);
-            render_key(key.kind, &resolved, swatch_rect, shapes, scene, dpi, geom);
+            render_key(
+                key.kind,
+                &resolved,
+                swatch_rect,
+                shapes,
+                scene,
+                dpi,
+                geom,
+                palette,
+            );
         }
         if let Some(frame_el) = key_frame {
             paint_rect_frame(scene, frame_el, palette, swatch_rect, dpi, false, true);
@@ -1456,7 +1449,7 @@ fn render_binned_stack_body(
         };
         for key in keys {
             let resolved = resolve_key(key, registry, &midpoint);
-            render_key(key.kind, &resolved, cell, shapes, scene, dpi, geom);
+            render_key(key.kind, &resolved, cell, shapes, scene, dpi, geom, palette);
         }
     }
 
@@ -1975,9 +1968,9 @@ impl LegendMeasure {
         // and draw size identical glyph runs. `Blank` short-circuits
         // to `None` — the corresponding cell reserves zero space
         // because the renderer won't draw it.
-        use crate::plot::theme::{text_concrete_defaults, Element};
+        use crate::plot::theme::{text_concrete_defaults, Element, DEFAULT_TEXT_SIZE_PT};
         let text_defaults = text_concrete_defaults();
-        let root_pt = 10.0_f64;
+        let root_pt = DEFAULT_TEXT_SIZE_PT;
         let resolve_style = |el: &Element<crate::plot::theme::TextElement>| match el {
             Element::Set(child) => Some(crate::plot::plot::text_style_from(
                 &child.cascade(&text_defaults),
@@ -2108,7 +2101,7 @@ impl LegendMeasure {
                 }
             }
             LegendBody::Colorbar(spec) => BodyMeasure::Colorbar {
-                bar_thickness_px: pt_to_px(spec.thickness_pt, dpi),
+                bar_thickness_px: pt_to_px(lt.bar.width.resolve(0.0), dpi),
                 samples: spec.samples.max(2),
             },
         };
@@ -2422,6 +2415,7 @@ fn swatch_dim_for(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_key(
     kind: LegendKey,
     resolved: &ResolvedKey,
@@ -2430,11 +2424,12 @@ fn render_key(
     scene: &mut dyn SceneBuilder,
     dpi: f64,
     geom: &crate::plot::theme::GeomTheme,
+    palette: &crate::plot::theme::Palette,
 ) {
     match kind {
         LegendKey::Point => render_point(resolved, cell, shapes, scene, dpi, geom),
-        LegendKey::Line => render_line(resolved, cell, scene, dpi, geom),
-        LegendKey::Rect => render_rect(resolved, cell, scene, dpi, geom),
+        LegendKey::Line => render_line(resolved, cell, scene, dpi, geom, palette),
+        LegendKey::Rect => render_rect(resolved, cell, scene, dpi, geom, palette),
     }
 }
 
@@ -2591,15 +2586,23 @@ fn render_line(
     scene: &mut dyn SceneBuilder,
     dpi: f64,
     geom: &crate::plot::theme::GeomTheme,
+    palette: &crate::plot::theme::Palette,
 ) {
     // Pick stroke colour: explicit `stroke` channel wins, else fall
     // back to `fill` (callers sometimes write `color` → fill on the
-    // ResolvedKey via the alias in `apply`).
+    // ResolvedKey via the alias in `apply`). Geom-default line stroke
+    // backstops both — palette-driven, no hardcoded black fallback.
     let color = resolved
         .stroke
         .or(resolved.fill)
         .map(|c| apply_alpha(c, resolved.alpha))
-        .unwrap_or_else(ink);
+        .unwrap_or_else(|| {
+            geom.line
+                .stroke
+                .as_ref()
+                .map(|c| c.resolve(palette))
+                .unwrap_or(palette.ink)
+        });
     let lw_pt = resolved.linewidth_pt.unwrap_or(geom.line.linewidth_pt);
     let mid_y = cell.y0 + (cell.y1 - cell.y0) * 0.5;
     let p0 = Point::new(cell.x0, mid_y);
@@ -2629,6 +2632,7 @@ fn render_rect(
     scene: &mut dyn SceneBuilder,
     dpi: f64,
     geom: &crate::plot::theme::GeomTheme,
+    palette: &crate::plot::theme::Palette,
 ) {
     let path: Path = cell.to_path(0.0);
     if let Some(fill) = resolved.fill {
@@ -2653,12 +2657,14 @@ fn render_rect(
             PickId::Skip,
         );
     } else if resolved.fill.is_none() {
-        // Placeholder outline so the row isn't visually empty.
+        // Placeholder outline so the row isn't visually empty —
+        // palette ink so dark themes don't render an invisible
+        // black-on-black stub.
         let stroke = Stroke::new(pt_to_px(geom.rect.linewidth_pt, dpi));
         scene.stroke(
             &stroke,
             Affine::IDENTITY,
-            &Brush::Solid(ink()),
+            &Brush::Solid(palette.ink),
             None,
             &path,
             PickId::Skip,
@@ -2680,7 +2686,11 @@ mod tests {
     }
 
     fn default_theme() -> Theme {
-        Theme::default()
+        // Blank the key frame so tests count only emissions driven by
+        // the key specs themselves, not the theme's swatch background.
+        let mut t = Theme::default();
+        t.legend.key.frame = crate::plot::theme::Element::Blank;
+        t
     }
 
     fn build_registry() -> ScaleRegistry {

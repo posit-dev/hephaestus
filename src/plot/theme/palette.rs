@@ -39,12 +39,13 @@ impl Palette {
 }
 
 impl Default for Palette {
-    /// Light palette: near-white paper, black ink, muted-blue accent.
-    /// Matches the visuals shipped before phase F so `Theme::default()`
-    /// produces byte-identical output to the pre-theme codebase.
+    /// Light palette: pure-white paper, black ink, muted-blue accent.
+    /// Paper at 1.0 lets `ThemeColor::mix(Paper, Ink, t)` produce
+    /// exact grey-`100*(1-t)` levels — so theme defaults can address
+    /// ggplot2 anchor greys (grey92, grey85, grey30, …) directly.
     fn default() -> Self {
         Self {
-            paper: rgb(0.95, 0.95, 0.95),
+            paper: rgb(1.0, 1.0, 1.0),
             ink: rgb(0.0, 0.0, 0.0),
             accent: rgb(0.20, 0.45, 0.85),
         }

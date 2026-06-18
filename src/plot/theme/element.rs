@@ -238,8 +238,8 @@ impl TextElement {
 /// Default text size, pt. Single source of truth shared by
 /// [`text_concrete_defaults`] (which wraps it in `Length::Abs`) and
 /// any chrome site that needs the bottom-of-cascade parent value to
-/// resolve a `Length::Rel`.
-pub const DEFAULT_TEXT_SIZE_PT: f64 = 10.0;
+/// resolve a `Length::Rel`. Matches ggplot2's `base_size = 11`.
+pub const DEFAULT_TEXT_SIZE_PT: f64 = 11.0;
 /// Default text lineheight multiplier — applied as `Rel(_)` against
 /// the resolved text size.
 pub const DEFAULT_TEXT_LINEHEIGHT: f64 = 1.2;

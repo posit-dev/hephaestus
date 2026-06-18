@@ -76,23 +76,29 @@ pub struct AxisTheme {
     pub title_location: Option<TitleLocation>,
 }
 
-/// Default major tick mark length, pt.
-pub const DEFAULT_TICK_LENGTH_PT: f64 = 4.0;
-/// Default minor tick mark length, pt.
-pub const DEFAULT_MINOR_TICK_LENGTH_PT: f64 = 2.0;
+/// Default major tick mark length, pt. Matches ggplot2's
+/// `axis.ticks.length = half_line / 2` at base size 11pt.
+pub const DEFAULT_TICK_LENGTH_PT: f64 = 2.75;
+/// Default minor tick mark length, pt — half the major.
+pub const DEFAULT_MINOR_TICK_LENGTH_PT: f64 = 1.375;
 /// Default gap between tick mark end and label near edge, pt.
-pub const DEFAULT_TICK_GAP_PT: f64 = 2.0;
+/// Matches ggplot2's `0.8 * half_line / 2` axis-text margin.
+pub const DEFAULT_TICK_GAP_PT: f64 = 2.2;
 /// Default gap between tick-label rail outer edge and axis-title
-/// near edge, pt.
-pub const DEFAULT_TITLE_GAP_PT: f64 = 6.0;
-/// Default axis-title font size, pt.
-pub const DEFAULT_AXIS_TITLE_SIZE_PT: f64 = 12.0;
+/// near edge, pt. Matches ggplot2's `half_line / 2` axis-title
+/// margin.
+pub const DEFAULT_TITLE_GAP_PT: f64 = 2.75;
+/// Default axis-title font size, pt — same as the root text size
+/// (ggplot2's `axis.title` inherits `base_size`).
+pub const DEFAULT_AXIS_TITLE_SIZE_PT: f64 = super::element::DEFAULT_TEXT_SIZE_PT;
 
-/// Concrete fallback values for an `AxisTheme` — 4pt major ticks,
-/// 2pt minor, 2pt label gap, `TitleLocation::Outside`, plus 12pt
-/// `Along`-rotated title and 10pt tick labels. Used as the safety
-/// net for any field still `None` after the three-layer cascade.
+/// Concrete fallback values for an `AxisTheme` matching ggplot2's
+/// `theme_gray()` defaults: no baseline (axis line blank), grey30
+/// tick labels at `rel(0.8)`, grey20 tick marks, axis title at the
+/// root text size rotated along the axis. Used as the safety net for
+/// any field still `None` after the three-layer cascade.
 pub fn axis_concrete_defaults() -> AxisTheme {
+    let line = super::element::line_concrete_defaults();
     AxisTheme {
         // Axis titles read along the axis baseline — `Along` lets
         // the chrome resolve to 0° on Top / Bottom and 90° on
@@ -106,14 +112,23 @@ pub fn axis_concrete_defaults() -> AxisTheme {
             ..TextElement::default()
         }),
         text: Element::Set(TextElement {
-            size_pt: Some(Length::Abs(super::element::DEFAULT_TEXT_SIZE_PT)),
-            color: Some(ThemeColor::Ink),
+            size_pt: Some(Length::Rel(0.8)),
+            color: Some(ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.7)),
             font: FontSpec::default(),
             ..TextElement::default()
         }),
-        line: Element::Set(super::element::line_concrete_defaults()),
-        ticks: Element::Set(super::element::line_concrete_defaults()),
-        ticks_minor: Element::Set(super::element::line_concrete_defaults()),
+        // ggplot2 theme_gray has `axis.line = element_blank()` —
+        // the grey panel does the work the axis line otherwise
+        // would.
+        line: Element::Blank,
+        ticks: Element::Set(LineElement {
+            color: Some(ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.8)),
+            ..line.clone()
+        }),
+        ticks_minor: Element::Set(LineElement {
+            color: Some(ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.8)),
+            ..line
+        }),
         tick_length: Some(Length::Abs(DEFAULT_TICK_LENGTH_PT)),
         tick_length_minor: Some(Length::Abs(DEFAULT_MINOR_TICK_LENGTH_PT)),
         tick_gap: Some(Length::Abs(DEFAULT_TICK_GAP_PT)),

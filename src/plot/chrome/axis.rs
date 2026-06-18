@@ -420,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn bottom_axis_draws_baseline_and_ticks() {
+    fn bottom_axis_draws_ticks_and_labels() {
         let s = scale::continuous(0.0..=10.0);
         let panel = panel_400_300();
         // Place the slot directly below the panel — height = chrome.
@@ -444,11 +444,12 @@ mod tests {
         let minors = s.minor_breaks(DEFAULT_BREAK_COUNT);
         let n_majors = breaks.iter().filter(|v| !matches!(v, Value::Null)).count();
         let n_minors = minors.iter().filter(|v| !matches!(v, Value::Null)).count();
-        // 1 baseline + 1 stroke per major + 1 per minor.
-        let expected_strokes = 1 + n_majors + n_minors;
+        // Default theme has `axis.line = Blank` (ggplot2 theme_gray
+        // style), so the baseline contributes no stroke — only ticks.
+        let expected_strokes = n_majors + n_minors;
         assert_eq!(
             strokes, expected_strokes,
-            "expected {expected_strokes} strokes (1 baseline + {n_majors} majors + {n_minors} minors); got {strokes}"
+            "expected {expected_strokes} strokes ({n_majors} majors + {n_minors} minors, no baseline); got {strokes}"
         );
         assert!(
             glyphs >= n_majors,
@@ -457,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn left_axis_draws_baseline_and_ticks() {
+    fn left_axis_draws_ticks_and_labels() {
         let s = scale::continuous(0.0..=1.0);
         let panel = panel_400_300();
         let theme = Theme::default();
@@ -483,7 +484,7 @@ mod tests {
         let minors = s.minor_breaks(DEFAULT_BREAK_COUNT);
         let n_majors = breaks.iter().filter(|v| !matches!(v, Value::Null)).count();
         let n_minors = minors.iter().filter(|v| !matches!(v, Value::Null)).count();
-        let expected_strokes = 1 + n_majors + n_minors;
+        let expected_strokes = n_majors + n_minors;
         assert_eq!(strokes, expected_strokes);
         assert!(glyphs >= n_majors);
     }

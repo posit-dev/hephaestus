@@ -122,13 +122,26 @@ pub struct Theme {
 }
 
 impl Default for Theme {
-    /// Defaults match the pre-theme visual output exactly. Existing
-    /// examples produce byte-identical PNGs against their baseline
-    /// after this struct lands.
+    /// Defaults mirror ggplot2's `theme_gray()`:
+    /// - 11pt base text, black on white.
+    /// - White plot background, no border. 5.5pt inner padding
+    ///   (ggplot2's `plot.margin` — *padding* in hephaestus
+    ///   terminology, since [`Self::plot_margin`] is the
+    ///   composition gap *outside* the background).
+    /// - Grey92 panel fill with no border.
+    /// - White grid lines — only visible where they cross the grey
+    ///   panel.
+    /// - No axis baseline; grey20 ticks; grey30 tick labels at
+    ///   `rel(0.8)`.
+    /// - Bold `rel(1.2)` title left-aligned; left-aligned subtitle;
+    ///   right-aligned `rel(0.8)` caption.
+    /// - Grey85 strip background, grey10 strip text at `rel(0.8)`.
+    /// - Grey92 legend key swatch, no border.
     fn default() -> Self {
         use super::axis::axis_concrete_defaults;
         use super::element::{
-            line_concrete_defaults, rect_concrete_defaults, text_concrete_defaults, HAlign, VAlign,
+            line_concrete_defaults, rect_concrete_defaults, text_concrete_defaults, HAlign,
+            Rotation, VAlign,
         };
         use super::font::{FontSpec, FontWeight};
 
@@ -143,105 +156,126 @@ impl Default for Theme {
         let line = line_concrete_defaults();
         let rect = rect_concrete_defaults();
 
+        // `half_line = base_size / 2` is ggplot2's primary spacing
+        // unit. Used for plot padding, title margins, etc.
+        const HALF_LINE_PT: f64 = super::element::DEFAULT_TEXT_SIZE_PT / 2.0;
+
+        // Grey anchors expressed as palette mixes so `invert()`
+        // produces a sensible dark counterpart automatically.
+        let grey92 = ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.08);
+        let grey85 = ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.15);
+        let grey10 = ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.9);
+
         Theme {
             palette,
             text,
             line,
             rect,
 
-            // Plot-level: title 16pt bold, subtitle 12pt, caption 10pt
-            // italic, no plot background (the panel background is what
-            // shows).
             plot_title: Element::Set(TextElement {
-                size_pt: Some(Length::Abs(16.0)),
+                size_pt: Some(Length::Rel(1.2)),
                 font: FontSpec {
                     weight: Some(FontWeight::BOLD),
                     ..FontSpec::default()
                 },
-                align: Some(HAlign::Center),
+                align: Some(HAlign::Start),
                 valign: Some(VAlign::Middle),
+                margin: Some(Margin::new(
+                    Length::Abs(0.0),
+                    Length::Abs(0.0),
+                    Length::Abs(HALF_LINE_PT),
+                    Length::Abs(0.0),
+                )),
                 ..TextElement::default()
             }),
             plot_subtitle: Element::Set(TextElement {
-                size_pt: Some(Length::Abs(12.0)),
+                align: Some(HAlign::Start),
+                valign: Some(VAlign::Middle),
+                margin: Some(Margin::new(
+                    Length::Abs(0.0),
+                    Length::Abs(0.0),
+                    Length::Abs(HALF_LINE_PT),
+                    Length::Abs(0.0),
+                )),
                 ..TextElement::default()
             }),
             plot_caption: Element::Set(TextElement {
-                size_pt: Some(Length::Abs(10.0)),
-                font: FontSpec {
-                    style: Some(super::font::FontStyle::Italic),
-                    ..FontSpec::default()
-                },
+                size_pt: Some(Length::Rel(0.8)),
+                align: Some(HAlign::End),
+                valign: Some(VAlign::Middle),
+                margin: Some(Margin::new(
+                    Length::Abs(HALF_LINE_PT),
+                    Length::Abs(0.0),
+                    Length::Abs(0.0),
+                    Length::Abs(0.0),
+                )),
                 ..TextElement::default()
             }),
             plot_text_align_to: AlignTo::default(),
-            plot_background: Element::Blank,
-            plot_margin: Margin::ZERO,
-            plot_padding: Margin::ZERO,
-
-            // Panel: rgb(.95) paper fill, ink border at 1pt, major
-            // grid mixed 22% toward ink, minor 12% toward ink at
-            // 0.5pt.
-            panel_background: Element::Set(RectElement {
+            // White plot canvas behind everything. Border is
+            // suppressed by zero linewidth — the chrome renderer
+            // short-circuits when linewidth resolves to 0.
+            plot_background: Element::Set(RectElement {
                 fill: Some(ThemeColor::Paper),
-                color: Some(ThemeColor::Ink),
-                linewidth_pt: Some(Length::Abs(1.0)),
+                color: None,
+                linewidth_pt: Some(Length::Abs(0.0)),
                 ..RectElement::default()
             }),
-            panel_border: Element::Set(RectElement {
-                fill: None,
-                color: Some(ThemeColor::Ink),
-                linewidth_pt: Some(Length::Abs(1.0)),
+            plot_margin: Margin::ZERO,
+            // ggplot2's `plot.margin` translates to our padding —
+            // the breathing room *inside* the plot background.
+            plot_padding: Margin::all(Length::Abs(HALF_LINE_PT)),
+
+            // Grey92 panel fill, no border — the panel reads as a
+            // tinted region within the white canvas.
+            panel_background: Element::Set(RectElement {
+                fill: Some(grey92.clone()),
+                color: None,
+                linewidth_pt: Some(Length::Abs(0.0)),
                 ..RectElement::default()
             }),
-            // Grid colors expressed as palette mixes so `invert()`
-            // produces a sensible dark-mode grid automatically. Light
-            // theme: major lands ~rgb(0.779), minor ~rgb(0.874), close
-            // to the historical 0.78 / 0.88 values.
+            panel_border: Element::Blank,
+            // White grid lines on the grey panel — the signature
+            // theme_gray look. Major at the base linewidth, minor
+            // at half.
             panel_grid_major: PerChannel::new(LineElement {
-                color: Some(ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.18)),
+                color: Some(ThemeColor::Paper),
                 linewidth_pt: Some(Length::Abs(0.5)),
                 ..LineElement::default()
             }),
             panel_grid_minor: PerChannel::new(LineElement {
-                color: Some(ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.08)),
-                linewidth_pt: Some(Length::Abs(0.5)),
+                color: Some(ThemeColor::Paper),
+                linewidth_pt: Some(Length::Abs(0.25)),
                 ..LineElement::default()
             }),
 
-            // Axis: root tuned to today's 4pt major / 2pt minor
-            // ticks, 2pt label gap, 10pt labels, 12pt title. Per-
-            // axis / per-side slots default to all-`None` so they
-            // cascade through this root.
             axis: PerAxis::new(axis_concrete_defaults()),
 
-            // Legend: defaults shipped with LegendTheme already match
-            // the existing legend visual surface.
             legend: LegendTheme::default(),
             legend_variants: HashMap::new(),
             legend_spacing: Length::Abs(DEFAULT_LEGEND_SPACING_PT),
             legend_gap: Length::Abs(DEFAULT_LEGEND_GAP_PT),
 
-            // Strips: default to inheriting from rect / text roots,
-            // with a small inner padding so labels don't butt
-            // against the strip edges.
+            // Grey85 strip background, no border — distinct from
+            // panel grey92 so the strip reads as a separate
+            // labelling band.
             strip_background: Sided::new(RectElement {
-                fill: Some(ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.10)),
-                color: Some(ThemeColor::Ink),
-                linewidth_pt: Some(Length::Abs(0.5)),
+                fill: Some(grey85),
+                color: None,
+                linewidth_pt: Some(Length::Abs(0.0)),
                 ..RectElement::default()
             }),
             // `Rotation::Along` makes strip text follow the panel
             // edge — horizontal on top / bottom, vertical on left /
             // right — so a vertical strip's column stays narrow.
-            // Users wanting horizontal labels everywhere set
-            // `angle = Some(Rotation::Degrees(0.0))`.
+            // Grey10 + `rel(0.8)` matches ggplot2's strip text.
             strip_text: Sided::new(TextElement {
-                size_pt: Some(Length::Abs(10.0)),
-                angle: Some(super::element::Rotation::Along),
+                size_pt: Some(Length::Rel(0.8)),
+                color: Some(grey10),
+                angle: Some(Rotation::Along),
                 ..TextElement::default()
             }),
-            strip_padding: Margin::all(Length::Abs(4.0)),
+            strip_padding: Margin::all(Length::Abs(HALF_LINE_PT)),
             geom: GeomTheme::default(),
         }
     }

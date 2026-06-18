@@ -661,7 +661,7 @@ fn draw_radius_title(
     // Rotation angle (screen coords, y-down).
     let mut theta_spoke = sy.atan2(sx);
 
-    let root_pt = 10.0;
+    let root_pt = crate::plot::theme::DEFAULT_TEXT_SIZE_PT;
     let style = crate::plot::plot::text_style_from(title_el, root_pt);
     let run = crate::text::TextRun::new(title, &style, dpi);
     let title_w = run.natural_width();
@@ -767,7 +767,7 @@ fn draw_angular_title(
     if g.r_outer <= 0.0 {
         return;
     }
-    let root_pt = 10.0;
+    let root_pt = crate::plot::theme::DEFAULT_TEXT_SIZE_PT;
     let style = crate::plot::plot::text_style_from(title_el, root_pt);
     let run = crate::text::TextRun::new(title, &style, dpi);
     let text_w = run.natural_width();
@@ -852,10 +852,15 @@ fn draw_angular_title(
     } else {
         natural_shift
     };
-    // When flipped, the glyph body extends "downward" from the
-    // baseline; rebase by (ascent - descent) so its world-bbox
-    // matches the unflipped case.
-    let effective_vjust = if flipped { ascent_px - descent_px } else { 0.0 };
+    // The angular title computes `r_title` directly from the label
+    // rail + title_gap, so the baseline must land exactly on the
+    // sampled arc. Unlike `TextPathGeom`, we don't need the
+    // bbox-preservation rebasing — that would shift the baseline
+    // by `ascent - descent` (radially inward for top-of-circle
+    // titles) and steal back the `title_gap` we just budgeted.
+    let _ = ascent_px;
+    let _ = descent_px;
+    let effective_vjust = 0.0;
 
     let title_color = title_el
         .color
