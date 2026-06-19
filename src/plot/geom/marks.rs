@@ -6,8 +6,8 @@
 //! the curve for the latter. Adding `PolygonGeom`-style multi-row geoms
 //! reuses the same machinery.
 
-use super::Keys;
-use crate::plot::value::DataColumn;
+use super::{empty_datacolumn_like, Keys};
+use crate::plot::value::{DataColumn, Value};
 
 /// One mark — a logical group of rows sharing a key value.
 #[derive(Clone, Debug)]
@@ -61,4 +61,34 @@ pub(crate) fn build_marks(keys: &Keys) -> Vec<MarkSlot> {
             .collect(),
         Keys::Explicit(col) => build_marks_from_column(col),
     }
+}
+
+/// Build a column of one entry per mark — the key value at each mark's
+/// first row. Used by grouped geoms to feed `diff_columns` at mark
+/// granularity. `geom_name` is interpolated into the variant-mismatch
+/// panic message.
+pub(crate) fn unique_values_at_first_rows(
+    col: &DataColumn,
+    first_rows: impl IntoIterator<Item = usize>,
+    geom_name: &str,
+) -> DataColumn {
+    let mut template = empty_datacolumn_like(col);
+    for i in first_rows {
+        match (&mut template, col.get(i)) {
+            (DataColumn::F64(vec), Value::Number(n)) => vec.push(n),
+            (DataColumn::F32(vec), Value::Number(n)) => vec.push(n as f32),
+            (DataColumn::I32(vec), Value::Number(n)) => vec.push(n as i32),
+            (DataColumn::I64(vec), Value::Number(n)) => vec.push(n as i64),
+            (DataColumn::Bool(vec), Value::Bool(b)) => vec.push(b),
+            (DataColumn::String(vec), Value::String(s)) => vec.push(s),
+            (DataColumn::Color(vec), Value::Color(c)) => vec.push(c),
+            (DataColumn::Date(vec), Value::Date(d)) => vec.push(d),
+            (DataColumn::DateTime(vec), Value::DateTime(us)) => vec.push(us),
+            (DataColumn::Time(vec), Value::Time(us)) => vec.push(us),
+            (DataColumn::Duration(vec), Value::Duration(us)) => vec.push(us),
+            (DataColumn::Linetype(vec), Value::Linetype(p)) => vec.push(p),
+            _ => panic!("{geom_name}: unique-keys column variant mismatch"),
+        }
+    }
+    template
 }

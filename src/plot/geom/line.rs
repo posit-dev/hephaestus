@@ -65,35 +65,30 @@
 //! → marks are non-pickable.
 
 use crate::color::{lerp_color, Color};
-use crate::geometry::{Affine, Point};
+use crate::geometry::{Affine, Point, Rect};
 use crate::plot::diff::{diff_columns, diff_positional, KeyIndex};
 use crate::plot::projection::InteriorSample;
+use crate::plot::scale::Scale;
 use crate::plot::value::{DataColumn, Value};
 use crate::primitives::{
-    clip_polyline, clip_polyline_with_attrs, polyline, polyline_ribbon_full, round_corners,
-    CornerRounding, EndClip, PolylineOptions, RibbonOptions,
+    clip_polyline_with_attrs, polyline_ribbon_full, CornerRounding, EndClip, RibbonOptions,
 };
 use crate::scene::SceneBuilder;
 #[cfg(test)]
 use crate::stroke::{Cap, Join};
 
 use super::linetype;
-use super::marks::{build_marks_from_column, MarkSlot};
+use super::marks::{build_marks_from_column, unique_values_at_first_rows, MarkSlot};
+use super::outline::{draw_curve_outline, EndpointMarker, OutlineSpec};
 use super::resolve::{
-    auto_endpoint_clip_pt, channel_varies_across, draw_stroke_with_linetype, emit_endpoint_marker,
-    endpoint_outward, override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or,
-    resolve_cap_channel, resolve_color_channel, resolve_color_channel_or_theme,
-    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position, resolve_str_channel_or,
+    auto_endpoint_clip_pt, channel_varies_across, emit_endpoint_marker, endpoint_outward,
+    override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or, resolve_cap_channel,
+    resolve_color_channel, resolve_color_channel_or_theme, resolve_join_channel,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
+    resolve_position, resolve_str_channel_or, ChannelBind,
 };
-use super::state::{
-    filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
-    GeomState, KeysStrategy,
-};
-use super::{
-    empty_datacolumn_like, BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext,
-    Keys,
-};
+use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
+use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
 // Style defaults (linewidth, cap, join) live on `theme.geom.line` and
@@ -153,52 +148,12 @@ impl LineGeom {
     }
 }
 
-/// Build a column holding one entry per mark — the key value of each
-/// mark's first row. Used to feed `diff_columns` at mark granularity.
-fn unique_keys_column(col: &DataColumn, marks: &[MarkSlot]) -> DataColumn {
-    let template = empty_datacolumn_like(col);
-    push_values_into(template, marks.iter().map(|m| col.get(m.first_row)))
-}
-
-/// Append a sequence of Values into a fresh column of `template`'s
-/// variant. Panics if a value's variant doesn't match the template.
-fn push_values_into(
-    mut template: DataColumn,
-    values: impl IntoIterator<Item = Value>,
-) -> DataColumn {
-    for v in values {
-        match (&mut template, v) {
-            (DataColumn::F64(vec), Value::Number(n)) => vec.push(n),
-            (DataColumn::F32(vec), Value::Number(n)) => vec.push(n as f32),
-            (DataColumn::I32(vec), Value::Number(n)) => vec.push(n as i32),
-            (DataColumn::I64(vec), Value::Number(n)) => vec.push(n as i64),
-            (DataColumn::Bool(vec), Value::Bool(b)) => vec.push(b),
-            (DataColumn::String(vec), Value::String(s)) => vec.push(s),
-            (DataColumn::Color(vec), Value::Color(c)) => vec.push(c),
-            (DataColumn::Date(vec), Value::Date(d)) => vec.push(d),
-            (DataColumn::DateTime(vec), Value::DateTime(us)) => vec.push(us),
-            (DataColumn::Time(vec), Value::Time(us)) => vec.push(us),
-            (DataColumn::Duration(vec), Value::Duration(us)) => vec.push(us),
-            (DataColumn::Linetype(vec), Value::Linetype(p)) => vec.push(p),
-            _ => panic!("LineGeom: unique-keys column variant mismatch"),
-        }
-    }
-    template
-}
-
 // ─── BuildableGeom impl ──────────────────────────────────────────────────────
 
 impl BuildableGeom for LineGeom {
     fn build_from(builder: GeomBuilder<Self>) -> Self {
         let (keys_opt, channels) = builder.into_parts();
-
-        let n = require_data_column("x", &channels, "LineGeom").len();
-        let y_len = require_data_column("y", &channels, "LineGeom").len();
-        if y_len != n {
-            panic!("LineGeom::build: \"y\" length {y_len} does not match \"x\" length {n}");
-        }
-        validate_channel_lengths(&channels, n, "LineGeom");
-        validate_pick_id_channel(&channels, "LineGeom");
+        let n = require_x_and_siblings(&channels, &["y"], "LineGeom");
 
         // Validate any user-supplied or constant linetype value to have
         // even length. Structural error caught at build time rather than
@@ -207,8 +162,14 @@ impl BuildableGeom for LineGeom {
             validate_linetype_channel(ch);
         }
 
-        let declared = filter_declared(&channels, CHANNELS);
-        let state = GeomState::from_builder(keys_opt, channels, n, KeysStrategy::OneMark, declared);
+        let state = finalize_state(
+            keys_opt,
+            channels,
+            n,
+            KeysStrategy::OneMark,
+            CHANNELS,
+            "LineGeom",
+        );
         LineGeom {
             state,
             marks: Vec::new(),
@@ -228,6 +189,100 @@ fn validate_linetype_channel(ch: &Channel) {
             }
         }
         Channel::Data(_) | Channel::RawData(_) => {} // non-Linetype column — resolved at draw time
+    }
+}
+
+// ─── Draw-time channel/scale bundle ──────────────────────────────────────────
+
+/// Channel + scale references for one `LineGeom::draw` call. Built once
+/// at the top of `draw`, then threaded into [`draw_one_mark`]. `x_col`
+/// and `y_col` are required; the per-mark styling fields are optional
+/// (resolved against theme defaults when unbound).
+#[derive(Clone, Copy)]
+struct LineDrawCtx<'a> {
+    x_col: &'a DataColumn,
+    y_col: &'a DataColumn,
+    x_scale: Option<&'a Scale>,
+    y_scale: Option<&'a Scale>,
+    fill: ChannelBind<'a>,
+    stroke: ChannelBind<'a>,
+    stroke_opacity: ChannelBind<'a>,
+    linewidth: ChannelBind<'a>,
+    linetype: ChannelBind<'a>,
+    dash_offset: ChannelBind<'a>,
+    cap: ChannelBind<'a>,
+    join: ChannelBind<'a>,
+    pick_id: ChannelBind<'a>,
+    corner_radius: ChannelBind<'a>,
+    corner_max_angle: ChannelBind<'a>,
+    clip_start_radius: ChannelBind<'a>,
+    clip_end_radius: ChannelBind<'a>,
+    angle: ChannelBind<'a>,
+    x_offset: ChannelBind<'a>,
+    y_offset: ChannelBind<'a>,
+    x_band: ChannelBind<'a>,
+    y_band: ChannelBind<'a>,
+    start_marker: ChannelBind<'a>,
+    end_marker: ChannelBind<'a>,
+    start_marker_size: ChannelBind<'a>,
+    end_marker_size: ChannelBind<'a>,
+    start_marker_fill: ChannelBind<'a>,
+    end_marker_fill: ChannelBind<'a>,
+    start_marker_invert: ChannelBind<'a>,
+    end_marker_invert: ChannelBind<'a>,
+}
+
+impl<'a> LineDrawCtx<'a> {
+    /// Resolve `x`/`y` columns + scales and look up every per-mark
+    /// channel by name. Returns `None` when `x` or `y` is missing or
+    /// non-positional.
+    fn build(
+        channels: &'a std::collections::HashMap<String, Channel>,
+        ctx: &'a GeomContext<'a>,
+    ) -> Option<Self> {
+        let (x_col, x_scale) = match channels.get("x")? {
+            Channel::Data(c) => (c, ctx.scale_for("x")),
+            Channel::RawData(c) => (c, None),
+            _ => return None,
+        };
+        let (y_col, y_scale) = match channels.get("y")? {
+            Channel::Data(c) => (c, ctx.scale_for("y")),
+            Channel::RawData(c) => (c, None),
+            _ => return None,
+        };
+        let b = |name: &str| ChannelBind::from_ctx(channels, ctx, name);
+        Some(Self {
+            x_col,
+            y_col,
+            x_scale,
+            y_scale,
+            fill: b("fill"),
+            stroke: b("stroke"),
+            stroke_opacity: b("stroke_opacity"),
+            linewidth: b("linewidth"),
+            linetype: b("linetype"),
+            dash_offset: b("dash_offset"),
+            cap: b("cap"),
+            join: b("join"),
+            pick_id: b("pick_id"),
+            corner_radius: b("corner_radius"),
+            corner_max_angle: b("corner_max_angle"),
+            clip_start_radius: b("clip_start_radius"),
+            clip_end_radius: b("clip_end_radius"),
+            angle: b("angle"),
+            x_offset: b("x_offset"),
+            y_offset: b("y_offset"),
+            x_band: b("x_band"),
+            y_band: b("y_band"),
+            start_marker: b("start_marker"),
+            end_marker: b("end_marker"),
+            start_marker_size: b("start_marker_size"),
+            end_marker_size: b("end_marker_size"),
+            start_marker_fill: b("start_marker_fill"),
+            end_marker_fill: b("end_marker_fill"),
+            start_marker_invert: b("start_marker_invert"),
+            end_marker_invert: b("end_marker_invert"),
+        })
     }
 }
 
@@ -274,8 +329,16 @@ impl Geom for LineGeom {
         };
         let (enter, update, exit) = match (&self.state.prev_keys, &self.state.keys) {
             (Keys::Explicit(prev_col), Keys::Explicit(next_col)) => {
-                let prev_unique = unique_keys_column(prev_col, &prev_marks);
-                let next_unique = unique_keys_column(next_col, &next_marks);
+                let prev_unique = unique_values_at_first_rows(
+                    prev_col,
+                    prev_marks.iter().map(|m| m.first_row),
+                    "LineGeom",
+                );
+                let next_unique = unique_values_at_first_rows(
+                    next_col,
+                    next_marks.iter().map(|m| m.first_row),
+                    "LineGeom",
+                );
                 let idx = KeyIndex::build(&prev_unique);
                 diff_columns(&prev_unique, &idx, &next_unique)
             }
@@ -312,446 +375,511 @@ impl Geom for LineGeom {
             return;
         }
 
-        let x_scale_bound = ctx.scale_for("x");
-        let y_scale_bound = ctx.scale_for("y");
-        let fill_scale = ctx.scale_for("fill");
-        let stroke_scale = ctx.scale_for("stroke");
-        let stroke_opacity_scale = ctx.scale_for("stroke_opacity");
-        let linewidth_scale = ctx.scale_for("linewidth");
-        let linetype_scale = ctx.scale_for("linetype");
-        let dash_offset_scale = ctx.scale_for("dash_offset");
-        let cap_scale = ctx.scale_for("cap");
-        let join_scale = ctx.scale_for("join");
-        let pick_id_scale = ctx.scale_for("pick_id");
-        let corner_radius_scale = ctx.scale_for("corner_radius");
-        let corner_max_angle_scale = ctx.scale_for("corner_max_angle");
-        let clip_start_radius_scale = ctx.scale_for("clip_start_radius");
-        let clip_end_radius_scale = ctx.scale_for("clip_end_radius");
-        let angle_scale = ctx.scale_for("angle");
-        let x_offset_scale = ctx.scale_for("x_offset");
-        let y_offset_scale = ctx.scale_for("y_offset");
-        let x_band_scale = ctx.scale_for("x_band");
-        let y_band_scale = ctx.scale_for("y_band");
-
-        let channels = &self.state.channels;
-        let (x_col, x_scale) = match channels.get("x") {
-            Some(Channel::Data(c)) => (c, x_scale_bound),
-            Some(Channel::RawData(c)) => (c, None),
-            _ => return,
+        let dc = match LineDrawCtx::build(&self.state.channels, ctx) {
+            Some(dc) => dc,
+            None => return,
         };
-        let (y_col, y_scale) = match channels.get("y") {
-            Some(Channel::Data(c)) => (c, y_scale_bound),
-            Some(Channel::RawData(c)) => (c, None),
-            _ => return,
-        };
-
-        let fill_ch = channels.get("fill");
-        let stroke_ch = channels.get("stroke");
-        let stroke_opacity_ch = channels.get("stroke_opacity");
-        let linewidth_ch = channels.get("linewidth");
-        let linetype_ch = channels.get("linetype");
-        let dash_offset_ch = channels.get("dash_offset");
-        let cap_ch = channels.get("cap");
-        let join_ch = channels.get("join");
-        let pick_id_ch = channels.get("pick_id");
-        let corner_radius_ch = channels.get("corner_radius");
-        let corner_max_angle_ch = channels.get("corner_max_angle");
-        let clip_start_radius_ch = channels.get("clip_start_radius");
-        let clip_end_radius_ch = channels.get("clip_end_radius");
-        let angle_ch = channels.get("angle");
-        let x_offset_ch = channels.get("x_offset");
-        let y_offset_ch = channels.get("y_offset");
-        let x_band_ch = channels.get("x_band");
-        let y_band_ch = channels.get("y_band");
-        let start_marker_ch = channels.get("start_marker");
-        let end_marker_ch = channels.get("end_marker");
-        let start_marker_size_ch = channels.get("start_marker_size");
-        let end_marker_size_ch = channels.get("end_marker_size");
-        let start_marker_fill_ch = channels.get("start_marker_fill");
-        let end_marker_fill_ch = channels.get("end_marker_fill");
-        let start_marker_invert_ch = channels.get("start_marker_invert");
-        let end_marker_invert_ch = channels.get("end_marker_invert");
-        let start_marker_size_scale = ctx.scale_for("start_marker_size");
-        let end_marker_size_scale = ctx.scale_for("end_marker_size");
-        let start_marker_fill_scale = ctx.scale_for("start_marker_fill");
-        let end_marker_fill_scale = ctx.scale_for("end_marker_fill");
-        let start_marker_invert_scale = ctx.scale_for("start_marker_invert");
-        let end_marker_invert_scale = ctx.scale_for("end_marker_invert");
-        let start_marker_scale = ctx.scale_for("start_marker");
-        let end_marker_scale = ctx.scale_for("end_marker");
 
         for mark in marks.iter() {
-            // ── Per-mark channel resolution (first row of mark). ──
-            let i0 = mark.first_row;
-            let stroke_color = override_alpha(
-                resolve_color_channel_or_theme(
-                    stroke_ch,
-                    stroke_scale,
-                    i0,
-                    ctx.theme.geom.line.stroke.as_ref(),
-                    &ctx.theme.palette,
-                ),
-                resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i0),
-            );
-            let stroke_color = match stroke_color {
-                Some(c) => c,
-                None => continue, // no stroke → no line to draw
-            };
-
-            let linewidth_pt = resolve_number_channel_or(
-                linewidth_ch,
-                linewidth_scale,
-                i0,
-                ctx.theme.geom.line.linewidth_pt,
-            );
-            let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
-            if !linewidth_px.is_finite() || linewidth_px <= 0.0 {
-                continue;
-            }
-
-            let dash_pattern_pt = resolve_linetype_channel(linetype_ch, linetype_scale, i0);
-            let dash_offset_pt =
-                resolve_number_channel_or(dash_offset_ch, dash_offset_scale, i0, 0.0);
-            let cap = resolve_cap_channel(cap_ch, cap_scale, i0, ctx.theme.geom.line.cap);
-            let join = resolve_join_channel(join_ch, join_scale, i0, ctx.theme.geom.line.join);
-
-            // Marker fill defaults to the resolved stroke color.
-            let marker_fill =
-                resolve_color_channel(fill_ch, fill_scale, i0).unwrap_or(stroke_color);
-
-            // Endpoint-marker constants hoisted earlier than the
-            // per-marker emission blocks so the auto-clip portion can
-            // fold into `clip_*_pt` for the polyline trim.
-            let start_name = resolve_str_channel_or(start_marker_ch, start_marker_scale, i0, "");
-            let end_name = resolve_str_channel_or(end_marker_ch, end_marker_scale, i0, "");
-            let default_marker_size_pt = 3.0 * linewidth_pt;
-            let start_marker_size_pt = resolve_number_channel_or(
-                start_marker_size_ch,
-                start_marker_size_scale,
-                i0,
-                default_marker_size_pt,
-            );
-            let end_marker_size_pt = resolve_number_channel_or(
-                end_marker_size_ch,
-                end_marker_size_scale,
-                i0,
-                default_marker_size_pt,
-            );
-            let start_invert = resolve_bool_channel_or(
-                start_marker_invert_ch,
-                start_marker_invert_scale,
-                i0,
-                false,
-            );
-            let end_invert =
-                resolve_bool_channel_or(end_marker_invert_ch, end_marker_invert_scale, i0, false);
-
-            // Hoist clip + corner-radius resolution so they're available
-            // for both the ribbon-mode decision and the per-mark draw
-            // path below.
-            //
-            // `clip_*_radius` covers the explicit-trim use case (graph
-            // node boundaries, breathing room next to a data point).
-            // The auto-clip term adds the forward extent of any
-            // endpoint marker so the marker's tip lands at the user's
-            // clip boundary (or the original endpoint when no user
-            // clip is set) without the user having to compute the
-            // marker geometry themselves.
-            let user_clip_start_pt =
-                resolve_number_channel_or(clip_start_radius_ch, clip_start_radius_scale, i0, 0.0);
-            let user_clip_end_pt =
-                resolve_number_channel_or(clip_end_radius_ch, clip_end_radius_scale, i0, 0.0);
-            let auto_clip_start_pt =
-                auto_endpoint_clip_pt(&start_name, start_marker_size_pt, start_invert, ctx.shapes);
-            let auto_clip_end_pt =
-                auto_endpoint_clip_pt(&end_name, end_marker_size_pt, end_invert, ctx.shapes);
-            let clip_start_pt = user_clip_start_pt + auto_clip_start_pt;
-            let clip_end_pt = user_clip_end_pt + auto_clip_end_pt;
-            let corner_radius_pt =
-                resolve_number_channel_or(corner_radius_ch, corner_radius_scale, i0, 0.0);
-
-            // ── Ribbon-mode decision. Upgrade to a per-vertex
-            // tessellated mesh when linewidth or stroke varies within
-            // the mark. Gated to solid linetype + no corner rounding
-            // (dashed patterns and curved beziers don't compose with
-            // the polyline-only ribbon primitive).
-            let linewidth_varies = channel_varies_across(linewidth_ch, linewidth_scale, &mark.rows);
-            let stroke_varies = channel_varies_across(stroke_ch, stroke_scale, &mark.rows)
-                || channel_varies_across(stroke_opacity_ch, stroke_opacity_scale, &mark.rows);
-            let ribbon_mode = dash_pattern_pt.is_empty()
-                && corner_radius_pt == 0.0
-                && (linewidth_varies || stroke_varies);
-
-            // ── Per-vertex positions for this mark. ──
-            //
-            // Under non-linear projections (polar, future ternary) the
-            // channel-space line between two vertices doesn't project
-            // to a straight pixel-space segment — it follows the
-            // projection's geodesic (an arc, a curve, etc.). We ask
-            // the projection to insert interior sample points between
-            // consecutive vertices so the rendered polyline tracks the
-            // geodesic instead of cutting across as a chord. For
-            // Cartesian `interpolate_segment` is a no-op and `points`
-            // ends up identical to the pre-projection-densification
-            // build.
-            //
-            // In ribbon mode we additionally co-build per-vertex
-            // `widths` and `colors`, lerping interior-sample attrs by
-            // the channel-space `t` returned by
-            // `interpolate_segment_with_t`. The three arrays stay
-            // length-aligned through densification.
-            let is_linear = ctx.projection.is_linear();
-            let mut interior: Vec<(f64, f64)> = Vec::new();
-            let mut interior_t: Vec<InteriorSample> = Vec::new();
-            let mut prev_channels: Option<[f64; 2]> = None;
-            let mut prev_w: Option<f64> = None;
-            let mut prev_c: Option<Color> = None;
-            let mut points: Vec<Point> = Vec::with_capacity(mark.rows.len());
-            let mut widths: Vec<f64> = if ribbon_mode {
-                Vec::with_capacity(mark.rows.len())
-            } else {
-                Vec::new()
-            };
-            let mut colors: Vec<Color> = if ribbon_mode {
-                Vec::with_capacity(mark.rows.len())
-            } else {
-                Vec::new()
-            };
-            for &i in &mark.rows {
-                let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
-                let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
-                let px_frac = resolve_position(x_col.get(i), x_scale, x_band);
-                let py_frac = resolve_position(y_col.get(i), y_scale, y_band);
-                if !px_frac.is_finite() || !py_frac.is_finite() {
-                    continue;
-                }
-                let curr_channels = [px_frac, py_frac];
-
-                let (curr_w, curr_c) = if ribbon_mode {
-                    let w_pt = resolve_number_channel_or(
-                        linewidth_ch,
-                        linewidth_scale,
-                        i,
-                        ctx.theme.geom.line.linewidth_pt,
-                    );
-                    let w_half_px = pt_to_px(w_pt, ctx.dpi) * 0.5;
-                    let c = override_alpha(
-                        resolve_color_channel(stroke_ch, stroke_scale, i),
-                        resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i),
-                    )
-                    .unwrap_or(stroke_color);
-                    (w_half_px, c)
-                } else {
-                    (0.0, stroke_color) // unused in non-ribbon mode
-                };
-
-                if !is_linear {
-                    if let Some(prev) = prev_channels {
-                        if ribbon_mode {
-                            interior_t.clear();
-                            ctx.projection.interpolate_segment_with_t(
-                                panel,
-                                &prev,
-                                &curr_channels,
-                                &mut interior_t,
-                            );
-                            let pw = prev_w.unwrap();
-                            let pc = prev_c.unwrap();
-                            for s in &interior_t {
-                                points.push(Point::new(s.px, s.py));
-                                widths.push(pw + s.t * (curr_w - pw));
-                                colors.push(lerp_color(pc, curr_c, s.t));
-                            }
-                        } else {
-                            interior.clear();
-                            ctx.projection.interpolate_segment(
-                                panel,
-                                &prev,
-                                &curr_channels,
-                                &mut interior,
-                            );
-                            for (ipx, ipy) in &interior {
-                                points.push(Point::new(*ipx, *ipy));
-                            }
-                        }
-                    }
-                }
-                let (px0, py0) = ctx.projection.project_to_panel_px(panel, &curr_channels);
-                let mut px = px0;
-                let mut py = py0;
-                if let Some(off) = resolve_number_channel(x_offset_ch, x_offset_scale, i) {
-                    px += pt_to_px(off, ctx.dpi);
-                }
-                if let Some(off) = resolve_number_channel(y_offset_ch, y_offset_scale, i) {
-                    py -= pt_to_px(off, ctx.dpi);
-                }
-                points.push(Point::new(px, py));
-                if ribbon_mode {
-                    widths.push(curr_w);
-                    colors.push(curr_c);
-                    prev_w = Some(curr_w);
-                    prev_c = Some(curr_c);
-                }
-                prev_channels = Some(curr_channels);
-            }
-            if points.len() < 2 {
-                continue;
-            }
-
-            // ── Rotation: per-mark angle around the centroid of finite
-            // vertex positions. Computed from `points` (after band +
-            // offset resolution, before clip / round) so clip and corner
-            // rounding still happen in the unrotated frame and the rigid
-            // line is then rotated as a whole around the centroid.
-            let angle = resolve_angle_channel(angle_ch, angle_scale, i0);
-            let xform = if angle == 0.0 {
-                Affine::IDENTITY
-            } else {
-                let n_pts = points.len() as f64;
-                let cx = points.iter().map(|p| p.x).sum::<f64>() / n_pts;
-                let cy = points.iter().map(|p| p.y).sum::<f64>() / n_pts;
-                Affine::rotate_about(-angle, Point::new(cx, cy))
-            };
-
-            // ── End clip (per-mark, first row). Ribbon mode threads
-            // widths / colors through the clip; non-ribbon clips
-            // points only.
-            let (clipped, clipped_widths, clipped_colors): (Vec<Point>, Vec<f64>, Vec<Color>) =
-                if clip_start_pt > 0.0 || clip_end_pt > 0.0 {
-                    let start = (clip_start_pt > 0.0).then(|| EndClip::Circle {
-                        center: points[0],
-                        radius: pt_to_px(clip_start_pt, ctx.dpi),
-                    });
-                    let end = (clip_end_pt > 0.0).then(|| EndClip::Circle {
-                        center: *points.last().unwrap(),
-                        radius: pt_to_px(clip_end_pt, ctx.dpi),
-                    });
-                    if ribbon_mode {
-                        clip_polyline_with_attrs(&points, &widths, &colors, start, end)
-                    } else {
-                        (clip_polyline(&points, start, end), Vec::new(), Vec::new())
-                    }
-                } else if ribbon_mode {
-                    (points.clone(), widths.clone(), colors.clone())
-                } else {
-                    (points.clone(), Vec::new(), Vec::new())
-                };
-            if clipped.len() < 2 {
-                continue;
-            }
-
-            // Non-ribbon mode builds a kurbo path (with optional corner
-            // rounding) for the stroke / marker walker. Ribbon mode
-            // bypasses this — the mesh is emitted directly below.
-            let path = if !ribbon_mode {
-                if corner_radius_pt > 0.0 {
-                    let max_angle_deg = resolve_number_channel_or(
-                        corner_max_angle_ch,
-                        corner_max_angle_scale,
-                        i0,
-                        f64::INFINITY,
-                    );
-                    let opts = CornerRounding {
-                        max_cut: pt_to_px(corner_radius_pt, ctx.dpi),
-                        max_angle_deg,
-                    };
-                    round_corners(&clipped, false, opts)
-                } else {
-                    polyline(&clipped, PolylineOptions::default())
-                }
-            } else {
-                crate::path::Path::new()
-            };
-            let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
-
-            // Emit the start marker *before* the stroke so a self-
-            // intersecting polyline's later segments draw over it —
-            // Phase C.5's path-order convention.
-            let marker_outline_px = linewidth_px.max(pt_to_px(0.5, ctx.dpi));
-
-            if !start_name.is_empty() {
-                let size_px = pt_to_px(start_marker_size_pt, ctx.dpi);
-                let fill = resolve_color_channel(start_marker_fill_ch, start_marker_fill_scale, i0)
-                    .unwrap_or(marker_fill);
-                let outward = endpoint_outward(&clipped, &points, true, clip_start_pt > 0.0);
-                emit_endpoint_marker(
-                    scene,
-                    clipped[0],
-                    outward,
-                    start_invert,
-                    &start_name,
-                    size_px,
-                    fill,
-                    stroke_color,
-                    marker_outline_px,
-                    xform,
-                    ctx.shapes,
-                    pick,
-                );
-            }
-
-            if ribbon_mode {
-                // ── Per-vertex ribbon mesh path. ──
-                let opts = RibbonOptions {
-                    half_width: 0.0, // superseded by per-vertex half_widths
-                    cap,
-                    join,
-                    miter_limit: 4.0,
-                };
-                let mesh = polyline_ribbon_full(
-                    &clipped,
-                    Some(&clipped_colors),
-                    Some(&clipped_widths),
-                    &opts,
-                );
-                scene.draw_mesh(&mesh, xform, pick);
-            } else {
-                draw_stroke_with_linetype(
-                    scene,
-                    &path,
-                    /* closed */ false,
-                    stroke_color,
-                    marker_fill,
-                    linewidth_px,
-                    linewidth_pt,
-                    cap,
-                    join,
-                    &dash_pattern_pt,
-                    dash_offset_pt,
-                    xform,
-                    pick,
-                    ctx.shapes,
-                    ctx.theme.geom.marker_outline_pt,
-                    ctx.dpi,
-                );
-            }
-
-            // End marker (Phase C.5). Emitted *after* the stroke so it
-            // sits on top of the line termination — matching the
-            // path-order convention (start cap → segments → end cap).
-            if !end_name.is_empty() {
-                let size_px = pt_to_px(end_marker_size_pt, ctx.dpi);
-                let fill = resolve_color_channel(end_marker_fill_ch, end_marker_fill_scale, i0)
-                    .unwrap_or(marker_fill);
-                let outward = endpoint_outward(&clipped, &points, false, clip_end_pt > 0.0);
-                let placement = *clipped.last().unwrap();
-                emit_endpoint_marker(
-                    scene,
-                    placement,
-                    outward,
-                    end_invert,
-                    &end_name,
-                    size_px,
-                    fill,
-                    stroke_color,
-                    marker_outline_px,
-                    xform,
-                    ctx.shapes,
-                    pick,
-                );
-            }
+            draw_one_mark(scene, ctx, panel, dc, mark);
         }
     }
+}
+
+/// Render a single line mark — channel resolution, polyline assembly,
+/// projection densification, clip + corner rounding, stroke + marker
+/// emission. Each mark is independent; the caller iterates.
+fn draw_one_mark(
+    scene: &mut dyn SceneBuilder,
+    ctx: &GeomContext<'_>,
+    panel: Rect,
+    dc: LineDrawCtx<'_>,
+    mark: &MarkSlot,
+) {
+    let LineDrawCtx {
+        x_col,
+        y_col,
+        x_scale,
+        y_scale,
+        fill: ChannelBind {
+            ch: fill_ch,
+            scale: fill_scale,
+        },
+        stroke: ChannelBind {
+            ch: stroke_ch,
+            scale: stroke_scale,
+        },
+        stroke_opacity:
+            ChannelBind {
+                ch: stroke_opacity_ch,
+                scale: stroke_opacity_scale,
+            },
+        linewidth:
+            ChannelBind {
+                ch: linewidth_ch,
+                scale: linewidth_scale,
+            },
+        linetype:
+            ChannelBind {
+                ch: linetype_ch,
+                scale: linetype_scale,
+            },
+        dash_offset:
+            ChannelBind {
+                ch: dash_offset_ch,
+                scale: dash_offset_scale,
+            },
+        cap: ChannelBind {
+            ch: cap_ch,
+            scale: cap_scale,
+        },
+        join: ChannelBind {
+            ch: join_ch,
+            scale: join_scale,
+        },
+        pick_id:
+            ChannelBind {
+                ch: pick_id_ch,
+                scale: pick_id_scale,
+            },
+        corner_radius:
+            ChannelBind {
+                ch: corner_radius_ch,
+                scale: corner_radius_scale,
+            },
+        corner_max_angle:
+            ChannelBind {
+                ch: corner_max_angle_ch,
+                scale: corner_max_angle_scale,
+            },
+        clip_start_radius:
+            ChannelBind {
+                ch: clip_start_radius_ch,
+                scale: clip_start_radius_scale,
+            },
+        clip_end_radius:
+            ChannelBind {
+                ch: clip_end_radius_ch,
+                scale: clip_end_radius_scale,
+            },
+        angle: ChannelBind {
+            ch: angle_ch,
+            scale: angle_scale,
+        },
+        x_offset:
+            ChannelBind {
+                ch: x_offset_ch,
+                scale: x_offset_scale,
+            },
+        y_offset:
+            ChannelBind {
+                ch: y_offset_ch,
+                scale: y_offset_scale,
+            },
+        x_band: ChannelBind {
+            ch: x_band_ch,
+            scale: x_band_scale,
+        },
+        y_band: ChannelBind {
+            ch: y_band_ch,
+            scale: y_band_scale,
+        },
+        start_marker:
+            ChannelBind {
+                ch: start_marker_ch,
+                scale: start_marker_scale,
+            },
+        end_marker:
+            ChannelBind {
+                ch: end_marker_ch,
+                scale: end_marker_scale,
+            },
+        start_marker_size:
+            ChannelBind {
+                ch: start_marker_size_ch,
+                scale: start_marker_size_scale,
+            },
+        end_marker_size:
+            ChannelBind {
+                ch: end_marker_size_ch,
+                scale: end_marker_size_scale,
+            },
+        start_marker_fill:
+            ChannelBind {
+                ch: start_marker_fill_ch,
+                scale: start_marker_fill_scale,
+            },
+        end_marker_fill:
+            ChannelBind {
+                ch: end_marker_fill_ch,
+                scale: end_marker_fill_scale,
+            },
+        start_marker_invert:
+            ChannelBind {
+                ch: start_marker_invert_ch,
+                scale: start_marker_invert_scale,
+            },
+        end_marker_invert:
+            ChannelBind {
+                ch: end_marker_invert_ch,
+                scale: end_marker_invert_scale,
+            },
+    } = dc;
+
+    // ── Per-mark channel resolution (first row of mark). ──
+    let i0 = mark.first_row;
+    let stroke_color = override_alpha(
+        resolve_color_channel_or_theme(
+            stroke_ch,
+            stroke_scale,
+            i0,
+            ctx.theme.geom.line.stroke.as_ref(),
+            &ctx.theme.palette,
+        ),
+        resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i0),
+    );
+    let stroke_color = match stroke_color {
+        Some(c) => c,
+        None => return, // no stroke → no line to draw
+    };
+
+    let linewidth_pt = resolve_number_channel_or(
+        linewidth_ch,
+        linewidth_scale,
+        i0,
+        ctx.theme.geom.line.linewidth_pt,
+    );
+    let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
+    if !linewidth_px.is_finite() || linewidth_px <= 0.0 {
+        return;
+    }
+
+    let dash_pattern_pt = resolve_linetype_channel(linetype_ch, linetype_scale, i0);
+    let dash_offset_pt = resolve_number_channel_or(dash_offset_ch, dash_offset_scale, i0, 0.0);
+    let cap = resolve_cap_channel(cap_ch, cap_scale, i0, ctx.theme.geom.line.cap);
+    let join = resolve_join_channel(join_ch, join_scale, i0, ctx.theme.geom.line.join);
+
+    // Marker fill defaults to the resolved stroke color.
+    let marker_fill = resolve_color_channel(fill_ch, fill_scale, i0).unwrap_or(stroke_color);
+
+    // Endpoint-marker constants hoisted earlier than the
+    // per-marker emission blocks so the auto-clip portion can
+    // fold into `clip_*_pt` for the polyline trim.
+    let start_name = resolve_str_channel_or(start_marker_ch, start_marker_scale, i0, "");
+    let end_name = resolve_str_channel_or(end_marker_ch, end_marker_scale, i0, "");
+    let default_marker_size_pt = 3.0 * linewidth_pt;
+    let start_marker_size_pt = resolve_number_channel_or(
+        start_marker_size_ch,
+        start_marker_size_scale,
+        i0,
+        default_marker_size_pt,
+    );
+    let end_marker_size_pt = resolve_number_channel_or(
+        end_marker_size_ch,
+        end_marker_size_scale,
+        i0,
+        default_marker_size_pt,
+    );
+    let start_invert =
+        resolve_bool_channel_or(start_marker_invert_ch, start_marker_invert_scale, i0, false);
+    let end_invert =
+        resolve_bool_channel_or(end_marker_invert_ch, end_marker_invert_scale, i0, false);
+
+    // Hoist clip + corner-radius resolution so they're available
+    // for both the ribbon-mode decision and the per-mark draw
+    // path below.
+    //
+    // `clip_*_radius` covers the explicit-trim use case (graph
+    // node boundaries, breathing room next to a data point).
+    // The auto-clip term adds the forward extent of any
+    // endpoint marker so the marker's tip lands at the user's
+    // clip boundary (or the original endpoint when no user
+    // clip is set) without the user having to compute the
+    // marker geometry themselves.
+    let user_clip_start_pt =
+        resolve_number_channel_or(clip_start_radius_ch, clip_start_radius_scale, i0, 0.0);
+    let user_clip_end_pt =
+        resolve_number_channel_or(clip_end_radius_ch, clip_end_radius_scale, i0, 0.0);
+    let auto_clip_start_pt =
+        auto_endpoint_clip_pt(&start_name, start_marker_size_pt, start_invert, ctx.shapes);
+    let auto_clip_end_pt =
+        auto_endpoint_clip_pt(&end_name, end_marker_size_pt, end_invert, ctx.shapes);
+    let clip_start_pt = user_clip_start_pt + auto_clip_start_pt;
+    let clip_end_pt = user_clip_end_pt + auto_clip_end_pt;
+    let corner_radius_pt =
+        resolve_number_channel_or(corner_radius_ch, corner_radius_scale, i0, 0.0);
+
+    // ── Ribbon-mode decision. Upgrade to a per-vertex
+    // tessellated mesh when linewidth or stroke varies within
+    // the mark. Gated to solid linetype + no corner rounding
+    // (dashed patterns and curved beziers don't compose with
+    // the polyline-only ribbon primitive).
+    let linewidth_varies = channel_varies_across(linewidth_ch, linewidth_scale, &mark.rows);
+    let stroke_varies = channel_varies_across(stroke_ch, stroke_scale, &mark.rows)
+        || channel_varies_across(stroke_opacity_ch, stroke_opacity_scale, &mark.rows);
+    let ribbon_mode = dash_pattern_pt.is_empty()
+        && corner_radius_pt == 0.0
+        && (linewidth_varies || stroke_varies);
+
+    // ── Per-vertex positions for this mark. ──
+    //
+    // Under non-linear projections (polar, future ternary) the
+    // channel-space line between two vertices doesn't project
+    // to a straight pixel-space segment — it follows the
+    // projection's geodesic (an arc, a curve, etc.). We ask
+    // the projection to insert interior sample points between
+    // consecutive vertices so the rendered polyline tracks the
+    // geodesic instead of cutting across as a chord. For
+    // Cartesian `interpolate_segment` is a no-op and `points`
+    // ends up identical to the pre-projection-densification
+    // build.
+    //
+    // In ribbon mode we additionally co-build per-vertex
+    // `widths` and `colors`, lerping interior-sample attrs by
+    // the channel-space `t` returned by
+    // `interpolate_segment_with_t`. The three arrays stay
+    // length-aligned through densification.
+    let is_linear = ctx.projection.is_linear();
+    let mut interior: Vec<(f64, f64)> = Vec::new();
+    let mut interior_t: Vec<InteriorSample> = Vec::new();
+    let mut prev_channels: Option<[f64; 2]> = None;
+    let mut prev_w: Option<f64> = None;
+    let mut prev_c: Option<Color> = None;
+    let mut points: Vec<Point> = Vec::with_capacity(mark.rows.len());
+    let mut widths: Vec<f64> = if ribbon_mode {
+        Vec::with_capacity(mark.rows.len())
+    } else {
+        Vec::new()
+    };
+    let mut colors: Vec<Color> = if ribbon_mode {
+        Vec::with_capacity(mark.rows.len())
+    } else {
+        Vec::new()
+    };
+    for &i in &mark.rows {
+        let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
+        let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
+        let px_frac = resolve_position(x_col.get(i), x_scale, x_band);
+        let py_frac = resolve_position(y_col.get(i), y_scale, y_band);
+        if !px_frac.is_finite() || !py_frac.is_finite() {
+            continue;
+        }
+        let curr_channels = [px_frac, py_frac];
+
+        let (curr_w, curr_c) = if ribbon_mode {
+            let w_pt = resolve_number_channel_or(
+                linewidth_ch,
+                linewidth_scale,
+                i,
+                ctx.theme.geom.line.linewidth_pt,
+            );
+            let w_half_px = pt_to_px(w_pt, ctx.dpi) * 0.5;
+            let c = override_alpha(
+                resolve_color_channel(stroke_ch, stroke_scale, i),
+                resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i),
+            )
+            .unwrap_or(stroke_color);
+            (w_half_px, c)
+        } else {
+            (0.0, stroke_color) // unused in non-ribbon mode
+        };
+
+        if !is_linear {
+            if let Some(prev) = prev_channels {
+                if ribbon_mode {
+                    interior_t.clear();
+                    ctx.projection.interpolate_segment_with_t(
+                        panel,
+                        &prev,
+                        &curr_channels,
+                        &mut interior_t,
+                    );
+                    let pw = prev_w.unwrap();
+                    let pc = prev_c.unwrap();
+                    for s in &interior_t {
+                        points.push(Point::new(s.px, s.py));
+                        widths.push(pw + s.t * (curr_w - pw));
+                        colors.push(lerp_color(pc, curr_c, s.t));
+                    }
+                } else {
+                    interior.clear();
+                    ctx.projection
+                        .interpolate_segment(panel, &prev, &curr_channels, &mut interior);
+                    for (ipx, ipy) in &interior {
+                        points.push(Point::new(*ipx, *ipy));
+                    }
+                }
+            }
+        }
+        let (px0, py0) = ctx.projection.project_to_panel_px(panel, &curr_channels);
+        let mut px = px0;
+        let mut py = py0;
+        if let Some(off) = resolve_number_channel(x_offset_ch, x_offset_scale, i) {
+            px += pt_to_px(off, ctx.dpi);
+        }
+        if let Some(off) = resolve_number_channel(y_offset_ch, y_offset_scale, i) {
+            py -= pt_to_px(off, ctx.dpi);
+        }
+        points.push(Point::new(px, py));
+        if ribbon_mode {
+            widths.push(curr_w);
+            colors.push(curr_c);
+            prev_w = Some(curr_w);
+            prev_c = Some(curr_c);
+        }
+        prev_channels = Some(curr_channels);
+    }
+    if points.len() < 2 {
+        return;
+    }
+
+    // ── Rotation: per-mark angle around the centroid of finite
+    // vertex positions. Computed from `points` (after band +
+    // offset resolution, before clip / round) so clip and corner
+    // rounding still happen in the unrotated frame and the rigid
+    // line is then rotated as a whole around the centroid.
+    let angle = resolve_angle_channel(angle_ch, angle_scale, i0);
+    let xform = if angle == 0.0 {
+        Affine::IDENTITY
+    } else {
+        let n_pts = points.len() as f64;
+        let cx = points.iter().map(|p| p.x).sum::<f64>() / n_pts;
+        let cy = points.iter().map(|p| p.y).sum::<f64>() / n_pts;
+        Affine::rotate_about(-angle, Point::new(cx, cy))
+    };
+
+    let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
+
+    if ribbon_mode {
+        // ── Ribbon-mode path: per-vertex tessellated mesh. Clip threads
+        // widths / colors through so the post-clip mesh stays
+        // attr-aligned.
+        let (clipped, clipped_widths, clipped_colors) = if clip_start_pt > 0.0 || clip_end_pt > 0.0
+        {
+            let start = (clip_start_pt > 0.0).then(|| EndClip::Circle {
+                center: points[0],
+                radius: pt_to_px(clip_start_pt, ctx.dpi),
+            });
+            let end = (clip_end_pt > 0.0).then(|| EndClip::Circle {
+                center: *points.last().unwrap(),
+                radius: pt_to_px(clip_end_pt, ctx.dpi),
+            });
+            clip_polyline_with_attrs(&points, &widths, &colors, start, end)
+        } else {
+            (points.clone(), widths.clone(), colors.clone())
+        };
+        if clipped.len() < 2 {
+            return;
+        }
+
+        let marker_outline_px = linewidth_px.max(pt_to_px(0.5, ctx.dpi));
+
+        if !start_name.is_empty() {
+            let size_px = pt_to_px(start_marker_size_pt, ctx.dpi);
+            let fill = resolve_color_channel(start_marker_fill_ch, start_marker_fill_scale, i0)
+                .unwrap_or(marker_fill);
+            let outward = endpoint_outward(&clipped, &points, true, clip_start_pt > 0.0);
+            emit_endpoint_marker(
+                scene,
+                clipped[0],
+                outward,
+                start_invert,
+                &start_name,
+                size_px,
+                fill,
+                stroke_color,
+                marker_outline_px,
+                xform,
+                ctx.shapes,
+                pick,
+            );
+        }
+
+        let opts = RibbonOptions {
+            half_width: 0.0, // superseded by per-vertex half_widths
+            cap,
+            join,
+            miter_limit: 4.0,
+        };
+        let mesh = polyline_ribbon_full(
+            &clipped,
+            Some(&clipped_colors),
+            Some(&clipped_widths),
+            &opts,
+        );
+        scene.draw_mesh(&mesh, xform, pick);
+
+        if !end_name.is_empty() {
+            let size_px = pt_to_px(end_marker_size_pt, ctx.dpi);
+            let fill = resolve_color_channel(end_marker_fill_ch, end_marker_fill_scale, i0)
+                .unwrap_or(marker_fill);
+            let outward = endpoint_outward(&clipped, &points, false, clip_end_pt > 0.0);
+            let placement = *clipped.last().unwrap();
+            emit_endpoint_marker(
+                scene,
+                placement,
+                outward,
+                end_invert,
+                &end_name,
+                size_px,
+                fill,
+                stroke_color,
+                marker_outline_px,
+                xform,
+                ctx.shapes,
+                pick,
+            );
+        }
+        return;
+    }
+
+    // ── Non-ribbon path: build an outline spec and delegate to the
+    // shared `draw_curve_outline` helper, which handles endpoint clip,
+    // path construction (straight or corner-rounded), start marker,
+    // stroke (fast path or dashed-with-markers walker), and end marker.
+    let corner_rounding = (corner_radius_pt > 0.0).then(|| {
+        let max_angle_deg = resolve_number_channel_or(
+            corner_max_angle_ch,
+            corner_max_angle_scale,
+            i0,
+            f64::INFINITY,
+        );
+        CornerRounding {
+            max_cut: pt_to_px(corner_radius_pt, ctx.dpi),
+            max_angle_deg,
+        }
+    });
+    let start_marker_fill_resolved =
+        resolve_color_channel(start_marker_fill_ch, start_marker_fill_scale, i0);
+    let end_marker_fill_resolved =
+        resolve_color_channel(end_marker_fill_ch, end_marker_fill_scale, i0);
+    let spec = OutlineSpec {
+        stroke_color,
+        linewidth_pt,
+        dash_pattern_pt,
+        dash_offset_pt,
+        cap,
+        join,
+        marker_fill,
+        user_clip_start_pt,
+        user_clip_end_pt,
+        start_marker: EndpointMarker {
+            name: start_name,
+            size_pt: start_marker_size_pt,
+            fill: start_marker_fill_resolved,
+            invert: start_invert,
+        },
+        end_marker: EndpointMarker {
+            name: end_name,
+            size_pt: end_marker_size_pt,
+            fill: end_marker_fill_resolved,
+            invert: end_invert,
+        },
+        pick,
+        xform,
+        corner_rounding,
+    };
+    draw_curve_outline(scene, ctx, &points, &spec);
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

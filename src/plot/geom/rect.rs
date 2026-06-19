@@ -71,10 +71,7 @@ use super::resolve::{
     resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
     resolve_position,
 };
-use super::state::{
-    filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
-    GeomState, KeysStrategy,
-};
+use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
@@ -134,19 +131,15 @@ crate::impl_geom_inherents!(RectGeom);
 impl BuildableGeom for RectGeom {
     fn build_from(builder: GeomBuilder<Self>) -> Self {
         let (keys_opt, channels) = builder.into_parts();
-
-        let n = require_data_column("x", &channels, "RectGeom").len();
-        for name in ["y", "x2", "y2"] {
-            let len = require_data_column(name, &channels, "RectGeom").len();
-            if len != n {
-                panic!("RectGeom::build: \"{name}\" length {len} does not match \"x\" length {n}");
-            }
-        }
-        validate_channel_lengths(&channels, n, "RectGeom");
-        validate_pick_id_channel(&channels, "RectGeom");
-
-        let declared = filter_declared(&channels, CHANNELS);
-        let state = GeomState::from_builder(keys_opt, channels, n, KeysStrategy::PerRow, declared);
+        let n = require_x_and_siblings(&channels, &["y", "x2", "y2"], "RectGeom");
+        let state = finalize_state(
+            keys_opt,
+            channels,
+            n,
+            KeysStrategy::PerRow,
+            CHANNELS,
+            "RectGeom",
+        );
         RectGeom { state }
     }
 }

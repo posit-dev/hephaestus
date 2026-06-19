@@ -63,8 +63,7 @@ use super::resolve::{
     resolve_pick_id, resolve_position,
 };
 use super::state::{
-    filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
-    GeomState, KeysStrategy,
+    finalize_state, require_data_column, require_x_and_siblings, GeomState, KeysStrategy,
 };
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
 
@@ -129,22 +128,16 @@ crate::impl_geom_inherents!(TextFitGeom);
 impl BuildableGeom for TextFitGeom {
     fn build_from(builder: GeomBuilder<Self>) -> Self {
         let (keys_opt, channels) = builder.into_parts();
-
-        let n = require_data_column("x", &channels, "TextFitGeom").len();
-        for name in ["y", "x2", "y2"] {
-            let len = require_data_column(name, &channels, "TextFitGeom").len();
-            if len != n {
-                panic!(
-                    "TextFitGeom::build: \"{name}\" length {len} does not match \"x\" length {n}"
-                );
-            }
-        }
+        let n = require_x_and_siblings(&channels, &["y", "x2", "y2"], "TextFitGeom");
         require_data_column("text", &channels, "TextFitGeom");
-        validate_channel_lengths(&channels, n, "TextFitGeom");
-        validate_pick_id_channel(&channels, "TextFitGeom");
-
-        let declared = filter_declared(&channels, CHANNELS);
-        let state = GeomState::from_builder(keys_opt, channels, n, KeysStrategy::PerRow, declared);
+        let state = finalize_state(
+            keys_opt,
+            channels,
+            n,
+            KeysStrategy::PerRow,
+            CHANNELS,
+            "TextFitGeom",
+        );
         TextFitGeom { state }
     }
 }

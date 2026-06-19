@@ -2,3 +2,4 @@
 examples/*.png
 tests/*.png
 .claude/
+PLAN.md

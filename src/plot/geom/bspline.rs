@@ -74,31 +74,24 @@
 //! per-segment lerp, generalised to the spline parameter space.
 
 use crate::color::{lerp_color, Color};
-use crate::geometry::{Affine, Point};
+use crate::geometry::{Affine, Point, Rect};
 use crate::plot::diff::{diff_columns, diff_positional, KeyIndex};
-use crate::plot::value::{DataColumn, Value};
-use crate::primitives::{
-    clip_polyline, clip_polyline_with_attrs, polyline, polyline_ribbon_full, EndClip,
-    PolylineOptions, RibbonOptions,
-};
+use crate::plot::scale::Scale;
+use crate::plot::value::DataColumn;
+use crate::primitives::{clip_polyline_with_attrs, polyline_ribbon_full, EndClip, RibbonOptions};
 use crate::scene::SceneBuilder;
 
-use super::marks::{build_marks_from_column, MarkSlot};
+use super::marks::{build_marks_from_column, unique_values_at_first_rows, MarkSlot};
+use super::outline::{draw_curve_outline, EndpointMarker, OutlineSpec};
 use super::resolve::{
-    auto_endpoint_clip_pt, channel_varies_across, draw_stroke_with_linetype, emit_endpoint_marker,
-    endpoint_outward, override_alpha, pt_to_px, resolve_bool_channel_or, resolve_cap_channel,
-    resolve_color_channel, resolve_color_channel_or_theme, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
-    resolve_position, resolve_str_channel_or,
+    auto_endpoint_clip_pt, channel_varies_across, emit_endpoint_marker, endpoint_outward,
+    override_alpha, pt_to_px, resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel,
+    resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
+    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
+    resolve_str_channel_or, ChannelBind,
 };
-use super::state::{
-    filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
-    GeomState, KeysStrategy,
-};
-use super::{
-    empty_datacolumn_like, BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext,
-    Keys,
-};
+use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
+use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
 
 // Style defaults (linewidth, cap, join) live on `theme.geom.bspline`.
 // DEGREE is a semantic default — the curve's order — and stays as a
@@ -160,57 +153,106 @@ impl BSplineGeom {
     }
 }
 
-/// Build a column holding one entry per mark — the key value of each
-/// mark's first row. Used to feed `diff_columns` at mark granularity.
-fn unique_keys_column(col: &DataColumn, marks: &[MarkSlot]) -> DataColumn {
-    let template = empty_datacolumn_like(col);
-    push_values_into(template, marks.iter().map(|m| col.get(m.first_row)))
-}
-
-fn push_values_into(
-    mut template: DataColumn,
-    values: impl IntoIterator<Item = Value>,
-) -> DataColumn {
-    for v in values {
-        match (&mut template, v) {
-            (DataColumn::F64(vec), Value::Number(n)) => vec.push(n),
-            (DataColumn::F32(vec), Value::Number(n)) => vec.push(n as f32),
-            (DataColumn::I32(vec), Value::Number(n)) => vec.push(n as i32),
-            (DataColumn::I64(vec), Value::Number(n)) => vec.push(n as i64),
-            (DataColumn::Bool(vec), Value::Bool(b)) => vec.push(b),
-            (DataColumn::String(vec), Value::String(s)) => vec.push(s),
-            (DataColumn::Color(vec), Value::Color(c)) => vec.push(c),
-            (DataColumn::Date(vec), Value::Date(d)) => vec.push(d),
-            (DataColumn::DateTime(vec), Value::DateTime(us)) => vec.push(us),
-            (DataColumn::Time(vec), Value::Time(us)) => vec.push(us),
-            (DataColumn::Duration(vec), Value::Duration(us)) => vec.push(us),
-            (DataColumn::Linetype(vec), Value::Linetype(p)) => vec.push(p),
-            _ => panic!("BSplineGeom: unique-keys column variant mismatch"),
-        }
-    }
-    template
-}
-
 // ─── BuildableGeom impl ──────────────────────────────────────────────────────
 
 impl BuildableGeom for BSplineGeom {
     fn build_from(builder: GeomBuilder<Self>) -> Self {
         let (keys_opt, channels) = builder.into_parts();
-
-        let n = require_data_column("x", &channels, "BSplineGeom").len();
-        let y_len = require_data_column("y", &channels, "BSplineGeom").len();
-        if y_len != n {
-            panic!("BSplineGeom::build: \"y\" length {y_len} does not match \"x\" length {n}");
-        }
-        validate_channel_lengths(&channels, n, "BSplineGeom");
-        validate_pick_id_channel(&channels, "BSplineGeom");
-
-        let declared = filter_declared(&channels, CHANNELS);
-        let state = GeomState::from_builder(keys_opt, channels, n, KeysStrategy::OneMark, declared);
+        let n = require_x_and_siblings(&channels, &["y"], "BSplineGeom");
+        let state = finalize_state(
+            keys_opt,
+            channels,
+            n,
+            KeysStrategy::OneMark,
+            CHANNELS,
+            "BSplineGeom",
+        );
         BSplineGeom {
             state,
             marks: Vec::new(),
         }
+    }
+}
+
+// ─── Draw-time channel/scale bundle ──────────────────────────────────────────
+
+/// Channel + scale references for one `BSplineGeom::draw` call. Built
+/// once at the top of `draw`, then threaded into [`draw_one_bspline_mark`].
+#[derive(Clone, Copy)]
+struct BSplineDrawCtx<'a> {
+    x_col: &'a DataColumn,
+    y_col: &'a DataColumn,
+    x_scale: Option<&'a Scale>,
+    y_scale: Option<&'a Scale>,
+    degree: ChannelBind<'a>,
+    interpolation: ChannelBind<'a>,
+    fill: ChannelBind<'a>,
+    stroke: ChannelBind<'a>,
+    alpha: ChannelBind<'a>,
+    linewidth: ChannelBind<'a>,
+    linetype: ChannelBind<'a>,
+    dash_offset: ChannelBind<'a>,
+    cap: ChannelBind<'a>,
+    join: ChannelBind<'a>,
+    clip_start_radius: ChannelBind<'a>,
+    clip_end_radius: ChannelBind<'a>,
+    pick_id: ChannelBind<'a>,
+    start_marker: ChannelBind<'a>,
+    end_marker: ChannelBind<'a>,
+    start_marker_size: ChannelBind<'a>,
+    end_marker_size: ChannelBind<'a>,
+    start_marker_fill: ChannelBind<'a>,
+    end_marker_fill: ChannelBind<'a>,
+    start_marker_invert: ChannelBind<'a>,
+    end_marker_invert: ChannelBind<'a>,
+}
+
+impl<'a> BSplineDrawCtx<'a> {
+    /// Resolve `x`/`y` columns + scales and look up every per-mark
+    /// channel by name. Returns `None` when `x` or `y` is missing or
+    /// non-positional.
+    fn build(
+        channels: &'a std::collections::HashMap<String, Channel>,
+        ctx: &'a GeomContext<'a>,
+    ) -> Option<Self> {
+        let (x_col, x_scale) = match channels.get("x")? {
+            Channel::Data(c) => (c, ctx.scale_for("x")),
+            Channel::RawData(c) => (c, None),
+            _ => return None,
+        };
+        let (y_col, y_scale) = match channels.get("y")? {
+            Channel::Data(c) => (c, ctx.scale_for("y")),
+            Channel::RawData(c) => (c, None),
+            _ => return None,
+        };
+        let b = |name: &str| ChannelBind::from_ctx(channels, ctx, name);
+        Some(Self {
+            x_col,
+            y_col,
+            x_scale,
+            y_scale,
+            degree: b("degree"),
+            interpolation: b("interpolation"),
+            fill: b("fill"),
+            stroke: b("stroke"),
+            alpha: b("alpha"),
+            linewidth: b("linewidth"),
+            linetype: b("linetype"),
+            dash_offset: b("dash_offset"),
+            cap: b("cap"),
+            join: b("join"),
+            clip_start_radius: b("clip_start_radius"),
+            clip_end_radius: b("clip_end_radius"),
+            pick_id: b("pick_id"),
+            start_marker: b("start_marker"),
+            end_marker: b("end_marker"),
+            start_marker_size: b("start_marker_size"),
+            end_marker_size: b("end_marker_size"),
+            start_marker_fill: b("start_marker_fill"),
+            end_marker_fill: b("end_marker_fill"),
+            start_marker_invert: b("start_marker_invert"),
+            end_marker_invert: b("end_marker_invert"),
+        })
     }
 }
 
@@ -251,8 +293,16 @@ impl Geom for BSplineGeom {
         };
         let (enter, update, exit) = match (&self.state.prev_keys, &self.state.keys) {
             (Keys::Explicit(prev_col), Keys::Explicit(next_col)) => {
-                let prev_unique = unique_keys_column(prev_col, &prev_marks);
-                let next_unique = unique_keys_column(next_col, &next_marks);
+                let prev_unique = unique_values_at_first_rows(
+                    prev_col,
+                    prev_marks.iter().map(|m| m.first_row),
+                    "BSplineGeom",
+                );
+                let next_unique = unique_values_at_first_rows(
+                    next_col,
+                    next_marks.iter().map(|m| m.first_row),
+                    "BSplineGeom",
+                );
                 let idx = KeyIndex::build(&prev_unique);
                 diff_columns(&prev_unique, &idx, &next_unique)
             }
@@ -286,252 +336,314 @@ impl Geom for BSplineGeom {
             return;
         }
 
-        let x_scale_bound = ctx.scale_for("x");
-        let y_scale_bound = ctx.scale_for("y");
-        let degree_scale = ctx.scale_for("degree");
-        let interpolation_scale = ctx.scale_for("interpolation");
-        let fill_scale = ctx.scale_for("fill");
-        let stroke_scale = ctx.scale_for("stroke");
-        let alpha_scale = ctx.scale_for("alpha");
-        let linewidth_scale = ctx.scale_for("linewidth");
-        let linetype_scale = ctx.scale_for("linetype");
-        let dash_offset_scale = ctx.scale_for("dash_offset");
-        let cap_scale = ctx.scale_for("cap");
-        let join_scale = ctx.scale_for("join");
-        let clip_start_radius_scale = ctx.scale_for("clip_start_radius");
-        let clip_end_radius_scale = ctx.scale_for("clip_end_radius");
-        let pick_id_scale = ctx.scale_for("pick_id");
-        let start_marker_scale = ctx.scale_for("start_marker");
-        let end_marker_scale = ctx.scale_for("end_marker");
-        let start_marker_size_scale = ctx.scale_for("start_marker_size");
-        let end_marker_size_scale = ctx.scale_for("end_marker_size");
-        let start_marker_fill_scale = ctx.scale_for("start_marker_fill");
-        let end_marker_fill_scale = ctx.scale_for("end_marker_fill");
-        let start_marker_invert_scale = ctx.scale_for("start_marker_invert");
-        let end_marker_invert_scale = ctx.scale_for("end_marker_invert");
-
-        let channels = &self.state.channels;
-        let (x_col, x_scale) = match channels.get("x") {
-            Some(Channel::Data(c)) => (c, x_scale_bound),
-            Some(Channel::RawData(c)) => (c, None),
-            _ => return,
+        let dc = match BSplineDrawCtx::build(&self.state.channels, ctx) {
+            Some(dc) => dc,
+            None => return,
         };
-        let (y_col, y_scale) = match channels.get("y") {
-            Some(Channel::Data(c)) => (c, y_scale_bound),
-            Some(Channel::RawData(c)) => (c, None),
-            _ => return,
-        };
-
-        let degree_ch = channels.get("degree");
-        let interpolation_ch = channels.get("interpolation");
-        let fill_ch = channels.get("fill");
-        let stroke_ch = channels.get("stroke");
-        let alpha_ch = channels.get("alpha");
-        let linewidth_ch = channels.get("linewidth");
-        let linetype_ch = channels.get("linetype");
-        let dash_offset_ch = channels.get("dash_offset");
-        let cap_ch = channels.get("cap");
-        let join_ch = channels.get("join");
-        let clip_start_radius_ch = channels.get("clip_start_radius");
-        let clip_end_radius_ch = channels.get("clip_end_radius");
-        let pick_id_ch = channels.get("pick_id");
-        let start_marker_ch = channels.get("start_marker");
-        let end_marker_ch = channels.get("end_marker");
-        let start_marker_size_ch = channels.get("start_marker_size");
-        let end_marker_size_ch = channels.get("end_marker_size");
-        let start_marker_fill_ch = channels.get("start_marker_fill");
-        let end_marker_fill_ch = channels.get("end_marker_fill");
-        let start_marker_invert_ch = channels.get("start_marker_invert");
-        let end_marker_invert_ch = channels.get("end_marker_invert");
 
         for mark in marks.iter() {
-            let i0 = mark.first_row;
+            draw_one_bspline_mark(scene, ctx, panel, dc, mark);
+        }
+    }
+}
 
-            let stroke_color = override_alpha(
-                resolve_color_channel_or_theme(
-                    stroke_ch,
-                    stroke_scale,
-                    i0,
-                    ctx.theme.geom.bspline.stroke.as_ref(),
-                    &ctx.theme.palette,
-                ),
-                resolve_number_channel(alpha_ch, alpha_scale, i0),
-            );
-            let stroke_color = match stroke_color {
-                Some(c) => c,
-                None => continue,
-            };
+/// Render a single B-spline mark — channel resolution, control-point
+/// projection, spline flattening (faithful in domain space or smoothed
+/// in pixel space), clip + ribbon-mode dispatch, stroke + endpoint
+/// markers. Each mark is independent; the caller iterates.
+fn draw_one_bspline_mark(
+    scene: &mut dyn SceneBuilder,
+    ctx: &GeomContext<'_>,
+    panel: Rect,
+    dc: BSplineDrawCtx<'_>,
+    mark: &MarkSlot,
+) {
+    let BSplineDrawCtx {
+        x_col,
+        y_col,
+        x_scale,
+        y_scale,
+        degree: ChannelBind {
+            ch: degree_ch,
+            scale: degree_scale,
+        },
+        interpolation:
+            ChannelBind {
+                ch: interpolation_ch,
+                scale: interpolation_scale,
+            },
+        fill: ChannelBind {
+            ch: fill_ch,
+            scale: fill_scale,
+        },
+        stroke: ChannelBind {
+            ch: stroke_ch,
+            scale: stroke_scale,
+        },
+        alpha: ChannelBind {
+            ch: alpha_ch,
+            scale: alpha_scale,
+        },
+        linewidth:
+            ChannelBind {
+                ch: linewidth_ch,
+                scale: linewidth_scale,
+            },
+        linetype:
+            ChannelBind {
+                ch: linetype_ch,
+                scale: linetype_scale,
+            },
+        dash_offset:
+            ChannelBind {
+                ch: dash_offset_ch,
+                scale: dash_offset_scale,
+            },
+        cap: ChannelBind {
+            ch: cap_ch,
+            scale: cap_scale,
+        },
+        join: ChannelBind {
+            ch: join_ch,
+            scale: join_scale,
+        },
+        clip_start_radius:
+            ChannelBind {
+                ch: clip_start_radius_ch,
+                scale: clip_start_radius_scale,
+            },
+        clip_end_radius:
+            ChannelBind {
+                ch: clip_end_radius_ch,
+                scale: clip_end_radius_scale,
+            },
+        pick_id:
+            ChannelBind {
+                ch: pick_id_ch,
+                scale: pick_id_scale,
+            },
+        start_marker:
+            ChannelBind {
+                ch: start_marker_ch,
+                scale: start_marker_scale,
+            },
+        end_marker:
+            ChannelBind {
+                ch: end_marker_ch,
+                scale: end_marker_scale,
+            },
+        start_marker_size:
+            ChannelBind {
+                ch: start_marker_size_ch,
+                scale: start_marker_size_scale,
+            },
+        end_marker_size:
+            ChannelBind {
+                ch: end_marker_size_ch,
+                scale: end_marker_size_scale,
+            },
+        start_marker_fill:
+            ChannelBind {
+                ch: start_marker_fill_ch,
+                scale: start_marker_fill_scale,
+            },
+        end_marker_fill:
+            ChannelBind {
+                ch: end_marker_fill_ch,
+                scale: end_marker_fill_scale,
+            },
+        start_marker_invert:
+            ChannelBind {
+                ch: start_marker_invert_ch,
+                scale: start_marker_invert_scale,
+            },
+        end_marker_invert:
+            ChannelBind {
+                ch: end_marker_invert_ch,
+                scale: end_marker_invert_scale,
+            },
+    } = dc;
 
-            let linewidth_pt = resolve_number_channel_or(
-                linewidth_ch,
-                linewidth_scale,
-                i0,
-                ctx.theme.geom.bspline.linewidth_pt,
-            );
-            let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
-            if !linewidth_px.is_finite() || linewidth_px <= 0.0 {
-                continue;
-            }
+    let i0 = mark.first_row;
 
-            let degree_raw =
-                resolve_number_channel_or(degree_ch, degree_scale, i0, DEFAULT_DEGREE as f64);
-            let degree_req = if degree_raw.is_finite() && degree_raw >= 1.0 {
-                degree_raw.round() as usize
-            } else {
-                DEFAULT_DEGREE
-            };
+    let stroke_color = override_alpha(
+        resolve_color_channel_or_theme(
+            stroke_ch,
+            stroke_scale,
+            i0,
+            ctx.theme.geom.bspline.stroke.as_ref(),
+            &ctx.theme.palette,
+        ),
+        resolve_number_channel(alpha_ch, alpha_scale, i0),
+    );
+    let stroke_color = match stroke_color {
+        Some(c) => c,
+        None => return,
+    };
 
-            let interpolation_mode =
-                match resolve_str_channel_or(interpolation_ch, interpolation_scale, i0, "domain")
-                    .as_str()
-                {
-                    "panel" => InterpolationSpace::Panel,
-                    _ => InterpolationSpace::Domain,
-                };
+    let linewidth_pt = resolve_number_channel_or(
+        linewidth_ch,
+        linewidth_scale,
+        i0,
+        ctx.theme.geom.bspline.linewidth_pt,
+    );
+    let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
+    if !linewidth_px.is_finite() || linewidth_px <= 0.0 {
+        return;
+    }
 
-            let dash_pattern_pt = resolve_linetype_channel(linetype_ch, linetype_scale, i0);
-            let dash_offset_pt =
-                resolve_number_channel_or(dash_offset_ch, dash_offset_scale, i0, 0.0);
-            let cap = resolve_cap_channel(cap_ch, cap_scale, i0, ctx.theme.geom.bspline.cap);
-            let join = resolve_join_channel(join_ch, join_scale, i0, ctx.theme.geom.bspline.join);
-            let marker_fill =
-                resolve_color_channel(fill_ch, fill_scale, i0).unwrap_or(stroke_color);
-            let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
+    let degree_raw = resolve_number_channel_or(degree_ch, degree_scale, i0, DEFAULT_DEGREE as f64);
+    let degree_req = if degree_raw.is_finite() && degree_raw >= 1.0 {
+        degree_raw.round() as usize
+    } else {
+        DEFAULT_DEGREE
+    };
 
-            // ── Control polygon in channel-fraction space. ──
-            //
-            // Non-finite rows are dropped silently (matches LineGeom /
-            // PolygonGeom): the spline closes around what's left rather
-            // than splitting.
-            let mut ctrl_frac: Vec<Point> = Vec::with_capacity(mark.rows.len());
-            let mut ctrl_rows: Vec<usize> = Vec::with_capacity(mark.rows.len());
-            for &i in &mark.rows {
-                let xf = resolve_position(x_col.get(i), x_scale, 0.0);
-                let yf = resolve_position(y_col.get(i), y_scale, 0.0);
-                if !xf.is_finite() || !yf.is_finite() {
-                    continue;
-                }
-                ctrl_frac.push(Point::new(xf, yf));
-                ctrl_rows.push(i);
-            }
-            if ctrl_frac.len() < 2 {
-                continue;
-            }
+    let interpolation_mode = match resolve_str_channel_or(
+        interpolation_ch,
+        interpolation_scale,
+        i0,
+        "domain",
+    )
+    .as_str()
+    {
+        "panel" => InterpolationSpace::Panel,
+        _ => InterpolationSpace::Domain,
+    };
 
-            // Effective degree: standard clamped B-spline requires
-            // `n >= degree + 1`. Below that we degrade to a straight
-            // polyline through whatever control points exist — same
-            // semantics the masterplan documents.
-            let degenerate = ctrl_frac.len() < degree_req + 1;
+    let dash_pattern_pt = resolve_linetype_channel(linetype_ch, linetype_scale, i0);
+    let dash_offset_pt = resolve_number_channel_or(dash_offset_ch, dash_offset_scale, i0, 0.0);
+    let cap = resolve_cap_channel(cap_ch, cap_scale, i0, ctx.theme.geom.bspline.cap);
+    let join = resolve_join_channel(join_ch, join_scale, i0, ctx.theme.geom.bspline.join);
+    let marker_fill = resolve_color_channel(fill_ch, fill_scale, i0).unwrap_or(stroke_color);
+    let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
 
-            // ── Build the flattened curve in pixel space. ──
-            //
-            // Two paths, branchless at the call site (each branch
-            // returns `Vec<(row_position, pixel_point)>`):
-            //
-            // - Polyline / degenerate fallback: straight segments
-            //   through control points; row position equals control
-            //   point index.
-            // - Spline: de Boor + adaptive chord-error refinement.
-            //   Row position is `u = t × (n − 1) / (n − d)`, the
-            //   piecewise-linear lerp index into `ctrl_rows`.
-            let samples: Vec<(f64, Point)> = if degenerate {
-                build_polyline_fallback(&ctrl_frac, panel, ctx)
-            } else {
-                build_spline_flatten(&ctrl_frac, degree_req, panel, ctx, interpolation_mode)
-            };
-            if samples.len() < 2 {
-                continue;
-            }
+    // ── Control polygon in channel-fraction space. ──
+    //
+    // Non-finite rows are dropped silently (matches LineGeom /
+    // PolygonGeom): the spline closes around what's left rather
+    // than splitting.
+    let mut ctrl_frac: Vec<Point> = Vec::with_capacity(mark.rows.len());
+    let mut ctrl_rows: Vec<usize> = Vec::with_capacity(mark.rows.len());
+    for &i in &mark.rows {
+        let xf = resolve_position(x_col.get(i), x_scale, 0.0);
+        let yf = resolve_position(y_col.get(i), y_scale, 0.0);
+        if !xf.is_finite() || !yf.is_finite() {
+            continue;
+        }
+        ctrl_frac.push(Point::new(xf, yf));
+        ctrl_rows.push(i);
+    }
+    if ctrl_frac.len() < 2 {
+        return;
+    }
 
-            // ── Ribbon-mode decision. ──
-            //
-            // Same dispatch as LineGeom (lines 425): per-vertex
-            // tessellated mesh when stroke or linewidth varies within
-            // the mark, gated to solid linetype.
-            let linewidth_varies = channel_varies_across(linewidth_ch, linewidth_scale, &mark.rows);
-            let stroke_varies = channel_varies_across(stroke_ch, stroke_scale, &mark.rows)
-                || channel_varies_across(alpha_ch, alpha_scale, &mark.rows);
-            let ribbon_mode = dash_pattern_pt.is_empty() && (linewidth_varies || stroke_varies);
+    // Effective degree: standard clamped B-spline requires
+    // `n >= degree + 1`. Below that we degrade to a straight
+    // polyline through whatever control points exist — same
+    // semantics the masterplan documents.
+    let degenerate = ctrl_frac.len() < degree_req + 1;
 
-            // ── Endpoint-marker constants (per-mark). ──
-            //
-            // Resolved BEFORE the clip calc so the auto-clip
-            // contribution can fold in below.
-            let start_name = resolve_str_channel_or(start_marker_ch, start_marker_scale, i0, "");
-            let end_name = resolve_str_channel_or(end_marker_ch, end_marker_scale, i0, "");
-            let default_marker_size_pt = 3.0 * linewidth_pt;
-            let start_marker_size_pt = resolve_number_channel_or(
-                start_marker_size_ch,
-                start_marker_size_scale,
-                i0,
-                default_marker_size_pt,
-            );
-            let end_marker_size_pt = resolve_number_channel_or(
-                end_marker_size_ch,
-                end_marker_size_scale,
-                i0,
-                default_marker_size_pt,
-            );
-            let start_invert = resolve_bool_channel_or(
-                start_marker_invert_ch,
-                start_marker_invert_scale,
-                i0,
-                false,
-            );
-            let end_invert =
-                resolve_bool_channel_or(end_marker_invert_ch, end_marker_invert_scale, i0, false);
+    // ── Build the flattened curve in pixel space. ──
+    //
+    // Two paths, branchless at the call site (each branch
+    // returns `Vec<(row_position, pixel_point)>`):
+    //
+    // - Polyline / degenerate fallback: straight segments
+    //   through control points; row position equals control
+    //   point index.
+    // - Spline: de Boor + adaptive chord-error refinement.
+    //   Row position is `u = t × (n − 1) / (n − d)`, the
+    //   piecewise-linear lerp index into `ctrl_rows`.
+    let samples: Vec<(f64, Point)> = if degenerate {
+        build_polyline_fallback(&ctrl_frac, panel, ctx)
+    } else {
+        build_spline_flatten(&ctrl_frac, degree_req, panel, ctx, interpolation_mode)
+    };
+    if samples.len() < 2 {
+        return;
+    }
 
-            // ── End-clip (per-mark). ──
-            //
-            // User-supplied `clip_*_radius` covers the "trim to a node
-            // boundary" use case (graph layouts, leaving breathing
-            // room next to a data point, etc.). On top of that we
-            // automatically add the forward extent of any endpoint
-            // marker so the marker's tip lands at the user's clip
-            // boundary (or the original endpoint when no user clip
-            // is set) without the user having to compute the marker
-            // geometry themselves.
-            //
-            // Ribbon mode threads per-vertex widths / colours through
-            // `clip_polyline_with_attrs` so the synthesised
-            // intersection vertex picks up lerped attrs.
-            let user_clip_start_pt =
-                resolve_number_channel_or(clip_start_radius_ch, clip_start_radius_scale, i0, 0.0);
-            let user_clip_end_pt =
-                resolve_number_channel_or(clip_end_radius_ch, clip_end_radius_scale, i0, 0.0);
-            let auto_clip_start_pt =
-                auto_endpoint_clip_pt(&start_name, start_marker_size_pt, start_invert, ctx.shapes);
-            let auto_clip_end_pt =
-                auto_endpoint_clip_pt(&end_name, end_marker_size_pt, end_invert, ctx.shapes);
-            let clip_start_pt = user_clip_start_pt + auto_clip_start_pt;
-            let clip_end_pt = user_clip_end_pt + auto_clip_end_pt;
+    // ── Ribbon-mode decision. ──
+    //
+    // Same dispatch as LineGeom (lines 425): per-vertex
+    // tessellated mesh when stroke or linewidth varies within
+    // the mark, gated to solid linetype.
+    let linewidth_varies = channel_varies_across(linewidth_ch, linewidth_scale, &mark.rows);
+    let stroke_varies = channel_varies_across(stroke_ch, stroke_scale, &mark.rows)
+        || channel_varies_across(alpha_ch, alpha_scale, &mark.rows);
+    let ribbon_mode = dash_pattern_pt.is_empty() && (linewidth_varies || stroke_varies);
 
-            let sample_points: Vec<Point> = samples.iter().map(|(_, p)| *p).collect();
-            let (ribbon_colors, ribbon_half_widths) = if ribbon_mode {
-                let (c, w) = build_ribbon_attrs(
-                    &samples,
-                    &ctrl_rows,
-                    stroke_color,
-                    linewidth_pt,
-                    ctx.dpi,
-                    stroke_ch,
-                    stroke_scale,
-                    alpha_ch,
-                    alpha_scale,
-                    linewidth_ch,
-                    linewidth_scale,
-                );
-                (c, w)
-            } else {
-                (Vec::new(), Vec::new())
-            };
+    // ── Endpoint-marker constants (per-mark). ──
+    //
+    // Resolved BEFORE the clip calc so the auto-clip
+    // contribution can fold in below.
+    let start_name = resolve_str_channel_or(start_marker_ch, start_marker_scale, i0, "");
+    let end_name = resolve_str_channel_or(end_marker_ch, end_marker_scale, i0, "");
+    let default_marker_size_pt = 3.0 * linewidth_pt;
+    let start_marker_size_pt = resolve_number_channel_or(
+        start_marker_size_ch,
+        start_marker_size_scale,
+        i0,
+        default_marker_size_pt,
+    );
+    let end_marker_size_pt = resolve_number_channel_or(
+        end_marker_size_ch,
+        end_marker_size_scale,
+        i0,
+        default_marker_size_pt,
+    );
+    let start_invert =
+        resolve_bool_channel_or(start_marker_invert_ch, start_marker_invert_scale, i0, false);
+    let end_invert =
+        resolve_bool_channel_or(end_marker_invert_ch, end_marker_invert_scale, i0, false);
 
-            let (clipped_points, clipped_colors, clipped_half_widths): (
-                Vec<Point>,
-                Vec<Color>,
-                Vec<f64>,
-            ) = if clip_start_pt > 0.0 || clip_end_pt > 0.0 {
+    // ── End-clip (per-mark). ──
+    //
+    // User-supplied `clip_*_radius` covers the "trim to a node
+    // boundary" use case (graph layouts, leaving breathing
+    // room next to a data point, etc.). On top of that we
+    // automatically add the forward extent of any endpoint
+    // marker so the marker's tip lands at the user's clip
+    // boundary (or the original endpoint when no user clip
+    // is set) without the user having to compute the marker
+    // geometry themselves.
+    //
+    // Ribbon mode threads per-vertex widths / colours through
+    // `clip_polyline_with_attrs` so the synthesised
+    // intersection vertex picks up lerped attrs.
+    let user_clip_start_pt =
+        resolve_number_channel_or(clip_start_radius_ch, clip_start_radius_scale, i0, 0.0);
+    let user_clip_end_pt =
+        resolve_number_channel_or(clip_end_radius_ch, clip_end_radius_scale, i0, 0.0);
+    let auto_clip_start_pt =
+        auto_endpoint_clip_pt(&start_name, start_marker_size_pt, start_invert, ctx.shapes);
+    let auto_clip_end_pt =
+        auto_endpoint_clip_pt(&end_name, end_marker_size_pt, end_invert, ctx.shapes);
+    let clip_start_pt = user_clip_start_pt + auto_clip_start_pt;
+    let clip_end_pt = user_clip_end_pt + auto_clip_end_pt;
+
+    let sample_points: Vec<Point> = samples.iter().map(|(_, p)| *p).collect();
+
+    if ribbon_mode {
+        // ── Ribbon-mode path: per-vertex tessellated mesh. Clip threads
+        // widths / colors through so the post-clip mesh stays
+        // attr-aligned.
+        let (ribbon_colors, ribbon_half_widths) = build_ribbon_attrs(
+            &samples,
+            &ctrl_rows,
+            stroke_color,
+            linewidth_pt,
+            ctx.dpi,
+            stroke_ch,
+            stroke_scale,
+            alpha_ch,
+            alpha_scale,
+            linewidth_ch,
+            linewidth_scale,
+        );
+        let (clipped_points, clipped_colors, clipped_half_widths) =
+            if clip_start_pt > 0.0 || clip_end_pt > 0.0 {
                 let start_clip = (clip_start_pt > 0.0).then(|| EndClip::Circle {
                     center: sample_points[0],
                     radius: pt_to_px(clip_start_pt, ctx.dpi),
@@ -540,131 +652,119 @@ impl Geom for BSplineGeom {
                     center: *sample_points.last().unwrap(),
                     radius: pt_to_px(clip_end_pt, ctx.dpi),
                 });
-                if ribbon_mode {
-                    let (p, w, c) = clip_polyline_with_attrs(
-                        &sample_points,
-                        &ribbon_half_widths,
-                        &ribbon_colors,
-                        start_clip,
-                        end_clip,
-                    );
-                    (p, c, w)
-                } else {
-                    (
-                        clip_polyline(&sample_points, start_clip, end_clip),
-                        Vec::new(),
-                        Vec::new(),
-                    )
-                }
-            } else if ribbon_mode {
+                let (p, w, c) = clip_polyline_with_attrs(
+                    &sample_points,
+                    &ribbon_half_widths,
+                    &ribbon_colors,
+                    start_clip,
+                    end_clip,
+                );
+                (p, c, w)
+            } else {
                 (sample_points.clone(), ribbon_colors, ribbon_half_widths)
-            } else {
-                (sample_points.clone(), Vec::new(), Vec::new())
             };
-            if clipped_points.len() < 2 {
-                continue;
-            }
-
-            // ── Endpoint markers (Phase C.5). ──
-            //
-            // Direction follows `endpoint_outward`: when the endpoint
-            // was clipped, points along the chord from the clipped
-            // endpoint toward the original endpoint (the direction
-            // the curve was heading before being trimmed). When
-            // unclipped, points along the terminal edge of the
-            // flattened polyline (the local curve tangent at the
-            // endpoint). The marker is *placed* at the clipped
-            // endpoint; the auto-clip portion of `clip_start_pt` /
-            // `clip_end_pt` (folded in above) guarantees an arrow's
-            // tip lands on the user's clip boundary (or the original
-            // endpoint when no user clip is set).
-            let marker_outline_px = linewidth_px.max(pt_to_px(0.5, ctx.dpi));
-
-            // Start marker BEFORE the stroke (Phase C.5 path order).
-            if !start_name.is_empty() {
-                let size_px = pt_to_px(start_marker_size_pt, ctx.dpi);
-                let fill = resolve_color_channel(start_marker_fill_ch, start_marker_fill_scale, i0)
-                    .unwrap_or(marker_fill);
-                let outward =
-                    endpoint_outward(&clipped_points, &sample_points, true, clip_start_pt > 0.0);
-                emit_endpoint_marker(
-                    scene,
-                    clipped_points[0],
-                    outward,
-                    start_invert,
-                    &start_name,
-                    size_px,
-                    fill,
-                    stroke_color,
-                    marker_outline_px,
-                    Affine::IDENTITY,
-                    ctx.shapes,
-                    pick,
-                );
-            }
-
-            // ── Stroke / mesh emission. ──
-            if ribbon_mode {
-                let opts = RibbonOptions {
-                    half_width: 0.0,
-                    cap,
-                    join,
-                    miter_limit: 4.0,
-                };
-                let mesh = polyline_ribbon_full(
-                    &clipped_points,
-                    Some(&clipped_colors),
-                    Some(&clipped_half_widths),
-                    &opts,
-                );
-                scene.draw_mesh(&mesh, Affine::IDENTITY, pick);
-            } else {
-                let path = polyline(&clipped_points, PolylineOptions::default());
-                draw_stroke_with_linetype(
-                    scene,
-                    &path,
-                    /* closed */ false,
-                    stroke_color,
-                    marker_fill,
-                    linewidth_px,
-                    linewidth_pt,
-                    cap,
-                    join,
-                    &dash_pattern_pt,
-                    dash_offset_pt,
-                    Affine::IDENTITY,
-                    pick,
-                    ctx.shapes,
-                    ctx.theme.geom.marker_outline_pt,
-                    ctx.dpi,
-                );
-            }
-
-            // End marker AFTER the stroke (Phase C.5 path order).
-            if !end_name.is_empty() {
-                let size_px = pt_to_px(end_marker_size_pt, ctx.dpi);
-                let fill = resolve_color_channel(end_marker_fill_ch, end_marker_fill_scale, i0)
-                    .unwrap_or(marker_fill);
-                let outward =
-                    endpoint_outward(&clipped_points, &sample_points, false, clip_end_pt > 0.0);
-                let placement = *clipped_points.last().unwrap();
-                emit_endpoint_marker(
-                    scene,
-                    placement,
-                    outward,
-                    end_invert,
-                    &end_name,
-                    size_px,
-                    fill,
-                    stroke_color,
-                    marker_outline_px,
-                    Affine::IDENTITY,
-                    ctx.shapes,
-                    pick,
-                );
-            }
+        if clipped_points.len() < 2 {
+            return;
         }
+
+        let marker_outline_px = linewidth_px.max(pt_to_px(0.5, ctx.dpi));
+
+        if !start_name.is_empty() {
+            let size_px = pt_to_px(start_marker_size_pt, ctx.dpi);
+            let fill = resolve_color_channel(start_marker_fill_ch, start_marker_fill_scale, i0)
+                .unwrap_or(marker_fill);
+            let outward =
+                endpoint_outward(&clipped_points, &sample_points, true, clip_start_pt > 0.0);
+            emit_endpoint_marker(
+                scene,
+                clipped_points[0],
+                outward,
+                start_invert,
+                &start_name,
+                size_px,
+                fill,
+                stroke_color,
+                marker_outline_px,
+                Affine::IDENTITY,
+                ctx.shapes,
+                pick,
+            );
+        }
+
+        let opts = RibbonOptions {
+            half_width: 0.0,
+            cap,
+            join,
+            miter_limit: 4.0,
+        };
+        let mesh = polyline_ribbon_full(
+            &clipped_points,
+            Some(&clipped_colors),
+            Some(&clipped_half_widths),
+            &opts,
+        );
+        scene.draw_mesh(&mesh, Affine::IDENTITY, pick);
+
+        if !end_name.is_empty() {
+            let size_px = pt_to_px(end_marker_size_pt, ctx.dpi);
+            let fill = resolve_color_channel(end_marker_fill_ch, end_marker_fill_scale, i0)
+                .unwrap_or(marker_fill);
+            let outward =
+                endpoint_outward(&clipped_points, &sample_points, false, clip_end_pt > 0.0);
+            let placement = *clipped_points.last().unwrap();
+            emit_endpoint_marker(
+                scene,
+                placement,
+                outward,
+                end_invert,
+                &end_name,
+                size_px,
+                fill,
+                stroke_color,
+                marker_outline_px,
+                Affine::IDENTITY,
+                ctx.shapes,
+                pick,
+            );
+        }
+        return;
     }
+
+    // ── Non-ribbon path: build an outline spec and delegate to the
+    // shared `draw_curve_outline` helper, which handles endpoint clip,
+    // polyline path construction, start marker, stroke (fast path or
+    // dashed-with-markers walker), and end marker.
+    let start_marker_fill_resolved =
+        resolve_color_channel(start_marker_fill_ch, start_marker_fill_scale, i0);
+    let end_marker_fill_resolved =
+        resolve_color_channel(end_marker_fill_ch, end_marker_fill_scale, i0);
+    let spec = OutlineSpec {
+        stroke_color,
+        linewidth_pt,
+        dash_pattern_pt,
+        dash_offset_pt,
+        cap,
+        join,
+        marker_fill,
+        user_clip_start_pt,
+        user_clip_end_pt,
+        start_marker: EndpointMarker {
+            name: start_name,
+            size_pt: start_marker_size_pt,
+            fill: start_marker_fill_resolved,
+            invert: start_invert,
+        },
+        end_marker: EndpointMarker {
+            name: end_name,
+            size_pt: end_marker_size_pt,
+            fill: end_marker_fill_resolved,
+            invert: end_invert,
+        },
+        pick,
+        xform: Affine::IDENTITY,
+        corner_rounding: None,
+    };
+    draw_curve_outline(scene, ctx, &sample_points, &spec);
 }
 
 // ─── Ribbon-mode per-sample attributes ───────────────────────────────────────

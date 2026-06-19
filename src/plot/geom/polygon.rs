@@ -50,32 +50,27 @@
 //! offset result is what users typically want ("inset by 4pt, then
 //! round the result").
 
-use crate::brush::Brush;
 use crate::color::{lerp_color, Color};
-use crate::geometry::{Affine, Point};
-use crate::path::{FillRule, Path};
+use crate::geometry::{Affine, Point, Rect};
+#[cfg(test)]
+use crate::path::FillRule;
 use crate::plot::diff::{diff_columns, diff_positional, KeyIndex};
 use crate::plot::projection::InteriorSample;
-use crate::plot::value::{DataColumn, Value};
-use crate::primitives::{
-    offset_polygon, polygon_ribbon_full, round_corners, CornerRounding, RibbonOptions,
-};
+use crate::plot::scale::Scale;
+use crate::plot::value::DataColumn;
+use crate::primitives::{polygon_ribbon_full, CornerRounding, RibbonOptions};
 use crate::scene::SceneBuilder;
 
+use super::marks::unique_values_at_first_rows;
+use super::outline::{draw_polygon_fill_and_stroke, expand_polygons, PolygonSpec};
 use super::resolve::{
-    channel_varies_across, draw_stroke_with_linetype, override_alpha, pt_to_px,
-    resolve_angle_channel, resolve_cap_channel, resolve_color_channel,
-    resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
-    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
+    channel_varies_across, override_alpha, pt_to_px, resolve_angle_channel, resolve_cap_channel,
+    resolve_color_channel, resolve_color_channel_or_theme, resolve_join_channel,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
+    resolve_position, ChannelBind,
 };
-use super::state::{
-    filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
-    GeomState, KeysStrategy,
-};
-use super::{
-    empty_datacolumn_like, BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext,
-    Keys,
-};
+use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
+use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
@@ -228,58 +223,100 @@ fn bucket_rows_by_ring(rows: &[usize], ring_col: Option<&DataColumn>) -> Vec<Vec
     buckets.into_iter().map(|b| b.rows).collect()
 }
 
-/// Build a column of one entry per mark — the key value of each mark's
-/// first row. Used to feed `diff_columns` at mark granularity. Same
-/// idea as LineGeom's `unique_keys_column`.
-fn unique_keys_column(col: &DataColumn, marks: &[PolygonMarkSlot]) -> DataColumn {
-    let template = empty_datacolumn_like(col);
-    push_values_into(template, marks.iter().map(|m| col.get(m.first_row)))
-}
-
-fn push_values_into(
-    mut template: DataColumn,
-    values: impl IntoIterator<Item = Value>,
-) -> DataColumn {
-    for v in values {
-        match (&mut template, v) {
-            (DataColumn::F64(vec), Value::Number(n)) => vec.push(n),
-            (DataColumn::F32(vec), Value::Number(n)) => vec.push(n as f32),
-            (DataColumn::I32(vec), Value::Number(n)) => vec.push(n as i32),
-            (DataColumn::I64(vec), Value::Number(n)) => vec.push(n as i64),
-            (DataColumn::Bool(vec), Value::Bool(b)) => vec.push(b),
-            (DataColumn::String(vec), Value::String(s)) => vec.push(s),
-            (DataColumn::Color(vec), Value::Color(c)) => vec.push(c),
-            (DataColumn::Date(vec), Value::Date(d)) => vec.push(d),
-            (DataColumn::DateTime(vec), Value::DateTime(us)) => vec.push(us),
-            (DataColumn::Time(vec), Value::Time(us)) => vec.push(us),
-            (DataColumn::Duration(vec), Value::Duration(us)) => vec.push(us),
-            (DataColumn::Linetype(vec), Value::Linetype(p)) => vec.push(p),
-            _ => panic!("PolygonGeom: unique-keys column variant mismatch"),
-        }
-    }
-    template
-}
-
 // ─── BuildableGeom impl ──────────────────────────────────────────────────────
 
 impl BuildableGeom for PolygonGeom {
     fn build_from(builder: GeomBuilder<Self>) -> Self {
         let (keys_opt, channels) = builder.into_parts();
-
-        let n = require_data_column("x", &channels, "PolygonGeom").len();
-        let y_len = require_data_column("y", &channels, "PolygonGeom").len();
-        if y_len != n {
-            panic!("PolygonGeom::build: \"y\" length {y_len} does not match \"x\" length {n}");
-        }
-        validate_channel_lengths(&channels, n, "PolygonGeom");
-        validate_pick_id_channel(&channels, "PolygonGeom");
-
-        let declared = filter_declared(&channels, CHANNELS);
-        let state = GeomState::from_builder(keys_opt, channels, n, KeysStrategy::OneMark, declared);
+        let n = require_x_and_siblings(&channels, &["y"], "PolygonGeom");
+        let state = finalize_state(
+            keys_opt,
+            channels,
+            n,
+            KeysStrategy::OneMark,
+            CHANNELS,
+            "PolygonGeom",
+        );
         PolygonGeom {
             state,
             marks: Vec::new(),
         }
+    }
+}
+
+// ─── Draw-time channel/scale bundle ──────────────────────────────────────────
+
+/// Channel + scale references for one `PolygonGeom::draw` call. Built
+/// once at the top of `draw`, then threaded into [`draw_one_polygon_mark`].
+#[derive(Clone, Copy)]
+struct PolygonDrawCtx<'a> {
+    x_col: &'a DataColumn,
+    y_col: &'a DataColumn,
+    x_scale: Option<&'a Scale>,
+    y_scale: Option<&'a Scale>,
+    x_offset: ChannelBind<'a>,
+    y_offset: ChannelBind<'a>,
+    x_band: ChannelBind<'a>,
+    y_band: ChannelBind<'a>,
+    fill: ChannelBind<'a>,
+    stroke: ChannelBind<'a>,
+    fill_opacity: ChannelBind<'a>,
+    stroke_opacity: ChannelBind<'a>,
+    linewidth: ChannelBind<'a>,
+    linetype: ChannelBind<'a>,
+    dash_offset: ChannelBind<'a>,
+    cap: ChannelBind<'a>,
+    join: ChannelBind<'a>,
+    pick_id: ChannelBind<'a>,
+    expand: ChannelBind<'a>,
+    corner_radius: ChannelBind<'a>,
+    corner_max_angle: ChannelBind<'a>,
+    angle: ChannelBind<'a>,
+}
+
+impl<'a> PolygonDrawCtx<'a> {
+    /// Resolve `x`/`y` columns + scales and look up every per-mark
+    /// channel by name. Returns `None` when `x` or `y` is missing or
+    /// non-positional.
+    fn build(
+        channels: &'a std::collections::HashMap<String, Channel>,
+        ctx: &'a GeomContext<'a>,
+    ) -> Option<Self> {
+        let (x_col, x_scale) = match channels.get("x")? {
+            Channel::Data(c) => (c, ctx.scale_for("x")),
+            Channel::RawData(c) => (c, None),
+            _ => return None,
+        };
+        let (y_col, y_scale) = match channels.get("y")? {
+            Channel::Data(c) => (c, ctx.scale_for("y")),
+            Channel::RawData(c) => (c, None),
+            _ => return None,
+        };
+        let b = |name: &str| ChannelBind::from_ctx(channels, ctx, name);
+        Some(Self {
+            x_col,
+            y_col,
+            x_scale,
+            y_scale,
+            x_offset: b("x_offset"),
+            y_offset: b("y_offset"),
+            x_band: b("x_band"),
+            y_band: b("y_band"),
+            fill: b("fill"),
+            stroke: b("stroke"),
+            fill_opacity: b("fill_opacity"),
+            stroke_opacity: b("stroke_opacity"),
+            linewidth: b("linewidth"),
+            linetype: b("linetype"),
+            dash_offset: b("dash_offset"),
+            cap: b("cap"),
+            join: b("join"),
+            pick_id: b("pick_id"),
+            expand: b("expand"),
+            corner_radius: b("corner_radius"),
+            corner_max_angle: b("corner_max_angle"),
+            angle: b("angle"),
+        })
     }
 }
 
@@ -324,8 +361,16 @@ impl Geom for PolygonGeom {
         };
         let (enter, update, exit) = match (&self.state.prev_keys, &self.state.keys) {
             (Keys::Explicit(prev_col), Keys::Explicit(next_col)) => {
-                let prev_unique = unique_keys_column(prev_col, &prev_marks);
-                let next_unique = unique_keys_column(next_col, &next_marks);
+                let prev_unique = unique_values_at_first_rows(
+                    prev_col,
+                    prev_marks.iter().map(|m| m.first_row),
+                    "PolygonGeom",
+                );
+                let next_unique = unique_values_at_first_rows(
+                    next_col,
+                    next_marks.iter().map(|m| m.first_row),
+                    "PolygonGeom",
+                );
                 let idx = KeyIndex::build(&prev_unique);
                 diff_columns(&prev_unique, &idx, &next_unique)
             }
@@ -359,411 +404,421 @@ impl Geom for PolygonGeom {
             return;
         }
 
-        let x_scale_bound = ctx.scale_for("x");
-        let y_scale_bound = ctx.scale_for("y");
-        let x_offset_scale = ctx.scale_for("x_offset");
-        let y_offset_scale = ctx.scale_for("y_offset");
-        let x_band_scale = ctx.scale_for("x_band");
-        let y_band_scale = ctx.scale_for("y_band");
-        let fill_scale = ctx.scale_for("fill");
-        let stroke_scale = ctx.scale_for("stroke");
-        let fill_opacity_scale = ctx.scale_for("fill_opacity");
-        let stroke_opacity_scale = ctx.scale_for("stroke_opacity");
-        let linewidth_scale = ctx.scale_for("linewidth");
-        let linetype_scale = ctx.scale_for("linetype");
-        let dash_offset_scale = ctx.scale_for("dash_offset");
-        let cap_scale = ctx.scale_for("cap");
-        let join_scale = ctx.scale_for("join");
-        let pick_id_scale = ctx.scale_for("pick_id");
-        let expand_scale = ctx.scale_for("expand");
-        let corner_radius_scale = ctx.scale_for("corner_radius");
-        let corner_max_angle_scale = ctx.scale_for("corner_max_angle");
-        let angle_scale = ctx.scale_for("angle");
-
-        let channels = &self.state.channels;
-        let (x_col, x_scale) = match channels.get("x") {
-            Some(Channel::Data(c)) => (c, x_scale_bound),
-            Some(Channel::RawData(c)) => (c, None),
-            _ => return,
+        let dc = match PolygonDrawCtx::build(&self.state.channels, ctx) {
+            Some(dc) => dc,
+            None => return,
         };
-        let (y_col, y_scale) = match channels.get("y") {
-            Some(Channel::Data(c)) => (c, y_scale_bound),
-            Some(Channel::RawData(c)) => (c, None),
-            _ => return,
-        };
-        let x_offset_ch = channels.get("x_offset");
-        let y_offset_ch = channels.get("y_offset");
-        let x_band_ch = channels.get("x_band");
-        let y_band_ch = channels.get("y_band");
-        let fill_ch = channels.get("fill");
-        let stroke_ch = channels.get("stroke");
-        let fill_opacity_ch = channels.get("fill_opacity");
-        let stroke_opacity_ch = channels.get("stroke_opacity");
-        let linewidth_ch = channels.get("linewidth");
-        let linetype_ch = channels.get("linetype");
-        let dash_offset_ch = channels.get("dash_offset");
-        let cap_ch = channels.get("cap");
-        let join_ch = channels.get("join");
-        let pick_id_ch = channels.get("pick_id");
-        let expand_ch = channels.get("expand");
-        let corner_radius_ch = channels.get("corner_radius");
-        let corner_max_angle_ch = channels.get("corner_max_angle");
-        let angle_ch = channels.get("angle");
 
         for mark in marks.iter() {
-            let i0 = mark.first_row;
+            draw_one_polygon_mark(scene, ctx, panel, dc, mark);
+        }
+    }
+}
 
-            let fill_color = override_alpha(
-                resolve_color_channel_or_theme(
-                    fill_ch,
-                    fill_scale,
-                    i0,
-                    ctx.theme.geom.polygon.fill.as_ref(),
-                    &ctx.theme.palette,
-                ),
-                resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i0),
-            );
-            let stroke_color = override_alpha(
-                resolve_color_channel_or_theme(
-                    stroke_ch,
-                    stroke_scale,
-                    i0,
-                    ctx.theme.geom.polygon.stroke.as_ref(),
-                    &ctx.theme.palette,
-                ),
-                resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i0),
-            );
-            if fill_color.is_none() && stroke_color.is_none() {
+/// Render a single polygon mark — multi-ring contour assembly with
+/// per-vertex projection, optional inset / corner rounding, fill +
+/// stroke + optional gradient mesh. Each mark is independent; the
+/// caller iterates.
+fn draw_one_polygon_mark(
+    scene: &mut dyn SceneBuilder,
+    ctx: &GeomContext<'_>,
+    panel: Rect,
+    dc: PolygonDrawCtx<'_>,
+    mark: &PolygonMarkSlot,
+) {
+    let PolygonDrawCtx {
+        x_col,
+        y_col,
+        x_scale,
+        y_scale,
+        x_offset:
+            ChannelBind {
+                ch: x_offset_ch,
+                scale: x_offset_scale,
+            },
+        y_offset:
+            ChannelBind {
+                ch: y_offset_ch,
+                scale: y_offset_scale,
+            },
+        x_band: ChannelBind {
+            ch: x_band_ch,
+            scale: x_band_scale,
+        },
+        y_band: ChannelBind {
+            ch: y_band_ch,
+            scale: y_band_scale,
+        },
+        fill: ChannelBind {
+            ch: fill_ch,
+            scale: fill_scale,
+        },
+        stroke: ChannelBind {
+            ch: stroke_ch,
+            scale: stroke_scale,
+        },
+        fill_opacity:
+            ChannelBind {
+                ch: fill_opacity_ch,
+                scale: fill_opacity_scale,
+            },
+        stroke_opacity:
+            ChannelBind {
+                ch: stroke_opacity_ch,
+                scale: stroke_opacity_scale,
+            },
+        linewidth:
+            ChannelBind {
+                ch: linewidth_ch,
+                scale: linewidth_scale,
+            },
+        linetype:
+            ChannelBind {
+                ch: linetype_ch,
+                scale: linetype_scale,
+            },
+        dash_offset:
+            ChannelBind {
+                ch: dash_offset_ch,
+                scale: dash_offset_scale,
+            },
+        cap: ChannelBind {
+            ch: cap_ch,
+            scale: cap_scale,
+        },
+        join: ChannelBind {
+            ch: join_ch,
+            scale: join_scale,
+        },
+        pick_id:
+            ChannelBind {
+                ch: pick_id_ch,
+                scale: pick_id_scale,
+            },
+        expand: ChannelBind {
+            ch: expand_ch,
+            scale: expand_scale,
+        },
+        corner_radius:
+            ChannelBind {
+                ch: corner_radius_ch,
+                scale: corner_radius_scale,
+            },
+        corner_max_angle:
+            ChannelBind {
+                ch: corner_max_angle_ch,
+                scale: corner_max_angle_scale,
+            },
+        angle: ChannelBind {
+            ch: angle_ch,
+            scale: angle_scale,
+        },
+    } = dc;
+
+    let i0 = mark.first_row;
+
+    let fill_color = override_alpha(
+        resolve_color_channel_or_theme(
+            fill_ch,
+            fill_scale,
+            i0,
+            ctx.theme.geom.polygon.fill.as_ref(),
+            &ctx.theme.palette,
+        ),
+        resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i0),
+    );
+    let stroke_color = override_alpha(
+        resolve_color_channel_or_theme(
+            stroke_ch,
+            stroke_scale,
+            i0,
+            ctx.theme.geom.polygon.stroke.as_ref(),
+            &ctx.theme.palette,
+        ),
+        resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i0),
+    );
+    if fill_color.is_none() && stroke_color.is_none() {
+        return;
+    }
+
+    // Resolve per-mark expand + corner_radius once.
+    let expand_pt = resolve_number_channel_or(expand_ch, expand_scale, i0, 0.0);
+    let expand_px = pt_to_px(expand_pt, ctx.dpi);
+    let corner_radius_pt =
+        resolve_number_channel_or(corner_radius_ch, corner_radius_scale, i0, 0.0);
+    let corner_radius_px = pt_to_px(corner_radius_pt, ctx.dpi);
+    let corner_max_angle_deg = resolve_number_channel_or(
+        corner_max_angle_ch,
+        corner_max_angle_scale,
+        i0,
+        f64::INFINITY,
+    );
+
+    // ── Ribbon-mode decision (Phase E.5). Upgrade the outline
+    // stroke to a per-vertex tessellated mesh per ring when
+    // `linewidth` or `stroke` varies within the mark. Gated to
+    // solid linetype + no `expand` + no corner rounding, since
+    // those produce non-polyline outputs that don't fit the
+    // ribbon primitive. The fill emission is unaffected.
+    let dash_pattern_pt = resolve_linetype_channel(linetype_ch, linetype_scale, i0);
+    let all_rows: Vec<usize> = mark.rings.iter().flatten().copied().collect();
+    let linewidth_varies = channel_varies_across(linewidth_ch, linewidth_scale, &all_rows);
+    let stroke_varies = channel_varies_across(stroke_ch, stroke_scale, &all_rows)
+        || channel_varies_across(stroke_opacity_ch, stroke_opacity_scale, &all_rows);
+    let ribbon_mode = stroke_color.is_some()
+        && dash_pattern_pt.is_empty()
+        && expand_pt == 0.0
+        && corner_radius_pt == 0.0
+        && (linewidth_varies || stroke_varies);
+
+    // First pass: build vertex sequences for every ring.
+    // Under non-linear projections, edges between consecutive
+    // vertices are densified so polygon outlines follow the
+    // projected geodesic. Closes the ring too (last → first
+    // edge gets densified just like the others).
+    //
+    // In ribbon mode, co-build per-ring `widths` and `colors`
+    // alongside `points`, lerping each interior-sample attr at
+    // the channel-space `t` returned by
+    // `interpolate_segment_with_t`.
+    let is_linear = ctx.projection.is_linear();
+    let mut interior: Vec<(f64, f64)> = Vec::new();
+    let mut interior_t: Vec<InteriorSample> = Vec::new();
+    let mut rings_pts: Vec<Vec<Point>> = Vec::with_capacity(mark.rings.len());
+    let mut rings_widths: Vec<Vec<f64>> = if ribbon_mode {
+        Vec::with_capacity(mark.rings.len())
+    } else {
+        Vec::new()
+    };
+    let mut rings_colors: Vec<Vec<Color>> = if ribbon_mode {
+        Vec::with_capacity(mark.rings.len())
+    } else {
+        Vec::new()
+    };
+    let fallback_stroke = stroke_color.unwrap_or_else(|| Color::new([0.0, 0.0, 0.0, 1.0]));
+    for ring in &mark.rings {
+        let mut points: Vec<Point> = Vec::with_capacity(ring.len());
+        let mut widths: Vec<f64> = if ribbon_mode {
+            Vec::with_capacity(ring.len())
+        } else {
+            Vec::new()
+        };
+        let mut colors: Vec<Color> = if ribbon_mode {
+            Vec::with_capacity(ring.len())
+        } else {
+            Vec::new()
+        };
+        let mut prev_channels: Option<[f64; 2]> = None;
+        let mut first_channels: Option<[f64; 2]> = None;
+        let mut prev_w: Option<f64> = None;
+        let mut prev_c: Option<Color> = None;
+        let mut first_w: Option<f64> = None;
+        let mut first_c: Option<Color> = None;
+        for &i in ring {
+            let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
+            let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
+            let x_frac = resolve_position(x_col.get(i), x_scale, x_band);
+            let y_frac = resolve_position(y_col.get(i), y_scale, y_band);
+            if !x_frac.is_finite() || !y_frac.is_finite() {
                 continue;
             }
+            let curr_channels = [x_frac, y_frac];
 
-            // Resolve per-mark expand + corner_radius once.
-            let expand_pt = resolve_number_channel_or(expand_ch, expand_scale, i0, 0.0);
-            let expand_px = pt_to_px(expand_pt, ctx.dpi);
-            let corner_radius_pt =
-                resolve_number_channel_or(corner_radius_ch, corner_radius_scale, i0, 0.0);
-            let corner_radius_px = pt_to_px(corner_radius_pt, ctx.dpi);
-            let corner_max_angle_deg = resolve_number_channel_or(
-                corner_max_angle_ch,
-                corner_max_angle_scale,
-                i0,
-                f64::INFINITY,
-            );
-
-            // ── Ribbon-mode decision (Phase E.5). Upgrade the outline
-            // stroke to a per-vertex tessellated mesh per ring when
-            // `linewidth` or `stroke` varies within the mark. Gated to
-            // solid linetype + no `expand` + no corner rounding, since
-            // those produce non-polyline outputs that don't fit the
-            // ribbon primitive. The fill emission is unaffected.
-            let dash_pattern_pt = resolve_linetype_channel(linetype_ch, linetype_scale, i0);
-            let all_rows: Vec<usize> = mark.rings.iter().flatten().copied().collect();
-            let linewidth_varies = channel_varies_across(linewidth_ch, linewidth_scale, &all_rows);
-            let stroke_varies = channel_varies_across(stroke_ch, stroke_scale, &all_rows)
-                || channel_varies_across(stroke_opacity_ch, stroke_opacity_scale, &all_rows);
-            let ribbon_mode = stroke_color.is_some()
-                && dash_pattern_pt.is_empty()
-                && expand_pt == 0.0
-                && corner_radius_pt == 0.0
-                && (linewidth_varies || stroke_varies);
-
-            // First pass: build vertex sequences for every ring.
-            // Under non-linear projections, edges between consecutive
-            // vertices are densified so polygon outlines follow the
-            // projected geodesic. Closes the ring too (last → first
-            // edge gets densified just like the others).
-            //
-            // In ribbon mode, co-build per-ring `widths` and `colors`
-            // alongside `points`, lerping each interior-sample attr at
-            // the channel-space `t` returned by
-            // `interpolate_segment_with_t`.
-            let is_linear = ctx.projection.is_linear();
-            let mut interior: Vec<(f64, f64)> = Vec::new();
-            let mut interior_t: Vec<InteriorSample> = Vec::new();
-            let mut rings_pts: Vec<Vec<Point>> = Vec::with_capacity(mark.rings.len());
-            let mut rings_widths: Vec<Vec<f64>> = if ribbon_mode {
-                Vec::with_capacity(mark.rings.len())
-            } else {
-                Vec::new()
-            };
-            let mut rings_colors: Vec<Vec<Color>> = if ribbon_mode {
-                Vec::with_capacity(mark.rings.len())
-            } else {
-                Vec::new()
-            };
-            let fallback_stroke = stroke_color.unwrap_or_else(|| Color::new([0.0, 0.0, 0.0, 1.0]));
-            for ring in &mark.rings {
-                let mut points: Vec<Point> = Vec::with_capacity(ring.len());
-                let mut widths: Vec<f64> = if ribbon_mode {
-                    Vec::with_capacity(ring.len())
-                } else {
-                    Vec::new()
-                };
-                let mut colors: Vec<Color> = if ribbon_mode {
-                    Vec::with_capacity(ring.len())
-                } else {
-                    Vec::new()
-                };
-                let mut prev_channels: Option<[f64; 2]> = None;
-                let mut first_channels: Option<[f64; 2]> = None;
-                let mut prev_w: Option<f64> = None;
-                let mut prev_c: Option<Color> = None;
-                let mut first_w: Option<f64> = None;
-                let mut first_c: Option<Color> = None;
-                for &i in ring {
-                    let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
-                    let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
-                    let x_frac = resolve_position(x_col.get(i), x_scale, x_band);
-                    let y_frac = resolve_position(y_col.get(i), y_scale, y_band);
-                    if !x_frac.is_finite() || !y_frac.is_finite() {
-                        continue;
-                    }
-                    let curr_channels = [x_frac, y_frac];
-
-                    let (curr_w, curr_c) = if ribbon_mode {
-                        let w_pt = resolve_number_channel_or(
-                            linewidth_ch,
-                            linewidth_scale,
-                            i,
-                            ctx.theme.geom.polygon.linewidth_pt,
-                        );
-                        let w_half_px = pt_to_px(w_pt, ctx.dpi) * 0.5;
-                        let c = override_alpha(
-                            resolve_color_channel(stroke_ch, stroke_scale, i),
-                            resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i),
-                        )
-                        .unwrap_or(fallback_stroke);
-                        (w_half_px, c)
-                    } else {
-                        (0.0, fallback_stroke)
-                    };
-
-                    if !is_linear {
-                        if let Some(prev) = prev_channels {
-                            if ribbon_mode {
-                                interior_t.clear();
-                                ctx.projection.interpolate_segment_with_t(
-                                    panel,
-                                    &prev,
-                                    &curr_channels,
-                                    &mut interior_t,
-                                );
-                                let pw = prev_w.unwrap();
-                                let pc = prev_c.unwrap();
-                                for s in &interior_t {
-                                    points.push(Point::new(s.px, s.py));
-                                    widths.push(pw + s.t * (curr_w - pw));
-                                    colors.push(lerp_color(pc, curr_c, s.t));
-                                }
-                            } else {
-                                interior.clear();
-                                ctx.projection.interpolate_segment(
-                                    panel,
-                                    &prev,
-                                    &curr_channels,
-                                    &mut interior,
-                                );
-                                for (ipx, ipy) in &interior {
-                                    points.push(Point::new(*ipx, *ipy));
-                                }
-                            }
-                        }
-                    }
-                    let (px0, py0) = ctx.projection.project_to_panel_px(panel, &curr_channels);
-                    let mut px = px0;
-                    let mut py = py0;
-                    if let Some(off) = resolve_number_channel(x_offset_ch, x_offset_scale, i) {
-                        px += pt_to_px(off, ctx.dpi);
-                    }
-                    if let Some(off) = resolve_number_channel(y_offset_ch, y_offset_scale, i) {
-                        py -= pt_to_px(off, ctx.dpi);
-                    }
-                    points.push(Point::new(px, py));
-                    if ribbon_mode {
-                        widths.push(curr_w);
-                        colors.push(curr_c);
-                        prev_w = Some(curr_w);
-                        prev_c = Some(curr_c);
-                        if first_w.is_none() {
-                            first_w = Some(curr_w);
-                            first_c = Some(curr_c);
-                        }
-                    }
-                    if first_channels.is_none() {
-                        first_channels = Some(curr_channels);
-                    }
-                    prev_channels = Some(curr_channels);
-                }
-                // Densify the closing edge (last vertex back to first).
-                if !is_linear {
-                    if let (Some(prev), Some(first)) = (prev_channels, first_channels) {
-                        if prev != first {
-                            if ribbon_mode {
-                                interior_t.clear();
-                                ctx.projection.interpolate_segment_with_t(
-                                    panel,
-                                    &prev,
-                                    &first,
-                                    &mut interior_t,
-                                );
-                                let pw = prev_w.unwrap();
-                                let pc = prev_c.unwrap();
-                                let fw = first_w.unwrap();
-                                let fc = first_c.unwrap();
-                                for s in &interior_t {
-                                    points.push(Point::new(s.px, s.py));
-                                    widths.push(pw + s.t * (fw - pw));
-                                    colors.push(lerp_color(pc, fc, s.t));
-                                }
-                            } else {
-                                interior.clear();
-                                ctx.projection.interpolate_segment(
-                                    panel,
-                                    &prev,
-                                    &first,
-                                    &mut interior,
-                                );
-                                for (ipx, ipy) in &interior {
-                                    points.push(Point::new(*ipx, *ipy));
-                                }
-                            }
-                        }
-                    }
-                }
-                if points.len() >= 3 {
-                    rings_pts.push(points);
-                    if ribbon_mode {
-                        rings_widths.push(widths);
-                        rings_colors.push(colors);
-                    }
-                }
-            }
-            if rings_pts.is_empty() {
-                continue;
-            }
-
-            // Rotation pivot: outer-ring centroid in panel space, computed
-            // from raw vertex positions before `expand` / corner rounding
-            // so the pivot tracks the user-supplied data even when the
-            // outline is deformed by the offset pass.
-            let angle = resolve_angle_channel(angle_ch, angle_scale, i0);
-            let xform = if angle == 0.0 || rings_pts.is_empty() {
-                Affine::IDENTITY
-            } else {
-                let outer = &rings_pts[0];
-                let n_pts = outer.len() as f64;
-                let cx = outer.iter().map(|p| p.x).sum::<f64>() / n_pts;
-                let cy = outer.iter().map(|p| p.y).sum::<f64>() / n_pts;
-                Affine::rotate_about(-angle, Point::new(cx, cy))
-            };
-
-            // Order is fixed: expand first, then corner rounding. Insetting
-            // a polygon with already-filleted corners produces an inset
-            // path whose old fillets are now lines plus a fresh inset
-            // shape with sharp corners — visually wrong. Offsetting first
-            // and rounding the offset rings gives the intuitive result.
-            let offset_rings: Vec<Vec<Point>> = if expand_px != 0.0 && expand_px.is_finite() {
-                let refs: Vec<&[Point]> = rings_pts.iter().map(|r| r.as_slice()).collect();
-                offset_polygon(&refs, expand_px, MITER_LIMIT)
-            } else {
-                rings_pts
-            };
-
-            let mut path = Path::new();
-            let mut any_rings_emitted = false;
-            for ring in &offset_rings {
-                if ring.len() < 3 {
-                    continue;
-                }
-                if corner_radius_px > 0.0 {
-                    let opts = CornerRounding {
-                        max_cut: corner_radius_px,
-                        max_angle_deg: corner_max_angle_deg,
-                    };
-                    let sub = round_corners(ring, true, opts);
-                    for el in sub.iter() {
-                        path.push(el);
-                    }
-                } else {
-                    path.move_to(ring[0]);
-                    for p in &ring[1..] {
-                        path.line_to(*p);
-                    }
-                    path.close_path();
-                }
-                any_rings_emitted = true;
-            }
-            if !any_rings_emitted {
-                continue;
-            }
-
-            let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
-
-            if let Some(fc) = fill_color {
-                scene.fill(
-                    FillRule::EvenOdd,
-                    xform,
-                    &Brush::Solid(fc),
-                    None,
-                    &path,
-                    pick,
-                );
-            }
-            if let Some(sc) = stroke_color {
-                let linewidth_pt = resolve_number_channel_or(
+            let (curr_w, curr_c) = if ribbon_mode {
+                let w_pt = resolve_number_channel_or(
                     linewidth_ch,
                     linewidth_scale,
-                    i0,
+                    i,
                     ctx.theme.geom.polygon.linewidth_pt,
                 );
-                let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
-                // dash_pattern_pt already resolved above for the
-                // ribbon-mode decision; re-use it.
-                let dash_offset_pt =
-                    resolve_number_channel_or(dash_offset_ch, dash_offset_scale, i0, 0.0);
-                let cap = resolve_cap_channel(cap_ch, cap_scale, i0, ctx.theme.geom.polygon.cap);
-                let join =
-                    resolve_join_channel(join_ch, join_scale, i0, ctx.theme.geom.polygon.join);
-                if ribbon_mode {
-                    // Per-ring ribbon mesh (Phase E.5). `offset_rings` is
-                    // the un-modified `rings_pts` because ribbon mode gates
-                    // on expand == 0 and corner_radius == 0.
-                    if linewidth_px.is_finite() && linewidth_px > 0.0 {
-                        let opts = RibbonOptions {
-                            half_width: 0.0,
-                            cap,
-                            join,
-                            miter_limit: MITER_LIMIT,
-                        };
-                        for (r, ring) in offset_rings.iter().enumerate() {
-                            if ring.len() < 3 {
-                                continue;
-                            }
-                            let widths = &rings_widths[r];
-                            let colors = &rings_colors[r];
-                            let mesh = polygon_ribbon_full(ring, Some(colors), Some(widths), &opts);
-                            scene.draw_mesh(&mesh, xform, pick);
+                let w_half_px = pt_to_px(w_pt, ctx.dpi) * 0.5;
+                let c = override_alpha(
+                    resolve_color_channel(stroke_ch, stroke_scale, i),
+                    resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i),
+                )
+                .unwrap_or(fallback_stroke);
+                (w_half_px, c)
+            } else {
+                (0.0, fallback_stroke)
+            };
+
+            if !is_linear {
+                if let Some(prev) = prev_channels {
+                    if ribbon_mode {
+                        interior_t.clear();
+                        ctx.projection.interpolate_segment_with_t(
+                            panel,
+                            &prev,
+                            &curr_channels,
+                            &mut interior_t,
+                        );
+                        let pw = prev_w.unwrap();
+                        let pc = prev_c.unwrap();
+                        for s in &interior_t {
+                            points.push(Point::new(s.px, s.py));
+                            widths.push(pw + s.t * (curr_w - pw));
+                            colors.push(lerp_color(pc, curr_c, s.t));
+                        }
+                    } else {
+                        interior.clear();
+                        ctx.projection.interpolate_segment(
+                            panel,
+                            &prev,
+                            &curr_channels,
+                            &mut interior,
+                        );
+                        for (ipx, ipy) in &interior {
+                            points.push(Point::new(*ipx, *ipy));
                         }
                     }
-                } else {
-                    draw_stroke_with_linetype(
-                        scene,
-                        &path,
-                        /* closed */ true,
-                        sc,
-                        sc,
-                        linewidth_px,
-                        linewidth_pt,
-                        cap,
-                        join,
-                        &dash_pattern_pt,
-                        dash_offset_pt,
-                        xform,
-                        pick,
-                        ctx.shapes,
-                        ctx.theme.geom.marker_outline_pt,
-                        ctx.dpi,
-                    );
+                }
+            }
+            let (px0, py0) = ctx.projection.project_to_panel_px(panel, &curr_channels);
+            let mut px = px0;
+            let mut py = py0;
+            if let Some(off) = resolve_number_channel(x_offset_ch, x_offset_scale, i) {
+                px += pt_to_px(off, ctx.dpi);
+            }
+            if let Some(off) = resolve_number_channel(y_offset_ch, y_offset_scale, i) {
+                py -= pt_to_px(off, ctx.dpi);
+            }
+            points.push(Point::new(px, py));
+            if ribbon_mode {
+                widths.push(curr_w);
+                colors.push(curr_c);
+                prev_w = Some(curr_w);
+                prev_c = Some(curr_c);
+                if first_w.is_none() {
+                    first_w = Some(curr_w);
+                    first_c = Some(curr_c);
+                }
+            }
+            if first_channels.is_none() {
+                first_channels = Some(curr_channels);
+            }
+            prev_channels = Some(curr_channels);
+        }
+        // Densify the closing edge (last vertex back to first).
+        if !is_linear {
+            if let (Some(prev), Some(first)) = (prev_channels, first_channels) {
+                if prev != first {
+                    if ribbon_mode {
+                        interior_t.clear();
+                        ctx.projection.interpolate_segment_with_t(
+                            panel,
+                            &prev,
+                            &first,
+                            &mut interior_t,
+                        );
+                        let pw = prev_w.unwrap();
+                        let pc = prev_c.unwrap();
+                        let fw = first_w.unwrap();
+                        let fc = first_c.unwrap();
+                        for s in &interior_t {
+                            points.push(Point::new(s.px, s.py));
+                            widths.push(pw + s.t * (fw - pw));
+                            colors.push(lerp_color(pc, fc, s.t));
+                        }
+                    } else {
+                        interior.clear();
+                        ctx.projection
+                            .interpolate_segment(panel, &prev, &first, &mut interior);
+                        for (ipx, ipy) in &interior {
+                            points.push(Point::new(*ipx, *ipy));
+                        }
+                    }
+                }
+            }
+        }
+        if points.len() >= 3 {
+            rings_pts.push(points);
+            if ribbon_mode {
+                rings_widths.push(widths);
+                rings_colors.push(colors);
+            }
+        }
+    }
+    if rings_pts.is_empty() {
+        return;
+    }
+
+    // Rotation pivot: outer-ring centroid in panel space, computed
+    // from raw vertex positions before `expand` / corner rounding
+    // so the pivot tracks the user-supplied data even when the
+    // outline is deformed by the offset pass.
+    let angle = resolve_angle_channel(angle_ch, angle_scale, i0);
+    let xform = if angle == 0.0 || rings_pts.is_empty() {
+        Affine::IDENTITY
+    } else {
+        let outer = &rings_pts[0];
+        let n_pts = outer.len() as f64;
+        let cx = outer.iter().map(|p| p.x).sum::<f64>() / n_pts;
+        let cy = outer.iter().map(|p| p.y).sum::<f64>() / n_pts;
+        Affine::rotate_about(-angle, Point::new(cx, cy))
+    };
+
+    // Order is fixed: expand first, then corner rounding. Insetting
+    // a polygon with already-filleted corners produces an inset
+    // path whose old fillets are now lines plus a fresh inset
+    // shape with sharp corners — visually wrong. Offsetting first
+    // and rounding the offset rings gives the intuitive result.
+    let offset_rings = expand_polygons(rings_pts, None, expand_px, MITER_LIMIT);
+    if offset_rings.iter().all(|r| r.len() < 3) {
+        return;
+    }
+
+    let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
+    let linewidth_pt = resolve_number_channel_or(
+        linewidth_ch,
+        linewidth_scale,
+        i0,
+        ctx.theme.geom.polygon.linewidth_pt,
+    );
+    let dash_offset_pt = resolve_number_channel_or(dash_offset_ch, dash_offset_scale, i0, 0.0);
+    let cap = resolve_cap_channel(cap_ch, cap_scale, i0, ctx.theme.geom.polygon.cap);
+    let join = resolve_join_channel(join_ch, join_scale, i0, ctx.theme.geom.polygon.join);
+    let corner_rounding = (corner_radius_px > 0.0).then_some(CornerRounding {
+        max_cut: corner_radius_px,
+        max_angle_deg: corner_max_angle_deg,
+    });
+
+    // The shared helper emits the EvenOdd fill (when bound) and the
+    // closed stroke (when bound). Ribbon mode replaces the closed
+    // stroke with a per-ring mesh, so we suppress the helper's stroke
+    // in that case and emit the mesh below.
+    let spec = PolygonSpec {
+        fill_color,
+        stroke_color: if ribbon_mode { None } else { stroke_color },
+        linewidth_pt,
+        dash_pattern_pt: dash_pattern_pt.clone(),
+        dash_offset_pt,
+        cap,
+        join,
+        corner_rounding,
+        marker_fill: stroke_color.unwrap_or(Color::new([0.0, 0.0, 0.0, 1.0])),
+        xform,
+        pick,
+    };
+    draw_polygon_fill_and_stroke(scene, ctx, &offset_rings, &spec);
+
+    if ribbon_mode {
+        if let Some(_sc) = stroke_color {
+            let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
+            if linewidth_px.is_finite() && linewidth_px > 0.0 {
+                let opts = RibbonOptions {
+                    half_width: 0.0,
+                    cap,
+                    join,
+                    miter_limit: MITER_LIMIT,
+                };
+                for (r, ring) in offset_rings.iter().enumerate() {
+                    if ring.len() < 3 {
+                        continue;
+                    }
+                    let widths = &rings_widths[r];
+                    let colors = &rings_colors[r];
+                    let mesh = polygon_ribbon_full(ring, Some(colors), Some(widths), &opts);
+                    scene.draw_mesh(&mesh, xform, pick);
                 }
             }
         }
@@ -780,6 +835,7 @@ mod tests {
     use crate::color::Color;
     use crate::geometry::Rect;
     use crate::plot::geom::{DirectScaleResolver, Raw};
+    use crate::plot::value::Value;
     use crate::scene::recording::{Op, RecordingScene};
 
     fn shapes() -> crate::shape::ShapeRegistry {

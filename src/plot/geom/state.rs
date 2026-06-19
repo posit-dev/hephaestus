@@ -189,6 +189,25 @@ pub fn require_data_column<'a>(
     }
 }
 
+/// Pull the required `x` data column to fix the row count `n`, then
+/// require every name in `siblings` to be a data channel of the same
+/// length. Panics with a geom-labelled message on missing channel,
+/// constant where a column was expected, or length mismatch.
+pub fn require_x_and_siblings(
+    channels: &HashMap<String, Channel>,
+    siblings: &[&str],
+    geom_label: &str,
+) -> usize {
+    let n = require_data_column("x", channels, geom_label).len();
+    for &name in siblings {
+        let len = require_data_column(name, channels, geom_label).len();
+        if len != n {
+            panic!("{geom_label}::build: \"{name}\" length {len} does not match \"x\" length {n}");
+        }
+    }
+    n
+}
+
 /// Validate that every data channel in `channels` (scaled or raw) has
 /// length `n`. Panics on mismatch with a geom-labelled message
 /// identifying the offending channel.
@@ -256,6 +275,24 @@ pub fn filter_declared(
     }
     out.sort_by_key(|d| d.name);
     out
+}
+
+/// Run the universal validate-then-build tail every `BuildableGeom`
+/// implementation finishes with: [`validate_channel_lengths`],
+/// [`validate_pick_id_channel`], [`filter_declared`], then
+/// [`GeomState::from_builder`].
+pub fn finalize_state(
+    keys_opt: Option<DataColumn>,
+    channels: HashMap<String, Channel>,
+    n: usize,
+    strategy: KeysStrategy,
+    catalog: &[(&'static str, ExpectedOutput)],
+    geom_label: &str,
+) -> GeomState {
+    validate_channel_lengths(&channels, n, geom_label);
+    validate_pick_id_channel(&channels, geom_label);
+    let declared = filter_declared(&channels, catalog);
+    GeomState::from_builder(keys_opt, channels, n, strategy, declared)
 }
 
 // ─── Snapshot helper ─────────────────────────────────────────────────────────

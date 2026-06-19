@@ -71,26 +71,21 @@
 
 use crate::brush::Brush;
 use crate::color::Color;
-use crate::geometry::{Affine, Point};
+use crate::geometry::{Affine, Point, Rect};
 use crate::path::{FillRule, Path};
 use crate::plot::diff::{diff_columns, diff_positional, KeyIndex};
-use crate::plot::value::{DataColumn, Value};
+use crate::plot::scale::Scale;
+use crate::plot::value::DataColumn;
 use crate::scene::SceneBuilder;
 
-use super::marks::{build_marks_from_column, MarkSlot};
+use super::marks::{build_marks_from_column, unique_values_at_first_rows, MarkSlot};
 use super::outline::{draw_curve_outline, resolve_outline_spec, OutlineChannels, OutlineScales};
 use super::resolve::{
     channel_varies_across, override_alpha, resolve_color_channel, resolve_color_channel_or_theme,
-    resolve_number_channel, resolve_pick_id, resolve_position,
+    resolve_number_channel, resolve_pick_id, resolve_position, ChannelBind,
 };
-use super::state::{
-    filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
-    GeomState, KeysStrategy,
-};
-use super::{
-    empty_datacolumn_like, BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext,
-    Keys,
-};
+use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
+use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
 
 /// Catalog of channels this geom recognises, with their expected scale
 /// output type. Outline-related channels (everything driving the
@@ -177,48 +172,12 @@ impl RibbonGeom {
     }
 }
 
-/// Build a column holding one entry per mark — the key value of each
-/// mark's first row. Used to feed `diff_columns` at mark granularity.
-fn unique_keys_column(col: &DataColumn, marks: &[MarkSlot]) -> DataColumn {
-    let template = empty_datacolumn_like(col);
-    push_values_into(template, marks.iter().map(|m| col.get(m.first_row)))
-}
-
-fn push_values_into(
-    mut template: DataColumn,
-    values: impl IntoIterator<Item = Value>,
-) -> DataColumn {
-    for v in values {
-        match (&mut template, v) {
-            (DataColumn::F64(vec), Value::Number(n)) => vec.push(n),
-            (DataColumn::F32(vec), Value::Number(n)) => vec.push(n as f32),
-            (DataColumn::I32(vec), Value::Number(n)) => vec.push(n as i32),
-            (DataColumn::I64(vec), Value::Number(n)) => vec.push(n as i64),
-            (DataColumn::Bool(vec), Value::Bool(b)) => vec.push(b),
-            (DataColumn::String(vec), Value::String(s)) => vec.push(s),
-            (DataColumn::Color(vec), Value::Color(c)) => vec.push(c),
-            (DataColumn::Date(vec), Value::Date(d)) => vec.push(d),
-            (DataColumn::DateTime(vec), Value::DateTime(us)) => vec.push(us),
-            (DataColumn::Time(vec), Value::Time(us)) => vec.push(us),
-            (DataColumn::Duration(vec), Value::Duration(us)) => vec.push(us),
-            (DataColumn::Linetype(vec), Value::Linetype(p)) => vec.push(p),
-            _ => panic!("RibbonGeom: unique-keys column variant mismatch"),
-        }
-    }
-    template
-}
-
 // ─── BuildableGeom impl ──────────────────────────────────────────────────────
 
 impl BuildableGeom for RibbonGeom {
     fn build_from(builder: GeomBuilder<Self>) -> Self {
         let (keys_opt, channels) = builder.into_parts();
-
-        let n = require_data_column("x", &channels, "RibbonGeom").len();
-        let y_len = require_data_column("y", &channels, "RibbonGeom").len();
-        if y_len != n {
-            panic!("RibbonGeom::build: \"y\" length {y_len} does not match \"x\" length {n}");
-        }
+        let n = require_x_and_siblings(&channels, &["y"], "RibbonGeom");
 
         let has_x2 = channels.contains_key("x2");
         let has_y2 = channels.contains_key("y2");
@@ -232,16 +191,83 @@ impl BuildableGeom for RibbonGeom {
             (true, true) => Orientation::Free,
         };
 
-        validate_channel_lengths(&channels, n, "RibbonGeom");
-        validate_pick_id_channel(&channels, "RibbonGeom");
-
-        let declared = filter_declared(&channels, CHANNELS);
-        let state = GeomState::from_builder(keys_opt, channels, n, KeysStrategy::OneMark, declared);
+        let state = finalize_state(
+            keys_opt,
+            channels,
+            n,
+            KeysStrategy::OneMark,
+            CHANNELS,
+            "RibbonGeom",
+        );
         RibbonGeom {
             state,
             marks: Vec::new(),
             orientation,
         }
+    }
+}
+
+// ─── Draw-time channel/scale bundle ──────────────────────────────────────────
+
+/// Channel + scale references and orientation handed to
+/// [`draw_one_ribbon_mark`] for one draw call. Bundles curve-A/-B
+/// outline handles (already aggregated by [`OutlineChannels`] /
+/// [`OutlineScales`]) with the fill, alpha, and pick-id channels and
+/// the x/x2/y/y2 positional inputs.
+#[derive(Clone, Copy)]
+struct RibbonDrawCtx<'a> {
+    orientation: Orientation,
+    x_col: &'a DataColumn,
+    y_col: &'a DataColumn,
+    x_scale: Option<&'a Scale>,
+    y_scale: Option<&'a Scale>,
+    x2: ChannelBind<'a>,
+    y2: ChannelBind<'a>,
+    fill: ChannelBind<'a>,
+    alpha: ChannelBind<'a>,
+    pick_id: ChannelBind<'a>,
+    outline_a_ch: OutlineChannels<'a>,
+    outline_b_ch: OutlineChannels<'a>,
+    outline_a_scales: OutlineScales<'a>,
+    outline_b_scales: OutlineScales<'a>,
+}
+
+impl<'a> RibbonDrawCtx<'a> {
+    /// Resolve x/y columns + scales and look up every per-mark channel
+    /// by name. Returns `None` when `x` or `y` is missing or
+    /// non-positional.
+    fn build(
+        channels: &'a std::collections::HashMap<String, Channel>,
+        ctx: &'a GeomContext<'a>,
+        orientation: Orientation,
+    ) -> Option<Self> {
+        let (x_col, x_scale) = match channels.get("x")? {
+            Channel::Data(c) => (c, ctx.scale_for("x")),
+            Channel::RawData(c) => (c, None),
+            _ => return None,
+        };
+        let (y_col, y_scale) = match channels.get("y")? {
+            Channel::Data(c) => (c, ctx.scale_for("y")),
+            Channel::RawData(c) => (c, None),
+            _ => return None,
+        };
+        let b = |name: &str| ChannelBind::from_ctx(channels, ctx, name);
+        Some(Self {
+            orientation,
+            x_col,
+            y_col,
+            x_scale,
+            y_scale,
+            x2: b("x2"),
+            y2: b("y2"),
+            fill: b("fill"),
+            alpha: b("alpha"),
+            pick_id: b("pick_id"),
+            outline_a_ch: OutlineChannels::from_map(channels, ""),
+            outline_b_ch: OutlineChannels::from_map(channels, "2"),
+            outline_a_scales: OutlineScales::from_ctx(ctx, ""),
+            outline_b_scales: OutlineScales::from_ctx(ctx, "2"),
+        })
     }
 }
 
@@ -282,8 +308,16 @@ impl Geom for RibbonGeom {
         };
         let (enter, update, exit) = match (&self.state.prev_keys, &self.state.keys) {
             (Keys::Explicit(prev_col), Keys::Explicit(next_col)) => {
-                let prev_unique = unique_keys_column(prev_col, &prev_marks);
-                let next_unique = unique_keys_column(next_col, &next_marks);
+                let prev_unique = unique_values_at_first_rows(
+                    prev_col,
+                    prev_marks.iter().map(|m| m.first_row),
+                    "RibbonGeom",
+                );
+                let next_unique = unique_values_at_first_rows(
+                    next_col,
+                    next_marks.iter().map(|m| m.first_row),
+                    "RibbonGeom",
+                );
                 let idx = KeyIndex::build(&prev_unique);
                 diff_columns(&prev_unique, &idx, &next_unique)
             }
@@ -317,384 +351,383 @@ impl Geom for RibbonGeom {
             return;
         }
 
-        let x_scale_bound = ctx.scale_for("x");
-        let y_scale_bound = ctx.scale_for("y");
-        let x2_scale_bound = ctx.scale_for("x2");
-        let y2_scale_bound = ctx.scale_for("y2");
-        let fill_scale = ctx.scale_for("fill");
-        let alpha_scale = ctx.scale_for("alpha");
-        let pick_id_scale = ctx.scale_for("pick_id");
-
-        let outline_a_scales = OutlineScales::from_ctx(ctx, "");
-        let outline_b_scales = OutlineScales::from_ctx(ctx, "2");
-
-        let channels = &self.state.channels;
-        let (x_col, x_scale) = match channels.get("x") {
-            Some(Channel::Data(c)) => (c, x_scale_bound),
-            Some(Channel::RawData(c)) => (c, None),
-            _ => return,
+        let dc = match RibbonDrawCtx::build(&self.state.channels, ctx, self.orientation) {
+            Some(dc) => dc,
+            None => return,
         };
-        let (y_col, y_scale) = match channels.get("y") {
-            Some(Channel::Data(c)) => (c, y_scale_bound),
-            Some(Channel::RawData(c)) => (c, None),
-            _ => return,
-        };
-
-        let fill_ch = channels.get("fill");
-        let alpha_ch = channels.get("alpha");
-        let pick_id_ch = channels.get("pick_id");
-
-        let outline_a_ch = OutlineChannels::from_map(channels, "");
-        let outline_b_ch = OutlineChannels::from_map(channels, "2");
-
-        // Curve-B inputs. Horizontal: B = `(x, y2)`. Vertical:
-        // B = `(x2, y)`. Free: B = `(x2, y2)`. The unused channel in
-        // the axis-aligned cases falls back to the corresponding curve-A
-        // channel for that row, so the per-row code only branches on
-        // which of x2 / y2 was actually supplied.
-        let x2_ch = channels.get("x2");
-        let y2_ch = channels.get("y2");
 
         for mark in marks.iter() {
-            let i0 = mark.first_row;
+            draw_one_ribbon_mark(scene, ctx, panel, dc, mark);
+        }
+    }
+}
 
-            // Per-mark fill colour at first row, blended with per-mark
-            // alpha. Used for both the uniform `Brush::Solid` path and as
-            // a fallback colour when building gradient stops if a row's
-            // own fill is unresolved.
-            let mark_fill = override_alpha(
-                resolve_color_channel_or_theme(
-                    fill_ch,
-                    fill_scale,
-                    i0,
-                    ctx.theme.geom.ribbon.fill.as_ref(),
-                    &ctx.theme.palette,
-                ),
-                resolve_number_channel(alpha_ch, alpha_scale, i0),
-            );
-            let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
-            let outline_a_spec = resolve_outline_spec(
-                ctx,
-                &ctx.theme.geom.ribbon,
-                &outline_a_ch,
-                &outline_a_scales,
-                alpha_ch,
-                alpha_scale,
-                i0,
-                pick,
-            );
-            let outline_b_spec = resolve_outline_spec(
-                ctx,
-                &ctx.theme.geom.ribbon,
-                &outline_b_ch,
-                &outline_b_scales,
-                alpha_ch,
-                alpha_scale,
-                i0,
-                pick,
-            );
+/// Render a single ribbon mark — fill contour, optional gradient brush,
+/// optional per-vertex mesh, plus per-curve outlines. Each mark is
+/// independent; the caller iterates.
+fn draw_one_ribbon_mark(
+    scene: &mut dyn SceneBuilder,
+    ctx: &GeomContext<'_>,
+    panel: Rect,
+    dc: RibbonDrawCtx<'_>,
+    mark: &MarkSlot,
+) {
+    let RibbonDrawCtx {
+        orientation,
+        x_col,
+        y_col,
+        x_scale,
+        y_scale,
+        x2: ChannelBind {
+            ch: x2_ch,
+            scale: x2_scale_bound,
+        },
+        y2: ChannelBind {
+            ch: y2_ch,
+            scale: y2_scale_bound,
+        },
+        fill: ChannelBind {
+            ch: fill_ch,
+            scale: fill_scale,
+        },
+        alpha: ChannelBind {
+            ch: alpha_ch,
+            scale: alpha_scale,
+        },
+        pick_id:
+            ChannelBind {
+                ch: pick_id_ch,
+                scale: pick_id_scale,
+            },
+        outline_a_ch,
+        outline_b_ch,
+        outline_a_scales,
+        outline_b_scales,
+    } = dc;
 
-            // If nothing to draw (no fill, no stroke on either curve)
-            // skip the whole mark.
-            if mark_fill.is_none() && outline_a_spec.is_none() && outline_b_spec.is_none() {
-                continue;
-            }
+    let i0 = mark.first_row;
 
-            // ── Build the two curves vertex-by-vertex. ──
-            //
-            // For each row we project two channel-space points to panel
-            // pixels: curve-A vertex from the unprimed `(x, y)` pair, and
-            // curve-B vertex from `(x2_or_x, y2_or_y)` based on which
-            // optional channels were supplied. Under non-linear
-            // projections (polar, future ternary) we densify each edge
-            // between consecutive rows via `interpolate_segment_with_t`
-            // on whichever curve has the higher chord error, then resample
-            // the *other* curve at the same channel-space `t` values so
-            // `curve_a_pts.len() == curve_b_pts.len()` — required by the
-            // mesh dispatch and harmless to the path dispatch.
-            //
-            // `vertex_origins` carries a per-vertex bracketing-row /
-            // interior-t tag so per-vertex colours can be lerped between
-            // the bracketing rows for the mesh path.
-            let is_linear = ctx.projection.is_linear();
-            let mut samples_a: Vec<crate::plot::projection::InteriorSample> = Vec::new();
-            let mut samples_b: Vec<crate::plot::projection::InteriorSample> = Vec::new();
-            let mut merged_t: Vec<f64> = Vec::new();
+    // Per-mark fill colour at first row, blended with per-mark
+    // alpha. Used for both the uniform `Brush::Solid` path and as
+    // a fallback colour when building gradient stops if a row's
+    // own fill is unresolved.
+    let mark_fill = override_alpha(
+        resolve_color_channel_or_theme(
+            fill_ch,
+            fill_scale,
+            i0,
+            ctx.theme.geom.ribbon.fill.as_ref(),
+            &ctx.theme.palette,
+        ),
+        resolve_number_channel(alpha_ch, alpha_scale, i0),
+    );
+    let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
+    let outline_a_spec = resolve_outline_spec(
+        ctx,
+        &ctx.theme.geom.ribbon,
+        &outline_a_ch,
+        &outline_a_scales,
+        alpha_ch,
+        alpha_scale,
+        i0,
+        pick,
+    );
+    let outline_b_spec = resolve_outline_spec(
+        ctx,
+        &ctx.theme.geom.ribbon,
+        &outline_b_ch,
+        &outline_b_scales,
+        alpha_ch,
+        alpha_scale,
+        i0,
+        pick,
+    );
 
-            let mut curve_a_pts: Vec<Point> = Vec::with_capacity(mark.rows.len());
-            let mut curve_b_pts: Vec<Point> = Vec::with_capacity(mark.rows.len());
-            let mut row_for_vertex: Vec<usize> = Vec::with_capacity(mark.rows.len());
-            let mut vertex_origins: Vec<VertexOrigin> = Vec::with_capacity(mark.rows.len());
-            let mut prev_real: Option<(usize, [f64; 2], [f64; 2])> = None;
-            // First real row's (a_ch, b_ch); used after the loop to densify
-            // the start cap (curve B's first → curve A's first in data space).
-            let mut first_real: Option<([f64; 2], [f64; 2])> = None;
+    // If nothing to draw (no fill, no stroke on either curve)
+    // skip the whole mark.
+    if mark_fill.is_none() && outline_a_spec.is_none() && outline_b_spec.is_none() {
+        return;
+    }
 
-            for &i in &mark.rows {
-                let x_frac = resolve_position(x_col.get(i), x_scale, 0.0);
-                let y_frac = resolve_position(y_col.get(i), y_scale, 0.0);
-                if !x_frac.is_finite() || !y_frac.is_finite() {
-                    continue;
+    // ── Build the two curves vertex-by-vertex. ──
+    //
+    // For each row we project two channel-space points to panel
+    // pixels: curve-A vertex from the unprimed `(x, y)` pair, and
+    // curve-B vertex from `(x2_or_x, y2_or_y)` based on which
+    // optional channels were supplied. Under non-linear
+    // projections (polar, future ternary) we densify each edge
+    // between consecutive rows via `interpolate_segment_with_t`
+    // on whichever curve has the higher chord error, then resample
+    // the *other* curve at the same channel-space `t` values so
+    // `curve_a_pts.len() == curve_b_pts.len()` — required by the
+    // mesh dispatch and harmless to the path dispatch.
+    //
+    // `vertex_origins` carries a per-vertex bracketing-row /
+    // interior-t tag so per-vertex colours can be lerped between
+    // the bracketing rows for the mesh path.
+    let is_linear = ctx.projection.is_linear();
+    let mut samples_a: Vec<crate::plot::projection::InteriorSample> = Vec::new();
+    let mut samples_b: Vec<crate::plot::projection::InteriorSample> = Vec::new();
+    let mut merged_t: Vec<f64> = Vec::new();
+
+    let mut curve_a_pts: Vec<Point> = Vec::with_capacity(mark.rows.len());
+    let mut curve_b_pts: Vec<Point> = Vec::with_capacity(mark.rows.len());
+    let mut row_for_vertex: Vec<usize> = Vec::with_capacity(mark.rows.len());
+    let mut vertex_origins: Vec<VertexOrigin> = Vec::with_capacity(mark.rows.len());
+    let mut prev_real: Option<(usize, [f64; 2], [f64; 2])> = None;
+    // First real row's (a_ch, b_ch); used after the loop to densify
+    // the start cap (curve B's first → curve A's first in data space).
+    let mut first_real: Option<([f64; 2], [f64; 2])> = None;
+
+    for &i in &mark.rows {
+        let x_frac = resolve_position(x_col.get(i), x_scale, 0.0);
+        let y_frac = resolve_position(y_col.get(i), y_scale, 0.0);
+        if !x_frac.is_finite() || !y_frac.is_finite() {
+            continue;
+        }
+        let (b_x_frac, b_y_frac) = match resolve_b_row(
+            orientation,
+            x2_ch,
+            y2_ch,
+            x2_scale_bound,
+            y2_scale_bound,
+            i,
+            x_frac,
+            y_frac,
+        ) {
+            Some(b) => b,
+            None => continue,
+        };
+
+        let a_ch = [x_frac, y_frac];
+        let b_ch = [b_x_frac, b_y_frac];
+
+        if !is_linear {
+            if let Some((prev_row, prev_a, prev_b)) = prev_real {
+                samples_a.clear();
+                samples_b.clear();
+                ctx.projection
+                    .interpolate_segment_with_t(panel, &prev_a, &a_ch, &mut samples_a);
+                ctx.projection
+                    .interpolate_segment_with_t(panel, &prev_b, &b_ch, &mut samples_b);
+                merged_t.clear();
+                merged_t.extend(samples_a.iter().map(|s| s.t));
+                merged_t.extend(samples_b.iter().map(|s| s.t));
+                merged_t.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+                merged_t.dedup_by(|x, y| (*x - *y).abs() < 1e-9);
+                for &t in &merged_t {
+                    let a_lerp = [
+                        (1.0 - t) * prev_a[0] + t * a_ch[0],
+                        (1.0 - t) * prev_a[1] + t * a_ch[1],
+                    ];
+                    let b_lerp = [
+                        (1.0 - t) * prev_b[0] + t * b_ch[0],
+                        (1.0 - t) * prev_b[1] + t * b_ch[1],
+                    ];
+                    let (apx, apy) = ctx.projection.project_to_panel_px(panel, &a_lerp);
+                    let (bpx, bpy) = ctx.projection.project_to_panel_px(panel, &b_lerp);
+                    curve_a_pts.push(Point::new(apx, apy));
+                    curve_b_pts.push(Point::new(bpx, bpy));
+                    vertex_origins.push(VertexOrigin {
+                        prev_row,
+                        next_row: i,
+                        t,
+                    });
                 }
-                let (b_x_frac, b_y_frac) = match resolve_b_row(
-                    self.orientation,
-                    x2_ch,
-                    y2_ch,
-                    x2_scale_bound,
-                    y2_scale_bound,
-                    i,
-                    x_frac,
-                    y_frac,
-                ) {
-                    Some(b) => b,
-                    None => continue,
-                };
-
-                let a_ch = [x_frac, y_frac];
-                let b_ch = [b_x_frac, b_y_frac];
-
-                if !is_linear {
-                    if let Some((prev_row, prev_a, prev_b)) = prev_real {
-                        samples_a.clear();
-                        samples_b.clear();
-                        ctx.projection.interpolate_segment_with_t(
-                            panel,
-                            &prev_a,
-                            &a_ch,
-                            &mut samples_a,
-                        );
-                        ctx.projection.interpolate_segment_with_t(
-                            panel,
-                            &prev_b,
-                            &b_ch,
-                            &mut samples_b,
-                        );
-                        merged_t.clear();
-                        merged_t.extend(samples_a.iter().map(|s| s.t));
-                        merged_t.extend(samples_b.iter().map(|s| s.t));
-                        merged_t
-                            .sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
-                        merged_t.dedup_by(|x, y| (*x - *y).abs() < 1e-9);
-                        for &t in &merged_t {
-                            let a_lerp = [
-                                (1.0 - t) * prev_a[0] + t * a_ch[0],
-                                (1.0 - t) * prev_a[1] + t * a_ch[1],
-                            ];
-                            let b_lerp = [
-                                (1.0 - t) * prev_b[0] + t * b_ch[0],
-                                (1.0 - t) * prev_b[1] + t * b_ch[1],
-                            ];
-                            let (apx, apy) = ctx.projection.project_to_panel_px(panel, &a_lerp);
-                            let (bpx, bpy) = ctx.projection.project_to_panel_px(panel, &b_lerp);
-                            curve_a_pts.push(Point::new(apx, apy));
-                            curve_b_pts.push(Point::new(bpx, bpy));
-                            vertex_origins.push(VertexOrigin {
-                                prev_row,
-                                next_row: i,
-                                t,
-                            });
-                        }
-                    }
-                }
-
-                let (apx, apy) = ctx.projection.project_to_panel_px(panel, &a_ch);
-                let (bpx, bpy) = ctx.projection.project_to_panel_px(panel, &b_ch);
-                curve_a_pts.push(Point::new(apx, apy));
-                curve_b_pts.push(Point::new(bpx, bpy));
-                row_for_vertex.push(i);
-                vertex_origins.push(VertexOrigin {
-                    prev_row: i,
-                    next_row: i,
-                    t: 1.0,
-                });
-                if first_real.is_none() {
-                    first_real = Some((a_ch, b_ch));
-                }
-                prev_real = Some((i, a_ch, b_ch));
-            }
-
-            if row_for_vertex.len() < 2 {
-                // A degenerate single-row band has no area.
-                continue;
-            }
-            debug_assert_eq!(curve_a_pts.len(), curve_b_pts.len());
-            debug_assert_eq!(curve_a_pts.len(), vertex_origins.len());
-
-            // Densify the two terminal caps under non-linear projections.
-            // The start cap connects curve B's first vertex back to curve A's
-            // first vertex in data space; the end cap connects curve A's last
-            // vertex to curve B's last vertex. Under Cartesian, both calls
-            // return zero interior samples and the contour shape is unchanged.
-            // Under polar with a non-radial cap (Free orientation with
-            // distinct theta on the two endpoints) the cap acquires the same
-            // geodesic curvature as the per-curve densification.
-            //
-            // Cap densification touches only the closed-contour path (the
-            // solid and gradient fill paths plus future per-curve outline
-            // strokes). The mesh path (varying fill) keeps straight cap
-            // chords — the mesh's quad topology doesn't naturally accommodate
-            // cap-arc triangles, and forcing it would require a fan
-            // triangulation that complicates `ribbon_band_mesh`.
-            let mut start_cap_samples: Vec<crate::plot::projection::InteriorSample> = Vec::new();
-            let mut end_cap_samples: Vec<crate::plot::projection::InteriorSample> = Vec::new();
-            if !is_linear {
-                if let (Some((first_a, first_b)), Some((_, last_a, last_b))) =
-                    (first_real, prev_real)
-                {
-                    ctx.projection.interpolate_segment_with_t(
-                        panel,
-                        &last_a,
-                        &last_b,
-                        &mut end_cap_samples,
-                    );
-                    ctx.projection.interpolate_segment_with_t(
-                        panel,
-                        &first_b,
-                        &first_a,
-                        &mut start_cap_samples,
-                    );
-                }
-            }
-
-            // Build the closed fill contour: forward along curve A, end cap
-            // samples, reversed curve B, start cap samples, then close.
-            let mut path = Path::new();
-            path.move_to(curve_a_pts[0]);
-            for p in &curve_a_pts[1..] {
-                path.line_to(*p);
-            }
-            for s in &end_cap_samples {
-                path.line_to(Point::new(s.px, s.py));
-            }
-            for p in curve_b_pts.iter().rev() {
-                path.line_to(*p);
-            }
-            for s in &start_cap_samples {
-                path.line_to(Point::new(s.px, s.py));
-            }
-            path.close_path();
-
-            // ── Fill dispatch (variance-detect). ──
-            //
-            // Solid fill (or no variation) — single `Brush::Solid` over
-            // the closed contour path. Variation under axis-aligned +
-            // linear projection — linear gradient brush along the shared
-            // axis (the fast path). Variation under Free orientation or
-            // any non-linear projection — quad-strip mesh between the
-            // two curves with per-vertex colours, so the gradient
-            // follows the band's actual sweep instead of a screen-aligned
-            // axis.
-            if let Some(mark_color) = mark_fill {
-                let varies = channel_varies_across(fill_ch, fill_scale, &row_for_vertex)
-                    || channel_varies_across(alpha_ch, alpha_scale, &row_for_vertex);
-                let axis_aligned = matches!(
-                    self.orientation,
-                    Orientation::Horizontal | Orientation::Vertical
-                );
-                let use_mesh = varies && (!axis_aligned || !is_linear);
-
-                if use_mesh {
-                    let (colors_a, colors_b) = build_per_vertex_colors(
-                        &vertex_origins,
-                        fill_ch,
-                        fill_scale,
-                        alpha_ch,
-                        alpha_scale,
-                        mark_color,
-                    );
-                    let mut mesh = crate::primitives::ribbon_band_mesh(
-                        &curve_a_pts,
-                        &curve_b_pts,
-                        &colors_a,
-                        &colors_b,
-                    );
-                    if !mesh.vertices.is_empty() && curve_a_pts.len() >= 2 {
-                        // Cap-fan + clip combo. The fan adds
-                        // triangles in outward-bulging cap crescents
-                        // (where the strip's straight chord falls
-                        // short of the data-space arc); the clip
-                        // carves any inward-bulging cap overshoot
-                        // off the strip's straight chord. Both
-                        // directions land at the densified arc
-                        // boundary symmetrically.
-                        let last = curve_a_pts.len() - 1;
-                        let start_neighbor = Point::new(
-                            (curve_a_pts[1].x + curve_b_pts[1].x) * 0.5,
-                            (curve_a_pts[1].y + curve_b_pts[1].y) * 0.5,
-                        );
-                        let end_neighbor = Point::new(
-                            (curve_a_pts[last - 1].x + curve_b_pts[last - 1].x) * 0.5,
-                            (curve_a_pts[last - 1].y + curve_b_pts[last - 1].y) * 0.5,
-                        );
-                        append_cap_fan_to_mesh(
-                            &mut mesh,
-                            curve_a_pts[0],
-                            curve_b_pts[0],
-                            start_neighbor,
-                            &start_cap_samples,
-                            colors_a[0],
-                            CapDirection::Start,
-                        );
-                        append_cap_fan_to_mesh(
-                            &mut mesh,
-                            curve_a_pts[last],
-                            curve_b_pts[last],
-                            end_neighbor,
-                            &end_cap_samples,
-                            *colors_a.last().unwrap(),
-                            CapDirection::End,
-                        );
-                        scene.push_layer(
-                            crate::blend::BlendMode::NORMAL,
-                            1.0,
-                            Affine::IDENTITY,
-                            &path,
-                        );
-                        scene.draw_mesh(&mesh, Affine::IDENTITY, pick);
-                        scene.pop_layer();
-                    }
-                } else {
-                    let brush = if varies {
-                        build_gradient_brush(
-                            self.orientation,
-                            &curve_a_pts,
-                            &row_for_vertex,
-                            curve_a_pts.len() - row_for_vertex.len(),
-                            fill_ch,
-                            fill_scale,
-                            alpha_ch,
-                            alpha_scale,
-                            mark_color,
-                        )
-                        .map(Brush::Gradient)
-                        .unwrap_or_else(|| Brush::Solid(mark_color))
-                    } else {
-                        Brush::Solid(mark_color)
-                    };
-                    scene.fill(
-                        FillRule::NonZero,
-                        Affine::IDENTITY,
-                        &brush,
-                        None,
-                        &path,
-                        pick,
-                    );
-                }
-            }
-
-            // ── Per-curve outlines. ──
-            //
-            // Each curve emits its own full LineGeom-style outline if
-            // its stroke channel is bound: dashed pattern, endpoint
-            // markers, endpoint clipping all flow through the same
-            // helper that LineGeom / BSplineGeom use.
-            if let Some(ref spec) = outline_a_spec {
-                draw_curve_outline(scene, ctx, &curve_a_pts, spec);
-            }
-            if let Some(ref spec) = outline_b_spec {
-                draw_curve_outline(scene, ctx, &curve_b_pts, spec);
             }
         }
+
+        let (apx, apy) = ctx.projection.project_to_panel_px(panel, &a_ch);
+        let (bpx, bpy) = ctx.projection.project_to_panel_px(panel, &b_ch);
+        curve_a_pts.push(Point::new(apx, apy));
+        curve_b_pts.push(Point::new(bpx, bpy));
+        row_for_vertex.push(i);
+        vertex_origins.push(VertexOrigin {
+            prev_row: i,
+            next_row: i,
+            t: 1.0,
+        });
+        if first_real.is_none() {
+            first_real = Some((a_ch, b_ch));
+        }
+        prev_real = Some((i, a_ch, b_ch));
+    }
+
+    if row_for_vertex.len() < 2 {
+        // A degenerate single-row band has no area.
+        return;
+    }
+    debug_assert_eq!(curve_a_pts.len(), curve_b_pts.len());
+    debug_assert_eq!(curve_a_pts.len(), vertex_origins.len());
+
+    // Densify the two terminal caps under non-linear projections.
+    // The start cap connects curve B's first vertex back to curve A's
+    // first vertex in data space; the end cap connects curve A's last
+    // vertex to curve B's last vertex. Under Cartesian, both calls
+    // return zero interior samples and the contour shape is unchanged.
+    // Under polar with a non-radial cap (Free orientation with
+    // distinct theta on the two endpoints) the cap acquires the same
+    // geodesic curvature as the per-curve densification.
+    //
+    // Cap densification touches only the closed-contour path (the
+    // solid and gradient fill paths plus future per-curve outline
+    // strokes). The mesh path (varying fill) keeps straight cap
+    // chords — the mesh's quad topology doesn't naturally accommodate
+    // cap-arc triangles, and forcing it would require a fan
+    // triangulation that complicates `ribbon_band_mesh`.
+    let mut start_cap_samples: Vec<crate::plot::projection::InteriorSample> = Vec::new();
+    let mut end_cap_samples: Vec<crate::plot::projection::InteriorSample> = Vec::new();
+    if !is_linear {
+        if let (Some((first_a, first_b)), Some((_, last_a, last_b))) = (first_real, prev_real) {
+            ctx.projection.interpolate_segment_with_t(
+                panel,
+                &last_a,
+                &last_b,
+                &mut end_cap_samples,
+            );
+            ctx.projection.interpolate_segment_with_t(
+                panel,
+                &first_b,
+                &first_a,
+                &mut start_cap_samples,
+            );
+        }
+    }
+
+    // Build the closed fill contour: forward along curve A, end cap
+    // samples, reversed curve B, start cap samples, then close.
+    let mut path = Path::new();
+    path.move_to(curve_a_pts[0]);
+    for p in &curve_a_pts[1..] {
+        path.line_to(*p);
+    }
+    for s in &end_cap_samples {
+        path.line_to(Point::new(s.px, s.py));
+    }
+    for p in curve_b_pts.iter().rev() {
+        path.line_to(*p);
+    }
+    for s in &start_cap_samples {
+        path.line_to(Point::new(s.px, s.py));
+    }
+    path.close_path();
+
+    // ── Fill dispatch (variance-detect). ──
+    //
+    // Solid fill (or no variation) — single `Brush::Solid` over
+    // the closed contour path. Variation under axis-aligned +
+    // linear projection — linear gradient brush along the shared
+    // axis (the fast path). Variation under Free orientation or
+    // any non-linear projection — quad-strip mesh between the
+    // two curves with per-vertex colours, so the gradient
+    // follows the band's actual sweep instead of a screen-aligned
+    // axis.
+    if let Some(mark_color) = mark_fill {
+        let varies = channel_varies_across(fill_ch, fill_scale, &row_for_vertex)
+            || channel_varies_across(alpha_ch, alpha_scale, &row_for_vertex);
+        let axis_aligned = matches!(orientation, Orientation::Horizontal | Orientation::Vertical);
+        let use_mesh = varies && (!axis_aligned || !is_linear);
+
+        if use_mesh {
+            let (colors_a, colors_b) = build_per_vertex_colors(
+                &vertex_origins,
+                fill_ch,
+                fill_scale,
+                alpha_ch,
+                alpha_scale,
+                mark_color,
+            );
+            let mut mesh = crate::primitives::ribbon_band_mesh(
+                &curve_a_pts,
+                &curve_b_pts,
+                &colors_a,
+                &colors_b,
+            );
+            if !mesh.vertices.is_empty() && curve_a_pts.len() >= 2 {
+                // Cap-fan + clip combo. The fan adds
+                // triangles in outward-bulging cap crescents
+                // (where the strip's straight chord falls
+                // short of the data-space arc); the clip
+                // carves any inward-bulging cap overshoot
+                // off the strip's straight chord. Both
+                // directions land at the densified arc
+                // boundary symmetrically.
+                let last = curve_a_pts.len() - 1;
+                let start_neighbor = Point::new(
+                    (curve_a_pts[1].x + curve_b_pts[1].x) * 0.5,
+                    (curve_a_pts[1].y + curve_b_pts[1].y) * 0.5,
+                );
+                let end_neighbor = Point::new(
+                    (curve_a_pts[last - 1].x + curve_b_pts[last - 1].x) * 0.5,
+                    (curve_a_pts[last - 1].y + curve_b_pts[last - 1].y) * 0.5,
+                );
+                append_cap_fan_to_mesh(
+                    &mut mesh,
+                    curve_a_pts[0],
+                    curve_b_pts[0],
+                    start_neighbor,
+                    &start_cap_samples,
+                    colors_a[0],
+                    CapDirection::Start,
+                );
+                append_cap_fan_to_mesh(
+                    &mut mesh,
+                    curve_a_pts[last],
+                    curve_b_pts[last],
+                    end_neighbor,
+                    &end_cap_samples,
+                    *colors_a.last().unwrap(),
+                    CapDirection::End,
+                );
+                scene.push_layer(
+                    crate::blend::BlendMode::NORMAL,
+                    1.0,
+                    Affine::IDENTITY,
+                    &path,
+                );
+                scene.draw_mesh(&mesh, Affine::IDENTITY, pick);
+                scene.pop_layer();
+            }
+        } else {
+            let brush = if varies {
+                build_gradient_brush(
+                    orientation,
+                    &curve_a_pts,
+                    &row_for_vertex,
+                    curve_a_pts.len() - row_for_vertex.len(),
+                    fill_ch,
+                    fill_scale,
+                    alpha_ch,
+                    alpha_scale,
+                    mark_color,
+                )
+                .map(Brush::Gradient)
+                .unwrap_or_else(|| Brush::Solid(mark_color))
+            } else {
+                Brush::Solid(mark_color)
+            };
+            scene.fill(
+                FillRule::NonZero,
+                Affine::IDENTITY,
+                &brush,
+                None,
+                &path,
+                pick,
+            );
+        }
+    }
+
+    // ── Per-curve outlines. ──
+    //
+    // Each curve emits its own full LineGeom-style outline if
+    // its stroke channel is bound: dashed pattern, endpoint
+    // markers, endpoint clipping all flow through the same
+    // helper that LineGeom / BSplineGeom use.
+    if let Some(ref spec) = outline_a_spec {
+        draw_curve_outline(scene, ctx, &curve_a_pts, spec);
+    }
+    if let Some(ref spec) = outline_b_spec {
+        draw_curve_outline(scene, ctx, &curve_b_pts, spec);
     }
 }
 
@@ -1064,6 +1097,7 @@ mod tests {
     use crate::color::Color;
     use crate::geometry::Rect;
     use crate::plot::geom::{DirectScaleResolver, Raw};
+    use crate::plot::value::Value;
     use crate::scene::recording::{Op, RecordingScene};
 
     fn shapes() -> crate::shape::ShapeRegistry {

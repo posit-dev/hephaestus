@@ -11,6 +11,7 @@
 //! output, an `"x"` column of dates can flow through a continuous scale
 //! to a `[0, 1]` panel fraction, etc.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::brush::Brush;
@@ -25,12 +26,39 @@ use crate::scene::{Glyph, GlyphRun, SceneBuilder};
 use crate::shape::{Shape, ShapeKind, ShapeRegistry, ShapeStyle};
 use crate::stroke::{Cap, Join, Stroke};
 
-use super::Channel;
+use super::{Channel, GeomContext};
 
 const MARKER_EPSILON: f64 = 1e-9;
 
 /// Maximum valid pick id — the 24-bit `PickId` encoding budget.
 pub(crate) const MAX_PICK_ID: u32 = 0xFF_FFFF;
+
+/// A `(channel, scale)` reference pair carried through draw-time
+/// channel bundles. Bundling halves the field count of per-geom
+/// `*DrawCtx` structs and gives the resolver helpers a natural pair to
+/// receive.
+#[derive(Clone, Copy)]
+pub(crate) struct ChannelBind<'a> {
+    pub ch: Option<&'a Channel>,
+    pub scale: Option<&'a Scale>,
+}
+
+impl<'a> ChannelBind<'a> {
+    /// Look up `name` in `channels` for the [`Channel`] handle and in
+    /// `ctx` for the matching [`Scale`] handle, bundling them into one
+    /// `ChannelBind`. Both lookups are independent — either may return
+    /// `None`.
+    pub(crate) fn from_ctx(
+        channels: &'a HashMap<String, Channel>,
+        ctx: &'a GeomContext<'_>,
+        name: &str,
+    ) -> Self {
+        Self {
+            ch: channels.get(name),
+            scale: ctx.scale_for(name),
+        }
+    }
+}
 
 /// Convert pt to px at the given dpi. The same convention is used for
 /// every absolute graphical size (point diameter, stroke linewidth,

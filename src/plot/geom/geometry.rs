@@ -25,26 +25,27 @@
 
 use crate::brush::Brush;
 use crate::geometry::{Affine, Point};
-use crate::path::{FillRule, Path};
+use crate::path::FillRule;
 use crate::pick::PickId;
 use crate::plot::value::Value;
-use crate::primitives::{offset_polygon, round_corners, CornerRounding};
+use crate::primitives::CornerRounding;
 use crate::scales::geometry::{Coord, Geometry, Polygon as GeoPolygon};
 use crate::scene::{Glyph, GlyphRun, SceneBuilder};
 use crate::shape::{Shape, ShapeKind, ShapeStyle};
 use crate::stroke::Stroke;
 
+use super::outline::{
+    draw_curve_outline, draw_polygon_fill_and_stroke, expand_polygons, EndpointMarker, OutlineSpec,
+    PolygonSpec,
+};
 use super::point::GLYPH_BBOX_REFERENCE;
 use super::resolve::{
-    draw_stroke_with_linetype, override_alpha, pt_to_px, resolve_angle_channel,
-    resolve_cap_channel, resolve_color_channel, resolve_color_channel_or_theme,
-    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position, resolve_str_channel_or,
+    override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or, resolve_cap_channel,
+    resolve_color_channel, resolve_color_channel_or_theme, resolve_join_channel,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
+    resolve_position, resolve_str_channel_or,
 };
-use super::state::{
-    filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
-    GeomState, KeysStrategy,
-};
+use super::state::{finalize_state, require_data_column, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
@@ -114,11 +115,14 @@ impl BuildableGeom for GeometryGeom {
             );
         }
         let n = geom_col.len();
-        validate_channel_lengths(&channels, n, "GeometryGeom");
-        validate_pick_id_channel(&channels, "GeometryGeom");
-
-        let declared = filter_declared(&channels, CHANNELS);
-        let state = GeomState::from_builder(keys_opt, channels, n, KeysStrategy::PerRow, declared);
+        let state = finalize_state(
+            keys_opt,
+            channels,
+            n,
+            KeysStrategy::PerRow,
+            CHANNELS,
+            "GeometryGeom",
+        );
         GeometryGeom { state }
     }
 }
@@ -172,6 +176,16 @@ impl Geom for GeometryGeom {
         let size_scale = ctx.scale_for("size");
         let angle_scale = ctx.scale_for("angle");
         let pick_id_scale = ctx.scale_for("pick_id");
+        let clip_start_radius_scale = ctx.scale_for("clip_start_radius");
+        let clip_end_radius_scale = ctx.scale_for("clip_end_radius");
+        let start_marker_scale = ctx.scale_for("start_marker");
+        let end_marker_scale = ctx.scale_for("end_marker");
+        let start_marker_size_scale = ctx.scale_for("start_marker_size");
+        let end_marker_size_scale = ctx.scale_for("end_marker_size");
+        let start_marker_fill_scale = ctx.scale_for("start_marker_fill");
+        let end_marker_fill_scale = ctx.scale_for("end_marker_fill");
+        let start_marker_invert_scale = ctx.scale_for("start_marker_invert");
+        let end_marker_invert_scale = ctx.scale_for("end_marker_invert");
 
         // ── Channels ──
         let channels = &self.state.channels;
@@ -199,6 +213,16 @@ impl Geom for GeometryGeom {
         let shape_ch = channels.get("shape");
         let angle_ch = channels.get("angle");
         let pick_id_ch = channels.get("pick_id");
+        let clip_start_radius_ch = channels.get("clip_start_radius");
+        let clip_end_radius_ch = channels.get("clip_end_radius");
+        let start_marker_ch = channels.get("start_marker");
+        let end_marker_ch = channels.get("end_marker");
+        let start_marker_size_ch = channels.get("start_marker_size");
+        let end_marker_size_ch = channels.get("end_marker_size");
+        let start_marker_fill_ch = channels.get("start_marker_fill");
+        let end_marker_fill_ch = channels.get("end_marker_fill");
+        let start_marker_invert_ch = channels.get("start_marker_invert");
+        let end_marker_invert_ch = channels.get("end_marker_invert");
 
         // Project an (x, y) data coordinate through the bound scales,
         // offsets, and panel projection — returns panel-space pixels.
@@ -277,6 +301,26 @@ impl Geom for GeometryGeom {
                     size_ch,
                     size_scale,
                     shape_ch,
+                    clip_start_radius_ch,
+                    clip_start_radius_scale,
+                    clip_end_radius_ch,
+                    clip_end_radius_scale,
+                    start_marker_ch,
+                    start_marker_scale,
+                    end_marker_ch,
+                    end_marker_scale,
+                    start_marker_size_ch,
+                    start_marker_size_scale,
+                    end_marker_size_ch,
+                    end_marker_size_scale,
+                    start_marker_fill_ch,
+                    start_marker_fill_scale,
+                    end_marker_fill_ch,
+                    end_marker_fill_scale,
+                    start_marker_invert_ch,
+                    start_marker_invert_scale,
+                    end_marker_invert_ch,
+                    end_marker_invert_scale,
                 },
             );
         }
@@ -327,6 +371,26 @@ where
     size_ch: Option<&'a Channel>,
     size_scale: Option<&'a crate::plot::scale::Scale>,
     shape_ch: Option<&'a Channel>,
+    clip_start_radius_ch: Option<&'a Channel>,
+    clip_start_radius_scale: Option<&'a crate::plot::scale::Scale>,
+    clip_end_radius_ch: Option<&'a Channel>,
+    clip_end_radius_scale: Option<&'a crate::plot::scale::Scale>,
+    start_marker_ch: Option<&'a Channel>,
+    start_marker_scale: Option<&'a crate::plot::scale::Scale>,
+    end_marker_ch: Option<&'a Channel>,
+    end_marker_scale: Option<&'a crate::plot::scale::Scale>,
+    start_marker_size_ch: Option<&'a Channel>,
+    start_marker_size_scale: Option<&'a crate::plot::scale::Scale>,
+    end_marker_size_ch: Option<&'a Channel>,
+    end_marker_size_scale: Option<&'a crate::plot::scale::Scale>,
+    start_marker_fill_ch: Option<&'a Channel>,
+    start_marker_fill_scale: Option<&'a crate::plot::scale::Scale>,
+    end_marker_fill_ch: Option<&'a Channel>,
+    end_marker_fill_scale: Option<&'a crate::plot::scale::Scale>,
+    start_marker_invert_ch: Option<&'a Channel>,
+    start_marker_invert_scale: Option<&'a crate::plot::scale::Scale>,
+    end_marker_invert_ch: Option<&'a Channel>,
+    end_marker_invert_scale: Option<&'a crate::plot::scale::Scale>,
 }
 
 fn draw_geometry<F>(
@@ -404,6 +468,26 @@ where
         size_ch: dc.size_ch,
         size_scale: dc.size_scale,
         shape_ch: dc.shape_ch,
+        clip_start_radius_ch: dc.clip_start_radius_ch,
+        clip_start_radius_scale: dc.clip_start_radius_scale,
+        clip_end_radius_ch: dc.clip_end_radius_ch,
+        clip_end_radius_scale: dc.clip_end_radius_scale,
+        start_marker_ch: dc.start_marker_ch,
+        start_marker_scale: dc.start_marker_scale,
+        end_marker_ch: dc.end_marker_ch,
+        end_marker_scale: dc.end_marker_scale,
+        start_marker_size_ch: dc.start_marker_size_ch,
+        start_marker_size_scale: dc.start_marker_size_scale,
+        end_marker_size_ch: dc.end_marker_size_ch,
+        end_marker_size_scale: dc.end_marker_size_scale,
+        start_marker_fill_ch: dc.start_marker_fill_ch,
+        start_marker_fill_scale: dc.start_marker_fill_scale,
+        end_marker_fill_ch: dc.end_marker_fill_ch,
+        end_marker_fill_scale: dc.end_marker_fill_scale,
+        start_marker_invert_ch: dc.start_marker_invert_ch,
+        start_marker_invert_scale: dc.start_marker_invert_scale,
+        end_marker_invert_ch: dc.end_marker_invert_ch,
+        end_marker_invert_scale: dc.end_marker_invert_scale,
     }
 }
 
@@ -588,6 +672,53 @@ fn draw_lines<F>(
 
     let xform = rotation_about_centroid(lines.iter().flat_map(|l| l.iter().copied()), dc);
 
+    let corner_rounding = (corner_radius_px > 0.0).then_some(CornerRounding {
+        max_cut: corner_radius_px,
+        max_angle_deg: corner_max_angle_deg,
+    });
+
+    // Endpoint markers + endpoint clip — per-row resolution shared
+    // across every line in this row's geometry.
+    let start_name = resolve_str_channel_or(dc.start_marker_ch, dc.start_marker_scale, dc.i, "");
+    let end_name = resolve_str_channel_or(dc.end_marker_ch, dc.end_marker_scale, dc.i, "");
+    let default_marker_size_pt = 3.0 * linewidth_pt;
+    let start_marker_size_pt = resolve_number_channel_or(
+        dc.start_marker_size_ch,
+        dc.start_marker_size_scale,
+        dc.i,
+        default_marker_size_pt,
+    );
+    let end_marker_size_pt = resolve_number_channel_or(
+        dc.end_marker_size_ch,
+        dc.end_marker_size_scale,
+        dc.i,
+        default_marker_size_pt,
+    );
+    let start_marker_fill =
+        resolve_color_channel(dc.start_marker_fill_ch, dc.start_marker_fill_scale, dc.i);
+    let end_marker_fill =
+        resolve_color_channel(dc.end_marker_fill_ch, dc.end_marker_fill_scale, dc.i);
+    let start_invert = resolve_bool_channel_or(
+        dc.start_marker_invert_ch,
+        dc.start_marker_invert_scale,
+        dc.i,
+        false,
+    );
+    let end_invert = resolve_bool_channel_or(
+        dc.end_marker_invert_ch,
+        dc.end_marker_invert_scale,
+        dc.i,
+        false,
+    );
+    let user_clip_start_pt = resolve_number_channel_or(
+        dc.clip_start_radius_ch,
+        dc.clip_start_radius_scale,
+        dc.i,
+        0.0,
+    );
+    let user_clip_end_pt =
+        resolve_number_channel_or(dc.clip_end_radius_ch, dc.clip_end_radius_scale, dc.i, 0.0);
+
     for line in lines {
         if line.len() < 2 {
             continue;
@@ -600,38 +731,33 @@ fn draw_lines<F>(
         if projected.len() < 2 {
             continue;
         }
-        let path = if corner_radius_px > 0.0 {
-            let opts = CornerRounding {
-                max_cut: corner_radius_px,
-                max_angle_deg: corner_max_angle_deg,
-            };
-            round_corners(&projected, false, opts)
-        } else {
-            let mut p = Path::new();
-            p.move_to(projected[0]);
-            for q in &projected[1..] {
-                p.line_to(*q);
-            }
-            p
-        };
-        draw_stroke_with_linetype(
-            scene,
-            &path,
-            /* closed */ false,
-            sc,
-            marker_fill,
-            linewidth_px,
+        let spec = OutlineSpec {
+            stroke_color: sc,
             linewidth_pt,
+            dash_pattern_pt: dash_pattern_pt.clone(),
+            dash_offset_pt,
             cap,
             join,
-            &dash_pattern_pt,
-            dash_offset_pt,
+            marker_fill,
+            user_clip_start_pt,
+            user_clip_end_pt,
+            start_marker: EndpointMarker {
+                name: start_name.clone(),
+                size_pt: start_marker_size_pt,
+                fill: start_marker_fill,
+                invert: start_invert,
+            },
+            end_marker: EndpointMarker {
+                name: end_name.clone(),
+                size_pt: end_marker_size_pt,
+                fill: end_marker_fill,
+                invert: end_invert,
+            },
+            pick: dc.pick,
             xform,
-            dc.pick,
-            ctx.shapes,
-            ctx.theme.geom.marker_outline_pt,
-            ctx.dpi,
-        );
+            corner_rounding,
+        };
+        draw_curve_outline(scene, ctx, &projected, &spec);
     }
 }
 
@@ -726,97 +852,40 @@ fn draw_polygons<F>(
         dc.i,
         ctx.theme.geom.polygon.linewidth_pt,
     );
-    let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
     let cap = resolve_cap_channel(dc.cap_ch, dc.cap_scale, dc.i, ctx.theme.geom.polygon.cap);
     let join = resolve_join_channel(dc.join_ch, dc.join_scale, dc.i, ctx.theme.geom.polygon.join);
     let dash_pattern_pt = resolve_linetype_channel(dc.linetype_ch, dc.linetype_scale, dc.i);
     let dash_offset_pt =
         resolve_number_channel_or(dc.dash_offset_ch, dc.dash_offset_scale, dc.i, 0.0);
+    let corner_rounding = (corner_radius_px > 0.0).then_some(CornerRounding {
+        max_cut: corner_radius_px,
+        max_angle_deg: corner_max_angle_deg,
+    });
 
-    // One MultiPolygon row produces one path covering every sub-polygon
-    // and its holes (EvenOdd handles the interior-exterior decision), so
-    // a single `fill` call covers the whole row.
-    let processed_rings: Vec<Vec<Point>> = if expand_px != 0.0 && expand_px.is_finite() {
-        // Offset polygon ring-by-ring per parent polygon so holes are
-        // offset relative to their own outer ring rather than every
-        // outer in the multipolygon.
-        let mut out = Vec::new();
-        let mut start = 0usize;
-        for pi in 0..polys.len() {
-            let end = ring_owners.partition_point(|&o| o <= pi);
-            if start == end {
-                continue;
-            }
-            let refs: Vec<&[Point]> = all_rings[start..end].iter().map(|r| r.as_slice()).collect();
-            out.extend(offset_polygon(&refs, expand_px, MITER_LIMIT));
-            start = end;
-        }
-        out
-    } else {
-        all_rings
+    // `ring_owners` is contiguous-grouped (per-parent rings pushed
+    // together in the projection loop above), so the helper iterates
+    // once without any reshuffling. The marker-fill convention here
+    // mirrors PolygonGeom but adds a fill→stroke fallback: dashed
+    // marker stamps inherit the polygon fill when bound, else the
+    // stroke color.
+    let processed_rings = expand_polygons(all_rings, Some(&ring_owners), expand_px, MITER_LIMIT);
+
+    let spec = PolygonSpec {
+        fill_color,
+        stroke_color,
+        linewidth_pt,
+        dash_pattern_pt,
+        dash_offset_pt,
+        cap,
+        join,
+        corner_rounding,
+        marker_fill: fill_color.unwrap_or_else(|| {
+            stroke_color.unwrap_or(crate::color::Color::new([0.0, 0.0, 0.0, 1.0]))
+        }),
+        xform,
+        pick,
     };
-
-    let mut path = Path::new();
-    let mut emitted_any = false;
-    for ring in &processed_rings {
-        if ring.len() < 3 {
-            continue;
-        }
-        if corner_radius_px > 0.0 {
-            let opts = CornerRounding {
-                max_cut: corner_radius_px,
-                max_angle_deg: corner_max_angle_deg,
-            };
-            let sub = round_corners(ring, true, opts);
-            for el in sub.iter() {
-                path.push(el);
-            }
-        } else {
-            path.move_to(ring[0]);
-            for q in &ring[1..] {
-                path.line_to(*q);
-            }
-            path.close_path();
-        }
-        emitted_any = true;
-    }
-    if !emitted_any {
-        return;
-    }
-
-    if let Some(fc) = fill_color {
-        scene.fill(
-            FillRule::EvenOdd,
-            xform,
-            &Brush::Solid(fc),
-            None,
-            &path,
-            pick,
-        );
-    }
-    if let Some(sc) = stroke_color {
-        // Marker stamps in the dash pattern inherit the fill color when
-        // bound, else fall back to the stroke color (mirrors PolygonGeom).
-        let marker_fill = fill_color.unwrap_or(sc);
-        draw_stroke_with_linetype(
-            scene,
-            &path,
-            /* closed */ true,
-            sc,
-            marker_fill,
-            linewidth_px,
-            linewidth_pt,
-            cap,
-            join,
-            &dash_pattern_pt,
-            dash_offset_pt,
-            xform,
-            pick,
-            ctx.shapes,
-            ctx.theme.geom.marker_outline_pt,
-            ctx.dpi,
-        );
-    }
+    draw_polygon_fill_and_stroke(scene, ctx, &processed_rings, &spec);
 }
 
 fn project_ring<F>(ring: &[Coord], dc: &DrawCtx<'_, F>) -> Vec<Point>

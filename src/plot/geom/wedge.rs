@@ -92,10 +92,7 @@ use super::resolve::{
     resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
     resolve_position, smallest_nonzero,
 };
-use super::state::{
-    filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
-    GeomState, KeysStrategy,
-};
+use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
@@ -157,17 +154,15 @@ crate::impl_geom_inherents!(WedgeGeom);
 impl BuildableGeom for WedgeGeom {
     fn build_from(builder: GeomBuilder<Self>) -> Self {
         let (keys_opt, channels) = builder.into_parts();
-
-        let n = require_data_column("x", &channels, "WedgeGeom").len();
-        let y_len = require_data_column("y", &channels, "WedgeGeom").len();
-        if y_len != n {
-            panic!("WedgeGeom::build: \"y\" length {y_len} does not match \"x\" length {n}");
-        }
-        validate_channel_lengths(&channels, n, "WedgeGeom");
-        validate_pick_id_channel(&channels, "WedgeGeom");
-
-        let declared = filter_declared(&channels, CHANNELS);
-        let state = GeomState::from_builder(keys_opt, channels, n, KeysStrategy::PerRow, declared);
+        let n = require_x_and_siblings(&channels, &["y"], "WedgeGeom");
+        let state = finalize_state(
+            keys_opt,
+            channels,
+            n,
+            KeysStrategy::PerRow,
+            CHANNELS,
+            "WedgeGeom",
+        );
         WedgeGeom { state }
     }
 }

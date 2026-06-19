@@ -63,23 +63,16 @@ use crate::primitives::PolylineSampler;
 use crate::scene::{Glyph, GlyphRun, SceneBuilder};
 use crate::text::{run_layout_glyphs, TextRun, TextStyle};
 
-use super::marks::{build_marks_from_column, MarkSlot};
+use super::marks::{build_marks_from_column, unique_values_at_first_rows, MarkSlot};
 use super::resolve::{
     override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or,
     resolve_color_channel_or_theme, resolve_number_channel, resolve_number_channel_or,
     resolve_pick_id, resolve_position, resolve_str_channel_or,
 };
-use super::state::{
-    filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
-    GeomState, KeysStrategy,
-};
-use super::{
-    empty_datacolumn_like, BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext,
-    Keys,
-};
+use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
+use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
 
 use crate::plot::diff::{diff_columns, diff_positional, KeyIndex};
-use crate::plot::value::DataColumn;
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
@@ -130,23 +123,21 @@ impl TextPathGeom {
 impl BuildableGeom for TextPathGeom {
     fn build_from(builder: GeomBuilder<Self>) -> Self {
         let (keys_opt, channels) = builder.into_parts();
-
-        let n = require_data_column("x", &channels, "TextPathGeom").len();
-        let y_len = require_data_column("y", &channels, "TextPathGeom").len();
-        if y_len != n {
-            panic!("TextPathGeom::build: \"y\" length {y_len} does not match \"x\" length {n}");
-        }
+        let n = require_x_and_siblings(&channels, &["y"], "TextPathGeom");
         // `"text"` may be a constant (one string for all marks) or per-
         // mark data, so we don't require_data_column here. But it must be
         // present — the geom has no useful default text.
         if !channels.contains_key("text") {
             panic!("TextPathGeom::build: missing required channel \"text\"");
         }
-        validate_channel_lengths(&channels, n, "TextPathGeom");
-        validate_pick_id_channel(&channels, "TextPathGeom");
-
-        let declared = filter_declared(&channels, CHANNELS);
-        let state = GeomState::from_builder(keys_opt, channels, n, KeysStrategy::OneMark, declared);
+        let state = finalize_state(
+            keys_opt,
+            channels,
+            n,
+            KeysStrategy::OneMark,
+            CHANNELS,
+            "TextPathGeom",
+        );
         TextPathGeom {
             state,
             marks: Vec::new(),
@@ -191,8 +182,16 @@ impl Geom for TextPathGeom {
         };
         let (enter, update, exit) = match (&self.state.prev_keys, &self.state.keys) {
             (Keys::Explicit(prev_col), Keys::Explicit(next_col)) => {
-                let prev_unique = unique_keys_column(prev_col, &prev_marks);
-                let next_unique = unique_keys_column(next_col, &next_marks);
+                let prev_unique = unique_values_at_first_rows(
+                    prev_col,
+                    prev_marks.iter().map(|m| m.first_row),
+                    "TextPathGeom",
+                );
+                let next_unique = unique_values_at_first_rows(
+                    next_col,
+                    next_marks.iter().map(|m| m.first_row),
+                    "TextPathGeom",
+                );
                 let idx = KeyIndex::build(&prev_unique);
                 diff_columns(&prev_unique, &idx, &next_unique)
             }
@@ -551,37 +550,6 @@ fn resolve_italic(
         Value::String(s) => matches!(&*s, "italic" | "oblique"),
         _ => false,
     }
-}
-
-// ─── Diff helpers (mirrored from LineGeom) ───────────────────────────────────
-
-fn unique_keys_column(col: &DataColumn, marks: &[MarkSlot]) -> DataColumn {
-    let template = empty_datacolumn_like(col);
-    push_values_into(template, marks.iter().map(|m| col.get(m.first_row)))
-}
-
-fn push_values_into(
-    mut template: DataColumn,
-    values: impl IntoIterator<Item = Value>,
-) -> DataColumn {
-    for v in values {
-        match (&mut template, v) {
-            (DataColumn::F64(vec), Value::Number(n)) => vec.push(n),
-            (DataColumn::F32(vec), Value::Number(n)) => vec.push(n as f32),
-            (DataColumn::I32(vec), Value::Number(n)) => vec.push(n as i32),
-            (DataColumn::I64(vec), Value::Number(n)) => vec.push(n as i64),
-            (DataColumn::Bool(vec), Value::Bool(b)) => vec.push(b),
-            (DataColumn::String(vec), Value::String(s)) => vec.push(s),
-            (DataColumn::Color(vec), Value::Color(c)) => vec.push(c),
-            (DataColumn::Date(vec), Value::Date(d)) => vec.push(d),
-            (DataColumn::DateTime(vec), Value::DateTime(us)) => vec.push(us),
-            (DataColumn::Time(vec), Value::Time(us)) => vec.push(us),
-            (DataColumn::Duration(vec), Value::Duration(us)) => vec.push(us),
-            (DataColumn::Linetype(vec), Value::Linetype(p)) => vec.push(p),
-            _ => panic!("TextPathGeom: unique-keys column variant mismatch"),
-        }
-    }
-    template
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

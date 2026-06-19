@@ -20,12 +20,17 @@
 //! geoms (`RibbonGeom`, `RibbonBSplineGeom`) can call it once per curve
 //! without duplicating ~150 lines of orchestration.
 
+use crate::brush::Brush;
 use crate::color::Color;
 use crate::geometry::{Affine, Point};
+use crate::path::{FillRule, Path};
 use crate::pick::PickId;
 use crate::plot::scale::Scale;
 use crate::plot::value::LinetypeStep;
-use crate::primitives::{clip_polyline, polyline, EndClip, PolylineOptions};
+use crate::primitives::offset_polygon;
+use crate::primitives::{
+    clip_polyline, polyline, round_corners, CornerRounding, EndClip, PolylineOptions,
+};
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join};
 use std::collections::HashMap;
@@ -47,6 +52,7 @@ use super::{Channel, GeomContext};
 /// Channel handles for one curve's full LineGeom-style outline surface,
 /// keyed off a suffix (`""` for curve A, `"2"` for curve B in a ribbon
 /// geom).
+#[derive(Clone, Copy)]
 pub(crate) struct OutlineChannels<'a> {
     pub stroke: Option<&'a Channel>,
     pub linewidth: Option<&'a Channel>,
@@ -95,6 +101,7 @@ impl<'a> OutlineChannels<'a> {
 
 /// Scale references for one curve's outline surface, keyed off the same
 /// suffix as the matching [`OutlineChannels`].
+#[derive(Clone, Copy)]
 pub(crate) struct OutlineScales<'a> {
     pub stroke: Option<&'a Scale>,
     pub linewidth: Option<&'a Scale>,
@@ -219,6 +226,8 @@ pub(crate) fn resolve_outline_spec(
             invert: end_marker_invert,
         },
         pick,
+        xform: Affine::IDENTITY,
+        corner_rounding: None,
     })
 }
 
@@ -252,6 +261,14 @@ pub(crate) struct OutlineSpec {
     pub start_marker: EndpointMarker,
     pub end_marker: EndpointMarker,
     pub pick: PickId,
+    /// Affine applied to the stroke and both endpoint markers. Used by
+    /// `LineGeom` for per-mark rotation around the polyline centroid;
+    /// other callers leave it at `Affine::IDENTITY`.
+    pub xform: Affine,
+    /// When `Some`, the post-clip polyline is fed through
+    /// [`round_corners`] before stroking. When `None`, a straight
+    /// `polyline(default)` path is built instead.
+    pub corner_rounding: Option<CornerRounding>,
 }
 
 /// Endpoint marker configuration for one side of a curve.
@@ -276,6 +293,169 @@ impl Default for EndpointMarker {
             fill: None,
             invert: false,
         }
+    }
+}
+
+// ─── Polygon (fill + closed stroke) shared helper ────────────────────────────
+
+/// Per-mark per-polygon outline configuration.
+///
+/// Mirrors [`OutlineSpec`] but for the closed-contour case used by
+/// `PolygonGeom`'s non-ribbon-mode branch and `GeometryGeom`'s polygon
+/// variant. The shared helper builds a single EvenOdd multi-ring path,
+/// optionally rounds the corners of every ring, then emits the fill
+/// (when `fill_color` is set) and a closed stroke (when `stroke_color`
+/// is set).
+pub(crate) struct PolygonSpec {
+    /// Brush colour for the EvenOdd-filled interior. `None` skips the
+    /// fill call entirely.
+    pub fill_color: Option<Color>,
+    /// Stroke colour for the closed outline. `None` skips the stroke
+    /// call entirely.
+    pub stroke_color: Option<Color>,
+    /// Width in pt of the closed stroke. Pixel conversion happens in
+    /// the helper.
+    pub linewidth_pt: f64,
+    /// Dash pattern (`LinetypeStep` sequence). Empty = solid.
+    pub dash_pattern_pt: Arc<[LinetypeStep]>,
+    /// Phase shift along the dash pattern in pt.
+    pub dash_offset_pt: f64,
+    /// Stroke end style (only meaningful for dashed open segments
+    /// within a closed pattern).
+    pub cap: Cap,
+    /// Stroke vertex style.
+    pub join: Join,
+    /// When `Some`, every ring is fed through [`round_corners`] before
+    /// being added to the path.
+    pub corner_rounding: Option<CornerRounding>,
+    /// Marker stamps in the dash pattern inherit this colour when bound.
+    /// `PolygonGeom` passes its resolved fill or stroke; `GeometryGeom`
+    /// passes the polygon-variant marker fill.
+    pub marker_fill: Color,
+    /// Affine applied to the fill and stroke. Used by both callers for
+    /// per-mark rotation around the outer-ring centroid.
+    pub xform: Affine,
+    /// Per-mark pick id.
+    pub pick: PickId,
+}
+
+/// Render a closed multi-ring polygon — build an EvenOdd path with
+/// optional per-ring corner rounding, emit the fill (if any) under the
+/// caller-supplied affine, then emit the closed stroke (if any) through
+/// [`draw_stroke_with_linetype`].
+///
+/// `rings` is the flat list of rings — exteriors and holes intermixed,
+/// in any order — that all participate in the same EvenOdd contour. The
+/// caller is responsible for any per-parent expand offset, projection,
+/// and band/offset arithmetic before invoking the helper.
+///
+/// No-op when every ring has fewer than three vertices.
+pub(crate) fn draw_polygon_fill_and_stroke(
+    scene: &mut dyn SceneBuilder,
+    ctx: &GeomContext<'_>,
+    rings: &[Vec<Point>],
+    spec: &PolygonSpec,
+) {
+    let mut path = Path::new();
+    let mut any = false;
+    for ring in rings {
+        if ring.len() < 3 {
+            continue;
+        }
+        if let Some(rounding) = spec.corner_rounding {
+            let sub = round_corners(ring, true, rounding);
+            for el in sub.iter() {
+                path.push(el);
+            }
+        } else {
+            path.move_to(ring[0]);
+            for q in &ring[1..] {
+                path.line_to(*q);
+            }
+            path.close_path();
+        }
+        any = true;
+    }
+    if !any {
+        return;
+    }
+
+    if let Some(fc) = spec.fill_color {
+        scene.fill(
+            FillRule::EvenOdd,
+            spec.xform,
+            &Brush::Solid(fc),
+            None,
+            &path,
+            spec.pick,
+        );
+    }
+    if let Some(sc) = spec.stroke_color {
+        let linewidth_px = pt_to_px(spec.linewidth_pt, ctx.dpi);
+        if !linewidth_px.is_finite() || linewidth_px <= 0.0 {
+            return;
+        }
+        draw_stroke_with_linetype(
+            scene,
+            &path,
+            /* closed */ true,
+            sc,
+            spec.marker_fill,
+            linewidth_px,
+            spec.linewidth_pt,
+            spec.cap,
+            spec.join,
+            &spec.dash_pattern_pt,
+            spec.dash_offset_pt,
+            spec.xform,
+            spec.pick,
+            ctx.shapes,
+            ctx.theme.geom.marker_outline_pt,
+            ctx.dpi,
+        );
+    }
+}
+
+/// Apply a polygon offset (Clipper2 miter-join) to every ring of a
+/// multi-polygon, keeping holes anchored to their own outer ring.
+///
+/// `rings` is the flat list of all projected rings. `ring_owners` —
+/// when supplied — assigns each ring to a parent polygon by index;
+/// runs of equal owners are taken as one parent for the offset call so
+/// holes are offset relative to their own outer ring. Pass `None` to
+/// treat the whole input as one polygon (the single-mark case).
+///
+/// `ring_owners` is expected to be contiguous-grouped (all rings of
+/// parent `k` adjacent in `rings`); the helper iterates once without
+/// any reshuffling. When `expand_px` is zero or non-finite the input
+/// rings are returned untouched (no work, no copy).
+pub(crate) fn expand_polygons(
+    rings: Vec<Vec<Point>>,
+    ring_owners: Option<&[usize]>,
+    expand_px: f64,
+    miter_limit: f64,
+) -> Vec<Vec<Point>> {
+    if expand_px == 0.0 || !expand_px.is_finite() {
+        return rings;
+    }
+    if let Some(owners) = ring_owners {
+        debug_assert_eq!(rings.len(), owners.len());
+        let mut out = Vec::new();
+        let mut start = 0;
+        while start < rings.len() {
+            let owner = owners[start];
+            let mut end = start + 1;
+            while end < rings.len() && owners[end] == owner {
+                end += 1;
+            }
+            let refs: Vec<&[Point]> = rings[start..end].iter().map(|r| r.as_slice()).collect();
+            out.extend(offset_polygon(&refs, expand_px, miter_limit));
+            start = end;
+        }
+        out
+    } else {
+        let refs: Vec<&[Point]> = rings.iter().map(|r| r.as_slice()).collect();
+        offset_polygon(&refs, expand_px, miter_limit)
     }
 }
 
@@ -339,9 +519,13 @@ pub(crate) fn draw_curve_outline(
         return;
     }
 
-    let path = polyline(&clipped, PolylineOptions::default());
+    let path = if let Some(rounding) = spec.corner_rounding {
+        round_corners(&clipped, false, rounding)
+    } else {
+        polyline(&clipped, PolylineOptions::default())
+    };
     let marker_outline_px = linewidth_px.max(pt_to_px(0.5, ctx.dpi));
-    let xform = Affine::IDENTITY;
+    let xform = spec.xform;
 
     if !spec.start_marker.name.is_empty() {
         let size_px = pt_to_px(spec.start_marker.size_pt, ctx.dpi);
