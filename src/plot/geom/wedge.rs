@@ -82,17 +82,15 @@ use crate::geometry::{Affine, Point};
 use crate::path::FillRule;
 use crate::primitives::{
     annular_wedge as annular_wedge_path, offset_polygon, path_to_rings, round_path_corners,
-    wedge as wedge_path, CornerRounding, PolylineSampler,
+    wedge as wedge_path, CornerRounding,
 };
 use crate::scene::SceneBuilder;
-use crate::stroke::Stroke;
 
-use super::linetype;
 use super::resolve::{
-    band_width_at, build_stroke_for_pattern, draw_linetype_with_markers, override_alpha, pt_to_px,
-    resolve_angle_channel, resolve_cap_channel, resolve_color_channel_or_theme,
-    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position, smallest_nonzero,
+    band_width_at, draw_stroke_with_linetype, override_alpha, pt_to_px, resolve_angle_channel,
+    resolve_cap_channel, resolve_color_channel_or_theme, resolve_join_channel,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
+    resolve_position, smallest_nonzero,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -451,47 +449,29 @@ impl Geom for WedgeGeom {
                     ctx.theme.geom.wedge.linewidth_pt,
                 );
                 let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
-                if linewidth_px.is_finite() && linewidth_px > 0.0 {
-                    let dash_pattern_pt = resolve_linetype_channel(linetype_ch, linetype_scale, i);
-                    let dash_offset_pt =
-                        resolve_number_channel_or(dash_offset_ch, dash_offset_scale, i, 0.0);
-                    let cap = resolve_cap_channel(cap_ch, cap_scale, i, ctx.theme.geom.wedge.cap);
-                    let join =
-                        resolve_join_channel(join_ch, join_scale, i, ctx.theme.geom.wedge.join);
-                    if linetype::is_marker_free(&dash_pattern_pt) {
-                        let stroke_spec = build_stroke_for_pattern(
-                            linewidth_px,
-                            cap,
-                            join,
-                            &dash_pattern_pt,
-                            dash_offset_pt,
-                            linewidth_pt,
-                            ctx.dpi,
-                        );
-                        scene.stroke(&stroke_spec, xform, &Brush::Solid(sc), None, &path, pick);
-                    } else {
-                        let samplers = PolylineSampler::from_closed_path(&path, 0.5);
-                        let solid_stroke_spec =
-                            Stroke::new(linewidth_px).with_caps(cap).with_join(join);
-                        let dash_offset_px = pt_to_px(dash_offset_pt, ctx.dpi);
-                        draw_linetype_with_markers(
-                            scene,
-                            &samplers,
-                            &dash_pattern_pt,
-                            dash_offset_px,
-                            linewidth_px,
-                            sc,
-                            sc,
-                            ctx.theme.geom.marker_outline_pt,
-                            &solid_stroke_spec,
-                            xform,
-                            ctx.shapes,
-                            ctx.dpi,
-                            pick,
-                            /* distribute */ true,
-                        );
-                    }
-                }
+                let dash_pattern_pt = resolve_linetype_channel(linetype_ch, linetype_scale, i);
+                let dash_offset_pt =
+                    resolve_number_channel_or(dash_offset_ch, dash_offset_scale, i, 0.0);
+                let cap = resolve_cap_channel(cap_ch, cap_scale, i, ctx.theme.geom.wedge.cap);
+                let join = resolve_join_channel(join_ch, join_scale, i, ctx.theme.geom.wedge.join);
+                draw_stroke_with_linetype(
+                    scene,
+                    &path,
+                    /* closed */ true,
+                    sc,
+                    sc,
+                    linewidth_px,
+                    linewidth_pt,
+                    cap,
+                    join,
+                    &dash_pattern_pt,
+                    dash_offset_pt,
+                    xform,
+                    pick,
+                    ctx.shapes,
+                    ctx.theme.geom.marker_outline_pt,
+                    ctx.dpi,
+                );
             }
         }
     }

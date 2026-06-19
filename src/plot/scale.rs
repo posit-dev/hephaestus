@@ -712,6 +712,7 @@ fn format_value(v: &Value, locale: &Locale) -> String {
                 format!("[{}]", parts.join(", "))
             }
         }
+        Value::Geometry(g) => format!("{g:?}"),
     }
 }
 

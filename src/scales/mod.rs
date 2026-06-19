@@ -37,6 +37,7 @@
 
 pub mod breaks;
 pub mod chrome;
+pub mod geometry;
 pub mod input;
 pub mod locale;
 pub mod output;
@@ -68,6 +69,7 @@ pub use breaks::{
     CalendarUnit, TemporalInterval, DEFAULT_BREAK_COUNT,
 };
 pub use chrome::{AxisSide, LegendSide};
+pub use geometry::{Coord, Geometry, ParseError as GeometryParseError, Polygon as GeometryPolygon};
 pub use input::InputRange;
 pub use locale::{Locale, Weekday};
 pub use output::OutputRange;

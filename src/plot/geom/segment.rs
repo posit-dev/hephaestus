@@ -24,23 +24,20 @@
 //!   mathematical CCW (positive rotates the segment counter-clockwise
 //!   in the rendered image). Default `0.0` (no rotation).
 
+#[cfg(test)]
 use crate::brush::Brush;
 use crate::geometry::{Affine, Point};
 use crate::primitives::{
     clip_polyline, polyline as polyline_path, segment as segment_path, EndClip, PolylineOptions,
-    PolylineSampler,
 };
 use crate::scene::SceneBuilder;
-use crate::stroke::Stroke;
 
-use super::linetype;
 use super::resolve::{
-    auto_endpoint_clip_pt, build_stroke_for_pattern, draw_linetype_with_markers,
-    emit_endpoint_marker, endpoint_outward, override_alpha, pt_to_px, resolve_angle_channel,
-    resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel,
-    resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
-    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
-    resolve_str_channel_or,
+    auto_endpoint_clip_pt, draw_stroke_with_linetype, emit_endpoint_marker, endpoint_outward,
+    override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or, resolve_cap_channel,
+    resolve_color_channel, resolve_color_channel_or_theme, resolve_join_channel,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
+    resolve_position, resolve_str_channel_or,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -439,49 +436,24 @@ impl Geom for SegmentGeom {
                 );
             }
 
-            if linetype::is_marker_free(&dash_pattern_pt) {
-                let stroke_spec = build_stroke_for_pattern(
-                    linewidth_px,
-                    cap,
-                    join,
-                    &dash_pattern_pt,
-                    dash_offset_pt,
-                    linewidth_pt,
-                    ctx.dpi,
-                );
-                scene.stroke(
-                    &stroke_spec,
-                    xform,
-                    &Brush::Solid(stroke_color),
-                    None,
-                    &path,
-                    pick,
-                );
-            } else {
-                // Segment is open: no gap distribution. Marker fill
-                // comes from the `"fill"` channel, defaulting to the
-                // resolved stroke colour. Marker outlines use the
-                // stroke colour.
-                let samplers = PolylineSampler::from_path(&path, 0.5);
-                let solid_stroke_spec = Stroke::new(linewidth_px).with_caps(cap).with_join(join);
-                let dash_offset_px = pt_to_px(dash_offset_pt, ctx.dpi);
-                draw_linetype_with_markers(
-                    scene,
-                    &samplers,
-                    &dash_pattern_pt,
-                    dash_offset_px,
-                    linewidth_px,
-                    marker_fill,
-                    stroke_color,
-                    ctx.theme.geom.marker_outline_pt,
-                    &solid_stroke_spec,
-                    xform,
-                    ctx.shapes,
-                    ctx.dpi,
-                    pick,
-                    /* distribute */ false,
-                );
-            }
+            draw_stroke_with_linetype(
+                scene,
+                &path,
+                /* closed */ false,
+                stroke_color,
+                marker_fill,
+                linewidth_px,
+                linewidth_pt,
+                cap,
+                join,
+                &dash_pattern_pt,
+                dash_offset_pt,
+                xform,
+                pick,
+                ctx.shapes,
+                ctx.theme.geom.marker_outline_pt,
+                ctx.dpi,
+            );
 
             if !end_name.is_empty() {
                 let size_px = pt_to_px(end_marker_size_pt, ctx.dpi);

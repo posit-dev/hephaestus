@@ -26,6 +26,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::color::Color;
+use crate::scales::geometry::Geometry;
 
 // ─── Temporal newtypes ───────────────────────────────────────────────────────
 
@@ -329,6 +330,14 @@ pub enum Value {
     /// pattern repeats across many rows (the common case under
     /// categorical scaling).
     Linetype(Arc<[LinetypeStep]>),
+
+    /// A spatial feature — Point / LineString / Polygon / Multi* /
+    /// GeometryCollection. See [`Geometry`]. Carried by `Arc` so cloning
+    /// a column of geometries does not duplicate the per-row coordinate
+    /// buffers. Opaque to scales: continuous and discrete maps do not
+    /// accept geometry input; the consuming geom walks the structure and
+    /// maps each coordinate through bound x/y scales.
+    Geometry(Arc<Geometry>),
 }
 
 impl Value {
@@ -411,6 +420,16 @@ impl Value {
         }
     }
 
+    /// Borrow the underlying spatial geometry, if this value is a
+    /// `Value::Geometry`. Returns `None` for every other variant.
+    pub fn as_geometry(&self) -> Option<&Geometry> {
+        if let Value::Geometry(g) = self {
+            Some(g)
+        } else {
+            None
+        }
+    }
+
     /// Deterministic equality for diff/lookup keys. Two `Value::Number`
     /// NaNs compare equal; positive and negative zero compare equal.
     /// `Value::Linetype` compares element-wise via
@@ -433,6 +452,7 @@ impl Value {
                         .zip(b.iter())
                         .all(|(x, y)| linetype_step_key_eq(x, y))
             }
+            (Geometry(a), Geometry(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -465,6 +485,10 @@ impl Value {
                 for step in p.iter() {
                     linetype_step_key_hash(step, state);
                 }
+            }
+            Value::Geometry(g) => {
+                // Pointer identity matches `key_eq`: same Arc = same row.
+                (Arc::as_ptr(g) as usize).hash(state);
             }
         }
     }
@@ -544,6 +568,19 @@ impl From<Color> for Value {
     }
 }
 
+// Geometries arrive either by value (auto-wrapped in an Arc) or as a
+// shared Arc (zero-cost when the same feature appears in many rows).
+impl From<Geometry> for Value {
+    fn from(g: Geometry) -> Self {
+        Value::Geometry(Arc::new(g))
+    }
+}
+impl From<Arc<Geometry>> for Value {
+    fn from(g: Arc<Geometry>) -> Self {
+        Value::Geometry(g)
+    }
+}
+
 // Temporal newtypes flow through their dedicated variants.
 impl From<Date> for Value {
     fn from(v: Date) -> Self {
@@ -596,6 +633,12 @@ pub enum DataColumn {
     /// replicating a small set of patterns (the typical case under
     /// categorical scaling).
     Linetype(Vec<Arc<[LinetypeStep]>>),
+
+    /// Column of spatial geometries — one `Arc<Geometry>` per row. The
+    /// `Arc` lets distinct rows share a backing feature when a column is
+    /// constructed by replicating one geometry (e.g. a small fixed set
+    /// of country outlines).
+    Geometry(Vec<Arc<Geometry>>),
 }
 
 impl DataColumn {
@@ -614,6 +657,7 @@ impl DataColumn {
             DataColumn::Time(v) => v.len(),
             DataColumn::Duration(v) => v.len(),
             DataColumn::Linetype(v) => v.len(),
+            DataColumn::Geometry(v) => v.len(),
         }
     }
 
@@ -640,6 +684,7 @@ impl DataColumn {
             DataColumn::Time(v) => Value::Time(v[i]),
             DataColumn::Duration(v) => Value::Duration(v[i]),
             DataColumn::Linetype(v) => Value::Linetype(v[i].clone()),
+            DataColumn::Geometry(v) => Value::Geometry(v[i].clone()),
         }
     }
 
@@ -694,6 +739,7 @@ impl DataColumn {
                         .zip(pb.iter())
                         .all(|(x, y)| linetype_step_key_eq(x, y))
             }
+            (Geometry(a), Geometry(b)) => Arc::ptr_eq(&a[i], &b[j]),
             _ => false,
         }
     }
@@ -791,6 +837,20 @@ impl From<std::ops::Range<i64>> for DataColumn {
 impl From<Vec<Arc<[LinetypeStep]>>> for DataColumn {
     fn from(v: Vec<Arc<[LinetypeStep]>>) -> Self {
         DataColumn::Linetype(v)
+    }
+}
+
+// Spatial geometry columns. `Vec<Geometry>` auto-wraps each row in an
+// `Arc`; `Vec<Arc<Geometry>>` is the zero-copy fast path when the caller
+// has already arranged sharing.
+impl From<Vec<Geometry>> for DataColumn {
+    fn from(v: Vec<Geometry>) -> Self {
+        DataColumn::Geometry(v.into_iter().map(Arc::new).collect())
+    }
+}
+impl From<Vec<Arc<Geometry>>> for DataColumn {
+    fn from(v: Vec<Arc<Geometry>>) -> Self {
+        DataColumn::Geometry(v)
     }
 }
 

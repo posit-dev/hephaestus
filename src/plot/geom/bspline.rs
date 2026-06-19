@@ -73,27 +73,23 @@
 //! rescaled to a row position — same convention LineGeom uses for its
 //! per-segment lerp, generalised to the spline parameter space.
 
-use crate::brush::Brush;
 use crate::color::{lerp_color, Color};
 use crate::geometry::{Affine, Point};
 use crate::plot::diff::{diff_columns, diff_positional, KeyIndex};
 use crate::plot::value::{DataColumn, Value};
 use crate::primitives::{
     clip_polyline, clip_polyline_with_attrs, polyline, polyline_ribbon_full, EndClip,
-    PolylineOptions, PolylineSampler, RibbonOptions,
+    PolylineOptions, RibbonOptions,
 };
 use crate::scene::SceneBuilder;
-use crate::stroke::Stroke;
 
-use super::linetype;
 use super::marks::{build_marks_from_column, MarkSlot};
 use super::resolve::{
-    auto_endpoint_clip_pt, build_stroke_for_pattern, channel_varies_across,
-    draw_linetype_with_markers, emit_endpoint_marker, endpoint_outward, override_alpha, pt_to_px,
-    resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel,
-    resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
-    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
-    resolve_str_channel_or,
+    auto_endpoint_clip_pt, channel_varies_across, draw_stroke_with_linetype, emit_endpoint_marker,
+    endpoint_outward, override_alpha, pt_to_px, resolve_bool_channel_or, resolve_cap_channel,
+    resolve_color_channel, resolve_color_channel_or_theme, resolve_join_channel,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
+    resolve_position, resolve_str_channel_or,
 };
 use super::state::{
     filter_declared, require_data_column, validate_channel_lengths, validate_pick_id_channel,
@@ -400,7 +396,6 @@ impl Geom for BSplineGeom {
             let join = resolve_join_channel(join_ch, join_scale, i0, ctx.theme.geom.bspline.join);
             let marker_fill =
                 resolve_color_channel(fill_ch, fill_scale, i0).unwrap_or(stroke_color);
-            let has_markers = !linetype::is_marker_free(&dash_pattern_pt);
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
 
             // ── Control polygon in channel-fraction space. ──
@@ -623,45 +618,25 @@ impl Geom for BSplineGeom {
                     &opts,
                 );
                 scene.draw_mesh(&mesh, Affine::IDENTITY, pick);
-            } else if !has_markers {
+            } else {
                 let path = polyline(&clipped_points, PolylineOptions::default());
-                let stroke_spec = build_stroke_for_pattern(
+                draw_stroke_with_linetype(
+                    scene,
+                    &path,
+                    /* closed */ false,
+                    stroke_color,
+                    marker_fill,
                     linewidth_px,
+                    linewidth_pt,
                     cap,
                     join,
                     &dash_pattern_pt,
                     dash_offset_pt,
-                    linewidth_pt,
-                    ctx.dpi,
-                );
-                scene.stroke(
-                    &stroke_spec,
                     Affine::IDENTITY,
-                    &Brush::Solid(stroke_color),
-                    None,
-                    &path,
                     pick,
-                );
-            } else {
-                let dash_offset_px = pt_to_px(dash_offset_pt, ctx.dpi);
-                let linewidth_px_for_marker = pt_to_px(linewidth_pt, ctx.dpi);
-                let samplers = vec![PolylineSampler::from_polyline(&clipped_points)];
-                let solid_stroke_spec = Stroke::new(linewidth_px).with_caps(cap).with_join(join);
-                draw_linetype_with_markers(
-                    scene,
-                    &samplers,
-                    &dash_pattern_pt,
-                    dash_offset_px,
-                    linewidth_px_for_marker,
-                    marker_fill,
-                    stroke_color,
-                    ctx.theme.geom.marker_outline_pt,
-                    &solid_stroke_spec,
-                    Affine::IDENTITY,
                     ctx.shapes,
+                    ctx.theme.geom.marker_outline_pt,
                     ctx.dpi,
-                    pick,
-                    /* distribute */ false,
                 );
             }
 

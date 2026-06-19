@@ -58,16 +58,13 @@ use crate::plot::diff::{diff_columns, diff_positional, KeyIndex};
 use crate::plot::projection::InteriorSample;
 use crate::plot::value::{DataColumn, Value};
 use crate::primitives::{
-    offset_polygon, polygon_ribbon_full, round_corners, CornerRounding, PolylineSampler,
-    RibbonOptions,
+    offset_polygon, polygon_ribbon_full, round_corners, CornerRounding, RibbonOptions,
 };
 use crate::scene::SceneBuilder;
-use crate::stroke::Stroke;
 
-use super::linetype;
 use super::resolve::{
-    build_stroke_for_pattern, channel_varies_across, draw_linetype_with_markers, override_alpha,
-    pt_to_px, resolve_angle_channel, resolve_cap_channel, resolve_color_channel,
+    channel_varies_across, draw_stroke_with_linetype, override_alpha, pt_to_px,
+    resolve_angle_channel, resolve_cap_channel, resolve_color_channel,
     resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
     resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
 };
@@ -720,19 +717,18 @@ impl Geom for PolygonGeom {
                     ctx.theme.geom.polygon.linewidth_pt,
                 );
                 let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
-                if linewidth_px.is_finite() && linewidth_px > 0.0 {
-                    // dash_pattern_pt already resolved above for the
-                    // ribbon-mode decision; re-use it.
-                    let dash_offset_pt =
-                        resolve_number_channel_or(dash_offset_ch, dash_offset_scale, i0, 0.0);
-                    let cap =
-                        resolve_cap_channel(cap_ch, cap_scale, i0, ctx.theme.geom.polygon.cap);
-                    let join =
-                        resolve_join_channel(join_ch, join_scale, i0, ctx.theme.geom.polygon.join);
-                    if ribbon_mode {
-                        // Per-ring ribbon mesh (Phase E.5). `offset_rings`
-                        // is the un-modified `rings_pts` because
-                        // ribbon mode gates on expand == 0 and corner_radius == 0.
+                // dash_pattern_pt already resolved above for the
+                // ribbon-mode decision; re-use it.
+                let dash_offset_pt =
+                    resolve_number_channel_or(dash_offset_ch, dash_offset_scale, i0, 0.0);
+                let cap = resolve_cap_channel(cap_ch, cap_scale, i0, ctx.theme.geom.polygon.cap);
+                let join =
+                    resolve_join_channel(join_ch, join_scale, i0, ctx.theme.geom.polygon.join);
+                if ribbon_mode {
+                    // Per-ring ribbon mesh (Phase E.5). `offset_rings` is
+                    // the un-modified `rings_pts` because ribbon mode gates
+                    // on expand == 0 and corner_radius == 0.
+                    if linewidth_px.is_finite() && linewidth_px > 0.0 {
                         let opts = RibbonOptions {
                             half_width: 0.0,
                             cap,
@@ -748,42 +744,26 @@ impl Geom for PolygonGeom {
                             let mesh = polygon_ribbon_full(ring, Some(colors), Some(widths), &opts);
                             scene.draw_mesh(&mesh, xform, pick);
                         }
-                    } else if linetype::is_marker_free(&dash_pattern_pt) {
-                        let stroke_spec = build_stroke_for_pattern(
-                            linewidth_px,
-                            cap,
-                            join,
-                            &dash_pattern_pt,
-                            dash_offset_pt,
-                            linewidth_pt,
-                            ctx.dpi,
-                        );
-                        scene.stroke(&stroke_spec, xform, &Brush::Solid(sc), None, &path, pick);
-                    } else {
-                        // Markers: walk the closed perimeter, scale
-                        // gaps so the pattern fits seamlessly, fill
-                        // every marker with the stroke colour.
-                        let samplers = PolylineSampler::from_closed_path(&path, 0.5);
-                        let solid_stroke_spec =
-                            Stroke::new(linewidth_px).with_caps(cap).with_join(join);
-                        let dash_offset_px = pt_to_px(dash_offset_pt, ctx.dpi);
-                        draw_linetype_with_markers(
-                            scene,
-                            &samplers,
-                            &dash_pattern_pt,
-                            dash_offset_px,
-                            linewidth_px,
-                            sc,
-                            sc,
-                            ctx.theme.geom.marker_outline_pt,
-                            &solid_stroke_spec,
-                            xform,
-                            ctx.shapes,
-                            ctx.dpi,
-                            pick,
-                            /* distribute */ true,
-                        );
                     }
+                } else {
+                    draw_stroke_with_linetype(
+                        scene,
+                        &path,
+                        /* closed */ true,
+                        sc,
+                        sc,
+                        linewidth_px,
+                        linewidth_pt,
+                        cap,
+                        join,
+                        &dash_pattern_pt,
+                        dash_offset_pt,
+                        xform,
+                        pick,
+                        ctx.shapes,
+                        ctx.theme.geom.marker_outline_pt,
+                        ctx.dpi,
+                    );
                 }
             }
         }

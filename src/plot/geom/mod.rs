@@ -30,12 +30,14 @@ use crate::color::Color;
 use crate::geometry::Rect;
 use crate::plot::scale::Scale;
 use crate::plot::value::{DataColumn, Date, DateTime, Duration, Time, Value};
+use crate::scales::geometry::Geometry;
 use crate::scene::SceneBuilder;
 use crate::shape::ShapeRegistry;
 
 pub mod bspline;
 pub(crate) mod bspline_eval;
 pub mod ellipse;
+pub mod geometry;
 pub mod line;
 pub(crate) mod marks;
 pub(crate) mod outline;
@@ -57,6 +59,7 @@ pub mod wedge;
 
 pub use bspline::BSplineGeom;
 pub use ellipse::EllipseGeom;
+pub use geometry::GeometryGeom;
 pub use line::LineGeom;
 pub use point::PointGeom;
 pub use polygon::PolygonGeom;
@@ -180,6 +183,8 @@ impl_channel_from_vec!(Date);
 impl_channel_from_vec!(DateTime);
 impl_channel_from_vec!(Time);
 impl_channel_from_vec!(Duration);
+impl_channel_from_vec!(Geometry);
+impl_channel_from_vec!(Arc<Geometry>);
 
 impl From<std::ops::Range<i64>> for Channel {
     fn from(r: std::ops::Range<i64>) -> Self {
@@ -210,6 +215,8 @@ impl_channel_from_scalar!(Date);
 impl_channel_from_scalar!(DateTime);
 impl_channel_from_scalar!(Time);
 impl_channel_from_scalar!(Duration);
+impl_channel_from_scalar!(Geometry);
+impl_channel_from_scalar!(Arc<Geometry>);
 
 // ── Raw<T> → Channel ──────────────────────────────────────────────────
 //
@@ -535,6 +542,7 @@ pub(crate) fn empty_datacolumn_like(col: &DataColumn) -> DataColumn {
         DataColumn::Time(_) => DataColumn::Time(Vec::new()),
         DataColumn::Duration(_) => DataColumn::Duration(Vec::new()),
         DataColumn::Linetype(_) => DataColumn::Linetype(Vec::new()),
+        DataColumn::Geometry(_) => DataColumn::Geometry(Vec::new()),
     }
 }
 

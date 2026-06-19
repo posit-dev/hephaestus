@@ -23,6 +23,13 @@ text = ["dep:parley"]
 chrono = ["dep:chrono"]
 time = ["dep:time"]
 jiff = ["dep:jiff"]
+# Spatial-geometry parsers for `crate::scales::Geometry`. Each gate
+# enables one input format; all three are hand-rolled with no extra deps,
+# so toggling them affects only what `Geometry::from_*` constructors
+# compile.
+geom-wkt = []
+geom-wkb = []
+geom-geojson = []
 # Placeholders for future backends — wired through cargo but not implemented yet.
 blend2d = []
 svg = []
@@ -113,6 +120,10 @@ required-features = ["vello", "png"]
 
 [[example]]
 name = "polygon"
+required-features = ["vello", "png"]
+
+[[example]]
+name = "geometry"
 required-features = ["vello", "png"]
 
 [[example]]
@@ -270,3 +281,7 @@ required-features = ["vello"]
 [[test]]
 name = "theme_render"
 required-features = ["text"]
+
+[[test]]
+name = "geometry_geom"
+required-features = ["vello"]

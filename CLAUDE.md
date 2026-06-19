@@ -55,6 +55,7 @@ Style rules (apply everywhere, including comments in `tests/` and `examples/`):
 - **`vello`** (default) — the GPU rasterising backend (wgpu + vello + pollster + futures-intrusive + bytemuck).
 - **`png`** (default) — PNG writer (`png` crate). Used by examples and tests.
 - **`text`** (off by default) — scaffolding text shaping / layout via parley. Needed by the chrome on plot scales (axes, legends, titles) and by `TextGeom` / `TextFitGeom` / `TextPathGeom`. The host crate is intended to bring its own shaper eventually; see `src/text/CLAUDE.md`.
+- **`geom-wkt`**, **`geom-wkb`**, **`geom-geojson`** (off by default) — opt-in parsers for `crate::scales::Geometry`. Each gate enables one of `Geometry::from_wkt` / `from_wkb` / `from_geojson`. Hand-rolled and dependency-free, so toggling them only affects what constructors compile, not the dependency tree.
 - **`blend2d`**, **`svg`**, **`pdf`** — feature placeholders only; no backend code behind them yet. Wired so dependent crates can write `features = ["blend2d"]` once they exist.
 
 The core types and traits compile with `--no-default-features` (no wgpu pulled in), so downstream crates can build on top of `SceneBuilder` without GPU dependencies.

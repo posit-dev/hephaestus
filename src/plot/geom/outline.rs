@@ -20,24 +20,22 @@
 //! geoms (`RibbonGeom`, `RibbonBSplineGeom`) can call it once per curve
 //! without duplicating ~150 lines of orchestration.
 
-use crate::brush::Brush;
 use crate::color::Color;
 use crate::geometry::{Affine, Point};
 use crate::pick::PickId;
 use crate::plot::scale::Scale;
 use crate::plot::value::LinetypeStep;
-use crate::primitives::{clip_polyline, polyline, EndClip, PolylineOptions, PolylineSampler};
+use crate::primitives::{clip_polyline, polyline, EndClip, PolylineOptions};
 use crate::scene::SceneBuilder;
-use crate::stroke::{Cap, Join, Stroke};
+use crate::stroke::{Cap, Join};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::linetype;
 use super::resolve::{
-    auto_endpoint_clip_pt, build_stroke_for_pattern, draw_linetype_with_markers,
-    emit_endpoint_marker, endpoint_outward, override_alpha, pt_to_px, resolve_bool_channel_or,
-    resolve_cap_channel, resolve_color_channel, resolve_join_channel, resolve_linetype_channel,
-    resolve_number_channel, resolve_number_channel_or, resolve_str_channel_or,
+    auto_endpoint_clip_pt, draw_stroke_with_linetype, emit_endpoint_marker, endpoint_outward,
+    override_alpha, pt_to_px, resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel,
+    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
+    resolve_number_channel_or, resolve_str_channel_or,
 };
 use super::{Channel, GeomContext};
 
@@ -342,7 +340,6 @@ pub(crate) fn draw_curve_outline(
     }
 
     let path = polyline(&clipped, PolylineOptions::default());
-    let has_markers = !linetype::is_marker_free(&spec.dash_pattern_pt);
     let marker_outline_px = linewidth_px.max(pt_to_px(0.5, ctx.dpi));
     let xform = Affine::IDENTITY;
 
@@ -366,48 +363,24 @@ pub(crate) fn draw_curve_outline(
         );
     }
 
-    if !has_markers {
-        let stroke_spec = build_stroke_for_pattern(
-            linewidth_px,
-            spec.cap,
-            spec.join,
-            &spec.dash_pattern_pt,
-            spec.dash_offset_pt,
-            spec.linewidth_pt,
-            ctx.dpi,
-        );
-        scene.stroke(
-            &stroke_spec,
-            xform,
-            &Brush::Solid(spec.stroke_color),
-            None,
-            &path,
-            spec.pick,
-        );
-    } else {
-        let dash_offset_px = pt_to_px(spec.dash_offset_pt, ctx.dpi);
-        let linewidth_px_for_marker = pt_to_px(spec.linewidth_pt, ctx.dpi);
-        let samplers = vec![PolylineSampler::from_polyline(&clipped)];
-        let solid_stroke_spec = Stroke::new(linewidth_px)
-            .with_caps(spec.cap)
-            .with_join(spec.join);
-        draw_linetype_with_markers(
-            scene,
-            &samplers,
-            &spec.dash_pattern_pt,
-            dash_offset_px,
-            linewidth_px_for_marker,
-            spec.marker_fill,
-            spec.stroke_color,
-            ctx.theme.geom.marker_outline_pt,
-            &solid_stroke_spec,
-            xform,
-            ctx.shapes,
-            ctx.dpi,
-            spec.pick,
-            false,
-        );
-    }
+    draw_stroke_with_linetype(
+        scene,
+        &path,
+        /* closed */ false,
+        spec.stroke_color,
+        spec.marker_fill,
+        linewidth_px,
+        spec.linewidth_pt,
+        spec.cap,
+        spec.join,
+        &spec.dash_pattern_pt,
+        spec.dash_offset_pt,
+        xform,
+        spec.pick,
+        ctx.shapes,
+        ctx.theme.geom.marker_outline_pt,
+        ctx.dpi,
+    );
 
     if !spec.end_marker.name.is_empty() {
         let size_px = pt_to_px(spec.end_marker.size_pt, ctx.dpi);

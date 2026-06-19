@@ -484,6 +484,88 @@ pub(crate) fn draw_linetype_with_markers(
     }
 }
 
+/// Stroke `path` honouring the full linetype contract — marker-free
+/// patterns flow through a plain `Stroke::with_dashes`; patterns
+/// containing `Marker(...)` steps route through
+/// [`draw_linetype_with_markers`], which walks arc-length and stamps
+/// shapes at the right cursor positions.
+///
+/// `closed` selects the sampler constructor: `true` →
+/// [`PolylineSampler::from_closed_path`] (closing edge included), `false`
+/// → [`PolylineSampler::from_path`]. `distribute` controls whether the
+/// marker walk scales gaps to fit the perimeter exactly — `true` for
+/// closed paths (no visible seam at the join), `false` for open lines.
+///
+/// The geom layer is responsible for resolving the per-row colours,
+/// pattern, linewidth, cap, join, and pick id. This helper just plumbs
+/// them through the dispatch.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_stroke_with_linetype(
+    scene: &mut dyn SceneBuilder,
+    path: &Path,
+    closed: bool,
+    stroke_color: Color,
+    marker_fill: Color,
+    linewidth_px: f64,
+    linewidth_pt: f64,
+    cap: Cap,
+    join: Join,
+    dash_pattern_pt: &[LinetypeStep],
+    dash_offset_pt: f64,
+    xform: Affine,
+    pick: PickId,
+    shapes: &ShapeRegistry,
+    marker_outline_pt: f64,
+    dpi: f64,
+) {
+    if !linewidth_px.is_finite() || linewidth_px <= 0.0 {
+        return;
+    }
+    if super::linetype::is_marker_free(dash_pattern_pt) {
+        let stroke_spec = build_stroke_for_pattern(
+            linewidth_px,
+            cap,
+            join,
+            dash_pattern_pt,
+            dash_offset_pt,
+            linewidth_pt,
+            dpi,
+        );
+        scene.stroke(
+            &stroke_spec,
+            xform,
+            &Brush::Solid(stroke_color),
+            None,
+            path,
+            pick,
+        );
+        return;
+    }
+    let samplers = if closed {
+        PolylineSampler::from_closed_path(path, 0.5)
+    } else {
+        PolylineSampler::from_path(path, 0.5)
+    };
+    let solid_stroke_spec = Stroke::new(linewidth_px).with_caps(cap).with_join(join);
+    let dash_offset_px = pt_to_px(dash_offset_pt, dpi);
+    draw_linetype_with_markers(
+        scene,
+        &samplers,
+        dash_pattern_pt,
+        dash_offset_px,
+        linewidth_px,
+        marker_fill,
+        stroke_color,
+        marker_outline_pt,
+        &solid_stroke_spec,
+        xform,
+        shapes,
+        dpi,
+        pick,
+        /* distribute */ closed,
+    );
+}
+
 /// Resolved pattern entry — pt converted to px and (for distribute
 /// mode) gaps scaled to fit the polyline total length.
 enum ResolvedStep {
