@@ -27,6 +27,7 @@ use crate::shape::ShapeRegistry;
 
 use super::geom::{Geom, GeomContext, ScaleResolver};
 use super::scale::{Scale, ScaleRegistry};
+use crate::scales::input::InputRange;
 
 #[cfg(feature = "text")]
 use super::scale::AxisSide;
@@ -42,6 +43,34 @@ use crate::layout::Cell;
 /// geom later. Internal; the value isn't user-meaningful.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GeomId(pub u32);
+
+/// How the plot's fixed-aspect constraint is enforced. Applies to
+/// every projection family, with per-family interpretation:
+///
+/// - **Cartesian / Custom** — the constraint is the data-space ratio
+///   set via [`Plot::aspect_ratio`].
+/// - **Polar** — the constraint is the projection's bbox aspect (e.g.
+///   `2:1` for a half-disk gauge, `1:1` for a full circle). No
+///   [`Plot::aspect_ratio`] is needed; the bbox supplies it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AspectMode {
+    /// Lock the panel rect to match the constraint. For Cartesian /
+    /// Custom that's `(x_extent * ratio, y_extent)`; for Polar that's
+    /// the projection's bbox aspect. The layout solver shrinks the
+    /// panel to honor it; surrounding tracks absorb the slack. This
+    /// is the default and matches ggplot's `coord_fixed` /
+    /// `coord_polar`.
+    #[default]
+    Panel,
+    /// Leave the panel free to fill its layout cell; honor the
+    /// constraint inside the panel instead. For Cartesian / Custom
+    /// the bound x or y scale's input range is symmetrically expanded
+    /// so one x-unit takes `ratio` times the screen space of one
+    /// y-unit at the actual panel aspect. For Polar the inscribed
+    /// disk is centred in the panel — empty space appears on the
+    /// sides that don't match the bbox aspect.
+    Range,
+}
 
 // ─── Always-available chrome helpers ─────────────────────────────────────────
 
@@ -130,6 +159,12 @@ pub struct Plot {
     /// projections compute their own aspect from their bounding box.
     cartesian_aspect_ratio: Option<f64>,
 
+    /// Which strategy enforces [`Self::cartesian_aspect_ratio`].
+    /// [`AspectMode::Panel`] (the default) locks the patch's panel
+    /// rect; [`AspectMode::Range`] keeps the panel flexible and
+    /// expands the bound x or y scale's input range at draw time.
+    aspect_mode: AspectMode,
+
     /// Optional per-plot theme override. When set, the orchestrator
     /// merges this on top of the composition's theme before
     /// rendering this plot. `None` (the default) means the plot
@@ -200,6 +235,7 @@ impl Plot {
             clip: true,
             dirty: true,
             cartesian_aspect_ratio: None,
+            aspect_mode: AspectMode::default(),
             theme_override: None,
             #[cfg(feature = "text")]
             strips: [None, None, None, None],
@@ -234,7 +270,9 @@ impl Plot {
     /// Applies to [`Projection::Cartesian`](crate::plot::projection::Projection::Cartesian)
     /// and [`Projection::Custom`](crate::plot::projection::Projection::Custom),
     /// which share the same scale-extent math. Polar projections
-    /// override with their own bbox aspect and ignore this setting.
+    /// supply their own ratio from the bbox and ignore this setting —
+    /// use [`Self::aspect_mode`] to control whether that bbox aspect
+    /// locks the panel or merely centres the disk.
     pub fn aspect_ratio(mut self, ratio: f64) -> Self {
         self.cartesian_aspect_ratio = if ratio.is_finite() && ratio > 0.0 {
             Some(ratio)
@@ -242,6 +280,25 @@ impl Plot {
             None
         };
         self
+    }
+
+    /// Pick which strategy enforces the plot's fixed-aspect
+    /// constraint. [`AspectMode::Panel`] (the default) locks the
+    /// panel rect; [`AspectMode::Range`] keeps the panel filling its
+    /// layout cell and honors the constraint inside the panel
+    /// instead — for Cartesian / Custom by expanding the bound x / y
+    /// scale's input range, for Polar by centring the inscribed disk
+    /// in the available rect. Has no effect under Cartesian / Custom
+    /// when [`Self::aspect_ratio`] is unset (no constraint to enforce
+    /// either way).
+    pub fn aspect_mode(mut self, mode: AspectMode) -> Self {
+        self.aspect_mode = mode;
+        self
+    }
+
+    /// Read the current aspect-ratio enforcement strategy.
+    pub fn aspect_mode_ref(&self) -> AspectMode {
+        self.aspect_mode
     }
 
     /// Override whether geoms are clipped to the projection's
@@ -280,6 +337,9 @@ impl Plot {
     ///   projection geometry fills the panel without slack.
     /// - **Polar with `fit_to_bbox = false`**: `1:1` (a square
     ///   panel; the largest inscribed disk fills it).
+    /// - **Any projection with `aspect_mode = Range`**: `None` —
+    ///   the panel flexes and the constraint is honoured inside
+    ///   the panel rect at draw time.
     ///
     /// The orchestrator collects each attached plot's aspect on a
     /// patch and locks the patch to it when every plot agrees; if
@@ -292,6 +352,11 @@ impl Plot {
                 // outline shapes the drawing surface but does not drive
                 // aspect; the bound x/y scale extents do.
                 let ratio = self.cartesian_aspect_ratio?;
+                // Range mode honors the ratio by expanding scale ranges
+                // at draw time instead of locking the panel.
+                if self.aspect_mode == AspectMode::Range {
+                    return None;
+                }
                 let x_binding = match &self.projection {
                     crate::plot::projection::Projection::Custom(c) => c.x_channel.as_str(),
                     _ => "x",
@@ -324,6 +389,11 @@ impl Plot {
                 }
             }
             crate::plot::projection::Projection::Polar(p) => {
+                // Range mode centres the inscribed disk in whatever
+                // panel rect the layout produces — no patch lock.
+                if self.aspect_mode == AspectMode::Range {
+                    return None;
+                }
                 if p.fit_to_bbox {
                     let (min_x, min_y, max_x, max_y) = p.bounding_box_units();
                     let bbox_w = (max_x - min_x) as f32;
@@ -506,12 +576,112 @@ impl Plot {
 struct PlotScaleResolver<'a> {
     bindings: &'a HashMap<String, String>,
     registry: &'a ScaleRegistry,
+    /// Per-plot scale overrides keyed by scale name. Used by Range-mode
+    /// aspect adjustment to inject scales with expanded input ranges
+    /// without mutating the shared registry. Empty in the common case.
+    overrides: &'a HashMap<String, Scale>,
 }
 
 impl<'a> ScaleResolver for PlotScaleResolver<'a> {
     fn scale_for(&self, channel: &str) -> Option<&Scale> {
         let scale_name = self.bindings.get(channel)?;
+        if let Some(scale) = self.overrides.get(scale_name.as_str()) {
+            return Some(scale);
+        }
         self.registry.get(scale_name)
+    }
+}
+
+impl Plot {
+    /// Build the per-plot scale-override map for [`AspectMode::Range`].
+    /// Returns an empty map when the mode is `Panel`, the projection is
+    /// Polar, no aspect ratio is set, the bound x/y scales aren't
+    /// continuous, or the natural extents already match the panel's
+    /// visual ratio. Otherwise contains a single cloned [`Scale`] keyed
+    /// by scale name with its domain symmetrically expanded around the
+    /// current center.
+    fn build_aspect_overlay(
+        &self,
+        panel: Rect,
+        registry: &ScaleRegistry,
+    ) -> HashMap<String, Scale> {
+        let mut overlay: HashMap<String, Scale> = HashMap::new();
+        if self.aspect_mode != AspectMode::Range {
+            return overlay;
+        }
+        let Some(ratio) = self.cartesian_aspect_ratio else {
+            return overlay;
+        };
+        let (x_channel, y_channel) = match &self.projection {
+            crate::plot::projection::Projection::Cartesian => ("x", "y"),
+            crate::plot::projection::Projection::Custom(c) => {
+                (c.x_channel.as_str(), c.y_channel.as_str())
+            }
+            crate::plot::projection::Projection::Polar(_) => return overlay,
+        };
+        let Some(x_scale_name) = self.bindings.get(x_channel) else {
+            return overlay;
+        };
+        let Some(y_scale_name) = self.bindings.get(y_channel) else {
+            return overlay;
+        };
+        let Some(x_scale) = registry.get(x_scale_name) else {
+            return overlay;
+        };
+        let Some(y_scale) = registry.get(y_scale_name) else {
+            return overlay;
+        };
+        let Some(InputRange::Continuous {
+            min: x_min,
+            max: x_max,
+        }) = x_scale.input_range().cloned()
+        else {
+            return overlay;
+        };
+        let Some(InputRange::Continuous {
+            min: y_min,
+            max: y_max,
+        }) = y_scale.input_range().cloned()
+        else {
+            return overlay;
+        };
+        let x_extent = x_max - x_min;
+        let y_extent = y_max - y_min;
+        let panel_w = panel.x1 - panel.x0;
+        let panel_h = panel.y1 - panel.y0;
+        if !(x_extent.is_finite()
+            && y_extent.is_finite()
+            && x_extent > 0.0
+            && y_extent > 0.0
+            && panel_w > 0.0
+            && panel_h > 0.0
+            && ratio > 0.0)
+        {
+            return overlay;
+        }
+        // Honor the data-space ratio at the actual panel aspect by
+        // matching `x_extent / y_extent` to `panel_w / (panel_h * ratio)`.
+        let target = panel_w / (panel_h * ratio);
+        let current = x_extent / y_extent;
+        // Tight tolerance — anything beyond a few ulps is worth a
+        // correction, and a zero-pad clone is harmless.
+        if (current - target).abs() <= target * 1e-12 {
+            return overlay;
+        }
+        if current < target {
+            let new_x_extent = y_extent * target;
+            let half_pad = (new_x_extent - x_extent) * 0.5;
+            let mut clone = x_scale.clone();
+            clone.set_domain_continuous(x_min - half_pad, x_max + half_pad);
+            overlay.insert(x_scale_name.clone(), clone);
+        } else {
+            let new_y_extent = x_extent / target;
+            let half_pad = (new_y_extent - y_extent) * 0.5;
+            let mut clone = y_scale.clone();
+            clone.set_domain_continuous(y_min - half_pad, y_max + half_pad);
+            overlay.insert(y_scale_name.clone(), clone);
+        }
+        overlay
     }
 }
 
@@ -620,15 +790,16 @@ impl Plot {
         }
         #[cfg(feature = "text")]
         {
+            let overlay = self.build_aspect_overlay(panel, registry);
+            let lookup = |name: &str| -> Option<&Scale> {
+                let scale_name = self.bindings.get(name)?;
+                overlay
+                    .get(scale_name.as_str())
+                    .or_else(|| registry.get(scale_name))
+            };
             let channels = self.projection.consume_channels();
-            let channel_0 = channels
-                .first()
-                .and_then(|name| self.bindings.get(*name))
-                .and_then(|scale_name| registry.get(scale_name));
-            let channel_1 = channels
-                .get(1)
-                .and_then(|name| self.bindings.get(*name))
-                .and_then(|scale_name| registry.get(scale_name));
+            let channel_0 = channels.first().and_then(|n| lookup(n));
+            let channel_1 = channels.get(1).and_then(|n| lookup(n));
             crate::plot::chrome::panel::draw_panel_chrome(
                 scene,
                 &self.projection,
@@ -676,9 +847,11 @@ impl Plot {
             geom.rebuild_diff_against_previous();
         }
 
+        let overrides = self.build_aspect_overlay(panel, registry);
         let resolver = PlotScaleResolver {
             bindings: &self.bindings,
             registry,
+            overrides: &overrides,
         };
         let ctx =
             GeomContext::with_projection(panel, dpi, &self.shapes, &resolver, &self.projection)
@@ -1187,11 +1360,23 @@ impl Plot {
         theme: &crate::plot::theme::Theme,
     ) {
         use crate::plot::chrome::axis::{AxisPlacement, PolarRing};
+        // Range-mode aspect adjustment expands one of the bound x / y
+        // scales — axes whose `scale_name` matches that scale must
+        // render against the expanded range so ticks line up with the
+        // panel gridlines.
+        let overlay = match panel {
+            Some(p) => self.build_aspect_overlay(p, registry),
+            None => HashMap::new(),
+        };
+        let resolve_scale =
+            |name: &str| -> Option<&Scale> { overlay.get(name).or_else(|| registry.get(name)) };
         for axis in &self.axes {
             match axis.placement {
                 AxisPlacement::Cartesian(side) => {
                     if let Some(scale_name) = &axis.scale_name {
-                        if let (Some(panel_rect), Some(scale)) = (panel, registry.get(scale_name)) {
+                        if let (Some(panel_rect), Some(scale)) =
+                            (panel, resolve_scale(scale_name.as_str()))
+                        {
                             let slot = cartesian_axis_slot(side);
                             if let Some(slot_rect) = layout.get(&self.patch_id, slot) {
                                 scale.draw_axis(scene, slot_rect, panel_rect, side, dpi, theme);
@@ -2176,6 +2361,179 @@ mod tests {
             .bind("y", "y")
             .aspect_ratio(1.0);
         assert!(p.desired_panel_aspect(&reg).is_none());
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn range_mode_skips_panel_lock() {
+        // Range mode honors the ratio at draw time by expanding scale
+        // ranges, so the patch should not be aspect-locked.
+        let c = comp_with_two();
+        let mut reg = ScaleRegistry::new();
+        reg.insert("x", scale::continuous(0.0..=10.0));
+        reg.insert("y", scale::continuous(0.0..=5.0));
+        let p = Plot::new(&c, "a")
+            .bind("x", "x")
+            .bind("y", "y")
+            .aspect_ratio(2.0)
+            .aspect_mode(AspectMode::Range);
+        assert!(p.desired_panel_aspect(&reg).is_none());
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn range_mode_expands_x_when_panel_is_wide() {
+        // ratio=1, x=[0,10], y=[0,10], panel 200×100.
+        // target x_extent/y_extent = 200 / (100 * 1) = 2.
+        // current = 1 < 2 → expand x to extent 20, padding ±5.
+        let c = comp_with_two();
+        let mut reg = ScaleRegistry::new();
+        reg.insert("x", scale::continuous(0.0..=10.0));
+        reg.insert("y", scale::continuous(0.0..=10.0));
+        let p = Plot::new(&c, "a")
+            .bind("x", "x")
+            .bind("y", "y")
+            .aspect_ratio(1.0)
+            .aspect_mode(AspectMode::Range);
+        let panel = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let overlay = p.build_aspect_overlay(panel, &reg);
+        let adjusted = overlay.get("x").expect("x scale overridden");
+        match adjusted.input_range() {
+            Some(crate::scales::input::InputRange::Continuous { min, max }) => {
+                assert!((min - (-5.0)).abs() < 1e-9, "x min = {min}");
+                assert!((max - 15.0).abs() < 1e-9, "x max = {max}");
+            }
+            other => panic!("expected continuous range, got {other:?}"),
+        }
+        assert!(!overlay.contains_key("y"), "y should be untouched");
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn range_mode_expands_y_when_panel_is_tall() {
+        // ratio=1, x=[0,10], y=[0,10], panel 100×200.
+        // target = 100 / 200 = 0.5. current = 1 > 0.5 → expand y.
+        // new_y_extent = 10 / 0.5 = 20, padding ±5.
+        let c = comp_with_two();
+        let mut reg = ScaleRegistry::new();
+        reg.insert("x", scale::continuous(0.0..=10.0));
+        reg.insert("y", scale::continuous(0.0..=10.0));
+        let p = Plot::new(&c, "a")
+            .bind("x", "x")
+            .bind("y", "y")
+            .aspect_ratio(1.0)
+            .aspect_mode(AspectMode::Range);
+        let panel = Rect::new(0.0, 0.0, 100.0, 200.0);
+        let overlay = p.build_aspect_overlay(panel, &reg);
+        let adjusted = overlay.get("y").expect("y scale overridden");
+        match adjusted.input_range() {
+            Some(crate::scales::input::InputRange::Continuous { min, max }) => {
+                assert!((min - (-5.0)).abs() < 1e-9, "y min = {min}");
+                assert!((max - 15.0).abs() < 1e-9, "y max = {max}");
+            }
+            other => panic!("expected continuous range, got {other:?}"),
+        }
+        assert!(!overlay.contains_key("x"), "x should be untouched");
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn range_mode_panel_mode_skips_overlay() {
+        // Default Panel mode → overlay is always empty even with a
+        // ratio set; the patch-aspect path handles it instead.
+        let c = comp_with_two();
+        let mut reg = ScaleRegistry::new();
+        reg.insert("x", scale::continuous(0.0..=10.0));
+        reg.insert("y", scale::continuous(0.0..=10.0));
+        let p = Plot::new(&c, "a")
+            .bind("x", "x")
+            .bind("y", "y")
+            .aspect_ratio(1.0);
+        let panel = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let overlay = p.build_aspect_overlay(panel, &reg);
+        assert!(overlay.is_empty());
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn range_mode_polar_drops_bbox_lock() {
+        // Default-polar Panel mode locks the patch to the bbox aspect
+        // (1:1 for a full circle); Range mode releases that lock so
+        // the panel can flex and the disk centres inside.
+        use crate::plot::projection::Projection;
+        let c = comp_with_two();
+        let reg = ScaleRegistry::new();
+        let panel_mode = Plot::new(&c, "a").projection(Projection::polar());
+        let (w, h) = panel_mode
+            .desired_panel_aspect(&reg)
+            .expect("polar reports bbox aspect");
+        assert!(
+            (w - h).abs() < 1e-4,
+            "expected 1:1 full-circle, got {w}:{h}"
+        );
+        let range_mode = Plot::new(&c, "a")
+            .projection(Projection::polar())
+            .aspect_mode(AspectMode::Range);
+        assert!(range_mode.desired_panel_aspect(&reg).is_none());
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn range_mode_polar_skips_overlay() {
+        // Polar projections never produce a scale overlay — Range mode
+        // just affects the patch lock; the disk geometry is handled by
+        // the projection's own panel-inscription code.
+        use crate::plot::projection::Projection;
+        let c = comp_with_two();
+        let mut reg = ScaleRegistry::new();
+        reg.insert("x", scale::continuous(0.0..=10.0));
+        reg.insert("y", scale::continuous(0.0..=10.0));
+        let p = Plot::new(&c, "a")
+            .projection(Projection::polar())
+            .bind("x", "x")
+            .bind("y", "y")
+            .aspect_ratio(2.0)
+            .aspect_mode(AspectMode::Range);
+        let panel = Rect::new(0.0, 0.0, 200.0, 100.0);
+        assert!(p.build_aspect_overlay(panel, &reg).is_empty());
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn range_mode_custom_projection_uses_custom_bindings() {
+        use crate::plot::projection::{CustomProjection, Projection};
+        use crate::scales::geometry::Polygon as GeoPolygon;
+        // Custom projection with non-default channel names — overlay
+        // must pick up "lon" / "lat", not "x" / "y".
+        let c = comp_with_two();
+        let mut reg = ScaleRegistry::new();
+        reg.insert("lon_scale", scale::continuous(0.0..=10.0));
+        reg.insert("lat_scale", scale::continuous(0.0..=10.0));
+        let outline = GeoPolygon::new(vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
+        let proj = Projection::Custom(CustomProjection::new(outline).channels("lon", "lat"));
+        let p = Plot::new(&c, "a")
+            .projection(proj)
+            .bind("lon", "lon_scale")
+            .bind("lat", "lat_scale")
+            .aspect_ratio(1.0)
+            .aspect_mode(AspectMode::Range);
+        let panel = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let overlay = p.build_aspect_overlay(panel, &reg);
+        assert!(
+            overlay.contains_key("lon_scale"),
+            "should overlay lon_scale"
+        );
+        assert!(
+            !overlay.contains_key("lat_scale"),
+            "lat_scale should be untouched"
+        );
+        match overlay.get("lon_scale").unwrap().input_range() {
+            Some(crate::scales::input::InputRange::Continuous { min, max }) => {
+                assert!((min - (-5.0)).abs() < 1e-9, "lon min = {min}");
+                assert!((max - 15.0).abs() < 1e-9, "lon max = {max}");
+            }
+            other => panic!("expected continuous range, got {other:?}"),
+        }
     }
 
     #[test]
