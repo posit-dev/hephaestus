@@ -231,8 +231,10 @@ impl Plot {
     /// scale's input-range extent at wire time; the patch's panel
     /// is then aspect-locked to `(x_extent * ratio, y_extent)`.
     ///
-    /// Only meaningful for the cartesian projection. Polar
-    /// projections override with their own bbox aspect.
+    /// Applies to [`Projection::Cartesian`](crate::plot::projection::Projection::Cartesian)
+    /// and [`Projection::Custom`](crate::plot::projection::Projection::Custom),
+    /// which share the same scale-extent math. Polar projections
+    /// override with their own bbox aspect and ignore this setting.
     pub fn aspect_ratio(mut self, ratio: f64) -> Self {
         self.cartesian_aspect_ratio = if ratio.is_finite() && ratio > 0.0 {
             Some(ratio)
@@ -284,17 +286,29 @@ impl Plot {
     /// they disagree it leaves the patch unlocked.
     pub fn desired_panel_aspect(&self, registry: &ScaleRegistry) -> Option<(f32, f32)> {
         match &self.projection {
-            crate::plot::projection::Projection::Cartesian => {
+            crate::plot::projection::Projection::Cartesian
+            | crate::plot::projection::Projection::Custom(_) => {
+                // Custom shares Cartesian's aspect math — its polygon
+                // outline shapes the drawing surface but does not drive
+                // aspect; the bound x/y scale extents do.
                 let ratio = self.cartesian_aspect_ratio?;
+                let x_binding = match &self.projection {
+                    crate::plot::projection::Projection::Custom(c) => c.x_channel.as_str(),
+                    _ => "x",
+                };
+                let y_binding = match &self.projection {
+                    crate::plot::projection::Projection::Custom(c) => c.y_channel.as_str(),
+                    _ => "y",
+                };
                 let x_extent = self
                     .bindings
-                    .get("x")
+                    .get(x_binding)
                     .and_then(|n| registry.get(n))
                     .and_then(|s| s.input_range())
                     .and_then(|r| r.extent())?;
                 let y_extent = self
                     .bindings
-                    .get("y")
+                    .get(y_binding)
                     .and_then(|n| registry.get(n))
                     .and_then(|s| s.input_range())
                     .and_then(|r| r.extent())?;
@@ -674,10 +688,18 @@ impl Plot {
             #[cfg(feature = "text")]
             {
                 let radius_px = crate::plot::chrome::panel::panel_corner_radius_px(theme, dpi);
+                // For Custom, the panel outline is resolved through the
+                // projection's bound scales. For Cartesian / Polar the
+                // pair is unused.
+                let channels = self.projection.consume_channels();
+                let x_scale = channels.first().and_then(|n| ctx.scale_for(n));
+                let y_scale = channels.get(1).and_then(|n| ctx.scale_for(n));
                 Some(crate::plot::chrome::panel::panel_outline_path(
                     &self.projection,
                     panel,
                     radius_px,
+                    x_scale,
+                    y_scale,
                 ))
             }
             #[cfg(not(feature = "text"))]

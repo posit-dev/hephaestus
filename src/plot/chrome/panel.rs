@@ -59,11 +59,29 @@ pub fn draw_panel_chrome(
         return;
     }
     let corner_radius_px = panel_corner_radius_px(theme, dpi);
-    let outline_path = panel_outline_path(projection, panel, corner_radius_px);
+    let outline_path = panel_outline_path(
+        projection,
+        panel,
+        corner_radius_px,
+        scales.channel_0,
+        scales.channel_1,
+    );
 
     // Background fill — sourced from theme.panel_background.
+    // Custom projections may emit a multi-ring path (holes); EvenOdd
+    // gives the right unfilled-interior behaviour regardless of ring
+    // winding direction, where NonZero depends on clipper2's output
+    // convention being preserved through the y-flip and would
+    // sometimes fill the hole. Cartesian / Polar paths are
+    // single-ring (or annular with opposite-wound inner ring) and
+    // render the same under either rule, so EvenOdd is safe across
+    // the board.
+    let bg_fill_rule = match projection {
+        Projection::Custom(_) => FillRule::EvenOdd,
+        _ => FillRule::NonZero,
+    };
     if let Some(bg) = theme.panel_background.as_set() {
-        fill_rect_element(scene, bg, &theme.palette, &outline_path);
+        fill_rect_element(scene, bg, &theme.palette, &outline_path, bg_fill_rule);
     }
 
     // Grid lines, per channel. Wrapped in a `push_layer` clip so
@@ -81,29 +99,51 @@ pub fn draw_panel_chrome(
     );
     let major_0 = theme.panel_grid_major.resolve(0);
     let minor_0 = theme.panel_grid_minor.resolve(0);
-    if let Some(scale) = scales.channel_0 {
-        draw_grid_lines(
-            scene,
-            scale,
-            |frac| channel_grid_path(projection, panel, 0, frac),
-            major_0,
-            minor_0,
-            &theme.palette,
-            dpi,
-        );
-    }
     let major_1 = theme.panel_grid_major.resolve(1);
     let minor_1 = theme.panel_grid_minor.resolve(1);
-    if let Some(scale) = scales.channel_1 {
-        draw_grid_lines(
+
+    if let Some(c) = projection.as_custom() {
+        // Custom projections supply graticules directly — skip the
+        // per-break loop. Each bucket is pre-clipped against the
+        // trimmed outline via clipper2 before stroking, so the
+        // boundary is exact even if the user's polylines extend past
+        // the polygon. Minors drawn first so majors layer on top.
+        draw_custom_graticules(
             scene,
-            scale,
-            |frac| channel_grid_path(projection, panel, 1, frac),
+            c,
+            panel,
+            scales.channel_0,
+            scales.channel_1,
+            major_0,
+            minor_0,
             major_1,
             minor_1,
             &theme.palette,
             dpi,
         );
+    } else {
+        if let Some(scale) = scales.channel_0 {
+            draw_grid_lines(
+                scene,
+                scale,
+                |frac| channel_grid_path(projection, panel, 0, frac),
+                major_0,
+                minor_0,
+                &theme.palette,
+                dpi,
+            );
+        }
+        if let Some(scale) = scales.channel_1 {
+            draw_grid_lines(
+                scene,
+                scale,
+                |frac| channel_grid_path(projection, panel, 1, frac),
+                major_1,
+                minor_1,
+                &theme.palette,
+                dpi,
+            );
+        }
     }
     scene.pop_layer();
 
@@ -118,6 +158,7 @@ fn fill_rect_element(
     rect: &RectElement,
     palette: &crate::plot::theme::Palette,
     path: &Path,
+    fill_rule: FillRule,
 ) {
     // `rect.fill` is `Option<ThemeColor>` — `None` after cascade
     // means an explicitly transparent interior (no fill drawn).
@@ -126,7 +167,7 @@ fn fill_rect_element(
     };
     let brush = Brush::Solid(fill.resolve(palette));
     scene.fill(
-        FillRule::NonZero,
+        fill_rule,
         Affine::IDENTITY,
         &brush,
         None,
@@ -221,6 +262,91 @@ fn draw_grid_lines<F>(
     }
 }
 
+/// Draw the four user-supplied graticule buckets for a custom
+/// projection. Each bucket is resolved through the bound scales,
+/// clipped against the trimmed outline polygon via clipper2, and
+/// stroked through the matching theme element. Minor first, major
+/// after, so coincident lines layer correctly.
+#[allow(clippy::too_many_arguments)]
+fn draw_custom_graticules(
+    scene: &mut dyn SceneBuilder,
+    c: &crate::plot::projection::CustomProjection,
+    panel: Rect,
+    x_scale: Option<&Scale>,
+    y_scale: Option<&Scale>,
+    major_x: Option<&LineElement>,
+    minor_x: Option<&LineElement>,
+    major_y: Option<&LineElement>,
+    minor_y: Option<&LineElement>,
+    palette: &crate::plot::theme::Palette,
+    dpi: f64,
+) {
+    // Resolve the trimmed outline rings once — used as the clip
+    // polygon for every graticule bucket below.
+    let outline_rings_frac = c.resolved_outline_fracs(x_scale, y_scale);
+    if outline_rings_frac.is_empty() {
+        return;
+    }
+    let panel_w = panel.x1 - panel.x0;
+    let panel_h = panel.y1 - panel.y0;
+    let to_px = |xf: f64, yf: f64| Point::new(panel.x0 + xf * panel_w, panel.y1 - yf * panel_h);
+    let outline_rings_px: Vec<Vec<Point>> = outline_rings_frac
+        .iter()
+        .map(|ring| ring.iter().map(|(xf, yf)| to_px(*xf, *yf)).collect())
+        .collect();
+    let outline_refs: Vec<&[Point]> = outline_rings_px.iter().map(|r| r.as_slice()).collect();
+
+    use crate::plot::theme::line_concrete_defaults;
+    let line_defaults = line_concrete_defaults();
+    let resolve_color = |el: &LineElement| -> Brush {
+        let c = el
+            .color
+            .clone()
+            .or_else(|| line_defaults.color.clone())
+            .expect("line color default");
+        Brush::Solid(c.resolve(palette))
+    };
+    // Render a bucket: resolve every polyline through scales, convert
+    // to panel-pixel space, clip against the outline, stroke.
+    let mut render = |lines: &[Vec<crate::scales::geometry::Coord>], el: Option<&LineElement>| {
+        let Some(el) = el else { return };
+        let stroke = stroke_from_line_element(el, dpi);
+        let brush = resolve_color(el);
+        if lines.is_empty() {
+            return;
+        }
+        let resolved_px: Vec<Vec<Point>> = lines
+            .iter()
+            .map(|line| {
+                c.resolve_graticule(line, x_scale, y_scale)
+                    .into_iter()
+                    .map(|(xf, yf)| to_px(xf, yf))
+                    .collect::<Vec<Point>>()
+            })
+            .collect();
+        let line_refs: Vec<&[Point]> = resolved_px.iter().map(|l| l.as_slice()).collect();
+        let clipped = crate::primitives::clip_polylines_to_polygon(&line_refs, &outline_refs);
+        for poly in &clipped {
+            if poly.len() < 2 {
+                continue;
+            }
+            let mut path = Path::new();
+            path.move_to(poly[0]);
+            for p in &poly[1..] {
+                path.line_to(*p);
+            }
+            scene.stroke(&stroke, Affine::IDENTITY, &brush, None, &path, PickId::Skip);
+        }
+    };
+
+    // Minors first so coincident majors layer on top — matches
+    // `draw_grid_lines`'s ordering.
+    render(&c.x_minor, minor_x);
+    render(&c.y_minor, minor_y);
+    render(&c.x_major, major_x);
+    render(&c.y_major, major_y);
+}
+
 // ─── Per-projection geometry ────────────────────────────────────────────────
 
 /// Closed path tracing the boundary of the plotting area. Used for
@@ -230,7 +356,21 @@ fn draw_grid_lines<F>(
 /// wedges (and the vertex-to-vertex joins of chord-style polygons) —
 /// full disks and full annuli have no corners and the radius is a
 /// no-op there.
-pub fn panel_outline_path(projection: &Projection, panel: Rect, corner_radius_px: f64) -> Path {
+///
+/// `x_scale` / `y_scale` are the resolved scales for the projection's
+/// two channels (in `consume_channels` order). They are consulted only
+/// by [`Projection::Custom`](crate::plot::projection::Projection::Custom),
+/// which resolves its data-space outline through them and trims against
+/// the visible panel rect. Other projections ignore them; passing
+/// `None` for both is the right call when no resolver is available
+/// (Cartesian / Polar fall back to their fixed-shape outlines).
+pub fn panel_outline_path(
+    projection: &Projection,
+    panel: Rect,
+    corner_radius_px: f64,
+    x_scale: Option<&Scale>,
+    y_scale: Option<&Scale>,
+) -> Path {
     match projection {
         Projection::Cartesian => {
             if corner_radius_px > 0.0 {
@@ -253,7 +393,45 @@ pub fn panel_outline_path(projection: &Projection, panel: Rect, corner_radius_px
                 path
             }
         }
+        Projection::Custom(c) => custom_panel_outline(c, panel, x_scale, y_scale),
     }
+}
+
+/// Build the panel-outline `Path` for a custom projection: resolve the
+/// data-space outline through the bound scales, trim against the
+/// visible panel rect, project each remaining ring to panel pixels,
+/// emit one `MoveTo … ClosePath` subpath per ring. Returns an empty
+/// path when the outline doesn't overlap the visible area (geoms get
+/// clipped to nothing, which is the right visual outcome — there's no
+/// drawing surface).
+fn custom_panel_outline(
+    c: &crate::plot::projection::CustomProjection,
+    panel: Rect,
+    x_scale: Option<&Scale>,
+    y_scale: Option<&Scale>,
+) -> Path {
+    let rings = c.resolved_outline_fracs(x_scale, y_scale);
+    let mut path = Path::new();
+    let panel_w = panel.x1 - panel.x0;
+    let panel_h = panel.y1 - panel.y0;
+    for ring in &rings {
+        if ring.len() < 3 {
+            continue;
+        }
+        let mut first = true;
+        for (xf, yf) in ring {
+            let px = panel.x0 + xf * panel_w;
+            let py = panel.y1 - yf * panel_h;
+            if first {
+                path.move_to(Point::new(px, py));
+                first = false;
+            } else {
+                path.line_to(Point::new(px, py));
+            }
+        }
+        path.close_path();
+    }
+    path
 }
 
 /// Resolve the panel's corner radius from `theme.panel_background`'s
@@ -289,6 +467,9 @@ pub fn channel_grid_path(
     match projection {
         Projection::Cartesian => Some(cartesian_grid(panel, channel, frac)),
         Projection::Polar(p) => polar_grid(p, panel, channel, frac),
+        // Custom projections supply their graticules directly; the
+        // per-break grid path is unused.
+        Projection::Custom(_) => None,
     }
 }
 

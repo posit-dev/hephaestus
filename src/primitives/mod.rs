@@ -31,6 +31,11 @@
 //!   Returns `Vec<Point>`.
 //! - [`offset_polygon`] — inflate/deflate a polygon's rings via Clipper2.
 //!   Returns `Vec<Vec<Point>>`.
+//! - [`intersect_polygons`] / [`clip_polylines_to_polygon`] — boolean
+//!   clip via Clipper2 (EvenOdd, multi-ring): intersect two closed
+//!   areas or clip a set of open polylines against a closed area.
+//!   Used by `Projection::Custom` to trim a user-supplied outline
+//!   against the visible panel rect and to clip graticules against it.
 //! - [`path_to_rings`] — flatten any `Path` (lines + quads + cubics) into
 //!   piecewise-linear ring vertices. Lets you pipe curved primitives
 //!   ([`wedge`], [`circle`], etc.) through [`offset_polygon`].
@@ -63,6 +68,7 @@ use crate::path::{Path, PathEl};
 use kurbo::Shape;
 
 mod arc_length;
+mod clip;
 mod corner;
 mod end_clip;
 mod offset;
@@ -70,6 +76,7 @@ mod path_corner;
 mod ribbon;
 
 pub use arc_length::{ArcLengthWalker, ArcSample, PolylineSampler, TrailingPolicy};
+pub use clip::{clip_polylines_to_polygon, intersect_polygons};
 pub use corner::round_corners;
 pub use end_clip::{clip_polyline, clip_polyline_with_attrs, EndClip};
 pub use offset::offset_polygon;

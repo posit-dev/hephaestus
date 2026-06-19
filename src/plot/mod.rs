@@ -44,7 +44,7 @@ pub use geom::{
 #[cfg(feature = "text")]
 pub use geom::{TextFitGeom, TextGeom, TextPathGeom};
 pub use plot::{GeomId, Plot};
-pub use projection::{ChromeStrategy, Projection};
+pub use projection::{ChromeStrategy, CustomProjection, Projection};
 pub use scale::{
     AxisSide, InputRange, LegendSide, OutputRange, Scale, ScaleRegistry, ScaleTypeKind, Transform,
     TransformKind,

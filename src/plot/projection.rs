@@ -1,9 +1,11 @@
 //! Coordinate projection — converts per-channel panel-fractions into
 //! pixel positions inside the panel rect.
 //!
-//! Ships [`Projection::Cartesian`] (default rectilinear) and
+//! Ships [`Projection::Cartesian`] (default rectilinear),
 //! [`Projection::Polar`] (with configurable angular range — see
-//! [`PolarProjection`]). The signature is N-channel
+//! [`PolarProjection`]), and [`Projection::Custom`] (arbitrary
+//! polygon-shaped drawing surface + user-supplied graticules — see
+//! [`CustomProjection`]). The signature is N-channel
 //! (`project_to_panel_px(panel, &[f64])`) so a future Ternary variant
 //! (deferred) can drop in without touching geom code.
 //!
@@ -78,6 +80,7 @@
 //! shapes). Future color / size / stroke combiners won't have them.
 
 use crate::geometry::Rect;
+use crate::scales::geometry::{Coord, Polygon as GeoPolygon};
 
 /// Where this projection wants its axis chrome drawn. Cartesian uses
 /// the standard patch axis slots (`AxisLeft`, `AxisBottom`, etc.).
@@ -125,6 +128,12 @@ pub enum Projection {
     /// partial-arc layouts (gauges, half-disks) via `theta_start` /
     /// `theta_end`. See [`PolarProjection`].
     Polar(PolarProjection),
+    /// Custom drawing surface defined by an arbitrary polygon outline
+    /// in data space, plus user-supplied graticule polylines as overlay
+    /// grid lines. Coordinate math is identical to Cartesian — the
+    /// polygon shapes the panel surface and the clip, it does not warp
+    /// coordinates. See [`CustomProjection`].
+    Custom(CustomProjection),
     // Ternary(TernaryProjection) — deferred (design accommodated via
     // the N-channel signature).
 }
@@ -574,6 +583,196 @@ pub(crate) struct PolarGeometry {
     pub r_inner: f64,
 }
 
+/// Custom drawing surface — arbitrary polygon outline plus user-supplied
+/// graticules.
+///
+/// Coordinate math matches [`Projection::Cartesian`] exactly: the
+/// `[x_frac, y_frac]` pair maps linearly to panel pixels. The polygon
+/// outline does not warp coordinates; it shapes the *drawing surface*
+/// (panel clip + background fill + outline stroke). Graticules are
+/// rendered as in-panel grid lines, each pre-clipped against the
+/// outline via `clipper2` so they don't overdraw the boundary.
+///
+/// Both the outline and the graticules live in **data space** and are
+/// resolved through the bound `x_channel` / `y_channel` scales at draw
+/// time. When the scales zoom in past the natural extent of the
+/// polygon, the resolved outline is intersected with the visible panel
+/// rect (the `[0, 1] × [0, 1]` channel-fraction rectangle) so the
+/// drawing surface trims to whatever sliver is still visible.
+///
+/// Perimeter axis slots are left empty under this projection
+/// ([`ChromeStrategy::InsidePanel`]); axis bindings on the plot are
+/// validated but produce no chrome.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CustomProjection {
+    /// Outline in **data space**: one exterior ring plus zero or more
+    /// interior rings (holes). Reuses [`crate::scales::geometry::Polygon`]
+    /// so the same primitive that drives `GeometryGeom` (and the WKT /
+    /// WKB / GeoJSON parsers) builds the outline. Interior rings are
+    /// treated as holes under EvenOdd.
+    pub outline: GeoPolygon,
+    /// Graticules running primarily along the **x** channel
+    /// (meridians / vertical-ish lines), styled as **major** grid.
+    /// Each entry is one polyline in data space.
+    pub x_major: Vec<Vec<Coord>>,
+    /// X-channel graticules styled as **minor** grid.
+    pub x_minor: Vec<Vec<Coord>>,
+    /// Graticules running primarily along the **y** channel
+    /// (parallels / horizontal-ish lines), styled as **major** grid.
+    pub y_major: Vec<Vec<Coord>>,
+    /// Y-channel graticules styled as **minor** grid.
+    pub y_minor: Vec<Vec<Coord>>,
+    /// Channel name resolved as the x coordinate. Defaults to `"x"`.
+    pub x_channel: String,
+    /// Channel name resolved as the y coordinate. Defaults to `"y"`.
+    pub y_channel: String,
+}
+
+impl CustomProjection {
+    /// Construct from a data-space outline polygon. Graticules default
+    /// to empty; channel names default to `"x"` and `"y"`.
+    pub fn new(outline: GeoPolygon) -> Self {
+        Self {
+            outline,
+            x_major: Vec::new(),
+            x_minor: Vec::new(),
+            y_major: Vec::new(),
+            y_minor: Vec::new(),
+            x_channel: "x".to_string(),
+            y_channel: "y".to_string(),
+        }
+    }
+
+    /// Replace the x-major graticule set.
+    pub fn x_major(mut self, lines: impl IntoIterator<Item = Vec<Coord>>) -> Self {
+        self.x_major = lines.into_iter().collect();
+        self
+    }
+
+    /// Replace the x-minor graticule set.
+    pub fn x_minor(mut self, lines: impl IntoIterator<Item = Vec<Coord>>) -> Self {
+        self.x_minor = lines.into_iter().collect();
+        self
+    }
+
+    /// Replace the y-major graticule set.
+    pub fn y_major(mut self, lines: impl IntoIterator<Item = Vec<Coord>>) -> Self {
+        self.y_major = lines.into_iter().collect();
+        self
+    }
+
+    /// Replace the y-minor graticule set.
+    pub fn y_minor(mut self, lines: impl IntoIterator<Item = Vec<Coord>>) -> Self {
+        self.y_minor = lines.into_iter().collect();
+        self
+    }
+
+    /// Override the channel names used to resolve outline + graticule
+    /// data through the scale registry.
+    pub fn channels(mut self, x: impl Into<String>, y: impl Into<String>) -> Self {
+        self.x_channel = x.into();
+        self.y_channel = y.into();
+        self
+    }
+
+    /// Resolve the data-space outline (exterior + holes) through the
+    /// supplied scales, then intersect with the panel rect
+    /// `[0, 1] × [0, 1]` so a zoomed-in scale trims the drawing surface
+    /// to whatever's still visible. Returns the trimmed rings in
+    /// channel-fraction space under EvenOdd — empty if the outline lies
+    /// entirely outside the visible panel; possibly with more or fewer
+    /// rings than the input (clipper2 can split a concave shape or
+    /// absorb a hole that ended up outside the clipped exterior).
+    pub fn resolved_outline_fracs(
+        &self,
+        x_scale: Option<&crate::plot::scale::Scale>,
+        y_scale: Option<&crate::plot::scale::Scale>,
+    ) -> Vec<Vec<Coord>> {
+        let exterior_fracs = resolve_ring(&self.outline.exterior, x_scale, y_scale);
+        let interior_fracs: Vec<Vec<Coord>> = self
+            .outline
+            .interiors
+            .iter()
+            .map(|ring| resolve_ring(ring, x_scale, y_scale))
+            .collect();
+        clip_outline_to_unit_rect(&exterior_fracs, &interior_fracs)
+    }
+
+    /// Resolve one graticule polyline through the supplied scales.
+    /// No clipping — the caller pipes the result through
+    /// [`crate::primitives::clip_polylines_to_polygon`] against the
+    /// trimmed outline rings.
+    // Used by the panel-chrome renderer in `src/plot/chrome/panel.rs`,
+    // which is `text`-gated; in `--no-default-features` builds the
+    // helper has no caller in-tree.
+    #[allow(dead_code)]
+    pub(crate) fn resolve_graticule(
+        &self,
+        line: &[Coord],
+        x_scale: Option<&crate::plot::scale::Scale>,
+        y_scale: Option<&crate::plot::scale::Scale>,
+    ) -> Vec<Coord> {
+        resolve_ring(line, x_scale, y_scale)
+    }
+}
+
+/// Per-vertex `(x, y)` data → channel-fraction resolution. Pass-through
+/// in identity mode (`None` scale → fraction equals the raw f64). NaN
+/// vertices are dropped — they have no meaningful projected location.
+fn resolve_ring(
+    ring: &[Coord],
+    x_scale: Option<&crate::plot::scale::Scale>,
+    y_scale: Option<&crate::plot::scale::Scale>,
+) -> Vec<Coord> {
+    use crate::plot::geom::resolve::resolve_position;
+    use crate::plot::value::Value;
+    let mut out = Vec::with_capacity(ring.len());
+    for (x, y) in ring {
+        let xf = resolve_position(Value::Number(*x), x_scale, 0.0);
+        let yf = resolve_position(Value::Number(*y), y_scale, 0.0);
+        if xf.is_finite() && yf.is_finite() {
+            out.push((xf, yf));
+        }
+    }
+    out
+}
+
+/// Trim a multi-ring polygon (channel-fraction space) against the unit
+/// rect `[0, 1] × [0, 1]`. Routes through
+/// [`crate::primitives::intersect_polygons`] under EvenOdd.
+fn clip_outline_to_unit_rect(exterior: &[Coord], interiors: &[Vec<Coord>]) -> Vec<Vec<Coord>> {
+    if exterior.len() < 3 {
+        return Vec::new();
+    }
+    use crate::geometry::Point;
+    use crate::primitives::intersect_polygons;
+
+    let exterior_pts: Vec<Point> = exterior.iter().map(|(x, y)| Point::new(*x, *y)).collect();
+    let interior_pts: Vec<Vec<Point>> = interiors
+        .iter()
+        .map(|ring| ring.iter().map(|(x, y)| Point::new(*x, *y)).collect())
+        .collect();
+    let mut subject_rings: Vec<&[Point]> = Vec::with_capacity(1 + interior_pts.len());
+    subject_rings.push(&exterior_pts);
+    for ring in &interior_pts {
+        if ring.len() >= 3 {
+            subject_rings.push(ring);
+        }
+    }
+    let unit_rect = [
+        Point::new(0.0, 0.0),
+        Point::new(1.0, 0.0),
+        Point::new(1.0, 1.0),
+        Point::new(0.0, 1.0),
+    ];
+    let clip_rings: [&[Point]; 1] = [&unit_rect];
+    let trimmed = intersect_polygons(&subject_rings, &clip_rings);
+    trimmed
+        .into_iter()
+        .map(|ring| ring.into_iter().map(|p| (p.x, p.y)).collect())
+        .collect()
+}
+
 impl Projection {
     /// Convenience: the default Cartesian projection.
     pub const fn cartesian() -> Self {
@@ -598,6 +797,12 @@ impl Projection {
         Projection::Polar(PolarProjection::radar(n_categories))
     }
 
+    /// Custom drawing surface from a data-space polygon outline. See
+    /// [`CustomProjection`].
+    pub fn custom(outline: GeoPolygon) -> Self {
+        Projection::Custom(CustomProjection::new(outline))
+    }
+
     /// Channel names this projection reads, in argument order for
     /// [`Self::project_to_panel_px`]. The returned slice borrows from
     /// `self` so configured channel names (Polar's angle/radius
@@ -608,6 +813,7 @@ impl Projection {
         match self {
             Projection::Cartesian => vec!["x", "y"],
             Projection::Polar(p) => vec![p.angle_channel.as_str(), p.radius_channel.as_str()],
+            Projection::Custom(c) => vec![c.x_channel.as_str(), c.y_channel.as_str()],
         }
     }
 
@@ -620,7 +826,7 @@ impl Projection {
     /// default to `0.0`. Extra channels are ignored.
     pub fn project_to_panel_px(&self, panel: Rect, channels: &[f64]) -> (f64, f64) {
         match self {
-            Projection::Cartesian => {
+            Projection::Cartesian | Projection::Custom(_) => {
                 let x_frac = channels.first().copied().unwrap_or(0.0);
                 let y_frac = channels.get(1).copied().unwrap_or(0.0);
                 let panel_w = panel.x1 - panel.x0;
@@ -642,7 +848,7 @@ impl Projection {
     pub const fn chrome_strategy(&self) -> ChromeStrategy {
         match self {
             Projection::Cartesian => ChromeStrategy::PatchSlots,
-            Projection::Polar(_) => ChromeStrategy::InsidePanel,
+            Projection::Polar(_) | Projection::Custom(_) => ChromeStrategy::InsidePanel,
         }
     }
 
@@ -659,13 +865,21 @@ impl Projection {
     /// so the rendered polyline follows the projected geodesic instead
     /// of cutting across it as a chord.
     pub const fn is_linear(&self) -> bool {
-        matches!(self, Projection::Cartesian)
+        matches!(self, Projection::Cartesian | Projection::Custom(_))
     }
 
     /// Borrow the polar projection's config, if this is one.
     pub fn as_polar(&self) -> Option<&PolarProjection> {
         match self {
             Projection::Polar(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// Borrow the custom projection's config, if this is one.
+    pub fn as_custom(&self) -> Option<&CustomProjection> {
+        match self {
+            Projection::Custom(c) => Some(c),
             _ => None,
         }
     }
@@ -764,7 +978,7 @@ impl Projection {
         out: &mut Vec<InteriorSample>,
     ) {
         match self {
-            Projection::Cartesian => {
+            Projection::Cartesian | Projection::Custom(_) => {
                 // No-op: straight segments need no interior samples.
             }
             Projection::Polar(p) => {
