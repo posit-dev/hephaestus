@@ -365,18 +365,19 @@ impl Plot {
                     crate::plot::projection::Projection::Custom(c) => c.y_channel.as_str(),
                     _ => "y",
                 };
-                let x_extent = self
-                    .bindings
-                    .get(x_binding)
-                    .and_then(|n| registry.get(n))
-                    .and_then(|s| s.input_range())
-                    .and_then(|r| r.extent())?;
-                let y_extent = self
-                    .bindings
-                    .get(y_binding)
-                    .and_then(|n| registry.get(n))
-                    .and_then(|s| s.input_range())
-                    .and_then(|r| r.extent())?;
+                // Extent in transformed (visual) space — the panel maps
+                // transformed values linearly, so a non-identity transform
+                // makes the data-space extent the wrong aspect driver.
+                let transformed_extent = |binding: &str| -> Option<f64> {
+                    let scale = self.bindings.get(binding).and_then(|n| registry.get(n))?;
+                    let InputRange::Continuous { min, max } = scale.input_range()? else {
+                        return None;
+                    };
+                    let tf = scale.transform();
+                    Some(tf.forward(*max) - tf.forward(*min))
+                };
+                let x_extent = transformed_extent(x_binding)?;
+                let y_extent = transformed_extent(y_binding)?;
                 if !(x_extent > 0.0 && y_extent > 0.0) {
                     return None;
                 }
@@ -598,8 +599,15 @@ impl Plot {
     /// Polar, no aspect ratio is set, the bound x/y scales aren't
     /// continuous, or the natural extents already match the panel's
     /// visual ratio. Otherwise contains a single cloned [`Scale`] keyed
-    /// by scale name with its domain symmetrically expanded around the
-    /// current center.
+    /// by scale name with its domain expanded.
+    ///
+    /// Aspect is measured and the domain expanded in **transformed**
+    /// (visual) space, since the panel maps transformed values linearly
+    /// to pixels — a non-identity transform makes data-space extents
+    /// nonlinear across the panel. The expansion is symmetric where
+    /// possible; if it would cross the transform's allowed domain it
+    /// degrades to a one-sided expansion that stays inside the domain
+    /// (see [`expand_within_domain`]).
     fn build_aspect_overlay(
         &self,
         panel: Rect,
@@ -645,8 +653,17 @@ impl Plot {
         else {
             return overlay;
         };
-        let x_extent = x_max - x_min;
-        let y_extent = y_max - y_min;
+        // Measure in transformed space — the endpoints the panel actually
+        // maps linearly. NaN here (e.g. a domain endpoint outside the
+        // transform's domain) fails the finite guard and skips correction.
+        let x_tf = x_scale.transform();
+        let y_tf = y_scale.transform();
+        let x_lo_t = x_tf.forward(x_min);
+        let x_hi_t = x_tf.forward(x_max);
+        let y_lo_t = y_tf.forward(y_min);
+        let y_hi_t = y_tf.forward(y_max);
+        let x_extent = x_hi_t - x_lo_t;
+        let y_extent = y_hi_t - y_lo_t;
         let panel_w = panel.x1 - panel.x0;
         let panel_h = panel.y1 - panel.y0;
         if !(x_extent.is_finite()
@@ -659,8 +676,9 @@ impl Plot {
         {
             return overlay;
         }
-        // Honor the data-space ratio at the actual panel aspect by
-        // matching `x_extent / y_extent` to `panel_w / (panel_h * ratio)`.
+        // Honor the ratio at the actual panel aspect by matching the
+        // transformed-space `x_extent / y_extent` to `panel_w / (panel_h *
+        // ratio)`.
         let target = panel_w / (panel_h * ratio);
         let current = x_extent / y_extent;
         // Tight tolerance — anything beyond a few ulps is worth a
@@ -669,20 +687,52 @@ impl Plot {
             return overlay;
         }
         if current < target {
-            let new_x_extent = y_extent * target;
-            let half_pad = (new_x_extent - x_extent) * 0.5;
+            let (lo, hi) = expand_within_domain(x_lo_t, x_hi_t, y_extent * target, x_tf);
             let mut clone = x_scale.clone();
-            clone.set_domain_continuous(x_min - half_pad, x_max + half_pad);
+            clone.set_domain_continuous(x_tf.inverse(lo), x_tf.inverse(hi));
             overlay.insert(x_scale_name.clone(), clone);
         } else {
-            let new_y_extent = x_extent / target;
-            let half_pad = (new_y_extent - y_extent) * 0.5;
+            let (lo, hi) = expand_within_domain(y_lo_t, y_hi_t, x_extent / target, y_tf);
             let mut clone = y_scale.clone();
-            clone.set_domain_continuous(y_min - half_pad, y_max + half_pad);
+            clone.set_domain_continuous(y_tf.inverse(lo), y_tf.inverse(hi));
             overlay.insert(y_scale_name.clone(), clone);
         }
         overlay
     }
+}
+
+/// Expand the transformed-space interval `[lo, hi]` to span `new_extent`,
+/// keeping it centered on the original where possible. When a symmetric
+/// expansion would push an endpoint past the transform's allowed domain,
+/// the overshoot is redistributed onto the opposite side so the interval
+/// stays inside the domain; if `new_extent` exceeds the whole allowed
+/// window the result degrades to that window. Operates on transformed
+/// values — callers invert back to data space.
+fn expand_within_domain(
+    lo: f64,
+    hi: f64,
+    new_extent: f64,
+    transform: &crate::scales::Transform,
+) -> (f64, f64) {
+    let (d_lo, d_hi) = transform.allowed_domain();
+    // Allowed bounds in transformed space. Every transform here is
+    // monotonically increasing on its domain, so `forward` preserves order
+    // (an unbounded data side maps to an infinite transformed bound, which
+    // disables that clamp).
+    let bound_lo = transform.forward(d_lo);
+    let bound_hi = transform.forward(d_hi);
+    let pad = (new_extent - (hi - lo)) * 0.5;
+    let mut lo = lo - pad;
+    let mut hi = hi + pad;
+    if lo < bound_lo {
+        hi += bound_lo - lo;
+        lo = bound_lo;
+    }
+    if hi > bound_hi {
+        lo = (lo - (hi - bound_hi)).max(bound_lo);
+        hi = bound_hi;
+    }
+    (lo, hi)
 }
 
 // ─── Wire / draw — feature-gated on `text` ───────────────────────────────────
@@ -2434,6 +2484,44 @@ mod tests {
             other => panic!("expected continuous range, got {other:?}"),
         }
         assert!(!overlay.contains_key("x"), "x should be untouched");
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn range_mode_expands_in_transformed_space() {
+        // Sqrt x over [0, 100] has transformed extent sqrt(100) = 10;
+        // identity y over [0, 10] has extent 10. ratio=1, panel 200×100
+        // → target = 2, so the transformed x extent must double to 20.
+        // Symmetric in transformed space: [-5, 15] → inverse keeps the
+        // non-negative branch, so the data domain is NOT a naive [±].
+        let c = comp_with_two();
+        let mut reg = ScaleRegistry::new();
+        reg.insert(
+            "x",
+            scale::continuous(0.0..=100.0).with_transform(crate::scales::TransformKind::Sqrt),
+        );
+        reg.insert("y", scale::continuous(0.0..=10.0));
+        let p = Plot::new(&c, "a")
+            .bind("x", "x")
+            .bind("y", "y")
+            .aspect_ratio(1.0)
+            .aspect_mode(AspectMode::Range);
+        let panel = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let overlay = p.build_aspect_overlay(panel, &reg);
+        let adjusted = overlay.get("x").expect("x scale overridden");
+        match adjusted.input_range() {
+            Some(crate::scales::input::InputRange::Continuous { min, max }) => {
+                // Symmetric expansion in transformed space [-5, 15] would
+                // dip below the sqrt domain; the low side clamps to 0 and
+                // the slack moves to the high side → transformed [0, 20],
+                // i.e. data [0, 400].
+                assert!(*min >= 0.0, "x min must stay in the sqrt domain, got {min}");
+                assert!((min - 0.0).abs() < 1e-9, "x min = {min}");
+                assert!((max - 400.0).abs() < 1e-6, "x max = {max}");
+            }
+            other => panic!("expected continuous range, got {other:?}"),
+        }
+        assert!(!overlay.contains_key("y"), "y should be untouched");
     }
 
     #[cfg(feature = "text")]
