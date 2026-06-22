@@ -8,7 +8,7 @@ use std::num::NonZeroUsize;
 use kurbo::Shape;
 use vello::{AaConfig, AaSupport, RenderParams, Renderer as VRenderer, RendererOptions, Scene};
 
-use crate::backend::{BackendError, Renderer};
+use crate::backend::{BackendError, Renderer, WgpuRenderer};
 use crate::blend::BlendMode;
 use crate::brush::{Brush, Image, Sampling};
 use crate::color::Color;
@@ -409,6 +409,28 @@ impl VelloRenderer {
         pollster::block_on(Self::new_async(true))
     }
 
+    /// Build a renderer that shares an existing wgpu device and queue —
+    /// e.g. the device backing a window's swap chain. Use this together
+    /// with [`WgpuRenderer::render_to_texture`](crate::backend::WgpuRenderer::render_to_texture)
+    /// to display the scene without a CPU readback round-trip.
+    ///
+    /// `device` and `queue` are handles (Arc-backed in wgpu); the host
+    /// keeps its own and the renderer holds clones.
+    pub fn with_device(device: &wgpu::Device, queue: &wgpu::Queue) -> Result<Self, BackendError> {
+        Self::build(device.clone(), queue.clone(), false)
+    }
+
+    /// Like [`Self::with_device`] but enables picking. The pick scene is
+    /// rasterised into a backend-owned headless target and read back to
+    /// CPU on every render, regardless of whether the display render goes
+    /// to a buffer or directly to a texture.
+    pub fn with_device_and_picking(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<Self, BackendError> {
+        Self::build(device.clone(), queue.clone(), true)
+    }
+
     async fn new_async(picking: bool) -> Result<Self, BackendError> {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = wgpu::Backends::PRIMARY;
@@ -435,6 +457,16 @@ impl VelloRenderer {
             .await
             .map_err(|e| BackendError::DeviceRequest(e.to_string()))?;
 
+        Self::build(device, queue, picking)
+    }
+
+    /// Shared post-device construction: build the vello renderer and the
+    /// (optionally picking) scene against an already-owned device/queue.
+    fn build(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        picking: bool,
+    ) -> Result<Self, BackendError> {
         let renderer = VRenderer::new(
             &device,
             RendererOptions {
@@ -464,19 +496,124 @@ impl VelloRenderer {
         })
     }
 
-    /// Re-allocate the display (and, if picking is on, pick) headless
-    /// target when the requested dimensions don't match the cached ones.
-    fn ensure_targets(&mut self, width: u32, height: u32) {
+    /// Re-allocate the display headless target when the requested
+    /// dimensions don't match the cached ones. Only used by the
+    /// [`Renderer::render_to_buffer`] path — the texture-target path
+    /// writes directly into the host's view and skips this entirely.
+    fn ensure_display_target(&mut self, width: u32, height: u32) {
         let need_new = match &self.target {
             None => true,
             Some(t) => t.width != width || t.height != height,
         };
         if need_new {
             self.target = Some(HeadlessTarget::new(&self.device, width, height));
-            if self.scene.raw_pick().is_some() {
-                self.pick_target = Some(HeadlessTarget::new(&self.device, width, height));
+        }
+    }
+
+    /// Re-allocate the pick headless target when picking is enabled and
+    /// the dimensions don't match the cached ones. No-op when picking is
+    /// disabled.
+    fn ensure_pick_target(&mut self, width: u32, height: u32) {
+        if self.scene.raw_pick().is_none() {
+            return;
+        }
+        let need_new = match &self.pick_target {
+            None => true,
+            Some(t) => t.width != width || t.height != height,
+        };
+        if need_new {
+            self.pick_target = Some(HeadlessTarget::new(&self.device, width, height));
+        }
+    }
+
+    /// Rasterise the pick scene into the cached pick target, copy it back
+    /// to CPU, and refresh the hitmap. Assumes [`Self::ensure_pick_target`]
+    /// has already been called and picking is enabled.
+    fn render_pick_and_readback(&mut self, width: u32, height: u32) -> Result<(), BackendError> {
+        let pick_scene = self.scene.raw_pick().expect("pick scene present");
+        let pick_target = self.pick_target.as_ref().expect("pick target ensured");
+
+        // Use AaConfig::Area (the only mode our AaSupport opted into).
+        // Edge pixels of solid fills will be partially blended toward the
+        // background — fine for picking interior regions, with a small
+        // ambiguity zone at borders the renderer does not try to eliminate.
+        self.renderer
+            .render_to_texture(
+                &self.device,
+                &self.queue,
+                pick_scene,
+                &pick_target.view,
+                &RenderParams {
+                    base_color: Color::new([0.0, 0.0, 0.0, 0.0]),
+                    width,
+                    height,
+                    antialiasing_method: AaConfig::Area,
+                },
+            )
+            .map_err(|e| BackendError::Other(format!("vello pick render: {e}")))?;
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("hephaestus.vello.pick_readback"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &pick_target.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &pick_target.readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(pick_target.padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        let pick_slice = pick_target.readback.slice(..);
+        let (pick_tx, pick_rx) = futures_intrusive::channel::shared::oneshot_channel();
+        pick_slice.map_async(wgpu::MapMode::Read, move |res| {
+            let _ = pick_tx.send(res);
+        });
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        match pollster::block_on(pick_rx.receive()) {
+            Some(Ok(())) => {}
+            Some(Err(e)) => return Err(BackendError::Readback(e.to_string())),
+            None => {
+                return Err(BackendError::Readback(
+                    "map_async pick sender dropped".into(),
+                ))
             }
         }
+
+        let row_bytes = (width as usize) * 4;
+        let total_bytes = (width as usize) * (height as usize) * 4;
+        let hitmap = self.hitmap.get_or_insert_with(Vec::new);
+        if hitmap.len() != total_bytes {
+            hitmap.resize(total_bytes, 0);
+        }
+        {
+            let data = pick_slice.get_mapped_range();
+            let padded = pick_target.padded_bytes_per_row as usize;
+            for y in 0..height as usize {
+                let src = &data[y * padded..y * padded + row_bytes];
+                let dst = &mut hitmap[y * row_bytes..y * row_bytes + row_bytes];
+                dst.copy_from_slice(src);
+            }
+        }
+        pick_target.readback.unmap();
+        self.hitmap_dims = Some((width, height));
+        Ok(())
     }
 
     /// Look up the id at pixel `(x, y)` in the most-recent pick render.
@@ -526,7 +663,8 @@ impl Renderer for VelloRenderer {
             });
         }
 
-        self.ensure_targets(width, height);
+        self.ensure_display_target(width, height);
+        self.ensure_pick_target(width, height);
         let target = self.target.as_ref().unwrap();
 
         self.renderer
@@ -694,6 +832,40 @@ impl Renderer for VelloRenderer {
             self.hitmap_dims = Some((width, height));
         }
 
+        Ok(())
+    }
+}
+
+impl WgpuRenderer for VelloRenderer {
+    fn render_to_texture(
+        &mut self,
+        view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        background: Color,
+    ) -> Result<(), BackendError> {
+        self.renderer
+            .render_to_texture(
+                &self.device,
+                &self.queue,
+                self.scene.raw(),
+                view,
+                &RenderParams {
+                    base_color: background,
+                    width,
+                    height,
+                    antialiasing_method: AaConfig::Area,
+                },
+            )
+            .map_err(|e| BackendError::Other(format!("vello render: {e}")))?;
+
+        // Picking still goes through the backend-owned pick target +
+        // CPU readback. Display has no readback to wait on, so the pick
+        // submit / poll happens after the display submit returns.
+        if self.scene.raw_pick().is_some() {
+            self.ensure_pick_target(width, height);
+            self.render_pick_and_readback(width, height)?;
+        }
         Ok(())
     }
 }

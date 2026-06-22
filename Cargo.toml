@@ -275,6 +275,10 @@ name = "smoke"
 required-features = ["vello"]
 
 [[test]]
+name = "texture_smoke"
+required-features = ["vello"]
+
+[[test]]
 name = "mesh"
 required-features = ["vello"]
 

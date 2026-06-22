@@ -53,3 +53,12 @@ pub use shape::{Shape, ShapeRegistry, ShapeStyle};
 pub use stroke::Stroke;
 
 pub use backend::{BackendError, Renderer};
+
+#[cfg(feature = "vello")]
+pub use backend::WgpuRenderer;
+
+/// Re-export of the `wgpu` crate version `hephaestus` is built against, so
+/// callers integrating the GPU rendering path (see [`WgpuRenderer`]) can pin
+/// to the exact types the backend expects.
+#[cfg(feature = "vello")]
+pub use wgpu;

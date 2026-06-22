@@ -6,6 +6,13 @@ Vello backend: implements `SceneBuilder` against a `vello::Scene` and `Renderer`
 
 `VelloScene` (in `mod.rs`) wraps a `vello::Scene` and translates our restricted enums to peniko's wider set via `convert.rs`. `VelloRenderer` owns the wgpu device, queue, and the cached `HeadlessTarget` (storage texture + readback buffer) needed to render headlessly. When picking is enabled (`VelloRenderer::with_picking()`), every draw call is also recorded into a parallel pick `vello::Scene`, rasterised into a second target, and read back to power `pick_at(x, y) -> Option<u32>`.
 
+Two output paths share one scene:
+
+- **`Renderer::render_to_buffer`** — the headless path. Renders into the backend-owned display `HeadlessTarget`, copies it back to CPU, and writes into the caller's RGBA8 slab. Display + pick texture-→-buffer copies share a single submit.
+- **`WgpuRenderer::render_to_texture`** — the windowing path. Renders straight into a host-owned `wgpu::TextureView` (must be `Rgba8Unorm` storage; the host blits to its swap chain). The display `HeadlessTarget` is never allocated on this path. Picking, when enabled, still rasterises and reads back the pick scene through the backend-owned pick target, so `pick_at` keeps working without forcing the display through CPU.
+
+`VelloRenderer::new()` / `with_picking()` spin up a private wgpu device. `with_device(&Device, &Queue)` / `with_device_and_picking(&Device, &Queue)` share an existing host device so the rendered texture is on the same device as the host's surface.
+
 ## Quirks worth remembering
 
 - **Sync construction via `pollster::block_on`.** Public API is sync. If async init becomes needed, add a `with_device(device, queue)` constructor — don't make `new()` async.
