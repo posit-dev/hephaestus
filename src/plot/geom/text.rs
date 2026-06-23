@@ -104,9 +104,9 @@ use crate::stroke::{Cap, Join, Stroke};
 use crate::text::{draw_text, Alignment, TextRun, TextStyle};
 
 use super::resolve::{
-    band_width_at, override_alpha, pt_to_px, resolve_angle_channel, resolve_color_channel,
-    resolve_color_channel_or_theme, resolve_number_channel, resolve_number_channel_or,
-    resolve_pick_id, resolve_position,
+    band_width_at, override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or,
+    resolve_color_channel, resolve_color_channel_or_theme, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, resolve_position,
 };
 use super::state::{
     finalize_state, require_data_column, require_x_and_siblings, GeomState, KeysStrategy,
@@ -133,6 +133,11 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("weight", ExpectedOutput::Numbers),
     ("italic", ExpectedOutput::Any),
     ("family", ExpectedOutput::Strings),
+    ("letter_spacing", ExpectedOutput::Numbers),
+    ("underline", ExpectedOutput::Any),
+    ("strikethrough", ExpectedOutput::Any),
+    ("text_stroke", ExpectedOutput::Colors),
+    ("text_linewidth", ExpectedOutput::Numbers),
     ("anchor_x", ExpectedOutput::Numbers),
     ("anchor_y", ExpectedOutput::Numbers),
     ("fill", ExpectedOutput::Colors),
@@ -217,6 +222,11 @@ impl Geom for TextGeom {
         let weight_scale = ctx.scale_for("weight");
         let italic_scale = ctx.scale_for("italic");
         let family_scale = ctx.scale_for("family");
+        let letter_spacing_scale = ctx.scale_for("letter_spacing");
+        let underline_scale = ctx.scale_for("underline");
+        let strikethrough_scale = ctx.scale_for("strikethrough");
+        let text_stroke_scale = ctx.scale_for("text_stroke");
+        let text_linewidth_scale = ctx.scale_for("text_linewidth");
         let anchor_x_scale = ctx.scale_for("anchor_x");
         let anchor_y_scale = ctx.scale_for("anchor_y");
         let fill_scale = ctx.scale_for("fill");
@@ -254,6 +264,11 @@ impl Geom for TextGeom {
         let weight_ch = channels.get("weight");
         let italic_ch = channels.get("italic");
         let family_ch = channels.get("family");
+        let letter_spacing_ch = channels.get("letter_spacing");
+        let underline_ch = channels.get("underline");
+        let strikethrough_ch = channels.get("strikethrough");
+        let text_stroke_ch = channels.get("text_stroke");
+        let text_linewidth_ch = channels.get("text_linewidth");
         let anchor_x_ch = channels.get("anchor_x");
         let anchor_y_ch = channels.get("anchor_y");
         let fill_ch = channels.get("fill");
@@ -307,9 +322,32 @@ impl Geom for TextGeom {
                 .unwrap_or(ctx.theme.geom.text.weight);
             let italic = resolve_bool_or_italic_string(italic_ch, italic_scale, i);
             let family = resolve_str_channel(family_ch, family_scale, i);
+            let letter_spacing_pt = resolve_number_channel_or(
+                letter_spacing_ch,
+                letter_spacing_scale,
+                i,
+                ctx.theme.geom.text.letter_spacing_pt,
+            );
+            let underline = resolve_bool_channel_or(
+                underline_ch,
+                underline_scale,
+                i,
+                ctx.theme.geom.text.underline,
+            );
+            let strikethrough = resolve_bool_channel_or(
+                strikethrough_ch,
+                strikethrough_scale,
+                i,
+                ctx.theme.geom.text.strikethrough,
+            );
 
             // ── Build TextStyle + TextRun. ──
-            let mut style = TextStyle::new(size_pt as f32).weight(weight).italic(italic);
+            let mut style = TextStyle::new(size_pt as f32)
+                .weight(weight)
+                .italic(italic)
+                .letter_spacing_pt(letter_spacing_pt as f32)
+                .underline(underline)
+                .strikethrough(strikethrough);
             if let Some(fam) = family {
                 style = style.family(fam);
             }
@@ -370,6 +408,21 @@ impl Geom for TextGeom {
                 resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i),
             )
             .unwrap_or_else(default_fill);
+
+            // ── Per-glyph outline. ──
+            let text_stroke_color = resolve_color_channel_or_theme(
+                text_stroke_ch,
+                text_stroke_scale,
+                i,
+                ctx.theme.geom.text.text_stroke.as_ref(),
+                &ctx.theme.palette,
+            );
+            let text_linewidth_pt = resolve_number_channel_or(
+                text_linewidth_ch,
+                text_linewidth_scale,
+                i,
+                ctx.theme.geom.text.text_linewidth_pt,
+            );
 
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
 
@@ -479,6 +532,24 @@ impl Geom for TextGeom {
                             );
                         }
                     }
+                }
+            }
+
+            // ── Outline pass (under the fill). ──
+            if let Some(stroke_color) = text_stroke_color {
+                let stroke_width_px = pt_to_px(text_linewidth_pt, ctx.dpi);
+                if stroke_width_px > 0.0 {
+                    let stroke = crate::stroke::Stroke::new(stroke_width_px);
+                    crate::text::draw_text_outline(
+                        scene,
+                        &run,
+                        draw_x,
+                        draw_y,
+                        &Brush::Solid(stroke_color),
+                        &stroke,
+                        xform,
+                        crate::pick::PickId::Skip,
+                    );
                 }
             }
 
@@ -1226,6 +1297,135 @@ mod tests {
             "bg width {} should be much less than wrap constraint {}",
             bb.width(),
             wrap_px
+        );
+    }
+
+    fn glyph_extent(scene: &RecordingScene) -> Option<(f32, f32)> {
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        for op in &scene.ops {
+            if let Op::DrawGlyphs(run) = op {
+                for g in &run.glyphs {
+                    lo = lo.min(g.x);
+                    hi = hi.max(g.x);
+                }
+            }
+        }
+        (lo.is_finite() && hi.is_finite()).then_some((lo, hi))
+    }
+
+    fn count_fills(scene: &RecordingScene) -> usize {
+        scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count()
+    }
+
+    fn draw_text_geom_to_scene(g: TextGeom) -> RecordingScene {
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 400.0, 200.0), &shapes, &scales),
+        );
+        scene
+    }
+
+    #[test]
+    fn text_stroke_emits_outline_pass() {
+        let make_plain = || {
+            let g = TextGeom::builder()
+                .set("x", vec![0.5_f64])
+                .set("y", vec![0.5_f64])
+                .set("text", vec!["hello"])
+                .set("fill", red())
+                .set("text_linewidth", 1.5_f64)
+                .build();
+            draw_text_geom_to_scene(g)
+        };
+        let make_outlined = || {
+            let g = TextGeom::builder()
+                .set("x", vec![0.5_f64])
+                .set("y", vec![0.5_f64])
+                .set("text", vec!["hello"])
+                .set("fill", red())
+                .set("text_linewidth", 1.5_f64)
+                .set("text_stroke", Color::new([0.0, 0.0, 1.0, 1.0]))
+                .build();
+            draw_text_geom_to_scene(g)
+        };
+        let count_stroked = |scene: &RecordingScene| {
+            scene
+                .ops
+                .iter()
+                .filter(|op| matches!(op, Op::DrawGlyphs(g) if g.style.is_some()))
+                .count()
+        };
+        assert_eq!(count_stroked(&make_plain()), 0);
+        assert!(count_stroked(&make_outlined()) >= 1);
+    }
+
+    #[test]
+    fn underline_channel_adds_fill_per_label() {
+        let make = |underline: bool| {
+            let g = TextGeom::builder()
+                .set("x", vec![0.5_f64])
+                .set("y", vec![0.5_f64])
+                .set("text", vec!["hello"])
+                .set("fill", red())
+                .set("underline", underline)
+                .build();
+            draw_text_geom_to_scene(g)
+        };
+        let base = count_fills(&make(false));
+        let underlined = count_fills(&make(true));
+        assert_eq!(underlined, base + 1);
+    }
+
+    #[test]
+    fn strikethrough_channel_adds_fill_per_label() {
+        let make = |strike: bool| {
+            let g = TextGeom::builder()
+                .set("x", vec![0.5_f64])
+                .set("y", vec![0.5_f64])
+                .set("text", vec!["hello"])
+                .set("fill", red())
+                .set("strikethrough", strike)
+                .build();
+            draw_text_geom_to_scene(g)
+        };
+        let base = count_fills(&make(false));
+        let struck = count_fills(&make(true));
+        assert_eq!(struck, base + 1);
+    }
+
+    #[test]
+    fn letter_spacing_channel_widens_emitted_glyphs() {
+        let make = |spacing: f64| {
+            let g = TextGeom::builder()
+                .set("x", vec![0.5_f64])
+                .set("y", vec![0.5_f64])
+                .set("text", vec!["MMMM"])
+                .set("fill", red())
+                .set("letter_spacing", spacing)
+                .build();
+            let shapes = shapes();
+            let scales = DirectScaleResolver::new();
+            let mut scene = RecordingScene::default();
+            g.draw(
+                &mut scene,
+                &ctx(Rect::new(0.0, 0.0, 400.0, 200.0), &shapes, &scales),
+            );
+            let (lo, hi) = glyph_extent(&scene).expect("glyphs");
+            (hi - lo) as f64
+        };
+        let base = make(0.0);
+        let loose = make(8.0);
+        assert!(
+            loose > base + 5.0,
+            "letter_spacing=8pt should widen glyph extent: base={base}, loose={loose}"
         );
     }
 

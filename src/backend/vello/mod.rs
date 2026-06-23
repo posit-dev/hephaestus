@@ -153,6 +153,10 @@ impl SceneBuilder for VelloScene {
     }
 
     fn draw_glyphs(&mut self, run: &GlyphRun<'_>, pick_id: PickId) {
+        let style: peniko::StyleRef<'_> = match run.style {
+            Some(stroke) => peniko::StyleRef::from(stroke),
+            None => peniko::StyleRef::from(peniko::Fill::NonZero),
+        };
         let mut builder = self
             .inner
             .draw_glyphs(&run.font.0)
@@ -164,7 +168,7 @@ impl SceneBuilder for VelloScene {
             .hint(run.hint);
         let _ = &mut builder; // silence unused if hint() ever returns ()
         builder.draw(
-            peniko::Fill::NonZero,
+            style,
             run.glyphs.iter().map(|g| vello::Glyph {
                 id: g.id,
                 x: g.x,
@@ -175,6 +179,10 @@ impl SceneBuilder for VelloScene {
         if let Some(pick) = &mut self.pick {
             if let Some(id) = pick::raw_id(pick_id) {
                 let pick_brush = Brush::Solid(pick::id_to_color(id));
+                let pick_style: peniko::StyleRef<'_> = match run.style {
+                    Some(stroke) => peniko::StyleRef::from(stroke),
+                    None => peniko::StyleRef::from(peniko::Fill::NonZero),
+                };
                 let mut pick_builder = pick
                     .draw_glyphs(&run.font.0)
                     .font_size(run.font_size)
@@ -185,7 +193,7 @@ impl SceneBuilder for VelloScene {
                     .hint(run.hint);
                 let _ = &mut pick_builder;
                 pick_builder.draw(
-                    peniko::Fill::NonZero,
+                    pick_style,
                     run.glyphs.iter().map(|g| vello::Glyph {
                         id: g.id,
                         x: g.x,

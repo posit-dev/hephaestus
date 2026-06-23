@@ -14,7 +14,7 @@ The crate ships two API levels in the same source tree: a low-level scene API (`
 cargo build                                              # default features (vello + png)
 cargo build --no-default-features                        # core types & traits only — no wgpu pulled in
 cargo build --no-default-features --features vello,png   # explicit feature combination
-cargo build --features vello,png,text                    # add the scaffolding text shaper (needed by chrome + text geoms)
+cargo build --features vello,png,text                    # add the parley-backed text shaper (needed by chrome + text geoms)
 
 cargo test                                               # all tests
 cargo test --test smoke                                  # the GPU smoke test (requires a working wgpu adapter)
@@ -54,7 +54,7 @@ Style rules (apply everywhere, including comments in `tests/` and `examples/`):
 
 - **`vello`** (default) — the GPU rasterising backend (wgpu + vello + pollster + futures-intrusive + bytemuck).
 - **`png`** (default) — PNG writer (`png` crate). Used by examples and tests.
-- **`text`** (off by default) — scaffolding text shaping / layout via parley. Needed by the chrome on plot scales (axes, legends, titles) and by `TextGeom` / `TextFitGeom` / `TextPathGeom`. The host crate is intended to bring its own shaper eventually; see `src/text/CLAUDE.md`.
+- **`text`** (off by default) — parley-backed text shaping / layout. Needed by the chrome on plot scales (axes, legends, titles) and by `TextGeom` / `TextFitGeom` / `TextPathGeom`. A host crate that prefers its own shaper can swap in behind `TextRun` / `draw_text`; see `src/text/CLAUDE.md`.
 - **`geom-wkt`**, **`geom-wkb`**, **`geom-geojson`** (off by default) — opt-in parsers for `crate::scales::Geometry`. Each gate enables one of `Geometry::from_wkt` / `from_wkb` / `from_geojson`. Hand-rolled and dependency-free, so toggling them only affects what constructors compile, not the dependency tree.
 - **`blend2d`**, **`svg`**, **`pdf`** — feature placeholders only; no backend code behind them yet. Wired so dependent crates can write `features = ["blend2d"]` once they exist.
 
@@ -67,7 +67,7 @@ The following belong in higher layers or other crates and should not land here:
 - **Surface presentation** — no winit, no event loop. The renderer produces RGBA8 buffers; presentation is the caller's problem.
 - **Interaction model and animation runtime** — picking emits pixel ids (see `src/CLAUDE.md`), but routing those to event handlers, tweening states, and animation scheduling all live in the host.
 - **Filter effects** — blur, drop shadow, etc. Outside the Vello-∩-Blend2D intersection that governs the scene API.
-- **Font selection / loading** — not handled at the scene level. The `text` feature provides a parley-backed scaffolding shaper and is explicitly meant to be replaced by the host. The `SceneBuilder` glyph-drawing surface consumes already-positioned glyphs.
+- **Font selection / loading at the `SceneBuilder` level** — the scene API consumes already-positioned glyphs. Shaping and font discovery live in the `text` module (parley-backed, gated on the `text` feature); a host that wants its own shaper can replace it behind the `TextRun` / `draw_text` surface.
 
 The `plot/` module is in-scope: it is the high-level layer inside this crate that builds on the low-level surface. Out-of-scope means "not in this crate", not "not in this layer".
 

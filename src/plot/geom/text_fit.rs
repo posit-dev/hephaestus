@@ -58,9 +58,9 @@ use crate::stroke::{Cap, Join, Stroke};
 use crate::text::{draw_text, Alignment, TextRun, TextStyle};
 
 use super::resolve::{
-    override_alpha, pt_to_px, resolve_angle_channel, resolve_color_channel,
-    resolve_color_channel_or_theme, resolve_number_channel, resolve_number_channel_or,
-    resolve_pick_id, resolve_position,
+    override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or,
+    resolve_color_channel, resolve_color_channel_or_theme, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, resolve_position,
 };
 use super::state::{
     finalize_state, require_data_column, require_x_and_siblings, GeomState, KeysStrategy,
@@ -97,6 +97,11 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("family", ExpectedOutput::Strings),
     ("weight", ExpectedOutput::Numbers),
     ("italic", ExpectedOutput::Any),
+    ("letter_spacing", ExpectedOutput::Numbers),
+    ("underline", ExpectedOutput::Any),
+    ("strikethrough", ExpectedOutput::Any),
+    ("text_stroke", ExpectedOutput::Colors),
+    ("text_linewidth", ExpectedOutput::Numbers),
     ("min_font_size", ExpectedOutput::Numbers),
     ("max_font_size", ExpectedOutput::Numbers),
     ("fill", ExpectedOutput::Colors),
@@ -185,6 +190,11 @@ impl Geom for TextFitGeom {
         let family_scale = ctx.scale_for("family");
         let weight_scale = ctx.scale_for("weight");
         let italic_scale = ctx.scale_for("italic");
+        let letter_spacing_scale = ctx.scale_for("letter_spacing");
+        let underline_scale = ctx.scale_for("underline");
+        let strikethrough_scale = ctx.scale_for("strikethrough");
+        let text_stroke_scale = ctx.scale_for("text_stroke");
+        let text_linewidth_scale = ctx.scale_for("text_linewidth");
         let min_font_scale = ctx.scale_for("min_font_size");
         let max_font_scale = ctx.scale_for("max_font_size");
         let fill_scale = ctx.scale_for("fill");
@@ -227,6 +237,11 @@ impl Geom for TextFitGeom {
         let family_ch = channels.get("family");
         let weight_ch = channels.get("weight");
         let italic_ch = channels.get("italic");
+        let letter_spacing_ch = channels.get("letter_spacing");
+        let underline_ch = channels.get("underline");
+        let strikethrough_ch = channels.get("strikethrough");
+        let text_stroke_ch = channels.get("text_stroke");
+        let text_linewidth_ch = channels.get("text_linewidth");
         let min_font_ch = channels.get("min_font_size");
         let max_font_ch = channels.get("max_font_size");
         let x_offset_ch = channels.get("x_offset");
@@ -312,6 +327,24 @@ impl Geom for TextFitGeom {
                 .unwrap_or(ctx.theme.geom.text_fit.weight);
             let italic = resolve_bool_or_italic_string(italic_ch, italic_scale, i);
             let family = resolve_str_channel(family_ch, family_scale, i);
+            let letter_spacing_pt = resolve_number_channel_or(
+                letter_spacing_ch,
+                letter_spacing_scale,
+                i,
+                ctx.theme.geom.text_fit.letter_spacing_pt,
+            ) as f32;
+            let underline = resolve_bool_channel_or(
+                underline_ch,
+                underline_scale,
+                i,
+                ctx.theme.geom.text_fit.underline,
+            );
+            let strikethrough = resolve_bool_channel_or(
+                strikethrough_ch,
+                strikethrough_scale,
+                i,
+                ctx.theme.geom.text_fit.strikethrough,
+            );
 
             let min_pt = resolve_number_channel_or(
                 min_font_ch,
@@ -337,7 +370,12 @@ impl Geom for TextFitGeom {
 
             // ── Binary-search the font size. ──
             let make_style = |size_pt: f32| {
-                let mut s = TextStyle::new(size_pt).weight(weight).italic(italic);
+                let mut s = TextStyle::new(size_pt)
+                    .weight(weight)
+                    .italic(italic)
+                    .letter_spacing_pt(letter_spacing_pt)
+                    .underline(underline)
+                    .strikethrough(strikethrough);
                 if let Some(f) = &family {
                     s = s.family(f);
                 }
@@ -399,6 +437,21 @@ impl Geom for TextFitGeom {
                 resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i),
             )
             .unwrap_or_else(default_fill);
+
+            // ── Per-glyph outline. ──
+            let text_stroke_color = resolve_color_channel_or_theme(
+                text_stroke_ch,
+                text_stroke_scale,
+                i,
+                ctx.theme.geom.text_fit.text_stroke.as_ref(),
+                &ctx.theme.palette,
+            );
+            let text_linewidth_pt = resolve_number_channel_or(
+                text_linewidth_ch,
+                text_linewidth_scale,
+                i,
+                ctx.theme.geom.text_fit.text_linewidth_pt,
+            );
 
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
 
@@ -500,6 +553,25 @@ impl Geom for TextFitGeom {
             // into the clip layer; the glyphs draw with Identity. When
             // not clipping the rotation goes on the glyph run itself.
             let glyph_xform = if need_clip { Affine::IDENTITY } else { xform };
+
+            // ── Outline pass (under the fill). ──
+            if let Some(stroke_color) = text_stroke_color {
+                let stroke_width_px = pt_to_px(text_linewidth_pt, ctx.dpi);
+                if stroke_width_px > 0.0 {
+                    let stroke = crate::stroke::Stroke::new(stroke_width_px);
+                    crate::text::draw_text_outline(
+                        scene,
+                        &run,
+                        draw_x,
+                        draw_y,
+                        &Brush::Solid(stroke_color),
+                        &stroke,
+                        glyph_xform,
+                        crate::pick::PickId::Skip,
+                    );
+                }
+            }
+
             draw_text(
                 scene,
                 &run,

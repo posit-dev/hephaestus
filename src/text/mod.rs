@@ -1,8 +1,9 @@
-//! **Scaffolding** text shaping/layout backed by [`parley`].
+//! Text shaping and layout backed by [`parley`].
 //!
-//! Gated behind the `text` cargo feature. Intended to be temporary — the host
-//! crate is expected to bring its own shaper. While this module exists it
-//! provides:
+//! Gated behind the `text` cargo feature. The committed text stack for
+//! chrome rendering (axis labels, legends, titles) and the
+//! [`crate::plot::geom::TextGeom`] / [`crate::plot::geom::TextFitGeom`] /
+//! [`crate::plot::geom::TextPathGeom`] plot geoms. Public surface:
 //!
 //! - [`TextStyle`] — font / size (pt, DPI-independent) / weight / width /
 //!   style (italic / oblique) / OpenType features / variations descriptor.
@@ -12,12 +13,24 @@
 //! - [`draw_text`] — bridge from a positioned [`TextRun`] to
 //!   [`crate::scene::SceneBuilder::draw_glyphs`].
 //!
-//! Font discovery uses parley's [`FontContext::new()`] which enumerates
+//! Font discovery uses parley's [`FontContext::new()`], which enumerates
 //! system fonts; on machines without common families the layout still works
 //! but the rendered glyphs depend on what fontique finds.
+//!
+//! A host crate that wants to plug in its own shaper can do so by
+//! preserving [`TextRun`]'s [`Measure`] impl and [`draw_text`]'s
+//! glyph-emission contract — those are the stable surface. Anything
+//! inside (parley layout, [`FontContext`] caching) is implementation
+//! detail.
+
+#[cfg(feature = "text-google-fonts")]
+pub mod google_fonts;
+#[cfg(feature = "text-google-fonts")]
+pub use google_fonts::{fetch_google_font, google_font_cache_dir, GoogleFontError};
 
 use std::cell::RefCell;
-use std::sync::{Mutex, OnceLock};
+use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use parley::{
     AlignmentOptions, FontContext, FontFamily, FontFamilyName, FontStyle, FontWeight,
@@ -42,12 +55,69 @@ use crate::shape::Shape;
 /// Placeholder brush type for parley — real brushes are passed at draw time.
 type B = ();
 
-/// Lazy, process-global [`FontContext`]. Constructed on first use; locked for
-/// shaping. Single mutex is fine since shaping is cheap and rare relative to
-/// per-frame work, and the `text` feature is positioned as scaffolding.
+/// Lazy, process-global [`FontContext`]. Constructed on first use; locked
+/// for shaping. A single mutex suffices because shaping is cheap and rare
+/// relative to per-frame work.
 fn font_context() -> &'static Mutex<FontContext> {
     static FC: OnceLock<Mutex<FontContext>> = OnceLock::new();
     FC.get_or_init(|| Mutex::new(FontContext::new()))
+}
+
+// ─── Font registration ──────────────────────────────────────────────────────
+
+/// Register every font face in `bytes` with the process-global font
+/// context. `bytes` must be a TTF / OTF / TTC / OTC blob; a single
+/// collection (TTC / OTC) may register multiple faces. Returns the
+/// number of faces registered.
+///
+/// Subsequent [`TextRun::new`] calls can resolve newly-registered
+/// families by name. Registration is process-global and persists for
+/// the lifetime of the process.
+///
+/// A blob that contains no recognisable faces returns `0`; this
+/// function never panics on malformed input.
+pub fn register_font_bytes(bytes: impl Into<Vec<u8>>) -> usize {
+    let owned: Arc<Vec<u8>> = Arc::new(bytes.into());
+    let blob = parley::fontique::Blob::new(owned);
+    let mut fcx = font_context().lock().expect("font context poisoned");
+    let registered = fcx.collection.register_fonts(blob, None);
+    registered.iter().map(|(_, fonts)| fonts.len()).sum()
+}
+
+/// Read `path` and register the contained fonts via
+/// [`register_font_bytes`]. Returns the number of faces registered.
+pub fn register_font_path(path: impl AsRef<Path>) -> std::io::Result<usize> {
+    let bytes = std::fs::read(path)?;
+    Ok(register_font_bytes(bytes))
+}
+
+/// Scan `dir` for font files (`.ttf` / `.otf` / `.ttc` / `.otc`,
+/// case-insensitive) and register each through [`register_font_path`].
+/// Non-recursive — subdirectories are ignored. Returns the total
+/// number of faces registered across all files.
+pub fn register_font_dir(dir: impl AsRef<Path>) -> std::io::Result<usize> {
+    let mut total = 0;
+    for entry in std::fs::read_dir(dir.as_ref())? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let ext_ok = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| {
+                matches!(
+                    e.to_ascii_lowercase().as_str(),
+                    "ttf" | "otf" | "ttc" | "otc"
+                )
+            })
+            .unwrap_or(false);
+        if ext_ok {
+            total += register_font_path(&path)?;
+        }
+    }
+    Ok(total)
 }
 
 // ─── TextStyle ───────────────────────────────────────────────────────────────
@@ -131,18 +201,17 @@ impl Default for LineHeight {
     }
 }
 
-/// Shaper-facing text style. Carries every axis the scaffolding shaper
-/// can plumb through to parley — size, family chain, weight, width
-/// (CSS `font-width` ratio), style (italic / oblique), OpenType feature
+/// Shaper-facing text style. Carries every axis the shaper plumbs
+/// through to parley — size, family chain, weight, width (CSS
+/// `font-width` ratio), style (italic / oblique), OpenType feature
 /// toggles, and variable-font variations.
 ///
 /// Sizes are in **points** (1pt = 1/72 inch) — DPI-independent. The
 /// conversion to pixels happens inside [`TextRun::new`] using the DPI
 /// passed at shaping time.
 ///
-/// Letter spacing, line height, decorations belong in the host shaper —
-/// add them here only if a composition test or chrome path actually
-/// needs them while this scaffolding is still in place.
+/// Additional axes (letter spacing, decorations, …) are added as
+/// chrome paths and geoms call for them.
 #[derive(Clone, Debug)]
 pub struct TextStyle {
     /// Font size in points (1pt = 1/72 inch).
@@ -159,6 +228,18 @@ pub struct TextStyle {
     pub style: FontStyleKind,
     /// Line height — relative-to-size multiplier or absolute pt.
     pub line_height: LineHeight,
+    /// Letter spacing (tracking) in points — extra horizontal advance
+    /// inserted between every pair of glyphs. `0.0` is the natural
+    /// font advance; positive values loosen, negative values tighten.
+    /// DPI-independent; converted to pixels at shape time.
+    pub letter_spacing_pt: f32,
+    /// Underline the text. Drawn at the font's reported underline
+    /// position and thickness; the brush passed to [`draw_text`] is
+    /// reused for the decoration line.
+    pub underline: bool,
+    /// Strike through the text. Drawn at the font's reported
+    /// strikethrough position and thickness; brush reused as above.
+    pub strikethrough: bool,
     /// OpenType feature toggles applied to the whole run.
     pub features: Vec<FontFeatureSetting>,
     /// Variable-font axis values applied to the whole run.
@@ -168,7 +249,7 @@ pub struct TextStyle {
 impl TextStyle {
     /// Construct a style with the given point size, empty family chain
     /// (defaults to sans-serif at shape time), weight `400`, normal
-    /// width and style, no features, no variations.
+    /// width and style, no letter spacing, no features, no variations.
     pub fn new(size_pt: f32) -> Self {
         Self {
             size_pt,
@@ -177,6 +258,9 @@ impl TextStyle {
             width: 1.0,
             style: FontStyleKind::Normal,
             line_height: LineHeight::default(),
+            letter_spacing_pt: 0.0,
+            underline: false,
+            strikethrough: false,
             features: Vec::new(),
             variations: Vec::new(),
         }
@@ -233,6 +317,30 @@ impl TextStyle {
     /// Set the line height.
     pub fn line_height(mut self, lh: LineHeight) -> Self {
         self.line_height = lh;
+        self
+    }
+
+    /// Set the letter spacing (tracking) in points. Positive values
+    /// loosen the glyph advance, negative values tighten it; `0.0` is
+    /// the natural advance. DPI-independent.
+    pub fn letter_spacing_pt(mut self, pt: f32) -> Self {
+        self.letter_spacing_pt = pt;
+        self
+    }
+
+    /// Toggle the underline decoration. The line is drawn at the
+    /// font's reported underline position and thickness, in the same
+    /// brush as the text.
+    pub fn underline(mut self, yes: bool) -> Self {
+        self.underline = yes;
+        self
+    }
+
+    /// Toggle the strikethrough decoration. The line is drawn at the
+    /// font's reported strikethrough position and thickness, in the
+    /// same brush as the text.
+    pub fn strikethrough(mut self, yes: bool) -> Self {
+        self.strikethrough = yes;
         self
     }
 
@@ -323,6 +431,16 @@ impl TextRun {
             }
         };
         builder.push_default(StyleProperty::LineHeight(line_height));
+        if style.letter_spacing_pt != 0.0 {
+            let letter_spacing_px = (style.letter_spacing_pt as f64 * dpi / 72.0) as f32;
+            builder.push_default(StyleProperty::LetterSpacing(letter_spacing_px));
+        }
+        if style.underline {
+            builder.push_default(StyleProperty::Underline(true));
+        }
+        if style.strikethrough {
+            builder.push_default(StyleProperty::Strikethrough(true));
+        }
         // Owned families list — parley borrows from us via `Cow`s, so
         // the source strings must outlive `build()`. Constructing the
         // names eagerly and pushing them keeps the lifetimes local.
@@ -664,6 +782,9 @@ pub fn glyph_marker(text: &str, style: &TextStyle) -> Shape {
         width: style.width,
         style: style.style,
         line_height: style.line_height,
+        letter_spacing_pt: style.letter_spacing_pt,
+        underline: false,
+        strikethrough: false,
         features: style.features.clone(),
         variations: style.variations.clone(),
     };
@@ -759,10 +880,147 @@ pub fn draw_text<S: SceneBuilder + ?Sized>(
                 brush_alpha: 1.0,
                 hint: false,
                 glyphs: &glyphs,
+                style: None,
+            };
+            scene.draw_glyphs(&glyph_run, pick_id);
+            // Underline / strikethrough decorations are emitted as
+            // axis-aligned filled rectangles in the same pre-transform
+            // coordinate frame as the glyphs, so any rotation supplied
+            // via `transform` rotates them with the text.
+            let style = gr.style();
+            let metrics = prun.metrics();
+            let baseline = gr.baseline();
+            let run_x0 = x as f32 + gr.offset();
+            let run_x1 = run_x0 + gr.advance();
+            if let Some(deco) = &style.underline {
+                emit_decoration_rect(
+                    scene,
+                    DecorationRect {
+                        x0: run_x0,
+                        x1: run_x1,
+                        top: y as f32 + baseline + deco.offset.unwrap_or(metrics.underline_offset),
+                        thickness: deco.size.unwrap_or(metrics.underline_size).max(0.0),
+                    },
+                    brush,
+                    transform,
+                    pick_id,
+                );
+            }
+            if let Some(deco) = &style.strikethrough {
+                emit_decoration_rect(
+                    scene,
+                    DecorationRect {
+                        x0: run_x0,
+                        x1: run_x1,
+                        top: y as f32
+                            + baseline
+                            + deco.offset.unwrap_or(metrics.strikethrough_offset),
+                        thickness: deco.size.unwrap_or(metrics.strikethrough_size).max(0.0),
+                    },
+                    brush,
+                    transform,
+                    pick_id,
+                );
+            }
+        }
+    }
+}
+
+/// Emit a stroke-only pass over `run` at `(x, y)`. Each glyph is
+/// outlined using `stroke_brush` and the supplied [`crate::stroke::Stroke`]
+/// instead of filled.
+///
+/// Intended to be called *before* [`draw_text`] when an outlined text
+/// effect is wanted — the stroke pass sits behind the fill pass so the
+/// outline appears around the visible glyph edge. Decorations
+/// (underline / strikethrough) are not emitted by this function; let
+/// [`draw_text`] handle them on the fill pass.
+///
+/// `pick_id` controls the picking record for the stroke pass. Geom
+/// code should pass [`PickId::Skip`] here so the picking surface is
+/// owned by the fill pass that follows.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_text_outline<S: SceneBuilder + ?Sized>(
+    scene: &mut S,
+    run: &TextRun,
+    x: f64,
+    y: f64,
+    stroke_brush: &Brush,
+    stroke: &crate::stroke::Stroke,
+    transform: Affine,
+    pick_id: PickId,
+) {
+    let layout = run.layout.borrow();
+    for line in layout.lines() {
+        for item in line.items() {
+            let PositionedLayoutItem::GlyphRun(gr) = item else {
+                continue;
+            };
+            let prun = gr.run();
+            let font = Font(prun.font().clone());
+            let glyphs: Vec<Glyph> = gr
+                .positioned_glyphs()
+                .map(|g| Glyph {
+                    id: g.id,
+                    x: x as f32 + g.x,
+                    y: y as f32 + g.y,
+                })
+                .collect();
+            if glyphs.is_empty() {
+                continue;
+            }
+            let glyph_run = GlyphRun {
+                font: &font,
+                font_size: prun.font_size(),
+                transform,
+                glyph_transform: None,
+                brush: stroke_brush,
+                brush_alpha: 1.0,
+                hint: false,
+                glyphs: &glyphs,
+                style: Some(stroke),
             };
             scene.draw_glyphs(&glyph_run, pick_id);
         }
     }
+}
+
+/// One filled axis-aligned rectangle representing an underline or
+/// strikethrough decoration. Bundled as a struct to keep the
+/// `emit_decoration_rect` helper from accumulating positional args.
+struct DecorationRect {
+    x0: f32,
+    x1: f32,
+    top: f32,
+    thickness: f32,
+}
+
+fn emit_decoration_rect<S: SceneBuilder + ?Sized>(
+    scene: &mut S,
+    deco: DecorationRect,
+    brush: &Brush,
+    transform: Affine,
+    pick_id: PickId,
+) {
+    let DecorationRect {
+        x0,
+        x1,
+        top,
+        thickness,
+    } = deco;
+    if !thickness.is_finite() || thickness <= 0.0 || x1 <= x0 {
+        return;
+    }
+    let rect = Rect::new(x0 as f64, top as f64, x1 as f64, (top + thickness) as f64);
+    let path: crate::path::Path = kurbo::Shape::to_path(&rect, 0.1);
+    scene.fill(
+        crate::path::FillRule::NonZero,
+        transform,
+        brush,
+        None,
+        &path,
+        pick_id,
+    );
 }
 
 /// [`Measure`] adapter that pads an inner measure with per-edge
@@ -875,6 +1133,113 @@ mod tests {
             run.natural_width()
         );
         assert!(run.natural_height() > 0.0);
+    }
+
+    #[test]
+    fn register_font_bytes_returns_zero_for_garbage() {
+        let n = register_font_bytes(b"not-a-font".to_vec());
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn register_font_dir_skips_non_font_files() {
+        let dir = std::env::temp_dir().join("hephaestus-font-dir-smoke");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("note.txt"), b"hi").expect("write");
+        std::fs::write(dir.join("garbage.ttf"), b"not-a-font").expect("write");
+        let result = register_font_dir(&dir).expect("scan");
+        std::fs::remove_dir_all(&dir).ok();
+        // `note.txt` is filtered by extension; `garbage.ttf` is read
+        // and contributes zero registered faces (invalid bytes).
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn draw_text_outline_emits_stroked_glyph_run() {
+        use crate::brush::Brush;
+        use crate::color::Color;
+        use crate::geometry::Affine;
+        use crate::pick::PickId;
+        use crate::scene::recording::{Op, RecordingScene};
+
+        let brush = Brush::Solid(Color::new([0.0, 0.0, 0.0, 1.0]));
+        let stroke = crate::stroke::Stroke::new(2.0);
+        let style = TextStyle::new(16.0);
+        let run = TextRun::new("Hello", &style, 96.0);
+        let mut scene = RecordingScene::default();
+        draw_text_outline(
+            &mut scene,
+            &run,
+            0.0,
+            0.0,
+            &brush,
+            &stroke,
+            Affine::IDENTITY,
+            PickId::Skip,
+        );
+        let stroked = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::DrawGlyphs(g) if g.style.is_some()))
+            .count();
+        assert!(stroked > 0, "expected at least one stroked glyph run");
+    }
+
+    #[test]
+    fn underline_and_strikethrough_emit_extra_fills() {
+        use crate::brush::Brush;
+        use crate::color::Color;
+        use crate::geometry::Affine;
+        use crate::pick::PickId;
+        use crate::scene::recording::{Op, RecordingScene};
+        let brush = Brush::Solid(Color::new([0.0, 0.0, 0.0, 1.0]));
+
+        let plain = TextStyle::new(16.0);
+        let underlined = TextStyle::new(16.0).underline(true);
+        let struck = TextStyle::new(16.0).strikethrough(true);
+        let both = TextStyle::new(16.0).underline(true).strikethrough(true);
+
+        let count_fills = |s: &TextStyle| -> usize {
+            let run = TextRun::new("Hello", s, 96.0);
+            let mut scene = RecordingScene::default();
+            draw_text(
+                &mut scene,
+                &run,
+                0.0,
+                0.0,
+                &brush,
+                Affine::IDENTITY,
+                PickId::Skip,
+            );
+            scene
+                .ops
+                .iter()
+                .filter(|op| matches!(op, Op::Fill { .. }))
+                .count()
+        };
+
+        let plain_fills = count_fills(&plain);
+        assert_eq!(count_fills(&underlined), plain_fills + 1);
+        assert_eq!(count_fills(&struck), plain_fills + 1);
+        assert_eq!(count_fills(&both), plain_fills + 2);
+    }
+
+    #[test]
+    fn letter_spacing_widens_the_layout() {
+        let base = TextStyle::new(16.0);
+        let loose = TextStyle::new(16.0).letter_spacing_pt(4.0);
+        let tight = TextStyle::new(16.0).letter_spacing_pt(-1.0);
+        let r_base = TextRun::new("Hello", &base, 96.0).natural_width();
+        let r_loose = TextRun::new("Hello", &loose, 96.0).natural_width();
+        let r_tight = TextRun::new("Hello", &tight, 96.0).natural_width();
+        assert!(
+            r_loose > r_base,
+            "positive letter spacing should widen: base={r_base}, loose={r_loose}"
+        );
+        assert!(
+            r_tight < r_base,
+            "negative letter spacing should narrow: base={r_base}, tight={r_tight}"
+        );
     }
 
     #[test]

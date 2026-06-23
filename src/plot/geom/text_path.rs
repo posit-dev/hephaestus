@@ -100,6 +100,11 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("weight", ExpectedOutput::Numbers),
     ("italic", ExpectedOutput::Any),
     ("family", ExpectedOutput::Strings),
+    ("letter_spacing", ExpectedOutput::Numbers),
+    ("underline", ExpectedOutput::Any),
+    ("strikethrough", ExpectedOutput::Any),
+    ("text_stroke", ExpectedOutput::Colors),
+    ("text_linewidth", ExpectedOutput::Numbers),
     ("fill", ExpectedOutput::Colors),
     ("alpha", ExpectedOutput::Numbers),
     ("offset", ExpectedOutput::Numbers),
@@ -247,6 +252,11 @@ impl Geom for TextPathGeom {
         let weight_scale = ctx.scale_for("weight");
         let italic_scale = ctx.scale_for("italic");
         let family_scale = ctx.scale_for("family");
+        let letter_spacing_scale = ctx.scale_for("letter_spacing");
+        let underline_scale = ctx.scale_for("underline");
+        let strikethrough_scale = ctx.scale_for("strikethrough");
+        let text_stroke_scale = ctx.scale_for("text_stroke");
+        let text_linewidth_scale = ctx.scale_for("text_linewidth");
         let fill_scale = ctx.scale_for("fill");
         let alpha_scale = ctx.scale_for("alpha");
         let offset_scale = ctx.scale_for("offset");
@@ -277,6 +287,11 @@ impl Geom for TextPathGeom {
         let weight_ch = channels.get("weight");
         let italic_ch = channels.get("italic");
         let family_ch = channels.get("family");
+        let letter_spacing_ch = channels.get("letter_spacing");
+        let underline_ch = channels.get("underline");
+        let strikethrough_ch = channels.get("strikethrough");
+        let text_stroke_ch = channels.get("text_stroke");
+        let text_linewidth_ch = channels.get("text_linewidth");
         let fill_ch = channels.get("fill");
         let alpha_ch = channels.get("alpha");
         let offset_ch = channels.get("offset");
@@ -308,6 +323,48 @@ impl Geom for TextPathGeom {
                 .unwrap_or(ctx.theme.geom.text_path.weight);
             let italic = resolve_italic(italic_ch, italic_scale, i0);
             let family = resolve_str_opt(family_ch, family_scale, i0);
+            let letter_spacing_pt = resolve_number_channel_or(
+                letter_spacing_ch,
+                letter_spacing_scale,
+                i0,
+                ctx.theme.geom.text_path.letter_spacing_pt,
+            ) as f32;
+            let underline = resolve_bool_channel_or(
+                underline_ch,
+                underline_scale,
+                i0,
+                ctx.theme.geom.text_path.underline,
+            );
+            let strikethrough = resolve_bool_channel_or(
+                strikethrough_ch,
+                strikethrough_scale,
+                i0,
+                ctx.theme.geom.text_path.strikethrough,
+            );
+            let text_stroke_color = resolve_color_channel_or_theme(
+                text_stroke_ch,
+                text_stroke_scale,
+                i0,
+                ctx.theme.geom.text_path.text_stroke.as_ref(),
+                &ctx.theme.palette,
+            );
+            let text_linewidth_pt = resolve_number_channel_or(
+                text_linewidth_ch,
+                text_linewidth_scale,
+                i0,
+                ctx.theme.geom.text_path.text_linewidth_pt,
+            );
+            let outline_stroke = match (text_stroke_color, text_linewidth_pt) {
+                (Some(col), pt) if pt > 0.0 => {
+                    let stroke_width_px = pt_to_px(pt, ctx.dpi);
+                    if stroke_width_px > 0.0 {
+                        Some((col, crate::stroke::Stroke::new(stroke_width_px)))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
 
             let fill_color = override_alpha(
                 resolve_color_channel_or_theme(
@@ -380,7 +437,12 @@ impl Geom for TextPathGeom {
             }
 
             // ── Shape the text. Single-line only — no set_max_width. ──
-            let mut style = TextStyle::new(size_pt as f32).weight(weight).italic(italic);
+            let mut style = TextStyle::new(size_pt as f32)
+                .weight(weight)
+                .italic(italic)
+                .letter_spacing_pt(letter_spacing_pt)
+                .underline(underline)
+                .strikethrough(strikethrough);
             if let Some(fam) = family {
                 style = style.family(fam);
             }
@@ -519,6 +581,21 @@ impl Geom for TextPathGeom {
                     x: 0.0,
                     y: 0.0,
                 };
+                if let Some((stroke_color, stroke)) = &outline_stroke {
+                    let stroke_brush = Brush::Solid(*stroke_color);
+                    let stroke_run = GlyphRun {
+                        font: &g.font,
+                        font_size: g.font_size,
+                        transform: xform,
+                        glyph_transform: None,
+                        brush: &stroke_brush,
+                        brush_alpha: 1.0,
+                        hint: false,
+                        glyphs: std::slice::from_ref(&glyph),
+                        style: Some(stroke),
+                    };
+                    scene.draw_glyphs(&stroke_run, crate::pick::PickId::Skip);
+                }
                 let glyph_run = GlyphRun {
                     font: &g.font,
                     font_size: g.font_size,
@@ -528,6 +605,7 @@ impl Geom for TextPathGeom {
                     brush_alpha: 1.0,
                     hint: false,
                     glyphs: std::slice::from_ref(&glyph),
+                    style: None,
                 };
                 scene.draw_glyphs(&glyph_run, pick);
             }

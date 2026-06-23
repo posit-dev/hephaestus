@@ -65,6 +65,9 @@ pub struct OwnedGlyphRun {
     pub brush_alpha: f32,
     pub hint: bool,
     pub glyphs: Vec<Glyph>,
+    /// `None` means fill the glyph outlines; `Some(stroke)` means
+    /// stroke them.
+    pub style: Option<crate::stroke::Stroke>,
     pub pick_id: PickId,
 }
 
@@ -152,6 +155,7 @@ impl SceneBuilder for RecordingScene {
             brush_alpha: run.brush_alpha,
             hint: run.hint,
             glyphs: run.glyphs.to_vec(),
+            style: run.style.cloned(),
             pick_id,
         }));
     }

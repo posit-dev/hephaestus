@@ -212,6 +212,16 @@ pub struct TextElement {
     pub angle: Option<Rotation>,
     /// Line height — typically `Rel(1.2)` (120% of the resolved size).
     pub lineheight: Option<Length>,
+    /// Letter spacing (tracking). `Length::Abs(pt)` is absolute pt
+    /// between glyph pairs; `Length::Rel(m)` is `m × resolved_size_pt`.
+    /// `Abs(0.0)` (the default) is the natural font advance.
+    pub letter_spacing: Option<Length>,
+    /// Underline the text. Position and thickness are taken from the
+    /// font's reported metrics.
+    pub underline: Option<bool>,
+    /// Strike through the text. Position and thickness are taken from
+    /// the font's reported metrics.
+    pub strikethrough: Option<bool>,
     /// Margin around the text block, each side independent.
     pub margin: Option<Margin>,
 }
@@ -230,6 +240,9 @@ impl TextElement {
             valign: self.valign.or(parent.valign),
             angle: self.angle.or(parent.angle),
             lineheight: self.lineheight.or(parent.lineheight),
+            letter_spacing: self.letter_spacing.or(parent.letter_spacing),
+            underline: self.underline.or(parent.underline),
+            strikethrough: self.strikethrough.or(parent.strikethrough),
             margin: self.margin.or(parent.margin),
         }
     }
@@ -256,6 +269,9 @@ pub fn text_concrete_defaults() -> TextElement {
         valign: Some(VAlign::Middle),
         angle: Some(Rotation::default()),
         lineheight: Some(Length::Rel(DEFAULT_TEXT_LINEHEIGHT)),
+        letter_spacing: Some(Length::Abs(0.0)),
+        underline: Some(false),
+        strikethrough: Some(false),
         margin: Some(Margin::ZERO),
     }
 }

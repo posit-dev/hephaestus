@@ -12,9 +12,14 @@ publish = false
 default = ["vello", "png"]
 vello = ["dep:vello", "dep:wgpu", "dep:pollster", "dep:futures-intrusive", "dep:bytemuck"]
 png = ["dep:png"]
-# Scaffolding text shaping/layout via parley. Off by default — the host crate
-# is intended to bring its own shaper. See `src/text/`.
+# Parley-backed text shaping / layout. Off by default; needed by chrome
+# rendering and the text geoms. See `src/text/`.
 text = ["dep:parley"]
+# Auto-fetch named Google Fonts families on demand. Hits the Google Fonts
+# CSS2 API, caches downloaded font files in the platform cache dir, and
+# registers them with the running font context. Synchronous network call
+# on cache miss; cache hits are offline.
+text-google-fonts = ["text", "dep:ureq", "dep:directories"]
 # Optional datetime-library interop: `From` impls between our temporal
 # newtypes (`Date` / `DateTime` / `Time` / `Duration`) and the matching
 # types in the named library. All three default off — pick whichever
@@ -52,6 +57,10 @@ png = { version = "0.18", optional = true }
 bytemuck = { version = "1", optional = true }
 parley = { version = "0.9", optional = true }
 clipper2-rust = "1.0.3"
+
+# Google Fonts auto-lookup — feature-gated; pulled in by `text-google-fonts`.
+ureq = { version = "2", optional = true, default-features = false, features = ["tls"] }
+directories = { version = "5", optional = true }
 
 # Optional datetime-library interop (one of three feature gates).
 chrono = { version = "0.4", default-features = false, optional = true }
@@ -288,6 +297,18 @@ required-features = ["vello", "png", "text"]
 [[example]]
 name = "locale_de"
 required-features = ["vello", "png", "text"]
+
+[[example]]
+name = "text_outline"
+required-features = ["vello", "png", "text"]
+
+[[example]]
+name = "font_registration"
+required-features = ["vello", "png", "text"]
+
+[[example]]
+name = "google_fonts"
+required-features = ["vello", "png", "text-google-fonts"]
 
 [[test]]
 name = "smoke"

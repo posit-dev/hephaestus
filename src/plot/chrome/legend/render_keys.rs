@@ -182,6 +182,7 @@ fn render_point(
                     brush_alpha: 1.0,
                     hint: false,
                     glyphs: &glyphs,
+                    style: None,
                 };
                 scene.draw_glyphs(&run, PickId::Skip);
                 return;

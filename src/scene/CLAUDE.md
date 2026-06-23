@@ -15,7 +15,7 @@ Every method is **self-contained** — no persistent "current transform" or "cur
 - **`Glyph`** — `{ id: u32, x: f32, y: f32 }`. A single positioned glyph in run-local coordinates.
 - **`GlyphRun<'a>`** — a run of glyphs sharing one font, size, transform, brush, and brush alpha. Borrows the font and glyph slice; the brush is owned by the caller and borrowed by reference.
 
-The trait deliberately consumes already-positioned glyphs — shaping and line-breaking are out of scope (the optional `text` module provides scaffolding, but the scene API doesn't require it).
+The trait deliberately consumes already-positioned glyphs — shaping and line-breaking are out of scope. The optional `text` module provides the parley-backed shaper used by chrome and the text geoms; the scene API itself does not require it.
 
 ## Conventions
 

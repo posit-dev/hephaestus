@@ -1805,6 +1805,25 @@ pub(crate) fn text_style_from(
         Length::Rel(mult) => LineHeight::Relative(mult as f32),
         Length::Abs(pt) => LineHeight::Absolute(pt as f32),
     });
+    let letter_spacing = el
+        .letter_spacing
+        .or(defaults.letter_spacing)
+        .expect("letter_spacing default");
+    let letter_spacing_pt = match letter_spacing {
+        Length::Abs(pt) => pt,
+        Length::Rel(mult) => mult * size as f64,
+    };
+    style = style.letter_spacing_pt(letter_spacing_pt as f32);
+    let underline = el
+        .underline
+        .or(defaults.underline)
+        .expect("underline default");
+    style = style.underline(underline);
+    let strikethrough = el
+        .strikethrough
+        .or(defaults.strikethrough)
+        .expect("strikethrough default");
+    style = style.strikethrough(strikethrough);
     if let Some(weight) = el.font.weight {
         style = style.weight(weight.0);
     }

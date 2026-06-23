@@ -119,4 +119,8 @@ pub struct GlyphRun<'a> {
     /// If true, the backend may apply hinting where supported.
     pub hint: bool,
     pub glyphs: &'a [Glyph],
+    /// Render style. `None` (default) fills the glyph outlines; `Some(stroke)`
+    /// strokes them along the outline with the given pen. Used for outlined
+    /// text — typically paired with a separate filled pass on top.
+    pub style: Option<&'a crate::stroke::Stroke>,
 }

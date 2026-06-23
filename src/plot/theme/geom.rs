@@ -201,6 +201,22 @@ pub struct TextDefaults {
     /// Background outline stroke width in pt when no `"bg_linewidth"`
     /// channel is bound.
     pub bg_linewidth_pt: f64,
+    /// Letter spacing in pt when no `"letter_spacing"` channel is
+    /// bound. `0.0` is the natural font advance.
+    pub letter_spacing_pt: f64,
+    /// Underline the text when no `"underline"` channel is bound.
+    pub underline: bool,
+    /// Strike through the text when no `"strikethrough"` channel is
+    /// bound.
+    pub strikethrough: bool,
+    /// Default per-glyph outline colour when no `"text_stroke"`
+    /// channel is bound. `None` = no outline. Drawn behind the fill
+    /// when both are present.
+    pub text_stroke: Option<ThemeColor>,
+    /// Default outline thickness in pt when no `"text_linewidth"`
+    /// channel is bound. Has no effect unless `text_stroke` resolves
+    /// to a colour.
+    pub text_linewidth_pt: f64,
 }
 
 impl Default for TextDefaults {
@@ -218,6 +234,11 @@ impl Default for TextDefaults {
             bg_fill: None,
             bg_stroke: None,
             bg_linewidth_pt: 1.0,
+            letter_spacing_pt: 0.0,
+            underline: false,
+            strikethrough: false,
+            text_stroke: None,
+            text_linewidth_pt: 1.0,
         }
     }
 }
@@ -239,6 +260,19 @@ pub struct TextFitDefaults {
     pub bg_stroke: Option<ThemeColor>,
     /// Background outline stroke width in pt.
     pub bg_linewidth_pt: f64,
+    /// Letter spacing in pt when no `"letter_spacing"` channel is
+    /// bound.
+    pub letter_spacing_pt: f64,
+    /// Underline the text when no `"underline"` channel is bound.
+    pub underline: bool,
+    /// Strike through the text when no `"strikethrough"` channel is
+    /// bound.
+    pub strikethrough: bool,
+    /// Default per-glyph outline colour. See
+    /// [`TextDefaults::text_stroke`].
+    pub text_stroke: Option<ThemeColor>,
+    /// Default per-glyph outline thickness in pt.
+    pub text_linewidth_pt: f64,
 }
 
 impl Default for TextFitDefaults {
@@ -253,6 +287,11 @@ impl Default for TextFitDefaults {
             bg_fill: None,
             bg_stroke: None,
             bg_linewidth_pt: 1.0,
+            letter_spacing_pt: 0.0,
+            underline: false,
+            strikethrough: false,
+            text_stroke: None,
+            text_linewidth_pt: 1.0,
         }
     }
 }
