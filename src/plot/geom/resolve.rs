@@ -327,6 +327,64 @@ pub(crate) fn override_alpha(color: Option<Color>, alpha: Option<f64>) -> Option
     }
 }
 
+/// Apply per-row pt-space offsets in place to a sequence of projected
+/// spline samples. Each sample's spline parameter
+/// `u ∈ [0, n_ctrl − 1]` brackets two source rows via
+/// `row_for_ctrl`; the lerped pt offset becomes the per-sample shift.
+/// Positive `y_offset` follows the project-wide convention "up is
+/// positive" — the projected pixel y decrements. No-op when both
+/// offset channels are unbound. Shared by spline-based geoms whose
+/// draw loop emits projected `(u, point)` samples after spline
+/// evaluation.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_per_row_offsets(
+    samples: &mut [Point],
+    us: &[f64],
+    row_for_ctrl: &[usize],
+    x_offset_ch: Option<&Channel>,
+    x_offset_scale: Option<&Scale>,
+    y_offset_ch: Option<&Channel>,
+    y_offset_scale: Option<&Scale>,
+    dpi: f64,
+) {
+    if x_offset_ch.is_none() && y_offset_ch.is_none() {
+        return;
+    }
+    let n_rows = row_for_ctrl.len();
+    if n_rows == 0 {
+        return;
+    }
+    let row_x = |row: usize| -> f64 {
+        resolve_number_channel(x_offset_ch, x_offset_scale, row).unwrap_or(0.0)
+    };
+    let row_y = |row: usize| -> f64 {
+        resolve_number_channel(y_offset_ch, y_offset_scale, row).unwrap_or(0.0)
+    };
+    let last = n_rows - 1;
+    for (idx, &u) in us.iter().enumerate().take(samples.len()) {
+        let u_clamped = u.clamp(0.0, last as f64);
+        let lo = u_clamped.floor() as usize;
+        let hi = (lo + 1).min(last);
+        let t = u_clamped - lo as f64;
+        let dx_pt = if lo == hi {
+            row_x(row_for_ctrl[lo])
+        } else {
+            let a = row_x(row_for_ctrl[lo]);
+            let b = row_x(row_for_ctrl[hi]);
+            a + t * (b - a)
+        };
+        let dy_pt = if lo == hi {
+            row_y(row_for_ctrl[lo])
+        } else {
+            let a = row_y(row_for_ctrl[lo]);
+            let b = row_y(row_for_ctrl[hi]);
+            a + t * (b - a)
+        };
+        samples[idx].x += pt_to_px(dx_pt, dpi);
+        samples[idx].y -= pt_to_px(dy_pt, dpi);
+    }
+}
+
 /// Look up the band width (in `[0, 1]` panel fraction) for `raw` on
 /// `scale`. Continuous scales return 0 (no bands → no contribution).
 /// Discrete / Ordinal / Binned return the band width at the value.

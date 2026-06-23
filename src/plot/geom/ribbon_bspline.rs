@@ -57,6 +57,16 @@
 //! - `"x"`, `"y"` — required; data; numeric. Curve A's control points.
 //! - `"x2"`, `"y2"` — optional; data; numeric. At least one is
 //!   required.
+//! - `"x_offset"` / `"y_offset"` / `"x2_offset"` / `"y2_offset"` —
+//!   per-row absolute pt offsets applied to the projected spline
+//!   samples, lerped between bracketing control points by the spline
+//!   parameter. Unsuffixed → curve A; `2`-suffixed → curve B.
+//!   Positive `y_offset` / `y2_offset` shifts the sample up
+//!   (decrements pixel y).
+//! - `"x_band"` / `"y_band"` / `"x2_band"` / `"y2_band"` — per-row
+//!   band-fraction offset folded into the corresponding scale's
+//!   `map_with_offset` for each control point. No effect on
+//!   continuous scales. Unsuffixed → curve A; `2`-suffixed → curve B.
 //! - `"degree"` — per-mark; numeric; default 3. Clamped to
 //!   `min(degree, n_ctrl - 1)`. Groups with fewer than `degree + 1`
 //!   control points degrade to straight polylines per curve.
@@ -119,9 +129,9 @@ use super::bspline_eval::{
 use super::marks::{build_marks_from_column, unique_values_at_first_rows, MarkSlot};
 use super::outline::{draw_curve_outline, resolve_outline_spec, OutlineChannels, OutlineScales};
 use super::resolve::{
-    override_alpha, resolve_color_channel, resolve_color_channel_or_theme, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position, resolve_str_channel_or,
-    ChannelBind,
+    apply_per_row_offsets, override_alpha, resolve_color_channel, resolve_color_channel_or_theme,
+    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
+    resolve_str_channel_or, ChannelBind,
 };
 use super::ribbon::{append_cap_fan_to_mesh, resolve_b_row, CapDirection, Orientation};
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
@@ -138,6 +148,14 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("y", ExpectedOutput::Numbers),
     ("x2", ExpectedOutput::Numbers),
     ("y2", ExpectedOutput::Numbers),
+    ("x_offset", ExpectedOutput::Numbers),
+    ("y_offset", ExpectedOutput::Numbers),
+    ("x2_offset", ExpectedOutput::Numbers),
+    ("y2_offset", ExpectedOutput::Numbers),
+    ("x_band", ExpectedOutput::Numbers),
+    ("y_band", ExpectedOutput::Numbers),
+    ("x2_band", ExpectedOutput::Numbers),
+    ("y2_band", ExpectedOutput::Numbers),
     ("degree", ExpectedOutput::Numbers),
     ("interpolation", ExpectedOutput::Strings),
     ("fill", ExpectedOutput::Colors),
@@ -244,6 +262,14 @@ struct RibbonBSplineDrawCtx<'a> {
     y_scale: Option<&'a Scale>,
     x2: ChannelBind<'a>,
     y2: ChannelBind<'a>,
+    x_offset: ChannelBind<'a>,
+    y_offset: ChannelBind<'a>,
+    x2_offset: ChannelBind<'a>,
+    y2_offset: ChannelBind<'a>,
+    x_band: ChannelBind<'a>,
+    y_band: ChannelBind<'a>,
+    x2_band: ChannelBind<'a>,
+    y2_band: ChannelBind<'a>,
     fill: ChannelBind<'a>,
     alpha: ChannelBind<'a>,
     degree: ChannelBind<'a>,
@@ -283,6 +309,14 @@ impl<'a> RibbonBSplineDrawCtx<'a> {
             y_scale,
             x2: b("x2"),
             y2: b("y2"),
+            x_offset: b("x_offset"),
+            y_offset: b("y_offset"),
+            x2_offset: b("x2_offset"),
+            y2_offset: b("y2_offset"),
+            x_band: b("x_band"),
+            y_band: b("y_band"),
+            x2_band: b("x2_band"),
+            y2_band: b("y2_band"),
             fill: b("fill"),
             alpha: b("alpha"),
             degree: b("degree"),
@@ -410,6 +444,44 @@ fn draw_one_ribbon_bspline_mark(
             ch: y2_ch,
             scale: y2_scale_bound,
         },
+        x_offset:
+            ChannelBind {
+                ch: x_offset_ch,
+                scale: x_offset_scale,
+            },
+        y_offset:
+            ChannelBind {
+                ch: y_offset_ch,
+                scale: y_offset_scale,
+            },
+        x2_offset:
+            ChannelBind {
+                ch: x2_offset_ch,
+                scale: x2_offset_scale,
+            },
+        y2_offset:
+            ChannelBind {
+                ch: y2_offset_ch,
+                scale: y2_offset_scale,
+            },
+        x_band: ChannelBind {
+            ch: x_band_ch,
+            scale: x_band_scale,
+        },
+        y_band: ChannelBind {
+            ch: y_band_ch,
+            scale: y_band_scale,
+        },
+        x2_band:
+            ChannelBind {
+                ch: x2_band_ch,
+                scale: x2_band_scale,
+            },
+        y2_band:
+            ChannelBind {
+                ch: y2_band_ch,
+                scale: y2_band_scale,
+            },
         fill: ChannelBind {
             ch: fill_ch,
             scale: fill_scale,
@@ -493,8 +565,12 @@ fn draw_one_ribbon_bspline_mark(
     let mut ctrl_b: Vec<Point> = Vec::with_capacity(mark.rows.len());
     let mut row_for_ctrl: Vec<usize> = Vec::with_capacity(mark.rows.len());
     for &i in &mark.rows {
-        let x_frac = resolve_position(x_col.get(i), x_scale, 0.0);
-        let y_frac = resolve_position(y_col.get(i), y_scale, 0.0);
+        let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
+        let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
+        let x2_band = resolve_number_channel_or(x2_band_ch, x2_band_scale, i, 0.0);
+        let y2_band = resolve_number_channel_or(y2_band_ch, y2_band_scale, i, 0.0);
+        let x_frac = resolve_position(x_col.get(i), x_scale, x_band);
+        let y_frac = resolve_position(y_col.get(i), y_scale, y_band);
         if !x_frac.is_finite() || !y_frac.is_finite() {
             continue;
         }
@@ -507,6 +583,8 @@ fn draw_one_ribbon_bspline_mark(
             i,
             x_frac,
             y_frac,
+            x2_band,
+            y2_band,
         ) {
             Some(b) => b,
             None => continue,
@@ -538,8 +616,30 @@ fn draw_one_ribbon_bspline_mark(
     if samples_a.len() < 2 || samples_b.len() < 2 {
         return;
     }
-    let curve_a_pts: Vec<Point> = samples_a.iter().map(|(_, p)| *p).collect();
-    let curve_b_pts: Vec<Point> = samples_b.iter().map(|(_, p)| *p).collect();
+    let mut curve_a_pts: Vec<Point> = samples_a.iter().map(|(_, p)| *p).collect();
+    let mut curve_b_pts: Vec<Point> = samples_b.iter().map(|(_, p)| *p).collect();
+    let us_a: Vec<f64> = samples_a.iter().map(|(u, _)| *u).collect();
+    let us_b: Vec<f64> = samples_b.iter().map(|(u, _)| *u).collect();
+    apply_per_row_offsets(
+        &mut curve_a_pts,
+        &us_a,
+        &row_for_ctrl,
+        x_offset_ch,
+        x_offset_scale,
+        y_offset_ch,
+        y_offset_scale,
+        ctx.dpi,
+    );
+    apply_per_row_offsets(
+        &mut curve_b_pts,
+        &us_b,
+        &row_for_ctrl,
+        x2_offset_ch,
+        x2_offset_scale,
+        y2_offset_ch,
+        y2_offset_scale,
+        ctx.dpi,
+    );
 
     // Densify the two terminal caps under non-linear projections.
     // Even in `"panel"` mode the closing edges run through
@@ -590,7 +690,7 @@ fn draw_one_ribbon_bspline_mark(
             || super::resolve::channel_varies_across(alpha_ch, alpha_scale, &row_for_ctrl);
 
         if varies {
-            let (curve_a_merged, curve_b_merged, merged_u) = build_merged_grid(
+            let (mut curve_a_merged, mut curve_b_merged, merged_u) = build_merged_grid(
                 &samples_a,
                 &samples_b,
                 &ctrl_a,
@@ -601,6 +701,26 @@ fn draw_one_ribbon_bspline_mark(
                 panel,
                 ctx,
                 interpolation_mode,
+            );
+            apply_per_row_offsets(
+                &mut curve_a_merged,
+                &merged_u,
+                &row_for_ctrl,
+                x_offset_ch,
+                x_offset_scale,
+                y_offset_ch,
+                y_offset_scale,
+                ctx.dpi,
+            );
+            apply_per_row_offsets(
+                &mut curve_b_merged,
+                &merged_u,
+                &row_for_ctrl,
+                x2_offset_ch,
+                x2_offset_scale,
+                y2_offset_ch,
+                y2_offset_scale,
+                ctx.dpi,
             );
             if curve_a_merged.len() >= 2 {
                 let colors = build_per_vertex_colors(

@@ -18,6 +18,13 @@
 //! Channels consumed:
 //!
 //! - `"x"` / `"y"` — vertex position (required; data; numeric, per row).
+//! - `"x_offset"` / `"y_offset"` — per-row absolute pt offset added to
+//!   each projected vertex (per row). Positive `y_offset` shifts the
+//!   vertex up (decrements pixel y). Distinct from the per-mark
+//!   `"offset"` channel below, which shifts the text along the path.
+//! - `"x_band"` / `"y_band"` — per-row band-fraction offset folded
+//!   into the corresponding scale's `map_with_offset`. No effect on
+//!   continuous scales.
 //! - `"text"` — label string (required; per mark; resolved at the mark's
 //!   first row).
 //! - `"size"` — font size in pt (optional; default 12pt; per mark).
@@ -84,6 +91,10 @@ fn default_fill() -> Color {
 const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("x", ExpectedOutput::Numbers),
     ("y", ExpectedOutput::Numbers),
+    ("x_offset", ExpectedOutput::Numbers),
+    ("y_offset", ExpectedOutput::Numbers),
+    ("x_band", ExpectedOutput::Numbers),
+    ("y_band", ExpectedOutput::Numbers),
     ("text", ExpectedOutput::Strings),
     ("size", ExpectedOutput::Numbers),
     ("weight", ExpectedOutput::Numbers),
@@ -227,6 +238,10 @@ impl Geom for TextPathGeom {
 
         let x_scale_bound = ctx.scale_for("x");
         let y_scale_bound = ctx.scale_for("y");
+        let x_offset_scale = ctx.scale_for("x_offset");
+        let y_offset_scale = ctx.scale_for("y_offset");
+        let x_band_scale = ctx.scale_for("x_band");
+        let y_band_scale = ctx.scale_for("y_band");
         let text_scale = ctx.scale_for("text");
         let size_scale = ctx.scale_for("size");
         let weight_scale = ctx.scale_for("weight");
@@ -253,6 +268,10 @@ impl Geom for TextPathGeom {
             _ => return,
         };
 
+        let x_offset_ch = channels.get("x_offset");
+        let y_offset_ch = channels.get("y_offset");
+        let x_band_ch = channels.get("x_band");
+        let y_band_ch = channels.get("y_band");
         let text_ch = channels.get("text");
         let size_ch = channels.get("size");
         let weight_ch = channels.get("weight");
@@ -319,8 +338,10 @@ impl Geom for TextPathGeom {
             let mut prev_channels: Option<[f64; 2]> = None;
             let mut points: Vec<Point> = Vec::with_capacity(mark.rows.len());
             for &i in &mark.rows {
-                let x_frac = resolve_position(x_col.get(i), x_scale, 0.0);
-                let y_frac = resolve_position(y_col.get(i), y_scale, 0.0);
+                let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
+                let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
+                let x_frac = resolve_position(x_col.get(i), x_scale, x_band);
+                let y_frac = resolve_position(y_col.get(i), y_scale, y_band);
                 if !x_frac.is_finite() || !y_frac.is_finite() {
                     continue;
                 }
@@ -339,7 +360,13 @@ impl Geom for TextPathGeom {
                         }
                     }
                 }
-                let (px, py) = ctx.projection.project_to_panel_px(panel, &curr_channels);
+                let (mut px, mut py) = ctx.projection.project_to_panel_px(panel, &curr_channels);
+                if let Some(off) = resolve_number_channel(x_offset_ch, x_offset_scale, i) {
+                    px += pt_to_px(off, ctx.dpi);
+                }
+                if let Some(off) = resolve_number_channel(y_offset_ch, y_offset_scale, i) {
+                    py -= pt_to_px(off, ctx.dpi);
+                }
                 points.push(Point::new(px, py));
                 prev_channels = Some(curr_channels);
             }

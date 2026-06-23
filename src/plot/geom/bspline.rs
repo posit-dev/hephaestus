@@ -12,6 +12,13 @@
 //!
 //! - `"x"` — control-point x (required; data; numeric).
 //! - `"y"` — control-point y (required; data; numeric).
+//! - `"x_offset"` / `"y_offset"` — per-row absolute pt offsets applied
+//!   to the projected spline samples, lerped between bracketing
+//!   control points by the spline parameter. Positive `y_offset`
+//!   shifts the sample up (decrements pixel y).
+//! - `"x_band"` / `"y_band"` — per-row band-fraction offset folded
+//!   into the scale's `map_with_offset` for each control point. No
+//!   effect on continuous scales.
 //! - `"degree"` — curve degree (per-mark; default 3). Effective degree
 //!   is clamped to `min(degree, n_ctrl - 1)`. Groups with fewer than
 //!   `degree + 1` control points degrade to a straight polyline through
@@ -84,11 +91,11 @@ use crate::scene::SceneBuilder;
 use super::marks::{build_marks_from_column, unique_values_at_first_rows, MarkSlot};
 use super::outline::{draw_curve_outline, EndpointMarker, OutlineSpec};
 use super::resolve::{
-    auto_endpoint_clip_pt, channel_varies_across, emit_endpoint_marker, endpoint_outward,
-    override_alpha, pt_to_px, resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel,
-    resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
-    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
-    resolve_str_channel_or, ChannelBind,
+    apply_per_row_offsets, auto_endpoint_clip_pt, channel_varies_across, emit_endpoint_marker,
+    endpoint_outward, override_alpha, pt_to_px, resolve_bool_channel_or, resolve_cap_channel,
+    resolve_color_channel, resolve_color_channel_or_theme, resolve_join_channel,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
+    resolve_position, resolve_str_channel_or, ChannelBind,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
@@ -109,6 +116,10 @@ use super::bspline_eval::{de_boor, CHORD_ERROR_PX};
 const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("x", ExpectedOutput::Numbers),
     ("y", ExpectedOutput::Numbers),
+    ("x_offset", ExpectedOutput::Numbers),
+    ("y_offset", ExpectedOutput::Numbers),
+    ("x_band", ExpectedOutput::Numbers),
+    ("y_band", ExpectedOutput::Numbers),
     ("degree", ExpectedOutput::Numbers),
     ("interpolation", ExpectedOutput::Strings),
     ("fill", ExpectedOutput::Colors),
@@ -184,6 +195,10 @@ struct BSplineDrawCtx<'a> {
     y_col: &'a DataColumn,
     x_scale: Option<&'a Scale>,
     y_scale: Option<&'a Scale>,
+    x_offset: ChannelBind<'a>,
+    y_offset: ChannelBind<'a>,
+    x_band: ChannelBind<'a>,
+    y_band: ChannelBind<'a>,
     degree: ChannelBind<'a>,
     interpolation: ChannelBind<'a>,
     fill: ChannelBind<'a>,
@@ -231,6 +246,10 @@ impl<'a> BSplineDrawCtx<'a> {
             y_col,
             x_scale,
             y_scale,
+            x_offset: b("x_offset"),
+            y_offset: b("y_offset"),
+            x_band: b("x_band"),
+            y_band: b("y_band"),
             degree: b("degree"),
             interpolation: b("interpolation"),
             fill: b("fill"),
@@ -363,6 +382,24 @@ fn draw_one_bspline_mark(
         y_col,
         x_scale,
         y_scale,
+        x_offset:
+            ChannelBind {
+                ch: x_offset_ch,
+                scale: x_offset_scale,
+            },
+        y_offset:
+            ChannelBind {
+                ch: y_offset_ch,
+                scale: y_offset_scale,
+            },
+        x_band: ChannelBind {
+            ch: x_band_ch,
+            scale: x_band_scale,
+        },
+        y_band: ChannelBind {
+            ch: y_band_ch,
+            scale: y_band_scale,
+        },
         degree: ChannelBind {
             ch: degree_ch,
             scale: degree_scale,
@@ -526,8 +563,10 @@ fn draw_one_bspline_mark(
     let mut ctrl_frac: Vec<Point> = Vec::with_capacity(mark.rows.len());
     let mut ctrl_rows: Vec<usize> = Vec::with_capacity(mark.rows.len());
     for &i in &mark.rows {
-        let xf = resolve_position(x_col.get(i), x_scale, 0.0);
-        let yf = resolve_position(y_col.get(i), y_scale, 0.0);
+        let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
+        let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
+        let xf = resolve_position(x_col.get(i), x_scale, x_band);
+        let yf = resolve_position(y_col.get(i), y_scale, y_band);
         if !xf.is_finite() || !yf.is_finite() {
             continue;
         }
@@ -623,7 +662,18 @@ fn draw_one_bspline_mark(
     let clip_start_pt = user_clip_start_pt + auto_clip_start_pt;
     let clip_end_pt = user_clip_end_pt + auto_clip_end_pt;
 
-    let sample_points: Vec<Point> = samples.iter().map(|(_, p)| *p).collect();
+    let mut sample_points: Vec<Point> = samples.iter().map(|(_, p)| *p).collect();
+    let sample_us: Vec<f64> = samples.iter().map(|(u, _)| *u).collect();
+    apply_per_row_offsets(
+        &mut sample_points,
+        &sample_us,
+        &ctrl_rows,
+        x_offset_ch,
+        x_offset_scale,
+        y_offset_ch,
+        y_offset_scale,
+        ctx.dpi,
+    );
 
     if ribbon_mode {
         // ── Ribbon-mode path: per-vertex tessellated mesh. Clip threads

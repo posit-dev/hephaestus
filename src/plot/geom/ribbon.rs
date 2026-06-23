@@ -31,6 +31,16 @@
 //! - `"y"` — required; data; numeric.
 //! - `"x2"` — optional; data; numeric.
 //! - `"y2"` — optional; data; numeric.
+//! - `"x_offset"` / `"y_offset"` / `"x2_offset"` / `"y2_offset"` — per-row
+//!   absolute pt offset added to the projected vertex. Unsuffixed
+//!   addresses curve A, `2`-suffixed addresses curve B. `y_offset` /
+//!   `y2_offset` follow the convention "positive is up" (the projected
+//!   pixel y is decremented).
+//! - `"x_band"` / `"y_band"` / `"x2_band"` / `"y2_band"` — per-row
+//!   band-fraction offset folded into the corresponding scale's
+//!   `map_with_offset`. No effect on continuous scales (whose band
+//!   width is zero). Unsuffixed addresses curve A, `2`-suffixed
+//!   addresses curve B.
 //! - `"fill"` — band fill color (per-mark, but read at every row when
 //!   the channel varies across the mark — see below). Default: none.
 //! - `"alpha"` — overrides the alpha of `"fill"` (per-mark or per-row,
@@ -81,8 +91,9 @@ use crate::scene::SceneBuilder;
 use super::marks::{build_marks_from_column, unique_values_at_first_rows, MarkSlot};
 use super::outline::{draw_curve_outline, resolve_outline_spec, OutlineChannels, OutlineScales};
 use super::resolve::{
-    channel_varies_across, override_alpha, resolve_color_channel, resolve_color_channel_or_theme,
-    resolve_number_channel, resolve_pick_id, resolve_position, ChannelBind,
+    channel_varies_across, override_alpha, pt_to_px, resolve_color_channel,
+    resolve_color_channel_or_theme, resolve_number_channel, resolve_number_channel_or,
+    resolve_pick_id, resolve_position, ChannelBind,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
@@ -98,6 +109,14 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("y", ExpectedOutput::Numbers),
     ("x2", ExpectedOutput::Numbers),
     ("y2", ExpectedOutput::Numbers),
+    ("x_offset", ExpectedOutput::Numbers),
+    ("y_offset", ExpectedOutput::Numbers),
+    ("x2_offset", ExpectedOutput::Numbers),
+    ("y2_offset", ExpectedOutput::Numbers),
+    ("x_band", ExpectedOutput::Numbers),
+    ("y_band", ExpectedOutput::Numbers),
+    ("x2_band", ExpectedOutput::Numbers),
+    ("y2_band", ExpectedOutput::Numbers),
     ("fill", ExpectedOutput::Colors),
     ("alpha", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
@@ -223,6 +242,14 @@ struct RibbonDrawCtx<'a> {
     y_scale: Option<&'a Scale>,
     x2: ChannelBind<'a>,
     y2: ChannelBind<'a>,
+    x_offset: ChannelBind<'a>,
+    y_offset: ChannelBind<'a>,
+    x2_offset: ChannelBind<'a>,
+    y2_offset: ChannelBind<'a>,
+    x_band: ChannelBind<'a>,
+    y_band: ChannelBind<'a>,
+    x2_band: ChannelBind<'a>,
+    y2_band: ChannelBind<'a>,
     fill: ChannelBind<'a>,
     alpha: ChannelBind<'a>,
     pick_id: ChannelBind<'a>,
@@ -260,6 +287,14 @@ impl<'a> RibbonDrawCtx<'a> {
             y_scale,
             x2: b("x2"),
             y2: b("y2"),
+            x_offset: b("x_offset"),
+            y_offset: b("y_offset"),
+            x2_offset: b("x2_offset"),
+            y2_offset: b("y2_offset"),
+            x_band: b("x_band"),
+            y_band: b("y_band"),
+            x2_band: b("x2_band"),
+            y2_band: b("y2_band"),
             fill: b("fill"),
             alpha: b("alpha"),
             pick_id: b("pick_id"),
@@ -386,6 +421,44 @@ fn draw_one_ribbon_mark(
             ch: y2_ch,
             scale: y2_scale_bound,
         },
+        x_offset:
+            ChannelBind {
+                ch: x_offset_ch,
+                scale: x_offset_scale,
+            },
+        y_offset:
+            ChannelBind {
+                ch: y_offset_ch,
+                scale: y_offset_scale,
+            },
+        x2_offset:
+            ChannelBind {
+                ch: x2_offset_ch,
+                scale: x2_offset_scale,
+            },
+        y2_offset:
+            ChannelBind {
+                ch: y2_offset_ch,
+                scale: y2_offset_scale,
+            },
+        x_band: ChannelBind {
+            ch: x_band_ch,
+            scale: x_band_scale,
+        },
+        y_band: ChannelBind {
+            ch: y_band_ch,
+            scale: y_band_scale,
+        },
+        x2_band:
+            ChannelBind {
+                ch: x2_band_ch,
+                scale: x2_band_scale,
+            },
+        y2_band:
+            ChannelBind {
+                ch: y2_band_ch,
+                scale: y2_band_scale,
+            },
         fill: ChannelBind {
             ch: fill_ch,
             scale: fill_scale,
@@ -480,8 +553,12 @@ fn draw_one_ribbon_mark(
     let mut first_real: Option<([f64; 2], [f64; 2])> = None;
 
     for &i in &mark.rows {
-        let x_frac = resolve_position(x_col.get(i), x_scale, 0.0);
-        let y_frac = resolve_position(y_col.get(i), y_scale, 0.0);
+        let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
+        let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
+        let x2_band = resolve_number_channel_or(x2_band_ch, x2_band_scale, i, 0.0);
+        let y2_band = resolve_number_channel_or(y2_band_ch, y2_band_scale, i, 0.0);
+        let x_frac = resolve_position(x_col.get(i), x_scale, x_band);
+        let y_frac = resolve_position(y_col.get(i), y_scale, y_band);
         if !x_frac.is_finite() || !y_frac.is_finite() {
             continue;
         }
@@ -494,6 +571,8 @@ fn draw_one_ribbon_mark(
             i,
             x_frac,
             y_frac,
+            x2_band,
+            y2_band,
         ) {
             Some(b) => b,
             None => continue,
@@ -537,8 +616,20 @@ fn draw_one_ribbon_mark(
             }
         }
 
-        let (apx, apy) = ctx.projection.project_to_panel_px(panel, &a_ch);
-        let (bpx, bpy) = ctx.projection.project_to_panel_px(panel, &b_ch);
+        let (mut apx, mut apy) = ctx.projection.project_to_panel_px(panel, &a_ch);
+        let (mut bpx, mut bpy) = ctx.projection.project_to_panel_px(panel, &b_ch);
+        if let Some(off) = resolve_number_channel(x_offset_ch, x_offset_scale, i) {
+            apx += pt_to_px(off, ctx.dpi);
+        }
+        if let Some(off) = resolve_number_channel(y_offset_ch, y_offset_scale, i) {
+            apy -= pt_to_px(off, ctx.dpi);
+        }
+        if let Some(off) = resolve_number_channel(x2_offset_ch, x2_offset_scale, i) {
+            bpx += pt_to_px(off, ctx.dpi);
+        }
+        if let Some(off) = resolve_number_channel(y2_offset_ch, y2_offset_scale, i) {
+            bpy -= pt_to_px(off, ctx.dpi);
+        }
         curve_a_pts.push(Point::new(apx, apy));
         curve_b_pts.push(Point::new(bpx, bpy));
         row_for_vertex.push(i);
@@ -906,7 +997,9 @@ struct VertexOrigin {
 /// Resolve curve B's `(x, y)` panel-fraction for one row. Returns
 /// `None` when either coordinate is non-finite (the row is dropped).
 /// Falls back to the corresponding curve-A coordinate for the channel
-/// that wasn't supplied in axis-aligned modes.
+/// that wasn't supplied in axis-aligned modes. The `x2_band` / `y2_band`
+/// arguments fold band-fraction offsets into the curve-B scales (no
+/// effect on continuous scales).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_b_row(
     orientation: Orientation,
@@ -917,17 +1010,19 @@ pub(crate) fn resolve_b_row(
     row: usize,
     x_frac: f64,
     y_frac: f64,
+    x2_band: f64,
+    y2_band: f64,
 ) -> Option<(f64, f64)> {
     let b_x = match orientation {
         Orientation::Horizontal => x_frac,
         Orientation::Vertical | Orientation::Free => {
-            resolve_optional_position(x2_ch, x2_scale_bound, row)?
+            resolve_optional_position(x2_ch, x2_scale_bound, row, x2_band)?
         }
     };
     let b_y = match orientation {
         Orientation::Vertical => y_frac,
         Orientation::Horizontal | Orientation::Free => {
-            resolve_optional_position(y2_ch, y2_scale_bound, row)?
+            resolve_optional_position(y2_ch, y2_scale_bound, row, y2_band)?
         }
     };
     Some((b_x, b_y))
@@ -1034,6 +1129,7 @@ fn resolve_optional_position(
     ch: Option<&Channel>,
     scale_bound: Option<&crate::plot::scale::Scale>,
     row: usize,
+    band: f64,
 ) -> Option<f64> {
     let value = match ch? {
         Channel::Constant(v) | Channel::RawConstant(v) => v.clone(),
@@ -1043,7 +1139,7 @@ fn resolve_optional_position(
         Channel::RawConstant(_) | Channel::RawData(_) => None,
         _ => scale_bound,
     };
-    let f = resolve_position(value, scale, 0.0);
+    let f = resolve_position(value, scale, band);
     if f.is_finite() {
         Some(f)
     } else {
