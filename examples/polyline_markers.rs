@@ -135,7 +135,7 @@ fn build_view(
             AxisPlacement::Cartesian(AxisSide::Left),
         ));
     }
-    PlotComposition::new(comp)
+    PlotComposition::new(&comp)
         .add_scale("x_scale", scale::continuous(0.0..=60.0))
         .add_scale("y_scale", scale::continuous(0.0..=100.0))
         .with_plot(plot)

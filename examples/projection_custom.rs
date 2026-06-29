@@ -170,7 +170,7 @@ where
     // Custom projections use `ChromeStrategy::InsidePanel`; perimeter
     // axes (Cartesian-style) are rejected by `Plot::add_axis` for this
     // projection, so we don't attach any.
-    PlotComposition::new(comp())
+    PlotComposition::new(&comp())
         .add_scale("x_axis", scale::continuous(x_domain.0..=x_domain.1))
         .add_scale("y_axis", scale::continuous(y_domain.0..=y_domain.1))
         .with_plot(plot)

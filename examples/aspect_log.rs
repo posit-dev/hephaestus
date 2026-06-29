@@ -61,7 +61,7 @@ fn main() {
     let line = rgb8(40, 90, 200);
     let dot = rgb8(200, 60, 40);
 
-    let mut view = PlotComposition::new(comp_shape())
+    let mut view = PlotComposition::new(&comp_shape())
         .add_scale(
             "x",
             scale::continuous(10.0..=10000.0).with_transform(TransformKind::Log10),

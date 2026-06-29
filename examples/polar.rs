@@ -107,7 +107,7 @@ fn main() {
         .collect();
     let partial_dot = rgb8(120, 60, 160);
 
-    let mut view = PlotComposition::new(comp_shape())
+    let mut view = PlotComposition::new(&comp_shape())
         // Scatter: theta in radians [0, 2π], radius in [0, 1].
         .add_scale("theta_full", scale::continuous(0.0..=std::f64::consts::TAU))
         .add_scale("radius_unit", scale::continuous(0.0..=1.0))

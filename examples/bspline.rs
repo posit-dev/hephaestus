@@ -90,7 +90,7 @@ fn cubic_vs_bezier(renderer: &mut VelloRenderer, w: u32, h: u32, dpi: f64, bg: C
     plot.add_axis(Axis::rail("x", AxisPlacement::Cartesian(AxisSide::Bottom)).title("x"));
     plot.add_axis(Axis::rail("y", AxisPlacement::Cartesian(AxisSide::Left)).title("y"));
 
-    let mut view = PlotComposition::new(cell_comp())
+    let mut view = PlotComposition::new(&cell_comp())
         .add_scale("x", scale::continuous(0.0..=10.0))
         .add_scale("y", scale::continuous(0.0..=10.0))
         .with_plot(plot);
@@ -157,7 +157,7 @@ fn parallel_coordinates(renderer: &mut VelloRenderer, w: u32, h: u32, dpi: f64, 
         rgb8(140, 90, 200),
         rgb8(40, 160, 170),
     ];
-    let mut view = PlotComposition::new(cell_comp())
+    let mut view = PlotComposition::new(&cell_comp())
         .add_scale("axis", scale::continuous(0.0..=(n_axes as f64 - 1.0)))
         .add_scale("value", scale::continuous(0.0..=1.0))
         .add_scale(
@@ -245,7 +245,7 @@ fn polar_interpolation(renderer: &mut VelloRenderer, w: u32, h: u32, dpi: f64, b
         Axis::rail("radius", AxisPlacement::PolarRadius { theta_frac: 0.0 }).title("Radius"),
     );
 
-    let mut view = PlotComposition::new(cell_comp())
+    let mut view = PlotComposition::new(&cell_comp())
         .add_scale("theta", scale::continuous(0.0..=std::f64::consts::TAU))
         .add_scale("radius", scale::continuous(0.0..=1.0))
         .add_scale(
@@ -301,7 +301,7 @@ fn endpoint_arrows(renderer: &mut VelloRenderer, w: u32, h: u32, dpi: f64, bg: C
     plot.add_axis(Axis::rail("x", AxisPlacement::Cartesian(AxisSide::Bottom)).title("x"));
     plot.add_axis(Axis::rail("y", AxisPlacement::Cartesian(AxisSide::Left)).title("y"));
 
-    let mut view = PlotComposition::new(cell_comp())
+    let mut view = PlotComposition::new(&cell_comp())
         .add_scale("x", scale::continuous(0.0..=10.0))
         .add_scale("y", scale::continuous(0.0..=10.0))
         .with_plot(plot);
@@ -354,7 +354,7 @@ fn ribbon_gradient(renderer: &mut VelloRenderer, w: u32, h: u32, dpi: f64, bg: C
     plot.add_axis(Axis::rail("x", AxisPlacement::Cartesian(AxisSide::Bottom)).title("x"));
     plot.add_axis(Axis::rail("y", AxisPlacement::Cartesian(AxisSide::Left)).title("y"));
 
-    let mut view = PlotComposition::new(cell_comp())
+    let mut view = PlotComposition::new(&cell_comp())
         .add_scale("x", scale::continuous(0.0..=10.0))
         .add_scale("y", scale::continuous(0.0..=10.0))
         .add_scale(
@@ -404,7 +404,7 @@ fn dashed_markers(renderer: &mut VelloRenderer, w: u32, h: u32, dpi: f64, bg: Co
     plot.add_axis(Axis::rail("x", AxisPlacement::Cartesian(AxisSide::Bottom)).title("x"));
     plot.add_axis(Axis::rail("y", AxisPlacement::Cartesian(AxisSide::Left)).title("y"));
 
-    let mut view = PlotComposition::new(cell_comp())
+    let mut view = PlotComposition::new(&cell_comp())
         .add_scale("x", scale::continuous(0.0..=10.0))
         .add_scale("y", scale::continuous(0.0..=10.0))
         .with_plot(plot);

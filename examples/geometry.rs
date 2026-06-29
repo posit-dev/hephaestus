@@ -104,7 +104,7 @@ fn main() {
         ));
     }
 
-    let mut view = PlotComposition::new(comp())
+    let mut view = PlotComposition::new(&comp())
         .add_scale("x_axis", scale::continuous(0.0..=10.0))
         .add_scale("y_axis", scale::continuous(0.0..=10.0))
         .add_scale(

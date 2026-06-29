@@ -405,11 +405,11 @@ pub struct PlotComposition {
 }
 
 impl PlotComposition {
-    /// Construct from a layout-level [`Composition`]. The composition
-    /// value is consumed; only its shape (placements / ids / tracks)
+    /// Construct from a layout-level [`Composition`]. Only the shape
+    /// (placements / ids / tracks) of composition
     /// is captured for the per-render rebuild walk.
-    pub fn new(composition: Composition) -> Self {
-        let template = CompositionTemplate::capture(&composition);
+    pub fn new(composition: &Composition) -> Self {
+        let template = CompositionTemplate::capture(composition);
         Self {
             template,
             scales: ScaleRegistry::new(),
@@ -849,7 +849,7 @@ mod tests {
 
     #[test]
     fn new_captures_template() {
-        let view = PlotComposition::new(comp_two());
+        let view = PlotComposition::new(&comp_two());
         // Template captures the two patches.
         assert_eq!(view.template.cols, 2);
         assert_eq!(view.template.rows, 1);
@@ -858,7 +858,7 @@ mod tests {
 
     #[test]
     fn add_scale_flips_layout_dirty() {
-        let mut view = PlotComposition::new(comp_two());
+        let mut view = PlotComposition::new(&comp_two());
         view.layout_dirty = false; // pretend a render just happened
         view.insert_scale("x", scale::continuous(0.0..=1.0));
         assert!(view.layout_dirty);
@@ -867,7 +867,7 @@ mod tests {
 
     #[test]
     fn update_scale_flips_plot_dirty_for_referencing_plots() {
-        let mut view = PlotComposition::new(comp_two())
+        let mut view = PlotComposition::new(&comp_two())
             .add_scale("time", scale::continuous(0.0..=100.0))
             .with_plot(crate::plot::Plot::new(&comp_two(), "a").bind("x", "time"))
             .with_plot(crate::plot::Plot::new(&comp_two(), "b").bind("x", "time"));
@@ -888,7 +888,7 @@ mod tests {
     #[test]
     fn update_plot_flips_dirty() {
         let mut view =
-            PlotComposition::new(comp_two()).with_plot(crate::plot::Plot::new(&comp_two(), "a"));
+            PlotComposition::new(&comp_two()).with_plot(crate::plot::Plot::new(&comp_two(), "a"));
         view.layout_dirty = false;
         view.plot_dirty.clear();
         view.update_plot("a", |p| p.set_title("hello"));
@@ -900,7 +900,7 @@ mod tests {
     #[test]
     fn render_resolves_cached_layout() {
         let mut view =
-            PlotComposition::new(comp_two()).with_plot(crate::plot::Plot::new(&comp_two(), "a"));
+            PlotComposition::new(&comp_two()).with_plot(crate::plot::Plot::new(&comp_two(), "a"));
         let mut scene = crate::scene::recording::RecordingScene::default();
         view.render(&mut scene, Size::new(400.0, 300.0), 96.0);
         assert!(!view.layout_dirty);
@@ -921,7 +921,7 @@ mod tests {
     fn render_with_size_change_re_solves() {
         use crate::composition::Slot;
         let mut view =
-            PlotComposition::new(comp_two()).with_plot(crate::plot::Plot::new(&comp_two(), "a"));
+            PlotComposition::new(&comp_two()).with_plot(crate::plot::Plot::new(&comp_two(), "a"));
         let mut scene = crate::scene::recording::RecordingScene::default();
 
         view.render(&mut scene, Size::new(400.0, 300.0), 96.0);
@@ -952,7 +952,7 @@ mod tests {
             .build();
         let mut plot = crate::plot::Plot::new(&comp_two(), "a");
         let _gid = plot.add_geom(g);
-        let mut view = PlotComposition::new(comp_two()).with_plot(plot);
+        let mut view = PlotComposition::new(&comp_two()).with_plot(plot);
         let mut scene = crate::scene::recording::RecordingScene::default();
         view.render(&mut scene, Size::new(400.0, 300.0), 96.0);
         let ids: Vec<u32> = scene
@@ -973,7 +973,7 @@ mod tests {
     fn unattached_patch_renders_silently() {
         // Only "a" has a plot; "b" is bare. render() should not panic.
         let mut view =
-            PlotComposition::new(comp_two()).with_plot(crate::plot::Plot::new(&comp_two(), "a"));
+            PlotComposition::new(&comp_two()).with_plot(crate::plot::Plot::new(&comp_two(), "a"));
         let mut scene = crate::scene::recording::RecordingScene::default();
         view.render(&mut scene, Size::new(400.0, 300.0), 96.0);
     }
@@ -982,7 +982,7 @@ mod tests {
 
     #[test]
     fn validate_flags_missing_scale() {
-        let view = PlotComposition::new(comp_two())
+        let view = PlotComposition::new(&comp_two())
             .with_plot(crate::plot::Plot::new(&comp_two(), "a").bind("x", "nope"));
         let issues = view.validate();
         assert_eq!(issues.len(), 1);
@@ -1005,7 +1005,7 @@ mod tests {
         // A "fill" binding (expects Colors) routed to a scale with
         // Numbers output should be flagged.
         let numeric = scale::continuous(0.0..=10.0).range_numbers([0.0, 1.0]);
-        let view = PlotComposition::new(comp_two())
+        let view = PlotComposition::new(&comp_two())
             .add_scale("size_scale", numeric)
             .with_plot(crate::plot::Plot::new(&comp_two(), "a").bind("fill", "size_scale"));
         let issues = view.validate();
@@ -1027,7 +1027,7 @@ mod tests {
             std::sync::Arc::from("solid"),
             std::sync::Arc::from("dashed"),
         ]);
-        let view = PlotComposition::new(comp_two())
+        let view = PlotComposition::new(&comp_two())
             .add_scale("dash_scale", s)
             .with_plot(crate::plot::Plot::new(&comp_two(), "a").bind("linetype", "dash_scale"));
         let issues = view.validate();
@@ -1043,7 +1043,7 @@ mod tests {
 
     #[test]
     fn validate_empty_when_everything_resolves() {
-        let view = PlotComposition::new(comp_two())
+        let view = PlotComposition::new(&comp_two())
             .add_scale("time", scale::continuous(0.0..=100.0))
             .add_scale(
                 "cat",

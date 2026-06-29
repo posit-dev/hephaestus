@@ -71,7 +71,7 @@ fn main() {
                 AxisPlacement::Cartesian(AxisSide::Left),
             ));
         }
-        let mut view = PlotComposition::new(comp())
+        let mut view = PlotComposition::new(&comp())
             .add_scale("x_scale", scale::continuous(0.0..=60.0))
             .add_scale("y_scale", scale::continuous(0.0..=100.0))
             .with_plot(plot);
@@ -129,7 +129,7 @@ fn main() {
                 AxisPlacement::Cartesian(AxisSide::Left),
             ));
         }
-        let mut view = PlotComposition::new(comp())
+        let mut view = PlotComposition::new(&comp())
             .add_scale("x_scale", scale::continuous(0.0..=60.0))
             .add_scale("y_scale", scale::continuous(0.0..=100.0))
             .with_plot(plot);
@@ -176,7 +176,7 @@ fn main() {
                 AxisPlacement::Cartesian(AxisSide::Left),
             ));
         }
-        let mut view = PlotComposition::new(comp())
+        let mut view = PlotComposition::new(&comp())
             .add_scale("x_scale", scale::continuous(0.0..=60.0))
             .add_scale("y_scale", scale::continuous(0.0..=100.0))
             .with_plot(plot);
@@ -229,7 +229,7 @@ fn main() {
                 AxisPlacement::Cartesian(AxisSide::Left),
             ));
         }
-        let mut view = PlotComposition::new(comp())
+        let mut view = PlotComposition::new(&comp())
             .add_scale("x_scale", scale::continuous(0.0..=60.0))
             .add_scale("y_scale", scale::continuous(0.0..=100.0))
             .with_plot(plot);
@@ -279,7 +279,7 @@ fn main() {
                 AxisPlacement::Cartesian(AxisSide::Left),
             ));
         }
-        let mut view = PlotComposition::new(comp())
+        let mut view = PlotComposition::new(&comp())
             .add_scale("x_scale", scale::continuous(0.0..=60.0))
             .add_scale("y_scale", scale::continuous(0.0..=100.0))
             .with_plot(plot);

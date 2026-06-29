@@ -72,7 +72,7 @@ fn main() {
         ));
     }
 
-    let mut view = PlotComposition::new(comp())
+    let mut view = PlotComposition::new(&comp())
         .add_scale("time", scale::continuous(0.0..=60.0))
         .add_scale("value", scale::continuous(0.0..=100.0))
         .with_plot(plot);

@@ -62,7 +62,7 @@ fn main() {
                 AxisPlacement::Cartesian(AxisSide::Left),
             ));
         }
-        let mut view = PlotComposition::new(comp())
+        let mut view = PlotComposition::new(&comp())
             .add_scale(
                 "category",
                 scale::discrete(cats.iter().map(|c| Value::String(Arc::from(*c)))),
@@ -134,7 +134,7 @@ fn main() {
         let red = Color::new([0.85, 0.4, 0.4, 1.0]);
         let green = Color::new([0.4, 0.7, 0.4, 1.0]);
         let blue = Color::new([0.4, 0.55, 0.85, 1.0]);
-        let mut view = PlotComposition::new(comp())
+        let mut view = PlotComposition::new(&comp())
             .add_scale(
                 "category",
                 scale::discrete(cats.iter().map(|c| Value::String(Arc::from(*c)))),
@@ -204,7 +204,7 @@ fn main() {
                 AxisPlacement::Cartesian(AxisSide::Left),
             ));
         }
-        let mut view = PlotComposition::new(comp())
+        let mut view = PlotComposition::new(&comp())
             .add_scale("x_axis", scale::continuous(0.0..=cols as f64))
             .add_scale("y_axis", scale::continuous(0.0..=rows as f64))
             .with_plot(plot);

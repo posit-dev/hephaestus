@@ -91,7 +91,7 @@ fn main() {
         ));
     }
 
-    let mut view = PlotComposition::new(comp())
+    let mut view = PlotComposition::new(&comp())
         .add_scale("time", scale::continuous(0.0..=100.0))
         .add_scale("price_y", scale::continuous(40.0..=90.0))
         .add_scale("volume_y", scale::continuous(80_000.0..=160_000.0))

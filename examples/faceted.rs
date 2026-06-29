@@ -79,7 +79,7 @@ fn main() {
 
     // ── Renders 1 & 2: shared "time" scale across the unlocked layout
     {
-        let mut view = PlotComposition::new(comp_shape(None))
+        let mut view = PlotComposition::new(&comp_shape(None))
             .add_scale("time", scale::continuous(0.0..=100.0))
             .add_scale("y", scale::continuous(0.0..=100.0));
         attach_all(&mut view, &xs, &datasets, None);
@@ -121,7 +121,7 @@ fn main() {
     //    horizontal slack.
     {
         let (lw, lh) = (1800u32, 600u32);
-        let mut view = PlotComposition::new(comp_shape(Some((1.0, 1.0))))
+        let mut view = PlotComposition::new(&comp_shape(Some((1.0, 1.0))))
             .add_scale("time", scale::continuous(20.0..=60.0))
             .add_scale("y", scale::continuous(0.0..=100.0));
         attach_all(&mut view, &xs, &datasets, Some((1.0, 1.0)));

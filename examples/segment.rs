@@ -104,7 +104,7 @@ fn main() {
             ));
         }
 
-        let mut view = PlotComposition::new(comp())
+        let mut view = PlotComposition::new(&comp())
             .add_scale("x_axis", scale::continuous(-1.0..=12.0))
             .add_scale("y_axis", scale::continuous(20.0..=80.0))
             .with_plot(plot);
@@ -179,7 +179,7 @@ fn main() {
             plot.add_axis(Axis::rail("axis", AxisPlacement::Cartesian(AxisSide::Left)));
         }
 
-        let mut view = PlotComposition::new(comp())
+        let mut view = PlotComposition::new(&comp())
             .add_scale("axis", scale::continuous(0.0..=100.0))
             .with_plot(plot);
 

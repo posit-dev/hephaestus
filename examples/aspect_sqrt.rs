@@ -51,7 +51,7 @@ fn main() {
     // Shared linear y; the x scales differ only in their transform. Both
     // start with the same transformed extent so they expand by the same
     // factor — only the boundary handling diverges.
-    let mut view = PlotComposition::new(comp_shape())
+    let mut view = PlotComposition::new(&comp_shape())
         .add_scale("y", scale::continuous(0.0..=10.0))
         .add_scale("x_lin", scale::continuous(0.0..=10.0))
         .add_scale(

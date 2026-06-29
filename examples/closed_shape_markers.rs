@@ -134,7 +134,7 @@ fn main() {
         poly_plot.add_axis(Axis::rail("ys", AxisPlacement::Cartesian(AxisSide::Left)));
     }
 
-    let mut view = PlotComposition::new(comp())
+    let mut view = PlotComposition::new(&comp())
         .add_scale("xs", scale::continuous(0.0..=1.0))
         .add_scale("ys", scale::continuous(0.0..=1.0))
         .with_plot(rect_plot)

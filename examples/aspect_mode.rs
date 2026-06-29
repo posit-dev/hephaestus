@@ -58,7 +58,7 @@ fn main() {
     let ys: Vec<f64> = xs.iter().map(|x| 5.0 + 3.5 * (x * 0.9).sin()).collect();
     let dot = rgb8(40, 90, 200);
 
-    let mut view = PlotComposition::new(comp_shape())
+    let mut view = PlotComposition::new(&comp_shape())
         .add_scale("x", scale::continuous(0.0..=10.0))
         .add_scale("y", scale::continuous(0.0..=10.0));
 
