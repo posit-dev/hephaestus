@@ -467,6 +467,25 @@ impl PolarProjection {
         self.theta_start + frac * (self.theta_end - self.theta_start)
     }
 
+    /// Route a geom's positional `(x, y)` channel fractions to
+    /// `(theta_frac, r_frac)` per this projection's `angle_channel` /
+    /// `radius_channel`.
+    ///
+    /// Geoms always pass their first spatial channel (`"x"`) then their
+    /// second (`"y"`); this decides which one is theta. With the default
+    /// (`angle_channel = "x"`) that is `(x, y)`; setting
+    /// `angle_channel = "y"` swaps to `(y, x)` so the y channel drives
+    /// the angle (e.g. a value-on-`y` pie). Consistent with the scale
+    /// routing in [`Projection::consume_channels`], so geometry and
+    /// chrome agree on which axis is angular.
+    pub(crate) fn theta_r_from_xy(&self, x: f64, y: f64) -> (f64, f64) {
+        if self.angle_channel == "y" || self.radius_channel == "x" {
+            (y, x)
+        } else {
+            (x, y)
+        }
+    }
+
     /// Project a (theta_frac, radius_frac) pair to pixel space.
     /// For chord-style projections with categories the (theta_frac,
     /// r_frac=1) image is the polygon — not the inscribed circle —
@@ -817,18 +836,23 @@ impl Projection {
         }
     }
 
-    /// Map per-channel panel-fractions to a pixel position inside
-    /// `panel`. `channels` is parallel to [`Self::consume_channels`];
-    /// position 0 = theta-or-x fraction, position 1 = radius-or-y
-    /// fraction.
+    /// Map a geom's `(x, y)` panel-fractions to a pixel position inside
+    /// `panel`: position 0 = the `"x"` channel fraction, position 1 =
+    /// the `"y"` channel fraction (the order every geom passes).
     ///
-    /// Missing channels (slice shorter than `consume_channels().len()`)
-    /// default to `0.0`. Extra channels are ignored.
+    /// For Polar, `angle_channel` / `radius_channel` decide which of
+    /// those two feeds theta vs radius (see
+    /// [`PolarProjection::theta_r_from_xy`]), so a projection with
+    /// `angle_channel = "y"` puts the y channel on theta. This mirrors
+    /// how [`Self::consume_channels`] routes the scales for chrome, so
+    /// geometry and axes agree.
+    ///
+    /// Missing channels default to `0.0`. Extra channels are ignored.
     pub fn project_to_panel_px(&self, panel: Rect, channels: &[f64]) -> (f64, f64) {
+        let x_frac = channels.first().copied().unwrap_or(0.0);
+        let y_frac = channels.get(1).copied().unwrap_or(0.0);
         match self {
             Projection::Cartesian | Projection::Custom(_) => {
-                let x_frac = channels.first().copied().unwrap_or(0.0);
-                let y_frac = channels.get(1).copied().unwrap_or(0.0);
                 let panel_w = panel.x1 - panel.x0;
                 let panel_h = panel.y1 - panel.y0;
                 // y flips: panel_rect.y0 is the TOP edge of the panel
@@ -837,8 +861,7 @@ impl Projection {
                 (panel.x0 + x_frac * panel_w, panel.y1 - y_frac * panel_h)
             }
             Projection::Polar(p) => {
-                let theta_frac = channels.first().copied().unwrap_or(0.0);
-                let r_frac = channels.get(1).copied().unwrap_or(0.0);
+                let (theta_frac, r_frac) = p.theta_r_from_xy(x_frac, y_frac);
                 p.project_frac(panel, theta_frac, r_frac)
             }
         }
@@ -982,10 +1005,16 @@ impl Projection {
                 // No-op: straight segments need no interior samples.
             }
             Projection::Polar(p) => {
-                let theta_a_frac = start_channels.first().copied().unwrap_or(0.0);
-                let r_a_frac = start_channels.get(1).copied().unwrap_or(0.0);
-                let theta_b_frac = end_channels.first().copied().unwrap_or(0.0);
-                let r_b_frac = end_channels.get(1).copied().unwrap_or(0.0);
+                // Callers pass `[x, y]`; route to theta/radius per the
+                // configured channels (matches `project_to_panel_px`).
+                let (theta_a_frac, r_a_frac) = p.theta_r_from_xy(
+                    start_channels.first().copied().unwrap_or(0.0),
+                    start_channels.get(1).copied().unwrap_or(0.0),
+                );
+                let (theta_b_frac, r_b_frac) = p.theta_r_from_xy(
+                    end_channels.first().copied().unwrap_or(0.0),
+                    end_channels.get(1).copied().unwrap_or(0.0),
+                );
 
                 match p.edge_style {
                     PolarEdgeStyle::Geodesic => {

@@ -308,11 +308,17 @@ impl Geom for RectGeom {
             let x1 = px.max(px2) + expand_px;
             let y1 = py.max(py2) + expand_px;
             let r = Rect::new(x0, y0, x1, y1);
-            if !r.is_finite() || r.width() <= 0.0 || r.height() <= 0.0 {
+            let is_linear = ctx.projection.is_linear();
+            // A zero-width/height rect is degenerate only for the axis-aligned
+            // (linear) path, where `r` *is* the drawn shape. Under a non-linear
+            // projection `r` is built from just two of the four polygon corners,
+            // which may legitimately share a pixel coordinate (e.g. a 180° polar
+            // wedge whose diagonal endpoints both lie on one diameter → zero px
+            // width); there `r` only supplies a fallback rotation pivot, so guard
+            // finiteness alone and let the polygon path draw.
+            if !r.is_finite() || (is_linear && (r.width() <= 0.0 || r.height() <= 0.0)) {
                 continue;
             }
-
-            let is_linear = ctx.projection.is_linear();
 
             // ── Resolve styling. ──
             let fill_color = override_alpha(
