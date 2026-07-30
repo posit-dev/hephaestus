@@ -310,6 +310,18 @@ required-features = ["vello", "png", "text"]
 name = "google_fonts"
 required-features = ["vello", "png", "text-google-fonts"]
 
+[[example]]
+name = "aspect_log"
+required-features = ["vello", "png", "text"]
+
+[[example]]
+name = "aspect_mode"
+required-features = ["vello", "png", "text"]
+
+[[example]]
+name = "aspect_sqrt"
+required-features = ["vello", "png", "text"]
+
 [[test]]
 name = "smoke"
 required-features = ["vello"]
