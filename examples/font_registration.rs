@@ -92,7 +92,7 @@ fn main() {
     let mut theme = hephaestus::plot::theme::Theme::default();
     apply_family_to_theme(&mut theme, FAMILY_NAME);
 
-    let mut view = PlotComposition::new(comp())
+    let mut view = PlotComposition::new(&comp())
         .add_scale("x", scale::continuous(0.0..=100.0))
         .add_scale("y", scale::continuous(0.0..=100.0))
         .with_plot(plot);

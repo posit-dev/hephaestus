@@ -88,7 +88,7 @@ fn main() {
 
     let theme = Theme::default().with_legend_variant("hero", hero);
 
-    let mut view = PlotComposition::new(comp())
+    let mut view = PlotComposition::new(&comp())
         .add_scale("x", scale::continuous(0.0..=12.0))
         .add_scale("y", scale::continuous(0.0..=1.0))
         .add_scale(

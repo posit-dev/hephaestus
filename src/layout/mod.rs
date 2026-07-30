@@ -1244,6 +1244,21 @@ mod tests {
 
     // ─── Measure / Content fixtures ──────────────────────────────────────
 
+    /// A Cell with a constant intrinsic size, independent of the width it
+    /// is offered. Models fixed chrome (a rule, an icon, a rail).
+    struct FixedSize {
+        w: f64,
+        h: f64,
+    }
+    impl Measure for FixedSize {
+        fn width_hint(&self, _dpi: f64) -> WidthHint {
+            WidthHint::Min(self.w)
+        }
+        fn height_at(&self, _width: f64, _dpi: f64) -> f64 {
+            self.h
+        }
+    }
+
     /// A Cell that returns `height_at(width) = width * factor`. Models a
     /// chart with a fixed aspect ratio.
     struct AspectContent {
@@ -1577,6 +1592,40 @@ mod tests {
 
         let r2 = layout.rect(CellId(2)).unwrap();
         approx_eq(r2.x1 - r2.x0, 250.0, 0.5, "unrespected col gets its share");
+    }
+
+    #[test]
+    fn nested_respected_grid_sees_full_window_height() {
+        // A nested grid spanning an Auto row must be handed the Auto row's
+        // resolved height in its width-pass window. Understating the window
+        // makes the height axis look tighter than it is, so a respected
+        // child locks its cell too small and leaves the surplus as
+        // centering slack.
+        //
+        // Outer: 500x300, rows [Fr(1), Auto]. A standalone 40px cell sizes
+        // the Auto row. The inner grid spans both rows, so its window is
+        // the full 300 tall. Inner: rows [Fr(1), Auto] with a 30px cell in
+        // the Auto row, respect_at(0, 0). Height binds:
+        // (300 - 30) / 1 = 270 vs width 500 / 1 = 500.
+        let mut inner = Grid::new([Track::Fr(1.0)], [Track::Fr(1.0), Track::Auto]).respect_at(0, 0);
+        inner = inner.id(CellId(10));
+        inner.place(Placement::at(1, 1), Grid::cell().id(CellId(1)));
+        inner.place(
+            Placement::at(2, 1),
+            Cell::measured(FixedSize { w: 0.0, h: 30.0 }),
+        );
+
+        let mut outer = Grid::new([Track::Fr(1.0)], [Track::Fr(1.0), Track::Auto]);
+        outer.place(Placement::at(1, 1).span(2, 1), inner);
+        outer.place(
+            Placement::at(2, 1),
+            Cell::measured(FixedSize { w: 0.0, h: 40.0 }),
+        );
+        let layout = outer.solve(Size::new(500.0, 300.0), 96.0);
+
+        let panel = layout.rect(CellId(1)).unwrap();
+        approx_eq(panel.x1 - panel.x0, 270.0, 0.5, "respected panel width");
+        approx_eq(panel.y1 - panel.y0, 270.0, 0.5, "respected panel height");
     }
 
     #[test]

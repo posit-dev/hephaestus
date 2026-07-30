@@ -97,7 +97,7 @@ fn main() {
         .collect();
     let bot_color = rgb8(80, 170, 80);
 
-    let mut view = PlotComposition::new(comp())
+    let mut view = PlotComposition::new(&comp())
         .add_scale("theta_unit", scale::continuous(0.0..=1.0))
         .add_scale("radius_unit", scale::continuous(0.0..=1.0));
 

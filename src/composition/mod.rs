@@ -451,6 +451,28 @@ impl Composition {
         )
     }
 
+    /// The composition's id, if set with [`Self::id`]. Composition-level
+    /// chrome rects are keyed on `(id, region)`, so an unnamed
+    /// composition's chrome is placed but not retrievable.
+    pub fn composition_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
+    /// Borrow the composition's aspect lock, if any.
+    pub fn aspect_ratio(&self) -> Option<(f32, f32)> {
+        self.aspect
+    }
+
+    /// Borrow the composition's outer margin inset.
+    pub fn margin_inset(&self) -> &Inset {
+        &self.margin
+    }
+
+    /// Borrow the composition's inner padding inset.
+    pub fn padding_inset(&self) -> &Inset {
+        &self.padding
+    }
+
     /// Has any composition-level chrome been added?
     fn has_chrome(&self) -> bool {
         !self.chrome.is_empty()
@@ -1648,6 +1670,69 @@ mod tests {
         );
         assert!(l1.x1 - l1.x0 > 0.0, "l1 panel has positive width");
         assert!(l2.x1 - l2.x0 > 0.0, "l2 panel has positive width");
+    }
+
+    #[test]
+    fn aspect_slack_pools_outside_the_composition() {
+        // A cascading aspect lock leaves the composition narrower than the
+        // canvas. That slack belongs at the composition's outer edges, not
+        // stranded between siblings: a nested grid counts as aspect-bearing
+        // (its leaves are locked by the same cascade), so its panel track is
+        // respected instead of soaking up the whole axis.
+        // Axis chrome on every patch matters here: the facet block pays for
+        // it per facet (two left rails, two bottom rails) while its sibling
+        // pays once, which is the asymmetry that used to strand the slack.
+        let leaf = |id: &str| {
+            Patch::new(id)
+                .slot(Slot::Background, Cell::empty())
+                .slot(Slot::AxisLeft, sized(26.0, 0.0))
+                .slot(Slot::AxisBottom, sized(0.0, 20.0))
+                .slot(Slot::Panel, Cell::empty())
+        };
+        let facets = grid(
+            2,
+            2,
+            vec![
+                leaf("q1").into(),
+                leaf("q2").into(),
+                leaf("q3").into(),
+                leaf("q4").into(),
+            ],
+        );
+        let comp = beside(facets, leaf("summary")).aspect(1.0, 1.0);
+        let layout = comp.solve(Size::new(1800.0, 600.0), 96.0);
+
+        let q1 = layout.get("q1", Slot::Panel).unwrap();
+        let q2 = layout.get("q2", Slot::Panel).unwrap();
+        let summary = layout.get("summary", Slot::Panel).unwrap();
+
+        // Every leaf panel honors the cascaded 1:1 lock.
+        for (id, r) in [("q1", q1), ("q2", q2), ("summary", summary)] {
+            approx_eq(r.x1 - r.x0, r.y1 - r.y0, 0.5, &format!("{id} panel square"));
+        }
+
+        // Compare whole blocks, not panels — the sibling's own axis rail
+        // legitimately sits between the two panels. `Slot::Background`
+        // spans the block (margin excluded), so block edges meet when
+        // there is no dead space.
+        let q1_block = layout.get("q1", Slot::Background).unwrap();
+        let q2_block = layout.get("q2", Slot::Background).unwrap();
+        let summary_block = layout.get("summary", Slot::Background).unwrap();
+
+        // No dead space between the facet grid and its sibling.
+        let interior_gap = summary_block.x0 - q2_block.x1;
+        assert!(
+            interior_gap < 1.0,
+            "facet grid and summary should sit flush, got a {interior_gap}px gap"
+        );
+
+        // The slack shows up as balanced gutters at the outer edges.
+        let (left, right) = (q1_block.x0, 1800.0 - summary_block.x1);
+        assert!(
+            left > 100.0 && right > 100.0,
+            "expected outer gutters to absorb the slack, got left {left} right {right}"
+        );
+        approx_eq(left, right, 1.0, "outer gutters balanced");
     }
 
     // ─── Composition-level chrome tests ─────────────────────────────────

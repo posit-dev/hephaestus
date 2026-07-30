@@ -155,6 +155,14 @@ struct Resolved<'a> {
 }
 
 impl<'a> Resolved<'a> {
+    /// Previous iteration's resolved height for row `i` of the grid at
+    /// `path`. `None` on iteration 0, before any height pass has run.
+    /// Callers treat that as 0 — Auto rows only grow from content, so
+    /// zero is a safe lower bound to start from.
+    fn prev_row_height(&self, path: &[usize], i: usize) -> Option<f64> {
+        self.heights?.grids.get(path)?.rows.get(i).copied()
+    }
+
     /// Look up the summed track size for a `TrackOf` reference. Returns
     /// `None` if the referenced grid hasn't been resolved yet (e.g.,
     /// iteration 0) — the caller treats this as 0.
@@ -404,22 +412,13 @@ fn width_pass_grid(
     let row_gap_pass1 = length_to_px(&node.gap.1, dpi, avail_h, resolved);
     let row_gap_total_pass1 = saturating_gap_total(node.rows.len(), row_gap_pass1);
     let row_fixed_pass1 = sum_fixed_track_size(&node.rows, dpi, avail_h, resolved);
-    let row_auto_pass1: f64 = if let Some(heights) = resolved.heights {
-        if let Some(prev) = heights.grids.get(path) {
-            node.rows
-                .iter()
-                .enumerate()
-                .filter_map(|(i, t)| match t {
-                    Track::Auto => prev.rows.get(i).copied(),
-                    _ => None,
-                })
-                .sum()
-        } else {
-            0.0
-        }
-    } else {
-        0.0
-    };
+    let row_auto_pass1: f64 = node
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| matches!(t, Track::Auto))
+        .filter_map(|(i, _)| resolved.prev_row_height(path, i))
+        .sum();
     let free_h_provisional =
         (avail_h - row_fixed_pass1 - row_auto_pass1 - row_gap_total_pass1).max(0.0);
     let per_fr_h_provisional = if row_fr_sum > 0.0 {
@@ -530,15 +529,20 @@ fn width_pass_grid(
     let _ = (per_fr_w_default, row_fr_sum, col_fr_sum);
 
     // Provisional row sizes used only to derive children's y-ranges for the
-    // respect clamp in nested width passes. Auto rows are treated as 0
-    // (their content-driven contribution is unknown until pass 2).
+    // respect clamp in nested width passes. Auto rows reuse the previous
+    // iteration's resolved height, exactly as `free_h_provisional` above
+    // does — a child spanning Auto rows would otherwise be handed a window
+    // short by their full height, and a respected child reads that as a
+    // tighter height bound than it really has (undersizing its aspect-
+    // locked cells and leaving the surplus as centering slack).
     let row_sizes_provisional: Vec<f64> = node
         .rows
         .iter()
-        .map(|t| match t {
+        .enumerate()
+        .map(|(i, t)| match t {
             Track::Fixed(l) => length_to_px(l, dpi, avail_h, resolved),
             Track::Fr(f) => *f as f64 * per_fr_h_provisional,
-            Track::Auto => 0.0,
+            Track::Auto => resolved.prev_row_height(path, i).unwrap_or(0.0),
         })
         .collect();
 

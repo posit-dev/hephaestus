@@ -65,7 +65,7 @@ fn main() {
         plot.add_axis(Axis::rail("time", AxisPlacement::Cartesian(AxisSide::Bottom)).title("Time"));
         plot.add_axis(Axis::rail("value", AxisPlacement::Cartesian(AxisSide::Left)).title("Value"));
 
-        let mut view = PlotComposition::new(cell_comp())
+        let mut view = PlotComposition::new(&cell_comp())
             .add_scale("time", scale::continuous(0.0..=5.0))
             .add_scale("value", scale::continuous(0.0..=100.0))
             .with_plot(plot);
@@ -135,7 +135,7 @@ fn main() {
         plot.add_axis(Axis::rail("time", AxisPlacement::Cartesian(AxisSide::Bottom)).title("Time"));
         plot.add_axis(Axis::rail("value", AxisPlacement::Cartesian(AxisSide::Left)).title("Value"));
 
-        let mut view = PlotComposition::new(cell_comp())
+        let mut view = PlotComposition::new(&cell_comp())
             .add_scale("time", scale::continuous(0.0..=12.0))
             .add_scale("value", scale::continuous(0.0..=100.0))
             .with_plot(plot);
@@ -224,7 +224,7 @@ fn main() {
             Axis::rail("radius", AxisPlacement::PolarRadius { theta_frac: 0.0 }).title("r"),
         );
 
-        let mut view = PlotComposition::new(comp_shape)
+        let mut view = PlotComposition::new(&comp_shape)
             .add_scale("theta", scale::continuous(0.0..=1.0))
             .add_scale("radius", scale::continuous(0.0..=1.0))
             .with_plot(plot_dom)

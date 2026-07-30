@@ -24,7 +24,7 @@ The canonical home for scales / values is [`crate::scales`]; see `src/scales/CLA
 
 ## Core types (this folder, not in subdirectories)
 
-- **`PlotComposition`** (`composition.rs`) — the orchestrator. Construct with `PlotComposition::new(composition)`; register scales with `add_scale("name", scale)`; attach plots with `with_plot(plot)` / `attach_plot(plot)`. Mutations flow through closures (`view.update_scale("time", |s| ...)`, `view.update_plot("price", |p| ...)`) so dirty-tracking stays accurate. The dirty model is conservative: any mutation flips `layout_dirty` and the next `render` re-solves. Per-plot / per-scale dirty bits are plumbed but only used by v1.5+ partial-repaint heuristics.
+- **`PlotComposition`** (`composition.rs`) — the orchestrator. Construct with `PlotComposition::new(&composition)`; register scales with `add_scale("name", scale)`; attach plots with `with_plot(plot)` / `attach_plot(plot)`. Composition-level chrome — a title / subtitle / caption, shared axis titles, and legends that serve every facet — is set directly on it (`title`, `axis_title`, `add_legend`), mirroring the same methods on `Plot`. Mutations flow through closures (`view.update_scale("time", |s| ...)`, `view.update_plot("price", |p| ...)`) so dirty-tracking stays accurate. The dirty model is conservative: any mutation flips `layout_dirty` and the next `render` re-solves. Per-plot / per-scale dirty bits are plumbed but only used by v1.5+ partial-repaint heuristics.
 - **`Plot`** (`plot.rs`) — bound to a patch id. Stores channel → scale-name bindings, geom list (`Vec<(GeomId, Box<dyn Geom>)>`), chrome text (title / subtitle / caption / axis titles), and a `ShapeRegistry`. Three lifecycle methods used by the orchestrator: `wire(patch, registry, dpi)` (drop chrome cells + panel into named slots; full version is `text`-gated, `wire_panel` is always available), `draw_chrome_into(scene, layout)`, `draw_panel_into(scene, layout, registry)`.
 - **`GeomId`** — opaque handle returned by `Plot::add_geom`; used with `Plot::update_geom` / `remove_geom`.
 - **`KeyIndex`** / **`diff_columns`** / **`diff_positional`** (`diff.rs`) — key-based columnar diff producing `(enter: Vec<usize>, update: Vec<(prev_idx, new_idx)>, exit: Vec<Value>)` for identity-preserving animation.
@@ -46,6 +46,17 @@ There's `crate::composition` (low-level layout engine — anatomy slots, hoist, 
 
 - `crate::composition::Composition` is library-agnostic. You could use it for non-plot composition with no scales involved.
 - `crate::plot::composition::PlotComposition` *owns* a `Composition` template, captured at construction. On every render it rebuilds the composition fresh from the template, wires in each plot's chrome (`plot.wire(patch, registry, dpi)`), solves, and draws. It also owns the scale registry and the plot-by-name map.
+
+## Composition-level chrome
+
+Chrome belongs to whichever thing owns the space it sits in: a patch's title goes on `Plot`, a title spanning a whole facet grid goes on `PlotComposition`. Nothing is collected or inferred across plots — a legend serving every facet is one legend attached to the composition, not a merge of the per-plot ones.
+
+- **Storage is keyed by composition id.** `PlotComposition` holds `HashMap<String, CompositionChrome>`; the root's entry is keyed on `root_id`, which is the caller's `Composition::id` when they set one and `ROOT_COMPOSITION_ID` otherwise. The id matters because composition chrome rects resolve as `(composition_id, region)` in `CompositionLayout::get` — `BuildState::register_region` only records a region when the composition is named.
+- **The public methods target the root.** `title` / `subtitle` / `caption` / `set_title` / `clear_title` / `axis_title` / `set_axis_title` / `add_legend` / `add_legend_separate` / `legends` / `clear_legends`, plus `shape_registry` for the registry backing composition legend key glyphs. A named nested composition already gets its chrome wired and drawn by the same path; only a public entry point that addresses it by id is missing (see `PLAN.md`).
+- **Wiring mirrors the per-plot path exactly.** `CompositionChrome::wire` drops cells into `Composition::slot` / `place_at` using the same helpers `Plot::wire` uses (`title_band_placement`, `text_cell_for_element`, `axis_title_cell`, `legend_stack_measure`), so `theme.plot_text_align_to` and every theme text field behave identically at both levels.
+- **Composition chrome draws last** (render phase 5). It shares canonical rows with the border facets' own chrome — see `build_wrapped_composition` — so the composition's wider rect paints over the band the narrower per-facet chrome sits in.
+- **Two things a composition can't have.** `LegendSide::InPanel` panics: an in-panel legend anchors to a panel rect, and the composition's panel cell is filled by its facets. And `TitleLocation::Inside` is ignored for composition axis titles for the same reason — they always take the outer slot.
+- **Chrome `Cell`s set on the composition before construction are dropped**, exactly as pre-attached patch chrome is. A raw `Cell` reserves space but carries nothing the orchestrator could draw, so keeping it would produce reserved-but-blank bands. `examples/nesting_faceted_title.rs` shows the low-level path, where the caller solves and draws the cells themselves.
 
 ## Conventions
 

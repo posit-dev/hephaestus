@@ -5,10 +5,10 @@
 //! Lifecycle:
 //!
 //! 1. User builds a `Composition` (the layout shape — named, empty
-//!    patches) and hands it to `PlotComposition::new(comp)`.
+//!    patches) and hands it to `PlotComposition::new(&comp)`.
 //!    The orchestrator captures a clone-friendly description of the
-//!    composition shape (placements + ids + tracks); the original
-//!    `Composition` value is consumed.
+//!    composition shape (placements + ids + tracks + the composition's
+//!    own aspect / margin / padding), leaving the caller's value intact.
 //! 2. User registers scales by name (`add_scale` / `insert_scale`) and
 //!    attaches `Plot`s (`with_plot` / `attach_plot`). Each plot is
 //!    bound to a patch id from the composition.
@@ -29,30 +29,51 @@ use std::sync::Arc;
 
 use crate::composition::{spacer, Composition, CompositionLayout, Element, Patch, Span};
 use crate::geometry::Size;
-use crate::layout::Track;
+use crate::layout::{Inset, Track};
 use crate::scene::SceneBuilder;
+use crate::shape::ShapeRegistry;
 
 use super::plot::Plot;
 use super::scale::{Scale, ScaleRegistry};
 use super::theme::Theme;
 
+#[cfg(feature = "text")]
+use super::scale::AxisSide;
+
+/// Id given to the root composition when the caller didn't name it with
+/// [`Composition::id`]. Composition-level chrome rects resolve as
+/// `(composition_id, region)`, so the root needs an id before any of its
+/// chrome can be looked up in the solved layout.
+const ROOT_COMPOSITION_ID: &str = "__hephaestus_root__";
+
 // ─── Template ────────────────────────────────────────────────────────────────
 
 /// Clone-friendly description of a [`Composition`]'s shape — captured at
-/// `PlotComposition::new` so the original (which may contain non-Clone
-/// `Cell` values) can be consumed once and rebuilt fresh on every
-/// render with each plot's chrome wired in.
+/// `PlotComposition::new` so a composition (which may contain non-Clone
+/// `Cell` values) can be rebuilt fresh on every render with each plot's
+/// chrome wired in.
 ///
-/// Captures placement metadata + patch ids only. Chrome cells attached
-/// directly to a patch before passing the composition to
+/// Captures placement metadata, ids, and the composition's own geometry
+/// fields (aspect / margin / padding). Chrome *cells* attached directly
+/// to a patch or a composition before passing it to
 /// `PlotComposition::new` are **dropped** — the orchestrator expects
-/// empty patches and re-attaches chrome from each plot on every render.
+/// empty patches and re-attaches chrome from each plot (and from its own
+/// composition-level chrome state) on every render. A raw `Cell` can
+/// reserve space but carries nothing the orchestrator could draw, so
+/// preserving it would produce reserved-but-blank chrome bands.
 #[derive(Debug, Clone)]
 struct CompositionTemplate {
+    /// The composition's id. Composition-level chrome rects resolve as
+    /// `(id, region)`, so the root is always given one — see
+    /// [`ROOT_COMPOSITION_ID`].
+    id: Option<String>,
     rows: usize,
     cols: usize,
     widths: Vec<Track>,
     heights: Vec<Track>,
+    aspect: Option<(f32, f32)>,
+    margin: Inset,
+    padding: Inset,
     placements: Vec<PlacementTemplate>,
 }
 
@@ -71,8 +92,9 @@ enum ElementTemplate {
     NamedPatch(String),
     /// Anonymous spacer.
     Spacer,
-    /// Nested composition (placed via `Composition::place`).
-    Composition(CompositionTemplate),
+    /// Nested composition (placed via `Composition::place`). Boxed —
+    /// a nested template dwarfs the other variants.
+    Composition(Box<CompositionTemplate>),
 }
 
 impl CompositionTemplate {
@@ -81,10 +103,14 @@ impl CompositionTemplate {
     /// compositions recurse.
     fn capture(c: &Composition) -> Self {
         Self {
+            id: c.composition_id().map(str::to_string),
             rows: c.rows(),
             cols: c.cols(),
             widths: c.widths_slice().to_vec(),
             heights: c.heights_slice().to_vec(),
+            aspect: c.aspect_ratio(),
+            margin: c.margin_inset().clone(),
+            padding: c.padding_inset().clone(),
             placements: c
                 .placements()
                 .map(|(row, col, span, element)| PlacementTemplate {
@@ -98,32 +124,51 @@ impl CompositionTemplate {
     }
 
     /// Rebuild a `Composition` from this template, wiring each known
-    /// patch's chrome via the attached plots. Per-patch aspect locks
+    /// patch's chrome via the attached plots and each named
+    /// composition's chrome from `ctx`. Per-patch aspect locks
     /// are propagated into the outer grid's Fr weights by
     /// `emit_patch_into` at solve time — depending on whether each
     /// patch is alone in its row or column, the aspect is encoded
     /// into either the row Fr or the column Fr so siblings on the
     /// other axis don't conflict.
-    fn rebuild(
-        &self,
-        plots: &HashMap<String, Vec<Plot>>,
-        registry: &ScaleRegistry,
-        dpi: f64,
-        comp_theme: &Theme,
-    ) -> Composition {
+    fn rebuild(&self, ctx: &RebuildCtx<'_>) -> Composition {
         let mut c = Composition::empty(self.rows, self.cols);
+        if let Some(id) = &self.id {
+            c = c.id(id.clone());
+        }
         if !self.widths.is_empty() {
             c = c.widths(self.widths.clone());
         }
         if !self.heights.is_empty() {
             c = c.heights(self.heights.clone());
         }
+        if let Some((w, h)) = self.aspect {
+            c = c.aspect(w, h);
+        }
+        c = c.margin(self.margin.clone()).padding(self.padding.clone());
         for p in &self.placements {
-            let element = p.element.rebuild(plots, registry, dpi, comp_theme);
+            let element = p.element.rebuild(ctx);
             c = c.place(p.row, p.col, p.span, element);
+        }
+        // Composition-level chrome, keyed on this composition's id.
+        // Wired after the placements so the chrome slots land on the
+        // canonical wrapping block around the finished facet grid.
+        if let Some(chrome) = self.id.as_deref().and_then(|id| ctx.chrome.get(id)) {
+            c = chrome.wire(c, ctx);
         }
         c
     }
+}
+
+/// The per-render inputs `CompositionTemplate::rebuild` needs: the
+/// attached plots, the scales they resolve through, and the
+/// composition-level chrome keyed by composition id.
+struct RebuildCtx<'a> {
+    plots: &'a HashMap<String, Vec<Plot>>,
+    registry: &'a ScaleRegistry,
+    dpi: f64,
+    theme: &'a Theme,
+    chrome: &'a HashMap<String, CompositionChrome>,
 }
 
 impl ElementTemplate {
@@ -134,27 +179,19 @@ impl ElementTemplate {
                 None => ElementTemplate::Spacer,
             },
             Element::Composition(c) => {
-                ElementTemplate::Composition(CompositionTemplate::capture(c))
+                ElementTemplate::Composition(Box::new(CompositionTemplate::capture(c)))
             }
         }
     }
 
-    fn rebuild(
-        &self,
-        plots: &HashMap<String, Vec<Plot>>,
-        registry: &ScaleRegistry,
-        dpi: f64,
-        comp_theme: &Theme,
-    ) -> Element {
+    fn rebuild(&self, ctx: &RebuildCtx<'_>) -> Element {
         match self {
             ElementTemplate::NamedPatch(id) => {
-                let patch = wire_into_patch(id, plots, registry, dpi, comp_theme);
+                let patch = wire_into_patch(id, ctx.plots, ctx.registry, ctx.dpi, ctx.theme);
                 Element::Patch(patch)
             }
             ElementTemplate::Spacer => Element::Patch(spacer()),
-            ElementTemplate::Composition(inner) => {
-                Element::Composition(inner.rebuild(plots, registry, dpi, comp_theme))
-            }
+            ElementTemplate::Composition(inner) => Element::Composition(inner.rebuild(ctx)),
         }
     }
 }
@@ -349,6 +386,235 @@ fn pl_wire_panel_fallback(p: Patch) -> Patch {
     p.slot(Slot::Panel, Cell::empty())
 }
 
+// ─── Composition-level chrome ────────────────────────────────────────────────
+
+/// The four cartesian sides, in `axis_side_index` order.
+#[cfg(feature = "text")]
+const AXIS_TITLE_SIDES: [AxisSide; 4] = [
+    AxisSide::Top,
+    AxisSide::Right,
+    AxisSide::Bottom,
+    AxisSide::Left,
+];
+
+/// Composition legends sit in the composition's anatomical legend ring;
+/// there is no composition-owned panel rect to anchor against.
+#[cfg(feature = "text")]
+fn reject_in_panel_legend(legend: &crate::plot::chrome::legend::Legend) {
+    use crate::scales::chrome::LegendSide;
+    assert!(
+        !matches!(legend.side, LegendSide::InPanel { .. }),
+        "PlotComposition legends cannot use LegendSide::InPanel; the composition's panel cell is filled by its facets"
+    );
+}
+
+/// Chrome owned by a composition rather than by one of its patches: a
+/// title / subtitle / caption spanning every facet, axis titles shared
+/// across a facet row or column, and legends placed in the
+/// composition's own legend ring.
+///
+/// [`PlotComposition`] holds one of these per composition id and
+/// addresses the root through [`ROOT_COMPOSITION_ID`], so the same
+/// wiring path serves the root and any named nested composition.
+#[derive(Default)]
+struct CompositionChrome {
+    title: Option<String>,
+    subtitle: Option<String>,
+    caption: Option<String>,
+    /// Axis titles by side, indexed as by
+    /// [`axis_side_index`](crate::plot::plot::axis_side_index).
+    #[cfg(feature = "text")]
+    axis_titles: [Option<String>; 4],
+    /// Legends attached to the composition. Same opt-in model as
+    /// [`Plot`]: nothing is inferred from the plots' bindings.
+    #[cfg(feature = "text")]
+    legends: Vec<crate::plot::chrome::legend::Legend>,
+    #[cfg(feature = "text")]
+    next_legend_id: u32,
+}
+
+impl CompositionChrome {
+    /// Drop this chrome's cells into `c`'s composition-level slots.
+    /// Populating any slot wraps the facets in a canonical 13×16 block,
+    /// so the chrome spans the whole facet grid.
+    #[cfg(feature = "text")]
+    fn wire(&self, mut c: Composition, ctx: &RebuildCtx<'_>) -> Composition {
+        use super::plot::{
+            axis_title_cell, cartesian_axis_title_slot, effective_text, legends_grouped_by_side,
+            text_cell_for_element, title_band_placement,
+        };
+        use crate::composition::Slot;
+        use crate::layout::Cell;
+
+        let theme = ctx.theme;
+        let root_pt = theme
+            .text
+            .size_pt
+            .map(|l| l.resolve(crate::plot::theme::DEFAULT_TEXT_SIZE_PT))
+            .unwrap_or(crate::plot::theme::DEFAULT_TEXT_SIZE_PT);
+
+        // Title / subtitle / caption — `theme.plot_text_align_to`
+        // chooses between spanning the whole composition interior and
+        // spanning just the facet band, exactly as it does per plot.
+        for (slot, text_opt, theme_slot) in [
+            (Slot::Title, self.title.as_ref(), &theme.plot_title),
+            (Slot::Subtitle, self.subtitle.as_ref(), &theme.plot_subtitle),
+            (Slot::Caption, self.caption.as_ref(), &theme.plot_caption),
+        ] {
+            if let (Some(t), Some(el)) = (text_opt, effective_text(theme_slot, &theme.text)) {
+                let (r, col, rs, cs) = title_band_placement(slot, theme.plot_text_align_to);
+                c = c.place_at(
+                    slot.name(),
+                    r,
+                    col,
+                    Span::rc(rs, cs),
+                    text_cell_for_element(t, &el, root_pt, ctx.dpi),
+                );
+            }
+        }
+
+        // Axis titles. A composition has no panel of its own, so
+        // `TitleLocation::Inside` has nothing to sit against — the
+        // title always takes the outer slot.
+        for side in AXIS_TITLE_SIDES {
+            if let Some(title) = self.axis_title_at(side) {
+                c = c.slot(
+                    cartesian_axis_title_slot(side),
+                    axis_title_cell(title, side, theme, ctx.dpi),
+                );
+            }
+        }
+
+        // Legends — one stack per populated side, sized through the
+        // same measure the per-plot ring uses.
+        for (side, slot, group) in legends_grouped_by_side(&self.legends) {
+            if group.is_empty() {
+                continue;
+            }
+            c = c.slot(
+                slot,
+                Cell::measured_boxed(crate::plot::chrome::legend::legend_stack_measure(
+                    &group,
+                    side,
+                    ctx.registry,
+                    ctx.dpi,
+                    theme,
+                )),
+            );
+        }
+        c
+    }
+
+    /// Non-text builds have no shaper, so composition chrome reserves
+    /// no space — mirrors `Plot::wire_panel` standing in for `wire`.
+    #[cfg(not(feature = "text"))]
+    fn wire(&self, c: Composition, _ctx: &RebuildCtx<'_>) -> Composition {
+        c
+    }
+
+    /// Read the axis title installed for `side`, if any.
+    #[cfg(feature = "text")]
+    fn axis_title_at(&self, side: AxisSide) -> Option<&str> {
+        self.axis_titles[super::plot::axis_side_index(side)].as_deref()
+    }
+
+    /// Render this chrome into the rects solved for `comp_id`.
+    #[cfg(feature = "text")]
+    #[allow(clippy::too_many_arguments)]
+    fn draw_into(
+        &self,
+        comp_id: &str,
+        scene: &mut dyn SceneBuilder,
+        layout: &CompositionLayout,
+        registry: &ScaleRegistry,
+        shapes: &ShapeRegistry,
+        dpi: f64,
+        theme: &Theme,
+    ) {
+        use super::plot::{
+            cartesian_axis_title_slot, draw_axis_title, draw_text_element_in_rect, effective_text,
+            legends_grouped_by_side,
+        };
+        use crate::brush::Brush;
+        use crate::composition::Slot;
+        use crate::plot::theme::text_concrete_defaults;
+        use crate::text::TextRun;
+
+        let root_pt = theme
+            .text
+            .size_pt
+            .map(|l| l.resolve(crate::plot::theme::DEFAULT_TEXT_SIZE_PT))
+            .unwrap_or(crate::plot::theme::DEFAULT_TEXT_SIZE_PT);
+
+        for (slot, text_opt, theme_slot) in [
+            (Slot::Title, self.title.as_ref(), &theme.plot_title),
+            (Slot::Subtitle, self.subtitle.as_ref(), &theme.plot_subtitle),
+            (Slot::Caption, self.caption.as_ref(), &theme.plot_caption),
+        ] {
+            let (Some(text), Some(rect), Some(el)) = (
+                text_opt,
+                layout.get(comp_id, slot),
+                effective_text(theme_slot, &theme.text),
+            ) else {
+                continue;
+            };
+            draw_text_element_in_rect(
+                scene,
+                text,
+                &el,
+                rect,
+                &theme.palette,
+                root_pt,
+                dpi,
+                crate::pick::PickId::Skip,
+            );
+        }
+
+        let text_defaults = text_concrete_defaults();
+        for side in AXIS_TITLE_SIDES {
+            let Some(title) = self.axis_title_at(side) else {
+                continue;
+            };
+            let (ch, side_idx) = crate::plot::chrome::axis::axis_side_to_channel_side(side);
+            let Some(el) = theme.axis.resolve(ch, side_idx).title else {
+                continue;
+            };
+            let Some(rect) = layout.get(comp_id, cartesian_axis_title_slot(side)) else {
+                continue;
+            };
+            let color = el
+                .color
+                .clone()
+                .or_else(|| text_defaults.color.clone())
+                .expect("text_concrete_defaults sets color");
+            let angle = el
+                .angle
+                .or(text_defaults.angle)
+                .expect("text_concrete_defaults sets angle");
+            let run = TextRun::new(title, &super::plot::text_style_from(&el, root_pt), dpi);
+            draw_axis_title(
+                scene,
+                &run,
+                rect,
+                side,
+                &Brush::Solid(color.resolve(&theme.palette)),
+                angle,
+            );
+        }
+
+        for (side, slot, group) in legends_grouped_by_side(&self.legends) {
+            if group.is_empty() {
+                continue;
+            }
+            if let Some(rect) = layout.get(comp_id, slot) {
+                crate::plot::chrome::legend::render_legend_stack(
+                    &group, side, rect, registry, shapes, scene, dpi, theme,
+                );
+            }
+        }
+    }
+}
+
 // ─── ValidationIssue ─────────────────────────────────────────────────────────
 
 /// Per-plot diagnostic surfaced by [`PlotComposition::validate`].
@@ -390,6 +656,16 @@ pub struct PlotComposition {
     /// earlier ones (the user controls draw order via attach
     /// order).
     plots: HashMap<String, Vec<Plot>>,
+    /// Composition-level chrome by composition id. The root's entry is
+    /// keyed on `root_id`; the builder / mutator methods on this type
+    /// all target that entry.
+    chrome: HashMap<String, CompositionChrome>,
+    /// Id of the root composition — the caller's [`Composition::id`] if
+    /// they set one, otherwise [`ROOT_COMPOSITION_ID`].
+    root_id: String,
+    /// Registry backing the glyphs drawn in composition-level legend
+    /// keys. Per-plot legends use their own plot's registry.
+    shapes: ShapeRegistry,
     /// Per-plot dirty bits, plumbed for partial-repaint heuristics. Not
     /// currently consumed — every render re-draws the full table.
     plot_dirty: HashMap<String, bool>,
@@ -405,16 +681,25 @@ pub struct PlotComposition {
 }
 
 impl PlotComposition {
-    /// Construct from a layout-level [`Composition`]. Only the shape
-    /// (placements / ids / tracks) of composition
-    /// is captured for the per-render rebuild walk.
+    /// Construct from a layout-level [`Composition`]. Captures the
+    /// shape (placements / ids / tracks) plus the composition's own
+    /// aspect / margin / padding for the per-render rebuild walk. The
+    /// root is given an id when it doesn't have one, so its
+    /// composition-level chrome is addressable in the solved layout.
     pub fn new(composition: &Composition) -> Self {
-        let template = CompositionTemplate::capture(composition);
+        let mut template = CompositionTemplate::capture(composition);
+        let root_id = template
+            .id
+            .get_or_insert_with(|| ROOT_COMPOSITION_ID.to_string())
+            .clone();
         Self {
             template,
             scales: ScaleRegistry::new(),
             theme: Arc::new(Theme::default()),
             plots: HashMap::new(),
+            chrome: HashMap::new(),
+            root_id,
+            shapes: ShapeRegistry::with_builtins(),
             plot_dirty: HashMap::new(),
             scale_dirty: HashMap::new(),
             layout_dirty: true,
@@ -464,6 +749,162 @@ impl PlotComposition {
             Some(part) => self.theme.merge(part),
             None => (*self.theme).clone(),
         }
+    }
+
+    // ── Composition-level chrome ──────────────────────────────────────
+
+    /// Borrow the root composition's chrome, creating it on first use.
+    fn root_chrome_mut(&mut self) -> &mut CompositionChrome {
+        self.layout_dirty = true;
+        self.chrome.entry(self.root_id.clone()).or_default()
+    }
+
+    /// Set the composition's title, rendered in the [`Slot::Title`]
+    /// slot of the canonical block that wraps every facet. Chainable
+    /// builder form of [`Self::set_title`].
+    ///
+    /// [`Slot::Title`]: crate::composition::Slot::Title
+    pub fn title(mut self, s: impl Into<String>) -> Self {
+        self.set_title(s);
+        self
+    }
+
+    /// Set the composition's subtitle, rendered in the
+    /// [`Slot::Subtitle`] slot spanning every facet.
+    ///
+    /// [`Slot::Subtitle`]: crate::composition::Slot::Subtitle
+    pub fn subtitle(mut self, s: impl Into<String>) -> Self {
+        self.root_chrome_mut().subtitle = Some(s.into());
+        self
+    }
+
+    /// Set the composition's caption, rendered in the [`Slot::Caption`]
+    /// slot spanning every facet.
+    ///
+    /// [`Slot::Caption`]: crate::composition::Slot::Caption
+    pub fn caption(mut self, s: impl Into<String>) -> Self {
+        self.root_chrome_mut().caption = Some(s.into());
+        self
+    }
+
+    /// Replace the composition's title. Flags the layout dirty.
+    pub fn set_title(&mut self, s: impl Into<String>) {
+        self.root_chrome_mut().title = Some(s.into());
+    }
+
+    /// Clear the composition's title, releasing its chrome row. Flags
+    /// the layout dirty.
+    pub fn clear_title(&mut self) {
+        self.root_chrome_mut().title = None;
+    }
+
+    /// Set a shared axis title on `side` — one label for the whole
+    /// facet grid rather than one per plot. Each side holds at most one
+    /// title; calling again with the same side replaces it.
+    ///
+    /// The title always takes the outer chrome slot: a composition has
+    /// no panel of its own, so `TitleLocation::Inside` has nothing to
+    /// sit against.
+    #[cfg(feature = "text")]
+    pub fn axis_title(mut self, side: AxisSide, text: impl Into<String>) -> Self {
+        self.set_axis_title(side, Some(text.into()));
+        self
+    }
+
+    /// Install or clear the shared axis title for `side`. `None`
+    /// removes it, releasing the slot. Flags the layout dirty.
+    #[cfg(feature = "text")]
+    pub fn set_axis_title(&mut self, side: AxisSide, text: Option<String>) {
+        let idx = super::plot::axis_side_index(side);
+        self.root_chrome_mut().axis_titles[idx] = text;
+    }
+
+    /// Read the shared axis title for `side`, if any.
+    #[cfg(feature = "text")]
+    pub fn axis_title_at(&self, side: AxisSide) -> Option<&str> {
+        self.chrome
+            .get(&self.root_id)
+            .and_then(|c| c.axis_title_at(side))
+    }
+
+    /// Attach a legend to the composition, placed in the composition's
+    /// own legend ring so one legend serves every facet. If an existing
+    /// composition legend matches on `(domain_scale, side, title)`, its
+    /// keys are appended and the existing legend's id is returned.
+    /// Otherwise a new legend is added and its id returned.
+    ///
+    /// Panics on [`LegendSide::InPanel`] — an in-panel legend anchors
+    /// to a panel rect, and the composition's panel cell is filled by
+    /// its facets.
+    ///
+    /// [`LegendSide::InPanel`]: crate::scales::chrome::LegendSide::InPanel
+    #[cfg(feature = "text")]
+    pub fn add_legend(
+        &mut self,
+        legend: crate::plot::chrome::legend::Legend,
+    ) -> crate::plot::chrome::legend::LegendId {
+        use crate::plot::chrome::legend::LegendBody;
+        reject_in_panel_legend(&legend);
+        let chrome = self.root_chrome_mut();
+        if let Some(idx) = chrome
+            .legends
+            .iter()
+            .position(|l| l.is_compatible_with(&legend))
+        {
+            // Only stack-style legends merge their keys; the colorbar
+            // case is excluded by `is_compatible_with`.
+            if let (LegendBody::Stack(existing), LegendBody::Stack(incoming)) =
+                (&mut chrome.legends[idx].body, legend.body)
+            {
+                existing.keys.extend(incoming.keys);
+            }
+            return crate::plot::chrome::legend::LegendId(idx as u32);
+        }
+        self.add_legend_separate(legend)
+    }
+
+    /// Attach a composition legend without merging into a compatible
+    /// existing one. Use when two legends with the same triple should
+    /// be rendered side-by-side instead.
+    ///
+    /// Panics on [`LegendSide::InPanel`], as [`Self::add_legend`] does.
+    ///
+    /// [`LegendSide::InPanel`]: crate::scales::chrome::LegendSide::InPanel
+    #[cfg(feature = "text")]
+    pub fn add_legend_separate(
+        &mut self,
+        legend: crate::plot::chrome::legend::Legend,
+    ) -> crate::plot::chrome::legend::LegendId {
+        reject_in_panel_legend(&legend);
+        let chrome = self.root_chrome_mut();
+        let id = crate::plot::chrome::legend::LegendId(chrome.next_legend_id);
+        chrome.next_legend_id += 1;
+        chrome.legends.push(legend);
+        id
+    }
+
+    /// Borrow the composition's legends in insertion order.
+    #[cfg(feature = "text")]
+    pub fn legends(&self) -> &[crate::plot::chrome::legend::Legend] {
+        self.chrome
+            .get(&self.root_id)
+            .map(|c| c.legends.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Remove every legend attached to the composition. Flags the
+    /// layout dirty.
+    #[cfg(feature = "text")]
+    pub fn clear_legends(&mut self) {
+        self.root_chrome_mut().legends.clear();
+    }
+
+    /// Replace the registry backing composition-level legend key
+    /// glyphs. Per-plot legends resolve through their own plot's
+    /// registry.
+    pub fn shape_registry(mut self, r: ShapeRegistry) -> Self {
+        self.shapes = r;
+        self
     }
 
     // ── Scale registry ────────────────────────────────────────────────
@@ -632,9 +1073,13 @@ impl PlotComposition {
 
         // Re-solve when needed.
         if self.layout_dirty || self.last_layout.is_none() {
-            let comp = self
-                .template
-                .rebuild(&self.plots, &self.scales, dpi, &self.theme);
+            let comp = self.template.rebuild(&RebuildCtx {
+                plots: &self.plots,
+                registry: &self.scales,
+                dpi,
+                theme: &self.theme,
+                chrome: &self.chrome,
+            });
             self.last_layout = Some(comp.solve(size, dpi));
             self.last_size = Some(size);
             self.last_dpi = Some(dpi);
@@ -708,6 +1153,24 @@ impl PlotComposition {
                 let effective = self.effective_theme_for(plot);
                 plot.draw_chrome_into(scene, layout, &self.scales, dpi, &effective);
             }
+        }
+
+        // Phase 5: composition-level chrome. Drawn last so a shared
+        // title / legend paints over the canonical chrome band it
+        // shares with the border facets' own chrome (see
+        // `build_wrapped_composition`: both resolve to the same
+        // anatomical row, the composition's spanning the full width).
+        #[cfg(feature = "text")]
+        for (comp_id, chrome) in &self.chrome {
+            chrome.draw_into(
+                comp_id,
+                scene,
+                layout,
+                &self.scales,
+                &self.shapes,
+                dpi,
+                &self.theme,
+            );
         }
 
         // Clear dirty bits after a successful render.
@@ -976,6 +1439,260 @@ mod tests {
             PlotComposition::new(&comp_two()).with_plot(crate::plot::Plot::new(&comp_two(), "a"));
         let mut scene = crate::scene::recording::RecordingScene::default();
         view.render(&mut scene, Size::new(400.0, 300.0), 96.0);
+    }
+
+    // ── Composition-level chrome ──
+
+    /// Two plots side by side, each with a panel, so composition chrome
+    /// has facets to span.
+    #[cfg(feature = "text")]
+    fn view_two_plots() -> PlotComposition {
+        PlotComposition::new(&comp_two())
+            .with_plot(crate::plot::Plot::new(&comp_two(), "a"))
+            .with_plot(crate::plot::Plot::new(&comp_two(), "b"))
+    }
+
+    #[test]
+    fn capture_preserves_composition_geometry() {
+        use crate::layout::{Inset, Length};
+        let comp = comp_two()
+            .id("outer")
+            .aspect(1.0, 1.0)
+            .margin(Inset::default().left(Length::pt(7.0)));
+        let view = PlotComposition::new(&comp);
+        assert_eq!(view.template.id.as_deref(), Some("outer"));
+        assert_eq!(view.template.aspect, Some((1.0, 1.0)));
+        assert!(view.template.margin.left.is_some());
+        assert_eq!(view.root_id, "outer");
+    }
+
+    #[test]
+    fn unnamed_composition_gets_a_root_id() {
+        let view = PlotComposition::new(&comp_two());
+        assert_eq!(view.root_id, ROOT_COMPOSITION_ID);
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn composition_title_spans_every_facet() {
+        let mut view = view_two_plots().title("Fuel economy");
+        let mut scene = crate::scene::recording::RecordingScene::default();
+        view.render(&mut scene, Size::new(600.0, 400.0), 96.0);
+
+        let layout = view.last_layout.as_ref().unwrap();
+        let title = layout
+            .get(ROOT_COMPOSITION_ID, crate::composition::Slot::Title)
+            .expect("composition title rect");
+        let a = layout.get("a", crate::composition::Slot::Panel).unwrap();
+        let b = layout.get("b", crate::composition::Slot::Panel).unwrap();
+        assert!(title.y1 > title.y0, "title row has height");
+        assert!(
+            title.x0 <= a.x0 && title.x1 >= b.x1,
+            "title {title:?} should span both facet panels {a:?} / {b:?}"
+        );
+        assert!(
+            a.y0 >= title.y1,
+            "both panels sit below the title band, got panel y0 {} vs title y1 {}",
+            a.y0,
+            title.y1
+        );
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn composition_title_is_drawn() {
+        let mut bare = view_two_plots();
+        let mut scene_bare = crate::scene::recording::RecordingScene::default();
+        bare.render(&mut scene_bare, Size::new(600.0, 400.0), 96.0);
+
+        let mut titled = view_two_plots().title("Fuel economy");
+        let mut scene_titled = crate::scene::recording::RecordingScene::default();
+        titled.render(&mut scene_titled, Size::new(600.0, 400.0), 96.0);
+
+        let glyphs = |s: &crate::scene::recording::RecordingScene| {
+            s.ops
+                .iter()
+                .filter(|op| matches!(op, crate::scene::recording::Op::DrawGlyphs(_)))
+                .count()
+        };
+        assert!(
+            glyphs(&scene_titled) > glyphs(&scene_bare),
+            "the composition title should emit glyphs"
+        );
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn composition_chrome_uses_the_caller_id() {
+        let mut view = PlotComposition::new(&comp_two().id("outer"))
+            .with_plot(crate::plot::Plot::new(&comp_two(), "a"))
+            .title("Shared");
+        let mut scene = crate::scene::recording::RecordingScene::default();
+        view.render(&mut scene, Size::new(600.0, 400.0), 96.0);
+        let layout = view.last_layout.as_ref().unwrap();
+        assert!(layout
+            .get("outer", crate::composition::Slot::Title)
+            .is_some());
+        assert!(layout
+            .get(ROOT_COMPOSITION_ID, crate::composition::Slot::Title)
+            .is_none());
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn composition_axis_title_spans_every_facet() {
+        let mut view = view_two_plots().axis_title(AxisSide::Bottom, "Displacement (l)");
+        let mut scene = crate::scene::recording::RecordingScene::default();
+        view.render(&mut scene, Size::new(600.0, 400.0), 96.0);
+
+        let layout = view.last_layout.as_ref().unwrap();
+        let rect = layout
+            .get(
+                ROOT_COMPOSITION_ID,
+                crate::composition::Slot::AxisBottomTitle,
+            )
+            .expect("composition axis title rect");
+        let a = layout.get("a", crate::composition::Slot::Panel).unwrap();
+        let b = layout.get("b", crate::composition::Slot::Panel).unwrap();
+        assert!(rect.y1 > rect.y0, "axis title row has height");
+        assert!(rect.x0 <= a.x0 && rect.x1 >= b.x1, "spans both panels");
+        assert_eq!(
+            view.axis_title_at(AxisSide::Bottom),
+            Some("Displacement (l)")
+        );
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn composition_legend_reserves_the_ring_once() {
+        use crate::plot::chrome::legend::{Legend, LegendKeySpec};
+        use crate::scales::chrome::LegendSide;
+
+        let scale = scale::discrete(vec![
+            crate::scales::value::Value::from("a"),
+            crate::scales::value::Value::from("b"),
+        ])
+        .range_colors([
+            crate::color::Color::new([1.0, 0.0, 0.0, 1.0]),
+            crate::color::Color::new([0.0, 0.0, 1.0, 1.0]),
+        ]);
+        let mut view = view_two_plots().add_scale("cat", scale);
+        view.add_legend(
+            Legend::new("cat")
+                .side(LegendSide::Right)
+                .title("Category")
+                .key(LegendKeySpec::point().scaled("fill", "cat")),
+        );
+        let mut scene = crate::scene::recording::RecordingScene::default();
+        view.render(&mut scene, Size::new(600.0, 400.0), 96.0);
+
+        let layout = view.last_layout.as_ref().unwrap();
+        let legend = layout
+            .get(ROOT_COMPOSITION_ID, crate::composition::Slot::LegendRight)
+            .expect("composition legend rect");
+        let b = layout.get("b", crate::composition::Slot::Panel).unwrap();
+        assert!(legend.x1 > legend.x0, "legend column has width");
+        assert!(
+            legend.x0 >= b.x1 - 0.5,
+            "the composition legend sits outside the rightmost panel, got legend x0 {} vs panel x1 {}",
+            legend.x0,
+            b.x1
+        );
+        // No per-plot legend was attached, so neither patch reserves one.
+        assert!(layout
+            .get("a", crate::composition::Slot::LegendRight)
+            .is_none());
+        assert_eq!(view.legends().len(), 1);
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn composition_add_legend_merges_compatible_keys() {
+        use crate::plot::chrome::legend::{Legend, LegendKeySpec};
+        use crate::scales::chrome::LegendSide;
+        let mut view = view_two_plots();
+        let one = view.add_legend(
+            Legend::new("cat")
+                .side(LegendSide::Right)
+                .title("Category")
+                .key(LegendKeySpec::line().scaled("stroke", "cat")),
+        );
+        let two = view.add_legend(
+            Legend::new("cat")
+                .side(LegendSide::Right)
+                .title("Category")
+                .key(LegendKeySpec::point().scaled("fill", "cat")),
+        );
+        assert_eq!(one, two, "compatible legends merge into one");
+        assert_eq!(view.legends().len(), 1);
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    #[should_panic(expected = "LegendSide::InPanel")]
+    fn composition_rejects_in_panel_legends() {
+        use crate::plot::chrome::legend::Legend;
+        use crate::scales::chrome::{Anchor, LegendSide};
+        let mut view = view_two_plots();
+        view.add_legend(Legend::new("cat").side(LegendSide::InPanel {
+            anchor: Anchor::TopRight,
+            inset_pt: 6.0,
+        }));
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn clearing_composition_chrome_releases_its_band() {
+        let mut view = view_two_plots().title("Fuel economy");
+        let mut scene = crate::scene::recording::RecordingScene::default();
+        view.render(&mut scene, Size::new(600.0, 400.0), 96.0);
+        let titled_panel = view
+            .last_layout
+            .as_ref()
+            .unwrap()
+            .get("a", crate::composition::Slot::Panel)
+            .unwrap();
+
+        view.clear_title();
+        view.render(&mut scene, Size::new(600.0, 400.0), 96.0);
+        let bare_panel = view
+            .last_layout
+            .as_ref()
+            .unwrap()
+            .get("a", crate::composition::Slot::Panel)
+            .unwrap();
+        assert!(
+            bare_panel.y0 < titled_panel.y0,
+            "clearing the title should give the row back to the panel"
+        );
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn composition_aspect_survives_alongside_chrome() {
+        // A chrome-bearing composition still cascades its aspect lock to
+        // leaf patches: `build_composition_grid` propagates aspect to the
+        // children before dispatching to the wrapped-chrome path.
+        let shape = || {
+            Composition::empty(1, 1)
+                .place(1, 1, Span::cell(), CompPatch::new("a"))
+                .aspect(1.0, 1.0)
+        };
+        let mut view = PlotComposition::new(&shape())
+            .with_plot(crate::plot::Plot::new(&shape(), "a"))
+            .title("Wide canvas");
+        let mut scene = crate::scene::recording::RecordingScene::default();
+        view.render(&mut scene, Size::new(900.0, 400.0), 96.0);
+        let layout = view.last_layout.as_ref().unwrap();
+        let panel = layout.get("a", crate::composition::Slot::Panel).unwrap();
+        let (pw, ph) = (panel.x1 - panel.x0, panel.y1 - panel.y0);
+        assert!(
+            (pw - ph).abs() < 2.0,
+            "panel should stay square under a 900x400 canvas, got {pw} x {ph}"
+        );
+        assert!(layout
+            .get(ROOT_COMPOSITION_ID, crate::composition::Slot::Title)
+            .is_some());
     }
 
     // ── validate() ──

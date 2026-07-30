@@ -105,7 +105,7 @@ fn main() {
             );
         }
 
-        let mut view = PlotComposition::new(comp()).with_plot(plot);
+        let mut view = PlotComposition::new(&comp()).with_plot(plot);
         render_to(
             &mut renderer,
             &mut view,
@@ -185,7 +185,7 @@ fn main() {
                 .build(),
         );
 
-        let mut view = PlotComposition::new(comp()).with_plot(plot);
+        let mut view = PlotComposition::new(&comp()).with_plot(plot);
         render_to(
             &mut renderer,
             &mut view,
@@ -355,7 +355,7 @@ fn main() {
                 .build(),
         );
 
-        let mut view = PlotComposition::new(comp()).with_plot(plot);
+        let mut view = PlotComposition::new(&comp()).with_plot(plot);
         render_to(
             &mut renderer,
             &mut view,

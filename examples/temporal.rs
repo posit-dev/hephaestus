@@ -51,7 +51,7 @@ fn main() {
     let start_d = Date::from_ymd(2024, 1, 1);
     let end_d = Date::from_ymd(2024, 12, 31);
 
-    let mut view = PlotComposition::new(comp_shape())
+    let mut view = PlotComposition::new(&comp_shape())
         // Legacy: continuous-with-Date-endpoints — numeric breaks.
         .add_scale("x_numeric", scale::continuous(start_d..=end_d))
         // Calendar-aware: month-aligned breaks.

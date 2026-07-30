@@ -25,11 +25,10 @@
 //!   `.aspect(1, 1)`; selective-respect under nesting locks each leaf
 //!   panel to 1:1 while the surrounding row/col tracks absorb slack.
 //!
-//! Note: composition-level chrome (`Composition::slot(Slot::Title, ...)`
-//! etc.) influences the layout but isn't rendered by `PlotComposition`
-//! yet. The `nesting_faceted_title` example demonstrates manual chrome
-//! rendering against `Composition::solve` directly. This example uses
-//! plain patches.
+//! Renders 1 & 2 also carry **composition-level chrome** — a title,
+//! subtitle, caption, one shared bottom axis title, and a single legend
+//! — set directly on `PlotComposition`. Each spans the whole five-panel
+//! layout rather than repeating per patch.
 
 use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
@@ -37,9 +36,13 @@ use hephaestus::composition::{beside, grid, Composition, Element, Patch};
 use hephaestus::geometry::Size;
 #[cfg(feature = "text")]
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
+#[cfg(feature = "text")]
+use hephaestus::plot::chrome::legend::{Legend, LegendKeySpec};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom};
 #[cfg(feature = "text")]
-use hephaestus::scales::chrome::AxisSide;
+use hephaestus::scales::chrome::{AxisSide, LegendSide};
+#[cfg(feature = "text")]
+use hephaestus::scales::value::Value;
 use hephaestus::Renderer;
 
 fn comp_shape(aspect: Option<(f32, f32)>) -> Composition {
@@ -79,10 +82,38 @@ fn main() {
 
     // ── Renders 1 & 2: shared "time" scale across the unlocked layout
     {
+        #[allow(unused_mut)]
         let mut view = PlotComposition::new(&comp_shape(None))
             .add_scale("time", scale::continuous(0.0..=100.0))
-            .add_scale("y", scale::continuous(0.0..=100.0));
-        attach_all(&mut view, &xs, &datasets, None);
+            .add_scale("y", scale::continuous(0.0..=100.0))
+            .title("Sensor array")
+            .subtitle("Four quadrants and a summary, sharing one time scale")
+            .caption("Composition-level chrome spans every panel");
+        attach_all(&mut view, &xs, &datasets);
+
+        // One axis title and one legend for the whole grid, set on the
+        // composition rather than on any single plot. The legend reads
+        // its rows from the "series" scale's domain; no plot needs to
+        // bind that scale for the legend to resolve it.
+        #[cfg(feature = "text")]
+        let mut view = {
+            let series: Vec<Value> = datasets.iter().map(|(id, _, _)| Value::from(*id)).collect();
+            let colors: Vec<Color> = datasets.iter().map(|(_, _, c)| *c).collect();
+            let mut view = view
+                .add_scale("series", scale::discrete(series).range_colors(colors))
+                .axis_title(AxisSide::Bottom, "Time (s)");
+            view.add_legend(
+                Legend::new("series")
+                    .side(LegendSide::Right)
+                    .title("Series")
+                    .key(
+                        LegendKeySpec::point()
+                            .scaled("fill", "series")
+                            .fixed("size", 6.0_f64),
+                    ),
+            );
+            view
+        };
 
         let issues = view.validate();
         if !issues.is_empty() {
@@ -124,7 +155,7 @@ fn main() {
         let mut view = PlotComposition::new(&comp_shape(Some((1.0, 1.0))))
             .add_scale("time", scale::continuous(20.0..=60.0))
             .add_scale("y", scale::continuous(0.0..=100.0));
-        attach_all(&mut view, &xs, &datasets, Some((1.0, 1.0)));
+        attach_all(&mut view, &xs, &datasets);
         render_to(
             &mut renderer,
             &mut view,
@@ -137,16 +168,14 @@ fn main() {
     }
 }
 
-fn attach_all(
-    view: &mut PlotComposition,
-    xs: &[f64],
-    datasets: &[(&str, Vec<f64>, Color)],
-    aspect: Option<(f32, f32)>,
-) {
+fn attach_all(view: &mut PlotComposition, xs: &[f64], datasets: &[(&str, Vec<f64>, Color)]) {
+    // `Plot::new` reads the composition only to check that the patch id
+    // exists, so one shape serves every plot here. A plot's own aspect
+    // lock would come from `Plot::aspect_ratio`; render 3 instead locks
+    // the outer composition and lets it cascade to the leaves.
+    let shape = comp_shape(None);
     for (id, ys, color) in datasets {
-        let mut p = Plot::new(&comp_shape(aspect), *id)
-            .bind("x", "time")
-            .bind("y", "y");
+        let mut p = Plot::new(&shape, *id).bind("x", "time").bind("y", "y");
         p.add_geom(
             PointGeom::builder()
                 .set("x", xs.to_vec())

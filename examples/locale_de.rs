@@ -26,7 +26,7 @@ fn main() {
     let template = || beside(Patch::new("us"), Patch::new("de"));
 
     let theme = Theme::default().with_locale(Locale::DE_DE);
-    let mut view = PlotComposition::new(template())
+    let mut view = PlotComposition::new(&template())
         .add_scale("x", scale::continuous(0.0..=3.0))
         .add_scale("y", scale::continuous(0.0..=1.0))
         .theme(theme);

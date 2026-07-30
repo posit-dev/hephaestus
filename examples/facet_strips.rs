@@ -79,7 +79,7 @@ fn main() {
         ),
     ];
 
-    let mut view = PlotComposition::new(comp_shape())
+    let mut view = PlotComposition::new(&comp_shape())
         .theme(brandy_theme())
         .add_scale("time", scale::continuous(0.0..=100.0))
         .add_scale("y", scale::continuous(0.0..=100.0));

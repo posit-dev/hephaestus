@@ -95,7 +95,7 @@ fn main() {
 
     // ── Render 1: Cartesian ──────────────────────────────────────────
     {
-        let mut view = PlotComposition::new(cart_shape())
+        let mut view = PlotComposition::new(&cart_shape())
             .add_scale("x_unit", scale::continuous(0.0..=1.0))
             .add_scale("y_unit", scale::continuous(0.0..=1.0));
 
@@ -157,7 +157,7 @@ fn main() {
     // ribbon path densifies via `interpolate_segment_with_t` and
     // lerps width / colour at every interior sample.
     {
-        let mut view = PlotComposition::new(polar_shape())
+        let mut view = PlotComposition::new(&polar_shape())
             .add_scale("theta", scale::continuous(0.0..=1.0))
             .add_scale("r", scale::continuous(0.0..=1.0));
 
@@ -242,7 +242,7 @@ fn main() {
     // half-width and colour at that `t` so the ribbon terminates
     // smoothly without a width discontinuity.
     {
-        let mut view = PlotComposition::new(clip_shape())
+        let mut view = PlotComposition::new(&clip_shape())
             .add_scale("x_unit", scale::continuous(0.0..=1.0))
             .add_scale("y_unit", scale::continuous(0.0..=1.0));
         let mut p = Plot::new(&clip_shape(), "clip")

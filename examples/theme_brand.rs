@@ -53,7 +53,7 @@ fn main() {
         ink: rgb(0.10, 0.18, 0.35),
         accent: rgb(0.86, 0.40, 0.31),
     };
-    let mut view = PlotComposition::new(comp())
+    let mut view = PlotComposition::new(&comp())
         .add_scale("x_scale", scale::continuous(0.0..=6.0))
         .add_scale("y_scale", scale::continuous(0.0..=1.0))
         .theme(Theme::default().with_palette(brand));

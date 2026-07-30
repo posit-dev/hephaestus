@@ -164,7 +164,7 @@ fn main() {
     let polygon_y: Vec<f64> = vec![0.85, 0.35, 0.75, 0.45];
     let polygon_color = rgb8(60, 130, 60);
 
-    let mut view = PlotComposition::new(comp_shape())
+    let mut view = PlotComposition::new(&comp_shape())
         // Scatter: discrete categories for theta + continuous radius.
         .add_scale("scatter_cat", scale::discrete(cats(&scatter_cats)))
         .add_scale("radius_unit", scale::continuous(0.0..=1.0))

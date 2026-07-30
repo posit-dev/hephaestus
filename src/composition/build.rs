@@ -288,8 +288,9 @@ fn build_wrapped_composition(
     // Extract chrome metadata; leave `c` as the bare facets composition.
     let chrome = std::mem::take(&mut c.chrome);
     let comp_id = c.id.take();
-    // Aspect on a wrapped composition has no clean semantics yet — the
-    // sub-Grid spans the entire wrapping block. Silently dropped.
+    // The caller's aspect already cascaded to the children before the
+    // dispatch here; the wrapping block itself has no cell to lock,
+    // since the facets sub-Grid spans all of it.
     c.aspect = None;
     let margin = std::mem::take(&mut c.margin);
     let padding = std::mem::take(&mut c.padding);
@@ -466,12 +467,17 @@ fn emit_patch_into(
     Ok(())
 }
 
-/// Push a composition's `aspect = Some((aw, ah))` down to immediate
-/// children that don't already carry their own. Cascading to grandchildren
-/// happens naturally when each child Composition's
-/// [`build_composition_grid`] runs and propagates again from its own
-/// (possibly just-received) aspect. A child with its own explicit aspect
-/// wins and blocks further propagation past that node.
+/// Push a composition's `aspect = Some((aw, ah))` down to every
+/// descendant that doesn't already carry its own. A child with its own
+/// explicit aspect wins and blocks propagation past that node.
+///
+/// The walk is depth-first rather than one level at a time because the
+/// aspect accounting that runs straight after it
+/// ([`composition_natural_aspect`]) reports `None` for a nested
+/// composition whose leaves aren't locked yet. That would leave the
+/// nested block's panel track unrespected, letting it claim the whole
+/// axis and stranding the slack *inside* the composition as a gap
+/// between siblings.
 fn propagate_aspect(placements: &mut [CompositionPlacement], aspect: (f32, f32)) {
     for p in placements.iter_mut() {
         match &mut p.element {
@@ -480,6 +486,7 @@ fn propagate_aspect(placements: &mut [CompositionPlacement], aspect: (f32, f32))
             }
             Element::Composition(child) if child.aspect.is_none() => {
                 child.aspect = Some(aspect);
+                propagate_aspect(&mut child.placements, aspect);
             }
             _ => {}
         }

@@ -75,7 +75,7 @@ fn main() {
             );
         }
 
-        let mut view = PlotComposition::new(comp()).with_plot(plot);
+        let mut view = PlotComposition::new(&comp()).with_plot(plot);
         render_to(
             &mut renderer,
             &mut view,
@@ -165,7 +165,7 @@ fn main() {
         // Use a square panel for this render so the geometry-defined
         // interior angles match what you see — corner rounding works in
         // panel-pixel space, not panel-fraction space.
-        let mut view = PlotComposition::new(comp()).with_plot(plot);
+        let mut view = PlotComposition::new(&comp()).with_plot(plot);
         render_to(
             &mut renderer,
             &mut view,
@@ -248,7 +248,7 @@ fn main() {
                 .build(),
         );
 
-        let mut view = PlotComposition::new(comp()).with_plot(plot);
+        let mut view = PlotComposition::new(&comp()).with_plot(plot);
         render_to(
             &mut renderer,
             &mut view,

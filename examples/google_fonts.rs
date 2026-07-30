@@ -76,7 +76,7 @@ fn main() {
     let mut theme = Theme::default();
     theme.text.font.family = Some(FontFamily::Named(vec!["Inter".to_string()]));
 
-    let mut view = PlotComposition::new(comp())
+    let mut view = PlotComposition::new(&comp())
         .add_scale("x", scale::continuous(0.0..=100.0))
         .add_scale("y", scale::continuous(0.0..=100.0))
         .with_plot(plot);

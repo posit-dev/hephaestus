@@ -69,7 +69,7 @@ fn any_stroke_with_color(ops: &[Op], target: Color, eps: f32) -> bool {
 /// orchestrator ready for `render`. Caller installs the theme.
 fn single_plot_view(theme: Theme) -> (PlotComposition, RecordingScene) {
     let template = beside(Patch::new("p"), Patch::new("__pad"));
-    let mut view = PlotComposition::new(template)
+    let mut view = PlotComposition::new(&template)
         .theme(theme)
         .add_scale("x", scale::continuous(0.0..=1.0))
         .add_scale("y", scale::continuous(0.0..=1.0));
@@ -226,7 +226,7 @@ fn theme_override_replaces_panel_background_fill() {
     // over the composition's theme. Render with a red override and
     // assert a red fill is emitted.
     let template = beside(Patch::new("p"), Patch::new("__pad"));
-    let mut view = PlotComposition::new(template)
+    let mut view = PlotComposition::new(&template)
         .theme(Theme::default())
         .add_scale("x", scale::continuous(0.0..=1.0))
         .add_scale("y", scale::continuous(0.0..=1.0));
@@ -356,7 +356,7 @@ fn strip_text_blank_suppresses_whole_strip() {
     };
 
     let template = beside(Patch::new("p"), Patch::new("__pad"));
-    let mut view = PlotComposition::new(template)
+    let mut view = PlotComposition::new(&template)
         .theme(theme)
         .add_scale("x", scale::continuous(0.0..=1.0))
         .add_scale("y", scale::continuous(0.0..=1.0));
@@ -396,7 +396,7 @@ fn legend_key_frame_uses_theme_swatch_color() {
     let grey92 = ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.08).resolve(&theme.palette);
 
     let template = beside(Patch::new("p"), Patch::new("__pad"));
-    let mut view = PlotComposition::new(template)
+    let mut view = PlotComposition::new(&template)
         .theme(theme)
         .add_scale("x", scale::continuous(0.0..=1.0))
         .add_scale("y", scale::continuous(0.0..=1.0))

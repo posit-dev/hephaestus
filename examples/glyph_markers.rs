@@ -99,7 +99,7 @@ fn main() {
     line_plot.add_axis(Axis::rail("lx", AxisPlacement::Cartesian(AxisSide::Bottom)));
     line_plot.add_axis(Axis::rail("ly", AxisPlacement::Cartesian(AxisSide::Left)));
 
-    let mut view = PlotComposition::new(comp())
+    let mut view = PlotComposition::new(&comp())
         .add_scale("sx", scale::continuous(-1.0..=(n as f64)))
         .add_scale("sy", scale::continuous(0.0..=8.0))
         .add_scale("lx", scale::continuous(0.0..=8.0))

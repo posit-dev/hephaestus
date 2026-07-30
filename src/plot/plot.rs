@@ -1749,7 +1749,7 @@ impl Plot {
 /// reserves is therefore sized to text + margin; the draw helper
 /// then insets back to position the text inside.
 #[cfg(feature = "text")]
-fn text_cell_for_element(
+pub(crate) fn text_cell_for_element(
     s: &str,
     el: &crate::plot::theme::TextElement,
     parent_pt: f64,
@@ -1918,7 +1918,7 @@ pub(crate) fn effective_text(
 /// (one font line height) rather than the natural string width.
 /// Horizontal sides reuse the unrotated `TextRun` measure directly.
 #[cfg(feature = "text")]
-fn axis_title_cell(
+pub(crate) fn axis_title_cell(
     title: &str,
     side: AxisSide,
     theme: &crate::plot::theme::Theme,
@@ -2089,7 +2089,7 @@ pub(crate) fn draw_text_element_in_rect(
 /// concrete `Rotation::Degrees(_)` bypasses that and uses the
 /// absolute angle.
 #[cfg(feature = "text")]
-fn draw_axis_title(
+pub(crate) fn draw_axis_title(
     scene: &mut dyn SceneBuilder,
     run: &crate::text::TextRun,
     rect: Rect,
@@ -2168,7 +2168,10 @@ impl crate::layout::Measure for BoxMeasure {
 /// narrows the column span to just the panel column so chrome text
 /// aligns against the panel rather than the full plot interior.
 #[cfg(feature = "text")]
-fn title_band_placement(slot: Slot, align_to: crate::plot::theme::AlignTo) -> (u16, u16, u16, u16) {
+pub(crate) fn title_band_placement(
+    slot: Slot,
+    align_to: crate::plot::theme::AlignTo,
+) -> (u16, u16, u16, u16) {
     let (row, col, rs, cs) = slot.placement();
     match align_to {
         crate::plot::theme::AlignTo::Plot => (row, col, rs, cs),
@@ -2187,7 +2190,7 @@ fn cartesian_axis_slot(side: AxisSide) -> Slot {
 }
 
 #[cfg(feature = "text")]
-fn cartesian_axis_title_slot(side: AxisSide) -> Slot {
+pub(crate) fn cartesian_axis_title_slot(side: AxisSide) -> Slot {
     match side {
         AxisSide::Left => Slot::AxisLeftTitle,
         AxisSide::Right => Slot::AxisRightTitle,
@@ -2197,7 +2200,7 @@ fn cartesian_axis_title_slot(side: AxisSide) -> Slot {
 }
 
 #[cfg(feature = "text")]
-fn legends_grouped_by_side(
+pub(crate) fn legends_grouped_by_side(
     legends: &[crate::plot::chrome::legend::Legend],
 ) -> Vec<(
     crate::scales::chrome::LegendSide,

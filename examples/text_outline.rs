@@ -97,7 +97,7 @@ fn main() {
             .build(),
     );
 
-    let mut view = PlotComposition::new(comp())
+    let mut view = PlotComposition::new(&comp())
         .add_scale("x", scale::continuous(0.0..=100.0))
         .add_scale("y", scale::continuous(0.0..=100.0))
         .with_plot(plain)

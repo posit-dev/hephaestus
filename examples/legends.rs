@@ -214,7 +214,7 @@ fn main() {
         .map(|s| Value::String(Arc::from(*s)))
         .collect();
 
-    let mut view = PlotComposition::new(comp())
+    let mut view = PlotComposition::new(&comp())
         .add_scale("x", scale::continuous(0.0..=10.0))
         .add_scale("y", scale::continuous(0.0..=1.0))
         .add_scale(

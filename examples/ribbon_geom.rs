@@ -72,7 +72,7 @@ fn main() {
         plot.add_axis(Axis::rail("time", AxisPlacement::Cartesian(AxisSide::Bottom)).title("Time"));
         plot.add_axis(Axis::rail("value", AxisPlacement::Cartesian(AxisSide::Left)).title("Value"));
 
-        let mut view = PlotComposition::new(cell_comp())
+        let mut view = PlotComposition::new(&cell_comp())
             .add_scale("time", scale::continuous(0.0..=(n as f64 - 1.0)))
             .add_scale("value", scale::continuous(0.0..=80.0))
             .with_plot(plot);
@@ -120,7 +120,7 @@ fn main() {
             Axis::rail("y_axis", AxisPlacement::Cartesian(AxisSide::Left)).title("Depth"),
         );
 
-        let mut view = PlotComposition::new(cell_comp())
+        let mut view = PlotComposition::new(&cell_comp())
             .add_scale("x_axis", scale::continuous(0.0..=60.0))
             .add_scale("y_axis", scale::continuous(0.0..=(n as f64 - 1.0)))
             .with_plot(plot);
@@ -182,7 +182,7 @@ fn main() {
         plot.add_axis(Axis::rail("time", AxisPlacement::Cartesian(AxisSide::Bottom)).title("Time"));
         plot.add_axis(Axis::rail("value", AxisPlacement::Cartesian(AxisSide::Left)).title("Value"));
 
-        let mut view = PlotComposition::new(cell_comp())
+        let mut view = PlotComposition::new(&cell_comp())
             .add_scale("time", scale::continuous(0.0..=(n as f64 - 1.0)))
             .add_scale("value", scale::continuous(0.0..=80.0))
             .with_plot(plot);
@@ -246,7 +246,7 @@ fn main() {
             Axis::rail("radius", AxisPlacement::PolarRadius { theta_frac: 0.0 }).title("Radius"),
         );
 
-        let mut view = PlotComposition::new(cell_comp())
+        let mut view = PlotComposition::new(&cell_comp())
             .add_scale("theta", scale::continuous(0.0..=std::f64::consts::TAU))
             .add_scale("radius", scale::continuous(0.0..=1.0))
             .with_plot(plot);
@@ -312,7 +312,7 @@ fn main() {
         plot.add_axis(Axis::rail("x", AxisPlacement::Cartesian(AxisSide::Bottom)).title("x"));
         plot.add_axis(Axis::rail("y", AxisPlacement::Cartesian(AxisSide::Left)).title("y"));
 
-        let mut view = PlotComposition::new(cell_comp())
+        let mut view = PlotComposition::new(&cell_comp())
             .add_scale("x", scale::continuous(0.0..=1.0))
             .add_scale("y", scale::continuous(0.0..=1.0))
             .with_plot(plot);

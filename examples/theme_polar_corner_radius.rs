@@ -68,7 +68,7 @@ fn main() {
         ..Theme::default()
     };
 
-    let mut view = PlotComposition::new(comp())
+    let mut view = PlotComposition::new(&comp())
         .add_scale("theta", scale::continuous(0.0..=1.0))
         .add_scale("radius", scale::continuous(0.0..=1.0))
         .theme(theme);

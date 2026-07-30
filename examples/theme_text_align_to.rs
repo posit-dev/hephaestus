@@ -99,7 +99,7 @@ fn main() {
     if let Element::Set(t) = &mut theme.plot_title {
         t.align = Some(HAlign::Start);
     }
-    let mut view = PlotComposition::new(comp())
+    let mut view = PlotComposition::new(&comp())
         .add_scale("x_scale", scale::continuous(0.0..=6.0))
         .add_scale("y_scale", scale::continuous(0.0..=1.0))
         .add_scale("category", category_scale)

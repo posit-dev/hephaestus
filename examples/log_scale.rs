@@ -42,7 +42,7 @@ fn main() {
     let ys: Vec<f64> = xs.iter().map(|x| x.ln() * 10.0).collect();
     let dot = rgb8(40, 80, 200);
 
-    let mut view = PlotComposition::new(comp_shape())
+    let mut view = PlotComposition::new(&comp_shape())
         .add_scale("x_linear", scale::continuous(1.0..=1000.0))
         .add_scale(
             "x_log",
