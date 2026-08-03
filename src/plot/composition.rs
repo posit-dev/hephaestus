@@ -487,7 +487,12 @@ impl CompositionChrome {
 
         // Legends — one stack per populated side, sized through the
         // same measure the per-plot ring uses.
-        for (side, slot, group) in legends_grouped_by_side(&self.legends) {
+        let collapsed = crate::plot::chrome::legend::collapse_legends(
+            &self.legends,
+            ctx.registry,
+            &theme.locale,
+        );
+        for (side, slot, group) in legends_grouped_by_side(&collapsed) {
             if group.is_empty() {
                 continue;
             }
@@ -602,7 +607,11 @@ impl CompositionChrome {
             );
         }
 
-        for (side, slot, group) in legends_grouped_by_side(&self.legends) {
+        // Must collapse identically to `wire` for the measured space
+        // to match what gets drawn.
+        let collapsed =
+            crate::plot::chrome::legend::collapse_legends(&self.legends, registry, &theme.locale);
+        for (side, slot, group) in legends_grouped_by_side(&collapsed) {
             if group.is_empty() {
                 continue;
             }
@@ -828,10 +837,13 @@ impl PlotComposition {
     }
 
     /// Attach a legend to the composition, placed in the composition's
-    /// own legend ring so one legend serves every facet. If an existing
-    /// composition legend matches on `(domain_scale, side, title)`, its
-    /// keys are appended and the existing legend's id is returned.
-    /// Otherwise a new legend is added and its id returned.
+    /// own legend ring so one legend serves every facet, and return its
+    /// id.
+    ///
+    /// The legend is stored as given. Merging with a compatible sibling
+    /// happens at render time, once the scales it names can be resolved
+    /// — see
+    /// [`collapse_legends`](crate::plot::chrome::legend::collapse_legends).
     ///
     /// Panics on [`LegendSide::InPanel`] — an in-panel legend anchors
     /// to a panel rect, and the composition's panel cell is filled by
@@ -843,35 +855,27 @@ impl PlotComposition {
         &mut self,
         legend: crate::plot::chrome::legend::Legend,
     ) -> crate::plot::chrome::legend::LegendId {
-        use crate::plot::chrome::legend::LegendBody;
-        reject_in_panel_legend(&legend);
-        let chrome = self.root_chrome_mut();
-        if let Some(idx) = chrome
-            .legends
-            .iter()
-            .position(|l| l.is_compatible_with(&legend))
-        {
-            // Only stack-style legends merge their keys; the colorbar
-            // case is excluded by `is_compatible_with`.
-            if let (LegendBody::Stack(existing), LegendBody::Stack(incoming)) =
-                (&mut chrome.legends[idx].body, legend.body)
-            {
-                existing.keys.extend(incoming.keys);
-            }
-            return crate::plot::chrome::legend::LegendId(idx as u32);
-        }
-        self.add_legend_separate(legend)
+        self.push_legend(legend)
     }
 
-    /// Attach a composition legend without merging into a compatible
-    /// existing one. Use when two legends with the same triple should
-    /// be rendered side-by-side instead.
+    /// Attach a composition legend that renders as its own block even
+    /// when a compatible legend precedes it. Use when two legends over
+    /// the same domain should sit side-by-side instead of sharing rows.
     ///
     /// Panics on [`LegendSide::InPanel`], as [`Self::add_legend`] does.
     ///
     /// [`LegendSide::InPanel`]: crate::scales::chrome::LegendSide::InPanel
     #[cfg(feature = "text")]
     pub fn add_legend_separate(
+        &mut self,
+        mut legend: crate::plot::chrome::legend::Legend,
+    ) -> crate::plot::chrome::legend::LegendId {
+        legend.merge = false;
+        self.push_legend(legend)
+    }
+
+    #[cfg(feature = "text")]
+    fn push_legend(
         &mut self,
         legend: crate::plot::chrome::legend::Legend,
     ) -> crate::plot::chrome::legend::LegendId {
@@ -1607,8 +1611,8 @@ mod tests {
 
     #[cfg(feature = "text")]
     #[test]
-    fn composition_add_legend_merges_compatible_keys() {
-        use crate::plot::chrome::legend::{Legend, LegendKeySpec};
+    fn composition_collapses_compatible_keys_at_render_time() {
+        use crate::plot::chrome::legend::{collapse_legends, Legend, LegendBody, LegendKeySpec};
         use crate::scales::chrome::LegendSide;
         let mut view = view_two_plots();
         let one = view.add_legend(
@@ -1623,8 +1627,59 @@ mod tests {
                 .title("Category")
                 .key(LegendKeySpec::point().scaled("fill", "cat")),
         );
-        assert_eq!(one, two, "compatible legends merge into one");
-        assert_eq!(view.legends().len(), 1);
+        assert_ne!(one, two, "each attach gets its own id");
+        assert_eq!(view.legends().len(), 2, "storage keeps both as attached");
+
+        let collapsed = collapse_legends(view.legends(), view.scales(), &Theme::default().locale);
+        assert_eq!(collapsed.len(), 1, "compatible legends render as one");
+        let LegendBody::Stack(stack) = &collapsed[0].body else {
+            panic!("stack body");
+        };
+        assert_eq!(stack.keys.len(), 2);
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn composition_collapses_scales_trained_alike_after_attach() {
+        use crate::plot::chrome::legend::{collapse_legends, Legend, LegendKeySpec};
+        use crate::plot::scale;
+        use crate::scales::chrome::LegendSide;
+        use crate::scales::value::Value;
+        let cats: Vec<Value> = ["A", "B"]
+            .iter()
+            .map(|s| Value::String(std::sync::Arc::from(*s)))
+            .collect();
+        let mut view = view_two_plots()
+            .add_scale("cat_color", scale::discrete(cats.clone()))
+            .add_scale("cat_shape", scale::discrete(cats));
+        view.add_legend(
+            Legend::new("cat_color")
+                .side(LegendSide::Right)
+                .title("Category")
+                .key(LegendKeySpec::rect().scaled("fill", "cat_color")),
+        );
+        view.add_legend(
+            Legend::new("cat_shape")
+                .side(LegendSide::Right)
+                .title("Category")
+                .key(LegendKeySpec::point().scaled("shape", "cat_shape")),
+        );
+        let locale = Theme::default().locale;
+        assert_eq!(
+            collapse_legends(view.legends(), view.scales(), &locale).len(),
+            1,
+            "distinct scales over the same domain share one legend"
+        );
+
+        // Retrain one of them and the legends must part ways again.
+        view.update_scale("cat_shape", |s| {
+            *s = scale::discrete([Value::String(std::sync::Arc::from("A"))]);
+        });
+        assert_eq!(
+            collapse_legends(view.legends(), view.scales(), &locale).len(),
+            2,
+            "collapse re-evaluates against the current scale state"
+        );
     }
 
     #[cfg(feature = "text")]

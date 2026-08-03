@@ -1010,36 +1010,31 @@ impl Plot {
         self.axes.clear();
     }
 
-    /// Attach a legend to this plot. If an existing legend matches
-    /// on `(domain_scale, side, title)`, its keys are appended and
-    /// the existing legend's id is returned. Otherwise a new legend
-    /// is added and its id returned.
+    /// Attach a legend to this plot and return its id.
+    ///
+    /// The legend is stored as given. Merging with a compatible
+    /// sibling happens at render time, once the scales it names can be
+    /// resolved — see
+    /// [`collapse_legends`](crate::plot::chrome::legend::collapse_legends).
     pub fn add_legend(
         &mut self,
         legend: crate::plot::chrome::legend::Legend,
     ) -> crate::plot::chrome::legend::LegendId {
-        use crate::plot::chrome::legend::LegendBody;
-        if let Some(idx) = self
-            .legends
-            .iter()
-            .position(|l| l.is_compatible_with(&legend))
-        {
-            // Only stack-style legends merge their keys; the
-            // colorbar case is excluded by `is_compatible_with`.
-            if let (LegendBody::Stack(existing), LegendBody::Stack(incoming)) =
-                (&mut self.legends[idx].body, legend.body)
-            {
-                existing.keys.extend(incoming.keys);
-            }
-            return crate::plot::chrome::legend::LegendId(idx as u32);
-        }
-        self.add_legend_separate(legend)
+        self.push_legend(legend)
     }
 
-    /// Attach a legend without merging into a compatible existing
-    /// legend. Use when two legends with the same triple should be
-    /// rendered side-by-side instead.
+    /// Attach a legend that renders as its own block even when a
+    /// compatible legend precedes it. Use when two legends over the
+    /// same domain should sit side-by-side instead of sharing rows.
     pub fn add_legend_separate(
+        &mut self,
+        mut legend: crate::plot::chrome::legend::Legend,
+    ) -> crate::plot::chrome::legend::LegendId {
+        legend.merge = false;
+        self.push_legend(legend)
+    }
+
+    fn push_legend(
         &mut self,
         legend: crate::plot::chrome::legend::Legend,
     ) -> crate::plot::chrome::legend::LegendId {
@@ -1131,11 +1126,11 @@ impl Plot {
         patch = self.wire_axes(patch, registry, dpi, theme);
 
         // Legends — explicitly composed by the caller via
-        // `Plot::add_legend{,_separate}`. Each attached side's
-        // legends are aggregated into one `LegendStackMeasure` cell
-        // through `legend_stack_measure`. In-panel legends reserve
-        // zero chrome space and render against the resolved panel
-        // rect from `draw_chrome_into`.
+        // `Plot::add_legend{,_separate}`, collapsed against the
+        // current scales, then aggregated per side into one
+        // `LegendStackMeasure` cell through `legend_stack_measure`.
+        // In-panel legends reserve zero chrome space and render
+        // against the resolved panel rect from `draw_chrome_into`.
         patch = self.wire_legends(patch, registry, dpi, theme);
 
         // Strips — facet labels populated via `Plot::strip(side, _)`.
@@ -1508,7 +1503,9 @@ impl Plot {
         dpi: f64,
         theme: &crate::plot::theme::Theme,
     ) -> Patch {
-        for (side, slot, group) in legends_grouped_by_side(&self.legends) {
+        let collapsed =
+            crate::plot::chrome::legend::collapse_legends(&self.legends, registry, &theme.locale);
+        for (side, slot, group) in legends_grouped_by_side(&collapsed) {
             if group.is_empty() {
                 continue;
             }
@@ -1548,8 +1545,11 @@ impl Plot {
         self.draw_strips_into(scene, layout, dpi, theme);
 
         // Legends — render each side's stack of attached legends
-        // into the matching slot. Mirrors the wiring loop.
-        for (side, slot, group) in legends_grouped_by_side(&self.legends) {
+        // into the matching slot. Mirrors the wiring loop, and must
+        // collapse identically to it for the measured space to match.
+        let collapsed =
+            crate::plot::chrome::legend::collapse_legends(&self.legends, registry, &theme.locale);
+        for (side, slot, group) in legends_grouped_by_side(&collapsed) {
             if group.is_empty() {
                 continue;
             }
@@ -1571,7 +1571,7 @@ impl Plot {
         // their anchor / inset. They reserve no chrome space; the
         // panel rect they paint into comes from the solved layout.
         if let Some(panel) = layout.get(&self.patch_id, Slot::Panel) {
-            for (anchor, inset_pt, group) in legends_grouped_in_panel(&self.legends) {
+            for (anchor, inset_pt, group) in legends_grouped_in_panel(&collapsed) {
                 if group.is_empty() {
                     continue;
                 }
@@ -2825,6 +2825,103 @@ mod tests {
             let axis_a = layout.get("a", Slot::AxisBottom).unwrap();
             let axis_b = layout.get("b", Slot::AxisBottom).unwrap();
             assert!((axis_a.y1 - axis_a.y0 - (axis_b.y1 - axis_b.y0)).abs() < 0.5);
+        }
+
+        // Legend ring width for a plot carrying `legends`, wired and
+        // solved against `registry`.
+        fn legend_ring_width(
+            registry: &ScaleRegistry,
+            legends: Vec<crate::plot::chrome::legend::Legend>,
+        ) -> f64 {
+            let c = beside(CompPatch::new("a"), CompPatch::new("b"));
+            let mut plot = Plot::new(&c, "a");
+            for l in legends {
+                plot.add_legend(l);
+            }
+            let patch = plot.wire(CompPatch::new("a"), registry, 96.0, &default_theme());
+            let comp = beside(patch, CompPatch::new("b"));
+            let layout = comp.solve(crate::geometry::Size::new(800.0, 400.0), 96.0);
+            let r = layout.get("a", Slot::LegendRight).expect("legend ring");
+            r.x1 - r.x0
+        }
+
+        #[test]
+        fn wire_reserves_one_ring_for_equivalent_domain_scales() {
+            use crate::plot::chrome::legend::{Legend, LegendKeySpec};
+            use crate::scales::value::Value;
+            let cats: Vec<Value> = ["Alpha", "Beta"]
+                .iter()
+                .map(|s| Value::String(std::sync::Arc::from(*s)))
+                .collect();
+            let registry = ScaleRegistry::new()
+                .with("cat_fill", scale::discrete(cats.clone()))
+                .with("cat_shape", scale::discrete(cats.clone()))
+                .with(
+                    "other",
+                    scale::discrete([Value::String(std::sync::Arc::from("Gamma"))]),
+                );
+
+            let fill = || {
+                Legend::new("cat_fill")
+                    .title("Category")
+                    .key(LegendKeySpec::rect().scaled("fill", "cat_fill"))
+            };
+            let shape = || {
+                Legend::new("cat_shape")
+                    .title("Category")
+                    .key(LegendKeySpec::point().scaled("shape", "cat_shape"))
+            };
+
+            // Two legends over separately configured but identically
+            // trained scales occupy exactly the ring one of them does.
+            let one = legend_ring_width(&registry, vec![fill()]);
+            let merged = legend_ring_width(&registry, vec![fill(), shape()]);
+            assert!(
+                (merged - one).abs() < 0.5,
+                "equivalent domains collapse: {merged} vs {one}"
+            );
+
+            // A scale trained to different values keeps its own block,
+            // which widens the ring.
+            let separate = legend_ring_width(
+                &registry,
+                vec![
+                    fill(),
+                    Legend::new("other")
+                        .title("Category")
+                        .key(LegendKeySpec::point().scaled("shape", "other")),
+                ],
+            );
+            assert!(
+                separate > one + 0.5,
+                "incompatible domains stay apart: {separate} vs {one}"
+            );
+        }
+
+        #[test]
+        fn add_legend_separate_opts_out_of_collapse() {
+            use crate::plot::chrome::legend::{Legend, LegendKeySpec};
+            use crate::scales::value::Value;
+            let cats: Vec<Value> = ["Alpha", "Beta"]
+                .iter()
+                .map(|s| Value::String(std::sync::Arc::from(*s)))
+                .collect();
+            let registry = ScaleRegistry::new().with("cat_fill", scale::discrete(cats));
+            let c = beside(CompPatch::new("a"), CompPatch::new("b"));
+            let mut plot = Plot::new(&c, "a");
+            let key = || {
+                Legend::new("cat_fill")
+                    .title("Category")
+                    .key(LegendKeySpec::rect().scaled("fill", "cat_fill"))
+            };
+            plot.add_legend(key());
+            plot.add_legend_separate(key());
+            let collapsed = crate::plot::chrome::legend::collapse_legends(
+                plot.legends(),
+                &registry,
+                &default_theme().locale,
+            );
+            assert_eq!(collapsed.len(), 2);
         }
     }
 }

@@ -620,6 +620,33 @@ impl Scale {
     pub(crate) fn generation(&self) -> u64 {
         self.generation.get()
     }
+
+    /// True when `other` lays out the same legend domain as this scale:
+    /// same family, transform and input domain, and the same break
+    /// values carrying the same labels under `locale`.
+    ///
+    /// This is deliberately blind to the **output** range — a colour
+    /// scale and a shape scale over one shared domain are equivalent,
+    /// which is exactly the case where their legends should collapse
+    /// into a single set of rows drawn with both key glyphs. Two
+    /// separately configured scales that end up describing the same
+    /// values compare equal, so collapse doesn't depend on the two
+    /// legends naming the same registry entry.
+    pub fn legend_equivalent_to(&self, other: &Scale, locale: &Locale) -> bool {
+        if self.scale_type != other.scale_type
+            || self.transform != other.transform
+            || self.input_range != other.input_range
+        {
+            return false;
+        }
+        let mine = self.breaks(DEFAULT_BREAK_COUNT);
+        let theirs = other.breaks(DEFAULT_BREAK_COUNT);
+        mine.len() == theirs.len()
+            && mine
+                .iter()
+                .zip(theirs.iter())
+                .all(|(a, b)| a.key_eq(b) && self.format(a, locale) == other.format(b, locale))
+    }
 }
 
 impl std::fmt::Debug for Scale {

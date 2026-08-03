@@ -16,6 +16,14 @@
 //! different scales, or hard-code fixed values, independently — so
 //! e.g. a Line with a scaled stroke colour can sit under a Point
 //! whose fill is scaled and whose stroke is a fixed black.
+//!
+//! Legends attached to one owner are collapsed per render by
+//! [`collapse_legends`]: legends describing the same rows fold their
+//! key stacks together so a colour legend and a shape legend over one
+//! set of categories read as a single block. "The same rows" is
+//! decided by comparing the *scales* the legends resolve to, not the
+//! names they were given, so independently configured scales that end
+//! up trained alike still collapse.
 
 mod render_keys;
 use render_keys::{apply_alpha, render_key, swatch_dim_for};
@@ -431,8 +439,9 @@ fn translate_rect(r: Rect, dx: f64, dy: f64) -> Rect {
 
 // ─── Public types ───────────────────────────────────────────────────────────
 
-/// Stable identifier returned by [`crate::plot::Plot::add_legend`].
-/// Used to remove or update a legend later.
+/// Stable identifier returned by [`crate::plot::Plot::add_legend`],
+/// unique per attached legend. Used to remove or update a legend
+/// later; render-time collapse doesn't consume or reassign ids.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LegendId(pub u32);
 
@@ -545,6 +554,11 @@ pub struct Legend {
     /// that styles this legend. `None` (the default) uses the
     /// theme's default `legend`.
     pub theme_variant: Option<String>,
+    /// Whether this legend may fold its keys into an earlier
+    /// compatible legend at render time (see [`collapse_legends`]).
+    /// `false` keeps it as its own block even when a compatible
+    /// legend precedes it; it can still be folded *into*.
+    pub merge: bool,
 }
 
 /// How a binned legend distributes its bins along the bar.
@@ -655,6 +669,7 @@ impl Legend {
             open_upper: false,
             bin_spacing: BinSpacing::Proportional,
             theme_variant: None,
+            merge: true,
         }
     }
     /// Continuous colorbar legend: gradient bar sampled from
@@ -670,6 +685,7 @@ impl Legend {
             open_upper: false,
             bin_spacing: BinSpacing::Proportional,
             theme_variant: None,
+            merge: true,
         }
     }
     /// Opt into a named theme variant. The renderer looks up
@@ -768,25 +784,85 @@ impl Legend {
         }
         self
     }
-    /// `true` if this legend's `(domain_scale, side, title, body
-    /// kind, binned flag)` match `other` — i.e. the two legends
-    /// are stack-compatible and `add_legend` should merge their
-    /// stack keys. Colorbars never merge (each gets its own slot).
-    pub fn is_compatible_with(&self, other: &Legend) -> bool {
-        if self.domain_scale != other.domain_scale
-            || self.side != other.side
+    /// `true` when the two legends describe one and the same block of
+    /// rows, so [`collapse_legends`] should fold `other`'s stack keys
+    /// into this one. Requires matching side, title, theme variant,
+    /// bin flags / spacing, a stack body on both sides (colorbars
+    /// never merge — each gets its own slot), and **equivalent domain
+    /// scales**.
+    ///
+    /// Domain equivalence is not name equality: two differently named
+    /// scales that resolve to the same breaks and labels (see
+    /// [`Scale::legend_equivalent_to`](crate::plot::scale::Scale::legend_equivalent_to))
+    /// count as the same domain, so a colour scale and a shape scale
+    /// configured over one shared set of categories collapse into a
+    /// single legend. A name that isn't in `registry` only matches the
+    /// identical name — an unresolvable scale has no breaks to compare.
+    pub fn is_compatible_with(
+        &self,
+        other: &Legend,
+        registry: &ScaleRegistry,
+        locale: &crate::scales::Locale,
+    ) -> bool {
+        if self.side != other.side
             || self.title != other.title
+            || self.theme_variant != other.theme_variant
             || self.open_lower != other.open_lower
             || self.open_upper != other.open_upper
             || self.bin_spacing != other.bin_spacing
         {
             return false;
         }
-        match (&self.body, &other.body) {
-            (LegendBody::Stack(a), LegendBody::Stack(b)) => a.binned == b.binned,
-            _ => false,
+        if !matches!(
+            (&self.body, &other.body),
+            (LegendBody::Stack(a), LegendBody::Stack(b)) if a.binned == b.binned
+        ) {
+            return false;
+        }
+        self.domain_scale == other.domain_scale
+            || match (
+                registry.get(&self.domain_scale),
+                registry.get(&other.domain_scale),
+            ) {
+                (Some(a), Some(b)) => a.legend_equivalent_to(b, locale),
+                _ => false,
+            }
+    }
+}
+
+/// Fold `legends` into the blocks actually rendered: every legend
+/// whose `merge` flag is set and that is
+/// [compatible](Legend::is_compatible_with) with an earlier survivor
+/// has its stack keys appended to that survivor and disappears.
+///
+/// Collapse runs per render rather than at attach time, so it reflects
+/// whatever the scales hold now — registering or retraining a scale
+/// after the legends were attached still merges them.
+pub fn collapse_legends(
+    legends: &[Legend],
+    registry: &ScaleRegistry,
+    locale: &crate::scales::Locale,
+) -> Vec<Legend> {
+    let mut out: Vec<Legend> = Vec::with_capacity(legends.len());
+    for legend in legends {
+        let target = legend.merge.then(|| {
+            out.iter()
+                .position(|kept| kept.is_compatible_with(legend, registry, locale))
+        });
+        match target.flatten() {
+            Some(idx) => {
+                // `is_compatible_with` already established both bodies
+                // are stacks; the colorbar case never reaches here.
+                if let (LegendBody::Stack(kept), LegendBody::Stack(incoming)) =
+                    (&mut out[idx].body, &legend.body)
+                {
+                    kept.keys.extend(incoming.keys.iter().cloned());
+                }
+            }
+            None => out.push(legend.clone()),
         }
     }
+    out
 }
 
 /// Per-row resolved aesthetic bundle. Each [`LegendKey`] reads the
@@ -2418,6 +2494,7 @@ mod tests {
     use super::*;
     use crate::plot::scale;
     use crate::plot::theme::Theme;
+    use crate::scales::Locale;
     use crate::scene::recording::{Op, RecordingScene};
 
     fn dpi_96() -> f64 {
@@ -2553,11 +2630,117 @@ mod tests {
 
     #[test]
     fn legend_is_compatible_with_matching_triple() {
+        let reg = build_registry();
+        let loc = Locale::default();
         let a = Legend::new("x").side(LegendSide::Right).title("T");
         let b = Legend::new("x").side(LegendSide::Right).title("T");
         let c = Legend::new("x").side(LegendSide::Right).title("U");
-        assert!(a.is_compatible_with(&b));
-        assert!(!a.is_compatible_with(&c));
+        assert!(a.is_compatible_with(&b, &reg, &loc));
+        assert!(!a.is_compatible_with(&c, &reg, &loc));
+    }
+
+    #[test]
+    fn legends_over_equivalent_scales_are_compatible() {
+        // `category_color` and `category_size` are separate registry
+        // entries trained to the same three categories; only their
+        // output ranges differ.
+        let reg = build_registry();
+        let loc = Locale::default();
+        let color = Legend::new("category_color").title("Category");
+        let size = Legend::new("category_size").title("Category");
+        assert!(color.is_compatible_with(&size, &reg, &loc));
+    }
+
+    #[test]
+    fn legends_over_differently_trained_scales_are_not_compatible() {
+        let mut reg = build_registry();
+        reg.insert(
+            "other_cats",
+            scale::discrete([Value::String(Arc::from("A")), Value::String(Arc::from("B"))])
+                .range_numbers([4.0, 8.0]),
+        );
+        let loc = Locale::default();
+        let three = Legend::new("category_color").title("Category");
+        let two = Legend::new("other_cats").title("Category");
+        assert!(!three.is_compatible_with(&two, &reg, &loc));
+    }
+
+    #[test]
+    fn unresolvable_domain_scales_only_match_by_name() {
+        let reg = build_registry();
+        let loc = Locale::default();
+        let a = Legend::new("missing").title("T");
+        let same = Legend::new("missing").title("T");
+        let other = Legend::new("also_missing").title("T");
+        assert!(a.is_compatible_with(&same, &reg, &loc));
+        assert!(!a.is_compatible_with(&other, &reg, &loc));
+    }
+
+    #[test]
+    fn collapse_folds_keys_of_equivalent_scales() {
+        let reg = build_registry();
+        let loc = Locale::default();
+        let legends = vec![
+            Legend::new("category_color")
+                .title("Category")
+                .key(LegendKeySpec::rect().scaled("fill", "category_color")),
+            Legend::new("category_size")
+                .title("Category")
+                .key(LegendKeySpec::point().scaled("size", "category_size")),
+        ];
+        let collapsed = collapse_legends(&legends, &reg, &loc);
+        assert_eq!(collapsed.len(), 1);
+        let LegendBody::Stack(stack) = &collapsed[0].body else {
+            panic!("stack body");
+        };
+        assert_eq!(stack.keys.len(), 2);
+        // The survivor keeps the first legend's domain scale; each key
+        // still resolves through the scale it was bound to.
+        assert_eq!(collapsed[0].domain_scale, "category_color");
+    }
+
+    #[test]
+    fn collapse_keeps_non_merging_legends_apart() {
+        let reg = build_registry();
+        let loc = Locale::default();
+        let mut second = Legend::new("category_size")
+            .title("Category")
+            .key(LegendKeySpec::point().scaled("size", "category_size"));
+        second.merge = false;
+        let legends = vec![
+            Legend::new("category_color")
+                .title("Category")
+                .key(LegendKeySpec::rect().scaled("fill", "category_color")),
+            second,
+        ];
+        assert_eq!(collapse_legends(&legends, &reg, &loc).len(), 2);
+    }
+
+    #[test]
+    fn collapse_leaves_colorbars_alone() {
+        let reg = build_registry();
+        let loc = Locale::default();
+        let legends = vec![
+            Legend::colorbar("category_color").title("Category"),
+            Legend::colorbar("category_size").title("Category"),
+        ];
+        assert_eq!(collapse_legends(&legends, &reg, &loc).len(), 2);
+    }
+
+    #[test]
+    fn collapse_separates_legends_with_different_theme_variants() {
+        let reg = build_registry();
+        let loc = Locale::default();
+        let legends = vec![
+            Legend::new("category_color")
+                .title("Category")
+                .theme_variant("hero")
+                .key(LegendKeySpec::rect().scaled("fill", "category_color")),
+            Legend::new("category_color")
+                .title("Category")
+                .key(LegendKeySpec::point().scaled("size", "category_size")),
+        ];
+        assert_eq!(collapse_legends(&legends, &reg, &loc).len(), 2);
     }
 
     #[test]
@@ -2645,11 +2828,13 @@ mod tests {
 
     #[test]
     fn legends_with_different_open_flags_are_not_compatible() {
+        let reg = build_registry();
+        let loc = Locale::default();
         let a = Legend::new("x").open_lower();
         let b = Legend::new("x");
-        assert!(!a.is_compatible_with(&b));
+        assert!(!a.is_compatible_with(&b, &reg, &loc));
         let c = Legend::new("x").open_upper();
-        assert!(!a.is_compatible_with(&c));
+        assert!(!a.is_compatible_with(&c, &reg, &loc));
     }
 
     #[test]
@@ -2687,9 +2872,10 @@ mod tests {
 
     #[test]
     fn legends_with_different_bin_spacing_are_not_compatible() {
+        let reg = build_registry();
         let a = Legend::new("x").equal_bins();
         let b = Legend::new("x");
-        assert!(!a.is_compatible_with(&b));
+        assert!(!a.is_compatible_with(&b, &reg, &Locale::default()));
     }
 
     #[test]

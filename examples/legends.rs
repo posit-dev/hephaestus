@@ -2,12 +2,12 @@
 //!
 //! Three legends, one per side:
 //!
-//! 1. **Right** (top stack): two keys merged into one legend via the
-//!    auto-merge in `add_legend` — a `Line` key whose stroke is
-//!    scaled by the category colour, and a `Point` key whose fill is
-//!    scaled by the same colour scale but whose stroke is **fixed**
-//!    black. The Point's stroke does NOT pick up the line's stroke
-//!    scale because each key carries its own per-aesthetic bindings.
+//! 1. **Right** (top stack): two attached legends collapsed into one
+//!    at render time — a `Line` key whose stroke is scaled by the
+//!    category colour, and a `Point` key whose fill is scaled by the
+//!    same colour scale but whose stroke is **fixed** black. The
+//!    Point's stroke does NOT pick up the line's stroke scale because
+//!    each key carries its own per-aesthetic bindings.
 //!
 //! 2. **Top**: a `Point` key whose size is scaled by `category_size`.
 //!
@@ -84,9 +84,9 @@ fn main() {
     p.add_axis(Axis::rail("y", AxisPlacement::Cartesian(AxisSide::Left)));
 
     // ── Right side, legend #1: line + point, both driven by
-    // category_color. First add_legend creates the legend; second
-    // add_legend matches the (domain_scale, side, title) triple and
-    // merges its key.
+    // category_color. Attached as two legends; they share a side,
+    // title and domain scale, so the render-time collapse folds the
+    // second one's key into the first.
     p.add_legend(
         Legend::new("category_color")
             .side(LegendSide::Right)
@@ -106,8 +106,9 @@ fn main() {
     );
 
     // ── Right side, legend #2 (stacks below #1): a size legend that
-    // shares the Right slot. Different `domain_scale` triple so
-    // `add_legend` keeps it separate, then the per-side stacker
+    // shares the Right slot. `category_size` is trained to the same
+    // categories as `category_color`, so what keeps this a block of
+    // its own is the differing title; the per-side stacker then
     // arranges both legends vertically.
     p.add_legend(
         Legend::new("category_size")
