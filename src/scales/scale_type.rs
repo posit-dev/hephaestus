@@ -447,6 +447,29 @@ pub fn binned_map(
     Value::Number((centre - d_min) / span)
 }
 
+/// Position a binned scale's break on the panel: the value's own
+/// domain fraction, not the centre of the bin containing it. Chrome
+/// uses this so each bin edge is drawn at the boundary it labels;
+/// out-of-domain inputs return `Null`.
+pub fn binned_map_break(input: &Value, input_range: Option<&InputRange>) -> Value {
+    let v = match input.as_number() {
+        Some(n) => n,
+        None => return Value::Null,
+    };
+    let (d_min, d_max) = match input_range {
+        Some(InputRange::Continuous { min, max }) => (*min, *max),
+        _ => return Value::Null,
+    };
+    if !v.is_finite() || v < d_min || v > d_max {
+        return Value::Null;
+    }
+    let span = d_max - d_min;
+    if span <= 0.0 {
+        return Value::Number(0.0);
+    }
+    Value::Number((v - d_min) / span)
+}
+
 /// Bin edges of a binned scale, as `Value::Number`.
 pub fn binned_breaks(output_range: Option<&OutputRange>) -> Vec<Value> {
     match output_range {

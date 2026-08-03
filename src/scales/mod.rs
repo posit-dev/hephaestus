@@ -20,6 +20,8 @@
 //!     [`ordinal_map`], [`binned_map`], [`identity_map`].
 //!   - Per scale type: [`continuous_breaks`], [`discrete_breaks`],
 //!     [`binned_breaks`].
+//!   - Break placement, where it differs from the data mapping:
+//!     [`binned_map_break`].
 //!   - Band-width queries: [`discrete_band_width`],
 //!     [`binned_band_width`], [`binned_band_width_at`].
 //!   - Transform dispatch: [`transform_forward`], [`transform_inverse`],
@@ -74,10 +76,10 @@ pub use input::InputRange;
 pub use locale::{Locale, Weekday};
 pub use output::OutputRange;
 pub use scale_type::{
-    binned_band_width, binned_band_width_at, binned_breaks, binned_map, continuous_breaks,
-    continuous_map, continuous_minor_breaks, discrete_band_width, discrete_breaks, discrete_map,
-    identity_map, ordinal_map, temporal_breaks, temporal_breaks_with_interval,
-    temporal_minor_breaks, ScaleTypeKind, TemporalUnit,
+    binned_band_width, binned_band_width_at, binned_breaks, binned_map, binned_map_break,
+    continuous_breaks, continuous_map, continuous_minor_breaks, discrete_band_width,
+    discrete_breaks, discrete_map, identity_map, ordinal_map, temporal_breaks,
+    temporal_breaks_with_interval, temporal_minor_breaks, ScaleTypeKind, TemporalUnit,
 };
 pub use transform::{
     transform_allowed_domain, transform_forward, transform_inverse, Transform, TransformKind,

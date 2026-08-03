@@ -234,7 +234,7 @@ impl Scale {
     /// the scale's breaks into panel-space pixels via `panel_rect`.
     ///
     /// Conventions:
-    /// - For position scales (no output range), `scale.map(break_value)`
+    /// - For position scales (no output range), `scale.map_break(value)`
     ///   returns a `Value::Number` in `[0, 1]`; the geom-side convention
     ///   `px = panel.x0 + frac * panel_w` (and `panel.y1 - frac * panel_h`
     ///   for y, to flip pixels-grow-downward) applies here too.
@@ -293,7 +293,7 @@ impl Scale {
             .iter()
             .filter(|v| !matches!(v, Value::Null))
             .filter_map(|v| {
-                self.map(v)
+                self.map_break(v)
                     .as_number()
                     .map(|f| (f, self.format(v, &theme.locale)))
             })
@@ -303,7 +303,7 @@ impl Scale {
             .minor_breaks(DEFAULT_BREAK_COUNT)
             .into_iter()
             .filter(|v| !matches!(v, Value::Null))
-            .filter_map(|v| self.map(&v).as_number())
+            .filter_map(|v| self.map_break(&v).as_number())
             .filter(|f| f.is_finite())
             .collect();
 
@@ -503,6 +503,43 @@ mod tests {
         let expected_strokes = n_majors + n_minors;
         assert_eq!(strokes, expected_strokes);
         assert!(glyphs >= n_majors);
+    }
+
+    #[test]
+    fn binned_axis_ticks_sit_on_their_own_bin_edges() {
+        use kurbo::Shape;
+
+        let edges = vec![2500.0, 3500.0, 4500.0, 5500.0, 6500.0];
+        let s = scale::binned(2500.0..=6500.0, edges.clone());
+        let panel = panel_400_300();
+        let theme = Theme::default();
+        let m = s.axis_measure(AxisSide::Bottom, dpi_96(), &theme);
+        let chrome_h = m.height_at(panel.x1 - panel.x0, dpi_96());
+        let slot = Rect::new(panel.x0, panel.y1, panel.x1, panel.y1 + chrome_h);
+
+        let mut scene = RecordingScene::default();
+        s.draw_axis(&mut scene, slot, panel, AxisSide::Bottom, dpi_96(), &theme);
+
+        let tick_xs: Vec<f64> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Stroke { path, .. } => Some(path.bounding_box().center().x),
+                _ => None,
+            })
+            .collect();
+        let panel_w = panel.x1 - panel.x0;
+        let expected: Vec<f64> = edges
+            .iter()
+            .map(|e| panel.x0 + (e - 2500.0) / 4000.0 * panel_w)
+            .collect();
+        assert_eq!(tick_xs.len(), expected.len(), "one tick per bin edge");
+        for (got, want) in tick_xs.iter().zip(&expected) {
+            assert!(
+                (got - want).abs() < 1e-6,
+                "tick at {got}, expected {want} (ticks: {tick_xs:?})"
+            );
+        }
     }
 
     #[test]

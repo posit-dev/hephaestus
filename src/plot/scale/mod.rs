@@ -30,8 +30,8 @@ use crate::scales::Locale;
 // re-exported wholesale; selected free functions and types are pulled to
 // the top level.
 pub use crate::scales::{
-    binned_band_width, binned_band_width_at, binned_breaks, binned_map, breaks, chrome,
-    continuous_breaks, continuous_map, continuous_minor_breaks, discrete_band_width,
+    binned_band_width, binned_band_width_at, binned_breaks, binned_map, binned_map_break, breaks,
+    chrome, continuous_breaks, continuous_map, continuous_minor_breaks, discrete_band_width,
     discrete_breaks, discrete_map, extended_breaks, identity_map, input, linear_breaks,
     linear_minor_breaks_between, log_minor_breaks, log_pretty_breaks, ordinal_map, output,
     scale_type, sqrt_breaks, symlog_breaks, symlog_minor_breaks, temporal_breaks,
@@ -386,6 +386,23 @@ impl Scale {
                 binned_map(input, self.input_range.as_ref(), self.output_range.as_ref())
             }
             ScaleTypeKind::Identity => identity_map(input),
+        }
+    }
+
+    /// Position a break value on the panel, for axis ticks, gridlines and
+    /// other chrome that anchors a label to the value it names.
+    ///
+    /// Differs from [`Self::map`] only for [`ScaleTypeKind::Binned`],
+    /// whose data mapping sends every value to the centre of its bin. A
+    /// binned scale's breaks are its bin edges, so mapping them as data
+    /// would draw each edge inside a bin — and collapse two edges of the
+    /// same bin onto one position. This returns the value's own domain
+    /// fraction instead. Every other family positions breaks exactly
+    /// where it positions data, and delegates.
+    pub fn map_break(&self, input: &Value) -> Value {
+        match self.scale_type {
+            ScaleTypeKind::Binned => binned_map_break(input, self.input_range.as_ref()),
+            _ => self.map(input),
         }
     }
 
@@ -1254,6 +1271,42 @@ mod tests {
             1e-12,
             "top",
         );
+    }
+
+    #[test]
+    fn binned_map_break_lands_on_own_domain_fraction() {
+        let s = binned(
+            2500.0..=6500.0,
+            vec![2500.0, 3500.0, 4500.0, 5500.0, 6500.0],
+        );
+        let breaks = s.breaks(5);
+        let positions: Vec<f64> = breaks
+            .iter()
+            .map(|b| s.map_break(b).as_number().unwrap())
+            .collect();
+        for (b, p) in breaks.iter().zip(&positions) {
+            let v = b.as_number().unwrap();
+            approx(*p, (v - 2500.0) / 4000.0, 1e-12, "edge break position");
+        }
+        // Distinct edges must not collapse onto each other — mapping them
+        // as data would put both 5500 and 6500 at the last bin's centre.
+        for (i, a) in positions.iter().enumerate() {
+            for b in &positions[i + 1..] {
+                assert!((a - b).abs() > 1e-9, "breaks collided at {a}");
+            }
+        }
+    }
+
+    #[test]
+    fn map_break_matches_map_off_binned() {
+        let c = continuous(0.0..=10.0);
+        for v in c.breaks(5) {
+            assert!(c.map_break(&v).key_eq(&c.map(&v)), "continuous {v:?}");
+        }
+        let d = discrete(vec![Value::from("a"), Value::from("b"), Value::from("c")]);
+        for v in d.breaks(0) {
+            assert!(d.map_break(&v).key_eq(&d.map(&v)), "discrete {v:?}");
+        }
     }
 
     #[test]

@@ -1318,7 +1318,7 @@ impl Plot {
                         if matches!(v, Value::Null) {
                             continue;
                         }
-                        let Some(frac) = scale.map(&v).as_number() else {
+                        let Some(frac) = scale.map_break(&v).as_number() else {
                             continue;
                         };
                         if !frac.is_finite() || !(0.0..=1.0).contains(&frac) {

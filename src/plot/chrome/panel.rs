@@ -237,7 +237,7 @@ fn draw_grid_lines<F>(
             if matches!(v, Value::Null) {
                 continue;
             }
-            let frac = match scale.map(&v).as_number() {
+            let frac = match scale.map_break(&v).as_number() {
                 Some(f) if f.is_finite() && (0.0..=1.0).contains(&f) => f,
                 _ => continue,
             };
@@ -251,7 +251,7 @@ fn draw_grid_lines<F>(
             if matches!(v, Value::Null) {
                 continue;
             }
-            let frac = match scale.map(&v).as_number() {
+            let frac = match scale.map_break(&v).as_number() {
                 Some(f) if f.is_finite() && (0.0..=1.0).contains(&f) => f,
                 _ => continue,
             };

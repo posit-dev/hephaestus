@@ -55,7 +55,7 @@ pub fn draw_radius_axis(
         .filter(|v| !matches!(v, Value::Null))
         .filter_map(|v| {
             scale
-                .map(v)
+                .map_break(v)
                 .as_number()
                 .map(|f| (f, scale.format(v, &theme.locale)))
         })
@@ -65,7 +65,7 @@ pub fn draw_radius_axis(
         .minor_breaks(DEFAULT_BREAK_COUNT)
         .into_iter()
         .filter(|v| !matches!(v, Value::Null))
-        .filter_map(|v| scale.map(&v).as_number())
+        .filter_map(|v| scale.map_break(&v).as_number())
         .filter(|f| f.is_finite())
         .collect();
 
@@ -180,7 +180,7 @@ pub fn draw_angular_axis(
         if matches!(v, Value::Null) {
             continue;
         }
-        let theta_frac = match scale.map(&v).as_number() {
+        let theta_frac = match scale.map_break(&v).as_number() {
             Some(f) if f.is_finite() => f,
             _ => continue,
         };
@@ -213,7 +213,7 @@ pub fn draw_angular_axis(
         if matches!(v, Value::Null) {
             continue;
         }
-        let theta_frac = match scale.map(v).as_number() {
+        let theta_frac = match scale.map_break(v).as_number() {
             Some(f) if f.is_finite() => f,
             _ => continue,
         };
