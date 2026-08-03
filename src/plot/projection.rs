@@ -3,9 +3,9 @@
 //!
 //! Ships [`Projection::Cartesian`] (default rectilinear),
 //! [`Projection::Polar`] (with configurable angular range — see
-//! [`PolarProjection`]), and [`Projection::Custom`] (arbitrary
-//! polygon-shaped drawing surface + user-supplied graticules — see
-//! [`CustomProjection`]). The signature is N-channel
+//! [`PolarProjection`]), and [`Projection::Custom`] (drawing surface
+//! shaped by an arbitrary set of polygons + user-supplied graticules —
+//! see [`CustomProjection`]). The signature is N-channel
 //! (`project_to_panel_px(panel, &[f64])`) so a future Ternary variant
 //! (deferred) can drop in without touching geom code.
 //!
@@ -128,10 +128,10 @@ pub enum Projection {
     /// partial-arc layouts (gauges, half-disks) via `theta_start` /
     /// `theta_end`. See [`PolarProjection`].
     Polar(PolarProjection),
-    /// Custom drawing surface defined by an arbitrary polygon outline
+    /// Custom drawing surface defined by an arbitrary set of polygons
     /// in data space, plus user-supplied graticule polylines as overlay
     /// grid lines. Coordinate math is identical to Cartesian — the
-    /// polygon shapes the panel surface and the clip, it does not warp
+    /// outline shapes the panel surface and the clip, it does not warp
     /// coordinates. See [`CustomProjection`].
     Custom(CustomProjection),
     // Ternary(TernaryProjection) — deferred (design accommodated via
@@ -602,12 +602,12 @@ pub(crate) struct PolarGeometry {
     pub r_inner: f64,
 }
 
-/// Custom drawing surface — arbitrary polygon outline plus user-supplied
-/// graticules.
+/// Custom drawing surface — arbitrary outline polygons plus
+/// user-supplied graticules.
 ///
 /// Coordinate math matches [`Projection::Cartesian`] exactly: the
-/// `[x_frac, y_frac]` pair maps linearly to panel pixels. The polygon
-/// outline does not warp coordinates; it shapes the *drawing surface*
+/// `[x_frac, y_frac]` pair maps linearly to panel pixels. The outline
+/// does not warp coordinates; it shapes the *drawing surface*
 /// (panel clip + background fill + outline stroke). Graticules are
 /// rendered as in-panel grid lines, each pre-clipped against the
 /// outline via `clipper2` so they don't overdraw the boundary.
@@ -615,7 +615,7 @@ pub(crate) struct PolarGeometry {
 /// Both the outline and the graticules live in **data space** and are
 /// resolved through the bound `x_channel` / `y_channel` scales at draw
 /// time. When the scales zoom in past the natural extent of the
-/// polygon, the resolved outline is intersected with the visible panel
+/// outline, the resolved rings are intersected with the visible panel
 /// rect (the `[0, 1] × [0, 1]` channel-fraction rectangle) so the
 /// drawing surface trims to whatever sliver is still visible.
 ///
@@ -624,12 +624,14 @@ pub(crate) struct PolarGeometry {
 /// validated but produce no chrome.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CustomProjection {
-    /// Outline in **data space**: one exterior ring plus zero or more
-    /// interior rings (holes). Reuses [`crate::scales::geometry::Polygon`]
-    /// so the same primitive that drives `GeometryGeom` (and the WKT /
-    /// WKB / GeoJSON parsers) builds the outline. Interior rings are
-    /// treated as holes under EvenOdd.
-    pub outline: GeoPolygon,
+    /// Outline in **data space**: zero or more polygons, each with one
+    /// exterior ring plus zero or more interior rings (holes). Reuses
+    /// [`crate::scales::geometry::Polygon`] so the same primitive that
+    /// drives `GeometryGeom` (and the WKT / WKB / GeoJSON parsers)
+    /// builds the outline. Every ring of every polygon is combined
+    /// under EvenOdd, so holes cut out and an island sitting inside
+    /// another polygon's hole fills again.
+    pub outline: Vec<GeoPolygon>,
     /// Graticules running primarily along the **x** channel
     /// (meridians / vertical-ish lines), styled as **major** grid.
     /// Each entry is one polyline in data space.
@@ -648,11 +650,11 @@ pub struct CustomProjection {
 }
 
 impl CustomProjection {
-    /// Construct from a data-space outline polygon. Graticules default
-    /// to empty; channel names default to `"x"` and `"y"`.
-    pub fn new(outline: GeoPolygon) -> Self {
+    /// Construct from the data-space outline polygons. Graticules
+    /// default to empty; channel names default to `"x"` and `"y"`.
+    pub fn new(outline: impl IntoIterator<Item = GeoPolygon>) -> Self {
         Self {
-            outline,
+            outline: outline.into_iter().collect(),
             x_major: Vec::new(),
             x_minor: Vec::new(),
             y_major: Vec::new(),
@@ -694,27 +696,36 @@ impl CustomProjection {
         self
     }
 
-    /// Resolve the data-space outline (exterior + holes) through the
+    /// Resolve every outline polygon (exteriors + holes) through the
     /// supplied scales, then intersect with the panel rect
     /// `[0, 1] × [0, 1]` so a zoomed-in scale trims the drawing surface
     /// to whatever's still visible. Returns the trimmed rings in
     /// channel-fraction space under EvenOdd — empty if the outline lies
     /// entirely outside the visible panel; possibly with more or fewer
     /// rings than the input (clipper2 can split a concave shape or
-    /// absorb a hole that ended up outside the clipped exterior).
+    /// absorb a hole that ended up outside the clipped exterior). A
+    /// polygon whose exterior degenerates to fewer than three vertices
+    /// drops out along with its holes.
     pub fn resolved_outline_fracs(
         &self,
         x_scale: Option<&crate::plot::scale::Scale>,
         y_scale: Option<&crate::plot::scale::Scale>,
     ) -> Vec<Vec<Coord>> {
-        let exterior_fracs = resolve_ring(&self.outline.exterior, x_scale, y_scale);
-        let interior_fracs: Vec<Vec<Coord>> = self
-            .outline
-            .interiors
-            .iter()
-            .map(|ring| resolve_ring(ring, x_scale, y_scale))
-            .collect();
-        clip_outline_to_unit_rect(&exterior_fracs, &interior_fracs)
+        let mut rings: Vec<Vec<Coord>> = Vec::new();
+        for polygon in &self.outline {
+            let exterior = resolve_ring(&polygon.exterior, x_scale, y_scale);
+            if exterior.len() < 3 {
+                continue;
+            }
+            rings.push(exterior);
+            for interior in &polygon.interiors {
+                let ring = resolve_ring(interior, x_scale, y_scale);
+                if ring.len() >= 3 {
+                    rings.push(ring);
+                }
+            }
+        }
+        clip_outline_to_unit_rect(&rings)
     }
 
     /// Resolve one graticule polyline through the supplied scales.
@@ -756,28 +767,21 @@ fn resolve_ring(
     out
 }
 
-/// Trim a multi-ring polygon (channel-fraction space) against the unit
-/// rect `[0, 1] × [0, 1]`. Routes through
+/// Trim a set of rings (channel-fraction space) against the unit rect
+/// `[0, 1] × [0, 1]`. Routes through
 /// [`crate::primitives::intersect_polygons`] under EvenOdd.
-fn clip_outline_to_unit_rect(exterior: &[Coord], interiors: &[Vec<Coord>]) -> Vec<Vec<Coord>> {
-    if exterior.len() < 3 {
+fn clip_outline_to_unit_rect(rings: &[Vec<Coord>]) -> Vec<Vec<Coord>> {
+    if rings.is_empty() {
         return Vec::new();
     }
     use crate::geometry::Point;
     use crate::primitives::intersect_polygons;
 
-    let exterior_pts: Vec<Point> = exterior.iter().map(|(x, y)| Point::new(*x, *y)).collect();
-    let interior_pts: Vec<Vec<Point>> = interiors
+    let ring_pts: Vec<Vec<Point>> = rings
         .iter()
         .map(|ring| ring.iter().map(|(x, y)| Point::new(*x, *y)).collect())
         .collect();
-    let mut subject_rings: Vec<&[Point]> = Vec::with_capacity(1 + interior_pts.len());
-    subject_rings.push(&exterior_pts);
-    for ring in &interior_pts {
-        if ring.len() >= 3 {
-            subject_rings.push(ring);
-        }
-    }
+    let subject_rings: Vec<&[Point]> = ring_pts.iter().map(|ring| ring.as_slice()).collect();
     let unit_rect = [
         Point::new(0.0, 0.0),
         Point::new(1.0, 0.0),
@@ -816,9 +820,9 @@ impl Projection {
         Projection::Polar(PolarProjection::radar(n_categories))
     }
 
-    /// Custom drawing surface from a data-space polygon outline. See
-    /// [`CustomProjection`].
-    pub fn custom(outline: GeoPolygon) -> Self {
+    /// Custom drawing surface from a set of data-space outline
+    /// polygons. See [`CustomProjection`].
+    pub fn custom(outline: impl IntoIterator<Item = GeoPolygon>) -> Self {
         Projection::Custom(CustomProjection::new(outline))
     }
 

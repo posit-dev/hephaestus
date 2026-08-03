@@ -2620,7 +2620,7 @@ mod tests {
         reg.insert("lon_scale", scale::continuous(0.0..=10.0));
         reg.insert("lat_scale", scale::continuous(0.0..=10.0));
         let outline = GeoPolygon::new(vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
-        let proj = Projection::Custom(CustomProjection::new(outline).channels("lon", "lat"));
+        let proj = Projection::Custom(CustomProjection::new([outline]).channels("lon", "lat"));
         let p = Plot::new(&c, "a")
             .projection(proj)
             .bind("lon", "lon_scale")

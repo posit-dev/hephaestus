@@ -29,7 +29,7 @@ fn custom_projection_renders_outline_graticules_and_geom() {
         (1.0, 4.0),
         (5.0, 1.0),
     ]);
-    let proj = CustomProjection::new(outline)
+    let proj = CustomProjection::new([outline])
         .x_major(vec![vec![(5.0, 0.0), (5.0, 10.0)]])
         .y_major(vec![vec![(0.0, 4.5), (10.0, 4.5)]]);
 
@@ -91,7 +91,7 @@ fn zoomed_in_scale_trims_outline_against_panel_rect() {
     use hephaestus::scales::ScaleTypeKind;
 
     let outline = GeoPolygon::new(vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
-    let proj = CustomProjection::new(outline);
+    let proj = CustomProjection::new([outline]);
     // x-scale narrowed to [3, 7]: the outline's [0, 10] data span should
     // trim to fractions covering only the [0, 1] visible range, which is
     // a smaller rect than the original.
@@ -106,4 +106,39 @@ fn zoomed_in_scale_trims_outline_against_panel_rect() {
         (x_min - 0.0).abs() < 1e-6 && (x_max - 1.0).abs() < 1e-6,
         "trimmed x range expected in [0, 1], got [{x_min}, {x_max}]"
     );
+}
+
+#[test]
+fn multipolygon_outline_keeps_every_polygon() {
+    use hephaestus::plot::projection::CustomProjection;
+    use hephaestus::plot::scale::Scale;
+    use hephaestus::scales::ScaleTypeKind;
+
+    // Two disjoint squares plus an island sitting inside the second
+    // square's hole — four rings in, four rings out.
+    let left = GeoPolygon::new(vec![(0.0, 0.0), (3.0, 0.0), (3.0, 3.0), (0.0, 3.0)]);
+    let right = GeoPolygon::new(vec![(5.0, 0.0), (10.0, 0.0), (10.0, 5.0), (5.0, 5.0)])
+        .with_hole(vec![(6.0, 1.0), (9.0, 1.0), (9.0, 4.0), (6.0, 4.0)]);
+    let island = GeoPolygon::new(vec![(7.0, 2.0), (8.0, 2.0), (8.0, 3.0), (7.0, 3.0)]);
+    let proj = CustomProjection::new([left, right, island]);
+
+    let scale = || Scale::new(ScaleTypeKind::Continuous).domain_continuous(0.0, 10.0);
+    let rings = proj.resolved_outline_fracs(Some(&scale()), Some(&scale()));
+    assert_eq!(
+        rings.len(),
+        4,
+        "expected all four rings to survive the trim"
+    );
+    // The left square's ring is the only one entirely left of x = 0.4.
+    let disjoint = rings
+        .iter()
+        .filter(|ring| ring.iter().all(|(x, _)| *x < 0.4))
+        .count();
+    assert_eq!(disjoint, 1, "left square should survive as its own ring");
+    // And the island keeps its own ring inside the right square's hole.
+    let island_rings = rings
+        .iter()
+        .filter(|ring| ring.iter().all(|(x, _)| (0.7..=0.8).contains(x)))
+        .count();
+    assert_eq!(island_rings, 1, "island should survive as its own ring");
 }

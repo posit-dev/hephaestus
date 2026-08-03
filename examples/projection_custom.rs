@@ -1,4 +1,4 @@
-//! End-to-end visual sanity for `Projection::Custom`. Three renders:
+//! End-to-end visual sanity for `Projection::Custom`. Four renders:
 //!
 //! - `projection_custom_1.png` — an irregular hexagon-shaped drawing
 //!   surface, a graticule grid of four x-major + four y-major + thin
@@ -14,6 +14,10 @@
 //!   in the middle. Demonstrates the EvenOdd handling: the hole is a
 //!   non-drawing region; both the panel background fill and the geom
 //!   clip respect it.
+//! - `projection_custom_4.png` — a multipolygon outline: two disjoint
+//!   triangles plus an island inside one of them. The drawing surface
+//!   is the union of the pieces, and the geom is clipped to all of
+//!   them at once.
 
 use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
@@ -81,7 +85,7 @@ fn main() {
         "examples/projection_custom_1.png",
         build_view(
             &comp,
-            CustomProjection::new(hex.clone())
+            CustomProjection::new([hex.clone()])
                 .x_major(x_major.clone())
                 .x_minor(x_minor.clone())
                 .y_major(y_major.clone())
@@ -103,7 +107,7 @@ fn main() {
         "examples/projection_custom_2.png",
         build_view(
             &comp,
-            CustomProjection::new(hex.clone())
+            CustomProjection::new([hex.clone()])
                 .x_major(x_major.clone())
                 .x_minor(x_minor.clone())
                 .y_major(y_major.clone())
@@ -131,14 +135,54 @@ fn main() {
         "examples/projection_custom_3.png",
         build_view(
             &comp,
-            CustomProjection::new(hex_with_hole)
+            CustomProjection::new([hex_with_hole])
+                .x_major(x_major.clone())
+                .x_minor(x_minor.clone())
+                .y_major(y_major.clone())
+                .y_minor(y_minor.clone()),
+            (0.0, 10.0),
+            (0.0, 8.0),
+            diamond.clone(),
+        ),
+    );
+
+    // ── Render 4: multipolygon outline — two disjoint triangles, the
+    //     right one carrying a hole with a smaller island inside it. ──
+    let left_triangle = GeoPolygon::new(vec![(0.5, 0.5), (4.5, 0.5), (2.5, 7.0), (0.5, 0.5)]);
+    let right_triangle = GeoPolygon::new(vec![(5.5, 0.5), (9.5, 0.5), (7.5, 7.0), (5.5, 0.5)])
+        .with_hole(vec![(6.5, 1.5), (8.5, 1.5), (7.5, 4.5), (6.5, 1.5)]);
+    let island = GeoPolygon::new(vec![
+        (7.1, 2.0),
+        (7.9, 2.0),
+        (7.9, 2.8),
+        (7.1, 2.8),
+        (7.1, 2.0),
+    ]);
+    render_scene(
+        &mut renderer,
+        w,
+        h,
+        dpi,
+        bg,
+        "examples/projection_custom_4.png",
+        build_view(
+            &comp,
+            CustomProjection::new([left_triangle, right_triangle, island])
                 .x_major(x_major)
                 .x_minor(x_minor)
                 .y_major(y_major)
                 .y_minor(y_minor),
             (0.0, 10.0),
             (0.0, 8.0),
-            diamond,
+            // A wide band across both triangles, so the clip has to
+            // respect every piece of the outline at once.
+            Geometry::Polygon(GeoPolygon::new(vec![
+                (0.0, 2.0),
+                (10.0, 2.0),
+                (10.0, 3.5),
+                (0.0, 3.5),
+                (0.0, 2.0),
+            ])),
         ),
     );
 }
