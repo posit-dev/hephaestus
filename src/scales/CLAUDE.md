@@ -12,7 +12,7 @@ Axes and legends — *rendering* of a scale's ticks / breaks against a `SceneBui
 
 ## What this module does
 
-A `Scale` combines a `ScaleType` (Continuous / Discrete / Ordinal / Binned / Identity), an optional `Transform` (Identity in v1), an `InputRange` (domain), and an optional `OutputRange` (visual range). Mapping flow:
+A `Scale` combines a `ScaleType` (Continuous / Discrete / Ordinal / Binned / Identity), an optional `Transform` (Identity in v1), an `InputRange` (domain), an optional `OutputRange` (visual range), and — for `Binned` — a bin-edge list. Mapping flow:
 
 1. Apply the transform (continuous scales only).
 2. Normalise to `[0, 1]` against the input range.
@@ -26,7 +26,7 @@ Scales are *stateless mappers*: all config lives on `Scale` itself. The same sca
 - **`Transform`** (`transform.rs`) — POD struct `{ kind: TransformKind }`. Convenience methods (`forward`, `inverse`, `allowed_domain`) delegate to free functions of the same name with `_` suffix.
 - **`TransformKind`** — enum tagging the transform family. Identity is wired today; Log10/Log2/Log/Sqrt/Square/Exp10/Exp2/Exp/Asinh/PseudoLog land in Phase E.1.
 - **`InputRange`** (`input.rs`) — `Continuous { min: f64, max: f64 }` (closed interval; temporal data projects to f64) or `Discrete(Vec<Value>)` (explicit list, user-ordered for ordinal scales). Accessors: `extent()`, `discrete_len()`.
-- **`OutputRange`** (`output.rs`) — `Numbers(Vec<f64>)` (pt for absolute sizes, unitless otherwise), `Strings(Vec<Arc<str>>)`, `Colors(Vec<Color>)`, `Linetypes(Vec<Arc<[LinetypeStep]>>)`. Position scales typically leave this unset; continuous scales then return `[0, 1]` fraction.
+- **`OutputRange`** (`output.rs`) — `Numbers(Vec<f64>)` (pt for absolute sizes, unitless otherwise), `Strings(Vec<Arc<str>>)`, `Colors(Vec<Color>)`, `Linetypes(Vec<Arc<[LinetypeStep]>>)`. Position scales typically leave this unset; continuous scales then return `[0, 1]` fraction. Never doubles as configuration — a binned scale's edges are a separate argument, so any family can carry any palette.
 - **`AxisSide`** / **`LegendSide`** (`chrome.rs`) — placement enums (Left / Right / Bottom / Top, Top / Bottom / Left / Right). No logic; rendering lives in `crate::plot::chrome::{axis, legend}`.
 - **`Geometry`** (`geometry.rs`) — spatial-feature enum (Point / MultiPoint / LineString / MultiLineString / Polygon / MultiPolygon / GeometryCollection / Empty). Carried by `Value::Geometry(Arc<Geometry>)` so a column of features behaves like any other typed channel. **Opaque to scales** — geometries don't enter continuous or discrete domains and cannot be mapped through `scale.map`; the consuming geom walks the geometry and routes each coordinate through the bound `x` / `y` scales itself. Optional WKT / WKB / GeoJSON constructors gate behind `geom-wkt` / `geom-wkb` / `geom-geojson` features; each parser is hand-rolled and dependency-free.
 - **Per-kind free functions** (`scale_type.rs`): `continuous_map`, `discrete_map`, `ordinal_map`, `binned_map`, `identity_map`; `continuous_breaks`, `discrete_breaks`, `binned_breaks`; `binned_map_break`; `discrete_band_width`, `binned_band_width`, `binned_band_width_at`.
@@ -40,7 +40,7 @@ Rendering of axis and legend chrome lives in `crate::plot::chrome::{axis, legend
 - **Continuous** — linear interpolation over a numeric domain. Output range can be unset (→ `[0, 1]` fraction), `Numbers` (piecewise-linear across stops), or `Colors` (componentwise).
 - **Discrete** — one-to-one lookup: `input[i]` → `output[i]`.
 - **Ordinal** — ordered discrete domain with continuous output. Input position `idx / (n - 1)` interpolated through the output range — intermediate domain entries fall on gradient stops.
-- **Binned** — continuous domain pre-binned by explicit breaks into discrete output bins.
+- **Binned** — continuous domain pre-binned by explicit edges. With no output range it positions data at bin centres; with one, the bin index picks a palette entry the ordinal way (N entries over N bins is one-to-one, fewer interpolate). The edges travel in their own argument (`bins: Option<&[f64]>` on the free functions, a `bins` field on hephaestus's `Scale`), so `OutputRange` means the same thing here as for every other family.
 - **Identity** — pass-through; input returned untouched.
 
 ## Conventions

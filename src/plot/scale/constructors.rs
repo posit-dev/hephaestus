@@ -37,13 +37,17 @@ pub fn discrete(domain: impl IntoIterator<Item = Value>) -> Scale {
 /// Binned continuous scale. `domain` is the overall range; `edges` is the
 /// list of bin boundaries (strictly increasing, length ≥ 2). The bin
 /// count is `edges.len() - 1`.
+///
+/// The output range is left unset, so the scale positions data at bin
+/// centres. Adding one (`range_colors`, `range_numbers`, …) turns it into
+/// a material scale whose palette is indexed by bin.
 pub fn binned<T>(domain: RangeInclusive<T>, edges: Vec<f64>) -> Scale
 where
     T: Into<Value> + Copy,
 {
     Scale::new(ScaleTypeKind::Binned)
         .domain_continuous(*domain.start(), *domain.end())
-        .range_numbers(edges)
+        .with_bins(edges)
 }
 
 /// Identity scale — input passes through unchanged.

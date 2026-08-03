@@ -102,6 +102,11 @@ pub struct Scale {
     transform: Transform,
     input_range: Option<InputRange>,
     output_range: Option<OutputRange>,
+    /// Bin edges for a [`ScaleTypeKind::Binned`] scale — strictly
+    /// increasing, length ≥ 2, bin count `len() - 1`. Ignored by every
+    /// other family; a binned scale without them maps everything to
+    /// `Null`.
+    bins: Option<Vec<f64>>,
     /// User-supplied break override, if any. `None` ⇒ use the scale
     /// type's automatic break algorithm.
     breaks_spec: Option<BreaksSpec>,
@@ -122,6 +127,7 @@ impl Scale {
             transform: Transform::default(),
             input_range: None,
             output_range: None,
+            bins: None,
             breaks_spec: None,
             formatter: None,
             generation: Cell::new(0),
@@ -156,6 +162,16 @@ impl Scale {
     /// [`ScaleTypeKind::Ordinal`].
     pub fn domain_discrete(mut self, values: impl IntoIterator<Item = Value>) -> Self {
         self.input_range = Some(InputRange::Discrete(values.into_iter().collect()));
+        self
+    }
+
+    /// Configure the bin edges of a [`ScaleTypeKind::Binned`] scale —
+    /// strictly increasing, length ≥ 2, giving `edges.len() - 1` bins.
+    /// Bins live in input space, alongside the domain: the output range
+    /// stays free to carry a palette (colours, sizes, linetypes) that the
+    /// bin index selects from.
+    pub fn with_bins(mut self, edges: impl IntoIterator<Item = f64>) -> Self {
+        self.bins = Some(edges.into_iter().collect());
         self
     }
 
@@ -212,6 +228,12 @@ impl Scale {
     /// counter.
     pub fn set_domain_discrete(&mut self, values: Vec<Value>) {
         self.input_range = Some(InputRange::Discrete(values));
+        self.bump_generation();
+    }
+
+    /// Replace the bin edges in place. Bumps the generation counter.
+    pub fn set_bins(&mut self, edges: Vec<f64>) {
+        self.bins = Some(edges);
         self.bump_generation();
     }
 
@@ -382,9 +404,12 @@ impl Scale {
             ScaleTypeKind::Ordinal => {
                 ordinal_map(input, self.input_range.as_ref(), self.output_range.as_ref())
             }
-            ScaleTypeKind::Binned => {
-                binned_map(input, self.input_range.as_ref(), self.output_range.as_ref())
-            }
+            ScaleTypeKind::Binned => binned_map(
+                input,
+                self.input_range.as_ref(),
+                self.bins.as_deref(),
+                self.output_range.as_ref(),
+            ),
             ScaleTypeKind::Identity => identity_map(input),
         }
     }
@@ -464,7 +489,7 @@ impl Scale {
             ScaleTypeKind::Discrete | ScaleTypeKind::Ordinal => {
                 discrete_breaks(self.input_range.as_ref())
             }
-            ScaleTypeKind::Binned => binned_breaks(self.output_range.as_ref()),
+            ScaleTypeKind::Binned => binned_breaks(self.bins.as_deref()),
             ScaleTypeKind::Identity => Vec::new(),
         }
     }
@@ -569,7 +594,7 @@ impl Scale {
             ScaleTypeKind::Discrete | ScaleTypeKind::Ordinal => {
                 discrete_band_width(self.input_range.as_ref())
             }
-            ScaleTypeKind::Binned => binned_band_width(self.output_range.as_ref()),
+            ScaleTypeKind::Binned => binned_band_width(self.bins.as_deref()),
             ScaleTypeKind::Identity => 0.0,
         }
     }
@@ -581,7 +606,7 @@ impl Scale {
     pub fn band_width_at(&self, input: &Value) -> f64 {
         match self.scale_type {
             ScaleTypeKind::Binned => {
-                binned_band_width_at(input, self.input_range.as_ref(), self.output_range.as_ref())
+                binned_band_width_at(input, self.input_range.as_ref(), self.bins.as_deref())
             }
             _ => self.band_width(),
         }
@@ -607,6 +632,12 @@ impl Scale {
     /// Borrow the configured output range, if any.
     pub fn output_range(&self) -> Option<&OutputRange> {
         self.output_range.as_ref()
+    }
+
+    /// Borrow the configured bin edges. Only [`ScaleTypeKind::Binned`]
+    /// consults them.
+    pub fn bins(&self) -> Option<&[f64]> {
+        self.bins.as_deref()
     }
 
     /// Borrow the configured break override, if any. `None` ⇒ the scale
@@ -639,8 +670,8 @@ impl Scale {
     }
 
     /// True when `other` lays out the same legend domain as this scale:
-    /// same family, transform and input domain, and the same break
-    /// values carrying the same labels under `locale`.
+    /// same family, transform, input domain and bin edges, and the same
+    /// break values carrying the same labels under `locale`.
     ///
     /// This is deliberately blind to the **output** range — a colour
     /// scale and a shape scale over one shared domain are equivalent,
@@ -653,6 +684,7 @@ impl Scale {
         if self.scale_type != other.scale_type
             || self.transform != other.transform
             || self.input_range != other.input_range
+            || self.bins != other.bins
         {
             return false;
         }
@@ -673,6 +705,7 @@ impl std::fmt::Debug for Scale {
             .field("transform", &self.transform)
             .field("input_range", &self.input_range)
             .field("output_range", &self.output_range)
+            .field("bins", &self.bins)
             .field("breaks_spec", &self.breaks_spec)
             .field(
                 "formatter",
@@ -1343,6 +1376,106 @@ mod tests {
         let s = binned(0.0..=10.0, vec![0.0, 5.0, 10.0]);
         assert!(s.map(&Value::Number(-1.0)).is_null());
         assert!(s.map(&Value::Number(11.0)).is_null());
+    }
+
+    #[test]
+    fn binned_without_bins_is_null() {
+        let s = Scale::new(ScaleTypeKind::Binned).domain_continuous(0.0, 10.0);
+        assert!(s.map(&Value::Number(5.0)).is_null());
+        assert!(s.breaks(5).is_empty());
+        approx(s.band_width(), 0.0, 1e-12, "no bins");
+    }
+
+    #[test]
+    fn binned_color_range_indexes_by_bin() {
+        let red = Color::new([1.0, 0.0, 0.0, 1.0]);
+        let green = Color::new([0.0, 1.0, 0.0, 1.0]);
+        let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
+        let s = binned(0.0..=30.0, vec![0.0, 10.0, 20.0, 30.0]).range_colors([red, green, blue]);
+        assert_eq!(s.map(&Value::Number(5.0)).as_color(), Some(red));
+        assert_eq!(s.map(&Value::Number(15.0)).as_color(), Some(green));
+        assert_eq!(s.map(&Value::Number(25.0)).as_color(), Some(blue));
+        // A palette doesn't disturb the bin definition.
+        let bs = s.breaks(5);
+        assert_eq!(bs.len(), 4);
+        assert!(bs[1].key_eq(&Value::Number(10.0)));
+        approx(s.band_width(), 1.0 / 3.0, 1e-12, "3 bins");
+    }
+
+    #[test]
+    fn binned_numeric_range_is_a_per_bin_palette() {
+        let s = binned(0.0..=30.0, vec![0.0, 10.0, 20.0, 30.0]).range_numbers([1.0, 3.0, 5.0]);
+        approx(
+            s.map(&Value::Number(5.0)).as_number().unwrap(),
+            1.0,
+            1e-12,
+            "bin 0",
+        );
+        approx(
+            s.map(&Value::Number(15.0)).as_number().unwrap(),
+            3.0,
+            1e-12,
+            "bin 1",
+        );
+        approx(
+            s.map(&Value::Number(25.0)).as_number().unwrap(),
+            5.0,
+            1e-12,
+            "bin 2",
+        );
+    }
+
+    #[test]
+    fn binned_color_range_interpolates_when_stops_lt_bins() {
+        let red = Color::new([1.0, 0.0, 0.0, 1.0]);
+        let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
+        let s = binned(0.0..=40.0, vec![0.0, 10.0, 20.0, 30.0, 40.0]).range_colors([red, blue]);
+        assert_eq!(s.map(&Value::Number(5.0)).as_color(), Some(red));
+        assert_eq!(s.map(&Value::Number(35.0)).as_color(), Some(blue));
+        let c2 = s.map(&Value::Number(15.0)).as_color().unwrap();
+        approx(c2.components[0] as f64, 2.0 / 3.0, 1e-5, "bin 1 r");
+        approx(c2.components[2] as f64, 1.0 / 3.0, 1e-5, "bin 1 b");
+    }
+
+    #[test]
+    fn binned_linetype_range_indexes_by_bin() {
+        let solid = lt_solid();
+        let dashed = lt_dash_gap(8.0, 4.0);
+        let dotted = lt_dash_gap(2.0, 3.0);
+        let s = binned(0.0..=30.0, vec![0.0, 10.0, 20.0, 30.0]).range_linetypes([
+            solid.clone(),
+            dashed.clone(),
+            dotted.clone(),
+        ]);
+        assert!(s
+            .map(&Value::Number(5.0))
+            .key_eq(&Value::Linetype(solid.clone())));
+        assert!(s.map(&Value::Number(15.0)).key_eq(&Value::Linetype(dashed)));
+        assert!(s.map(&Value::Number(25.0)).key_eq(&Value::Linetype(dotted)));
+    }
+
+    #[test]
+    fn binned_palette_keeps_positional_band_offsets() {
+        let red = Color::new([1.0, 0.0, 0.0, 1.0]);
+        let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
+        let s = binned(0.0..=10.0, vec![0.0, 2.0, 5.0, 10.0]).range_colors([red, blue]);
+        approx(s.band_width_at(&Value::Number(3.0)), 0.3, 1e-12, "bin 1");
+        // A Color output has no numeric offset to apply — it passes through.
+        assert_eq!(
+            s.map_with_offset(&Value::Number(3.0), 0.5).as_color(),
+            s.map(&Value::Number(3.0)).as_color()
+        );
+    }
+
+    #[test]
+    fn binned_legend_equivalence_distinguishes_bin_edges() {
+        let locale = Locale::default();
+        let a = binned(0.0..=30.0, vec![0.0, 10.0, 20.0, 30.0]);
+        let b = binned(0.0..=30.0, vec![0.0, 15.0, 30.0]);
+        assert!(!a.legend_equivalent_to(&b, &locale));
+        let c = binned(0.0..=30.0, vec![0.0, 10.0, 20.0, 30.0])
+            .range_colors([Color::new([1.0, 0.0, 0.0, 1.0])]);
+        assert!(a.legend_equivalent_to(&c, &locale));
     }
 
     // ── Identity ──

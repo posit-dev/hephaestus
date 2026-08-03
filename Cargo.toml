@@ -343,6 +343,10 @@ name = "theme_render"
 required-features = ["text"]
 
 [[test]]
+name = "binned_scale_render"
+required-features = ["text"]
+
+[[test]]
 name = "geometry_geom"
 required-features = ["vello"]
 

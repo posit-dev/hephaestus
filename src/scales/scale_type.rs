@@ -414,13 +414,23 @@ pub fn discrete_band_width(input_range: Option<&InputRange>) -> f64 {
 
 // ─── Binned ──────────────────────────────────────────────────────────────────
 
-/// Map a value through a binned scale. Returns the bin's domain-space
-/// centre projected onto `[0, 1]`; out-of-range inputs return `Null`. For
-/// uneven-width bins the centre placement naturally widens the bin's
-/// panel slot, matching histogram conventions.
+/// Map a value through a binned scale. `bins` is the bin-edge list
+/// (strictly increasing, length ≥ 2); values outside the domain, and any
+/// input on a scale with no bins, return `Null`.
+///
+/// With no output range the result is the containing bin's domain-space
+/// centre projected onto `[0, 1]` — the position case. For uneven-width
+/// bins the centre placement naturally widens the bin's panel slot,
+/// matching histogram conventions.
+///
+/// With an output range the bin's index picks a palette entry the way an
+/// ordinal scale picks one for its levels: an N-entry palette over N bins
+/// is a one-to-one lookup, and a shorter palette interpolates across the
+/// bins.
 pub fn binned_map(
     input: &Value,
     input_range: Option<&InputRange>,
+    bins: Option<&[f64]>,
     output_range: Option<&OutputRange>,
 ) -> Value {
     let v = match input.as_number() {
@@ -431,20 +441,33 @@ pub fn binned_map(
         Some(InputRange::Continuous { min, max }) => (*min, *max),
         _ => return Value::Null,
     };
-    let edges = match output_range {
-        Some(OutputRange::Numbers(vs)) if vs.len() >= 2 => vs,
+    let edges = match bins {
+        Some(es) if es.len() >= 2 => es,
         _ => return Value::Null,
     };
     if !v.is_finite() || v < d_min || v > d_max {
         return Value::Null;
     }
-    let span = d_max - d_min;
-    if span <= 0.0 {
-        return Value::Number(0.0);
-    }
     let bin = find_bin(v, edges);
-    let centre = (edges[bin] + edges[bin + 1]) * 0.5;
-    Value::Number((centre - d_min) / span)
+    match output_range {
+        None => {
+            let span = d_max - d_min;
+            if span <= 0.0 {
+                return Value::Number(0.0);
+            }
+            let centre = (edges[bin] + edges[bin + 1]) * 0.5;
+            Value::Number((centre - d_min) / span)
+        }
+        Some(range) => {
+            let n_bins = edges.len() - 1;
+            let t = if n_bins > 1 {
+                bin as f64 / (n_bins - 1) as f64
+            } else {
+                0.0
+            };
+            interpolate_range(t, Some(range))
+        }
+    }
 }
 
 /// Position a binned scale's break on the panel: the value's own
@@ -471,17 +494,17 @@ pub fn binned_map_break(input: &Value, input_range: Option<&InputRange>) -> Valu
 }
 
 /// Bin edges of a binned scale, as `Value::Number`.
-pub fn binned_breaks(output_range: Option<&OutputRange>) -> Vec<Value> {
-    match output_range {
-        Some(OutputRange::Numbers(vs)) => vs.iter().copied().map(Value::Number).collect(),
-        _ => Vec::new(),
+pub fn binned_breaks(bins: Option<&[f64]>) -> Vec<Value> {
+    match bins {
+        Some(es) => es.iter().copied().map(Value::Number).collect(),
+        None => Vec::new(),
     }
 }
 
 /// Uniform band width for a binned scale: `1.0 / n_bins`.
-pub fn binned_band_width(output_range: Option<&OutputRange>) -> f64 {
-    match output_range {
-        Some(OutputRange::Numbers(vs)) if vs.len() >= 2 => 1.0 / (vs.len() - 1) as f64,
+pub fn binned_band_width(bins: Option<&[f64]>) -> f64 {
+    match bins {
+        Some(es) if es.len() >= 2 => 1.0 / (es.len() - 1) as f64,
         _ => 0.0,
     }
 }
@@ -492,7 +515,7 @@ pub fn binned_band_width(output_range: Option<&OutputRange>) -> f64 {
 pub fn binned_band_width_at(
     input: &Value,
     input_range: Option<&InputRange>,
-    output_range: Option<&OutputRange>,
+    bins: Option<&[f64]>,
 ) -> f64 {
     let v = match input.as_number() {
         Some(n) => n,
@@ -502,8 +525,8 @@ pub fn binned_band_width_at(
         Some(InputRange::Continuous { min, max }) => (*min, *max),
         _ => return 0.0,
     };
-    let edges = match output_range {
-        Some(OutputRange::Numbers(vs)) if vs.len() >= 2 => vs,
+    let edges = match bins {
+        Some(es) if es.len() >= 2 => es,
         _ => return 0.0,
     };
     let span = d_max - d_min;

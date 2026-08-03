@@ -31,8 +31,9 @@
 //! ## What's not here
 //!
 //! - No `Scale` aggregate struct or `ScaleRegistry`. Consumers bundle
-//!   `(scale_type, transform, input_range, output_range)` as they see
-//!   fit. Hephaestus's bundle lives at [`crate::plot::scale::Scale`].
+//!   `(scale_type, transform, input_range, output_range)` — plus bin
+//!   edges for [`ScaleTypeKind::Binned`] — as they see fit. Hephaestus's
+//!   bundle lives at [`crate::plot::scale::Scale`].
 //! - No rendering. Axes and legends are drawn by hephaestus's
 //!   [`crate::plot::chrome`] against `SceneBuilder` + `TextRun`; future
 //!   `scales`-crate consumers (e.g. ggsql) supply their own.
