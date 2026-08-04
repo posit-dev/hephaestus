@@ -696,6 +696,17 @@ impl Scale {
                 .zip(theirs.iter())
                 .all(|(a, b)| a.key_eq(b) && self.format(a, locale) == other.format(b, locale))
     }
+
+    /// True when `other` both lays out the same legend domain (see
+    /// [`Self::legend_equivalent_to`]) **and** carries the same output
+    /// range, so the two scales map every input to the same visual.
+    ///
+    /// This is the check for legends that display the range itself
+    /// rather than one glyph per break — a colorbar over a viridis ramp
+    /// and one over a magma ramp share a domain but draw different bars.
+    pub fn visual_equivalent_to(&self, other: &Scale, locale: &Locale) -> bool {
+        self.output_range == other.output_range && self.legend_equivalent_to(other, locale)
+    }
 }
 
 impl std::fmt::Debug for Scale {

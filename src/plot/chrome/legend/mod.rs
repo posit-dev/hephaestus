@@ -23,7 +23,9 @@
 //! set of categories read as a single block. "The same rows" is
 //! decided by comparing the *scales* the legends resolve to, not the
 //! names they were given, so independently configured scales that end
-//! up trained alike still collapse.
+//! up trained alike still collapse. Colorbars collapse on the stricter
+//! condition that they draw the same bar — a shared domain isn't
+//! enough when the surviving bar has to stand in for both palettes.
 
 mod render_keys;
 use render_keys::{apply_alpha, render_key, swatch_dim_for};
@@ -554,8 +556,8 @@ pub struct Legend {
     /// that styles this legend. `None` (the default) uses the
     /// theme's default `legend`.
     pub theme_variant: Option<String>,
-    /// Whether this legend may fold its keys into an earlier
-    /// compatible legend at render time (see [`collapse_legends`]).
+    /// Whether this legend may fold into an earlier compatible
+    /// legend at render time (see [`collapse_legends`]).
     /// `false` keeps it as its own block even when a compatible
     /// legend precedes it; it can still be folded *into*.
     pub merge: bool,
@@ -784,12 +786,10 @@ impl Legend {
         }
         self
     }
-    /// `true` when the two legends describe one and the same block of
-    /// rows, so [`collapse_legends`] should fold `other`'s stack keys
-    /// into this one. Requires matching side, title, theme variant,
-    /// bin flags / spacing, a stack body on both sides (colorbars
-    /// never merge — each gets its own slot), and **equivalent domain
-    /// scales**.
+    /// `true` when the two legends describe one and the same block, so
+    /// [`collapse_legends`] should fold `other` into this one. Requires
+    /// matching side, title, theme variant, bin flags / spacing, bodies
+    /// of the same kind, and **equivalent domain scales**.
     ///
     /// Domain equivalence is not name equality: two differently named
     /// scales that resolve to the same breaks and labels (see
@@ -798,6 +798,14 @@ impl Legend {
     /// configured over one shared set of categories collapse into a
     /// single legend. A name that isn't in `registry` only matches the
     /// identical name — an unresolvable scale has no breaks to compare.
+    ///
+    /// The bodies carry their own conditions. Two stacks agree when
+    /// their `binned` flags match — the keys themselves then stack up.
+    /// Two colorbars agree only when they *draw the same bar*: same
+    /// step mode, same sample count where it's honoured, and every
+    /// aesthetic resolving to the same value along the bar (see
+    /// [`Scale::visual_equivalent_to`](crate::plot::scale::Scale::visual_equivalent_to)),
+    /// since folding a colorbar keeps one bar and drops the other.
     pub fn is_compatible_with(
         &self,
         other: &Legend,
@@ -813,10 +821,23 @@ impl Legend {
         {
             return false;
         }
-        if !matches!(
-            (&self.body, &other.body),
-            (LegendBody::Stack(a), LegendBody::Stack(b)) if a.binned == b.binned
-        ) {
+        let bodies_agree = match (&self.body, &other.body) {
+            (LegendBody::Stack(a), LegendBody::Stack(b)) => a.binned == b.binned,
+            (LegendBody::Colorbar(a), LegendBody::Colorbar(b)) => {
+                a.stepped == b.stepped
+                    // `samples` only drives the smooth gradient; a
+                    // stepped bar takes its stop count from the breaks.
+                    && (a.stepped || a.samples == b.samples)
+                    && colorbar_gradients_agree(
+                        (a, &self.domain_scale),
+                        (b, &other.domain_scale),
+                        registry,
+                        locale,
+                    )
+            }
+            _ => false,
+        };
+        if !bodies_agree {
             return false;
         }
         self.domain_scale == other.domain_scale
@@ -830,10 +851,86 @@ impl Legend {
     }
 }
 
+/// Where one colorbar aesthetic gets its value from, with the
+/// implicit `fill` fallback already applied.
+enum StopSource<'a> {
+    /// Mapped through this registry entry at each stop's domain value.
+    Scale(&'a str),
+    /// Constant along the bar.
+    Fixed(&'a Value),
+}
+
+/// The aesthetics a colorbar resolves per gradient stop, sorted by
+/// name. Mirrors the draw path: an unbound `fill` (and no `color`
+/// standing in for it) falls back to the legend's domain scale.
+fn stop_sources<'a>(
+    spec: &'a ColorbarSpec,
+    domain_scale: &'a str,
+) -> Vec<(&'a str, StopSource<'a>)> {
+    let mut out: Vec<(&str, StopSource)> = spec
+        .bindings
+        .iter()
+        .map(|(aesthetic, source)| {
+            let src = match source {
+                AestheticSource::Scaled(name) => StopSource::Scale(name.as_str()),
+                AestheticSource::Fixed(v) => StopSource::Fixed(v),
+            };
+            (aesthetic.as_str(), src)
+        })
+        .collect();
+    if !spec.bindings.contains_key("fill") && !spec.bindings.contains_key("color") {
+        out.push(("fill", StopSource::Scale(domain_scale)));
+    }
+    out.sort_by_key(|(aesthetic, _)| *aesthetic);
+    out
+}
+
+/// `true` when two colorbar bodies paint the same gradient — the same
+/// aesthetics, each resolving identically along the bar.
+fn colorbar_gradients_agree(
+    a: (&ColorbarSpec, &str),
+    b: (&ColorbarSpec, &str),
+    registry: &ScaleRegistry,
+    locale: &crate::scales::Locale,
+) -> bool {
+    let (mine, theirs) = (stop_sources(a.0, a.1), stop_sources(b.0, b.1));
+    mine.len() == theirs.len()
+        && mine
+            .iter()
+            .zip(theirs.iter())
+            .all(|((a_aes, a_src), (b_aes, b_src))| {
+                a_aes == b_aes && stop_sources_agree(a_src, b_src, registry, locale)
+            })
+}
+
+/// `true` when two stop sources yield the same value at every domain
+/// value. Scales match by name, or by mapping inputs to the same
+/// outputs over the same domain; an unresolvable name only matches the
+/// identical name.
+fn stop_sources_agree(
+    a: &StopSource,
+    b: &StopSource,
+    registry: &ScaleRegistry,
+    locale: &crate::scales::Locale,
+) -> bool {
+    match (a, b) {
+        (StopSource::Scale(x), StopSource::Scale(y)) => {
+            x == y
+                || match (registry.get(x), registry.get(y)) {
+                    (Some(sx), Some(sy)) => sx.visual_equivalent_to(sy, locale),
+                    _ => false,
+                }
+        }
+        (StopSource::Fixed(x), StopSource::Fixed(y)) => x.key_eq(y),
+        _ => false,
+    }
+}
+
 /// Fold `legends` into the blocks actually rendered: every legend
 /// whose `merge` flag is set and that is
 /// [compatible](Legend::is_compatible_with) with an earlier survivor
-/// has its stack keys appended to that survivor and disappears.
+/// disappears into it — a stack hands over its keys, and a colorbar
+/// that would draw the same bar simply drops out.
 ///
 /// Collapse runs per render rather than at attach time, so it reflects
 /// whatever the scales hold now — registering or retraining a scale
@@ -851,8 +948,10 @@ pub fn collapse_legends(
         });
         match target.flatten() {
             Some(idx) => {
-                // `is_compatible_with` already established both bodies
-                // are stacks; the colorbar case never reaches here.
+                // `is_compatible_with` established the bodies are of
+                // the same kind. Stacks accumulate keys; compatible
+                // colorbars are already identical bars, so the survivor
+                // needs nothing from the incoming one.
                 if let (LegendBody::Stack(kept), LegendBody::Stack(incoming)) =
                     (&mut out[idx].body, &legend.body)
                 {
@@ -2716,15 +2815,110 @@ mod tests {
         assert_eq!(collapse_legends(&legends, &reg, &loc).len(), 2);
     }
 
+    /// Two continuous colour scales over one domain: `ramp` and
+    /// `same_ramp` share a palette, `other_ramp` doesn't, and
+    /// `ramp_alpha` maps the same domain to numbers.
+    fn colorbar_registry() -> ScaleRegistry {
+        let mut reg = ScaleRegistry::new();
+        let palette = [rgb(1.0, 1.0, 0.0), rgb(0.0, 0.0, 1.0)];
+        reg.insert("ramp", scale::continuous(0.0..=100.0).range_colors(palette));
+        reg.insert(
+            "same_ramp",
+            scale::continuous(0.0..=100.0).range_colors(palette),
+        );
+        reg.insert(
+            "other_ramp",
+            scale::continuous(0.0..=100.0).range_colors([rgb(0.0, 0.0, 0.0), rgb(1.0, 1.0, 1.0)]),
+        );
+        reg.insert(
+            "ramp_alpha",
+            scale::continuous(0.0..=100.0).range_numbers([0.1, 1.0]),
+        );
+        reg
+    }
+
     #[test]
-    fn collapse_leaves_colorbars_alone() {
-        let reg = build_registry();
+    fn collapse_folds_identical_colorbars() {
+        let reg = colorbar_registry();
         let loc = Locale::default();
         let legends = vec![
-            Legend::colorbar("category_color").title("Category"),
-            Legend::colorbar("category_size").title("Category"),
+            Legend::colorbar("ramp").title("Value"),
+            Legend::colorbar("ramp").title("Value"),
+        ];
+        let collapsed = collapse_legends(&legends, &reg, &loc);
+        assert_eq!(collapsed.len(), 1);
+        assert!(matches!(collapsed[0].body, LegendBody::Colorbar(_)));
+    }
+
+    #[test]
+    fn collapse_folds_colorbars_over_equivalent_scales() {
+        // Separate registry entries, same domain and same palette — the
+        // surviving bar stands in for both.
+        let reg = colorbar_registry();
+        let loc = Locale::default();
+        let legends = vec![
+            Legend::colorbar("ramp").title("Value"),
+            Legend::colorbar("same_ramp").title("Value"),
+        ];
+        assert_eq!(collapse_legends(&legends, &reg, &loc).len(), 1);
+    }
+
+    #[test]
+    fn collapse_keeps_colorbars_with_different_palettes_apart() {
+        let reg = colorbar_registry();
+        let loc = Locale::default();
+        let legends = vec![
+            Legend::colorbar("ramp").title("Value"),
+            Legend::colorbar("other_ramp").title("Value"),
         ];
         assert_eq!(collapse_legends(&legends, &reg, &loc).len(), 2);
+    }
+
+    #[test]
+    fn collapse_keeps_colorbars_with_different_bindings_apart() {
+        let reg = colorbar_registry();
+        let loc = Locale::default();
+        let plain = Legend::colorbar("ramp").title("Value");
+        let faded = Legend::colorbar("ramp")
+            .title("Value")
+            .scaled("alpha", "ramp_alpha");
+        assert!(!plain.is_compatible_with(&faded, &reg, &loc));
+        let also_faded = Legend::colorbar("ramp")
+            .title("Value")
+            .scaled("alpha", "ramp_alpha");
+        assert!(faded.is_compatible_with(&also_faded, &reg, &loc));
+    }
+
+    #[test]
+    fn collapse_keeps_stepped_and_smooth_colorbars_apart() {
+        let reg = colorbar_registry();
+        let loc = Locale::default();
+        let smooth = Legend::colorbar("ramp").title("Value");
+        let stepped = Legend::colorbar("ramp").title("Value").binned();
+        assert!(!smooth.is_compatible_with(&stepped, &reg, &loc));
+        // `samples` is ignored on a stepped bar, so it can't keep two
+        // otherwise-identical stepped colorbars apart.
+        assert!(stepped.is_compatible_with(
+            &Legend::colorbar("ramp").title("Value").binned().samples(8),
+            &reg,
+            &loc
+        ));
+        assert!(!smooth.is_compatible_with(
+            &Legend::colorbar("ramp").title("Value").samples(8),
+            &reg,
+            &loc
+        ));
+    }
+
+    #[test]
+    fn collapse_keeps_a_colorbar_and_a_stack_apart() {
+        let reg = build_registry();
+        let loc = Locale::default();
+        let bar = Legend::colorbar("category_color").title("Category");
+        let stack = Legend::new("category_color")
+            .title("Category")
+            .key(LegendKeySpec::rect().scaled("fill", "category_color"));
+        assert!(!bar.is_compatible_with(&stack, &reg, &loc));
     }
 
     #[test]
