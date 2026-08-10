@@ -18,6 +18,7 @@ Two output paths share one scene:
 - **Sync construction via `pollster::block_on`.** Public API is sync. If async init becomes needed, add a `with_device(device, queue)` constructor — don't make `new()` async.
 - **`HeadlessTarget` cached per `(width, height)`.** Recreated on size change.
 - **`Rgba8Unorm`, not `Rgba8UnormSrgb`.** Vello requires storage texture; sRGB is not storable on the path Vello uses. Storage flags: `STORAGE_BINDING | COPY_SRC`.
+- **Vello unpremultiplies on output.** Its fine shader writes straight alpha into the target texture, and our readback is a plain row-by-row memcpy, so both output paths hand out un-premultiplied RGBA8. This is vello's behavior, not ours — re-check it on every vello bump; `tests/alpha_format.rs` fails loudly if it flips.
 - **Readback honours wgpu's 256-byte row alignment** (`COPY_BYTES_PER_ROW_ALIGNMENT`). The readback buffer has padded rows; the copy-out strips padding into the caller's tight RGBA8 buffer.
 - **GPU drain pattern after `queue.submit`** — `device.poll(PollType::wait_indefinitely())` then await `map_async` via a `futures_intrusive` oneshot. Non-obvious; preserve this sequence.
 - **Pick scene composition normalises blend.** Inside `push_layer` the pick scene uses `NORMAL` blend with `alpha = 1.0` so encoded ids don't fade toward the no-hit sentinel through alpha attenuation. Display scene keeps the caller's `BlendMode` and `alpha`.

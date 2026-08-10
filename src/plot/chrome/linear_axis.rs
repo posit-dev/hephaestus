@@ -122,6 +122,8 @@ pub(crate) struct AxisChromeStyle {
     pub title_gap_px: f64,
     pub text_style: TextStyle,
     pub text_brush: Brush,
+    /// Outline pass for tick labels. `None` draws labels fill-only.
+    pub text_outline: Option<crate::plot::plot::TextOutline>,
     pub draw_labels: bool,
 }
 
@@ -167,7 +169,7 @@ impl AxisChromeStyle {
             None => (None, fallback_stroke()),
         };
 
-        let (text_style, text_brush, draw_labels) = match &resolved.text {
+        let (text_style, text_brush, text_outline, draw_labels) = match &resolved.text {
             Some(el) => {
                 let size_pt = el
                     .size_pt
@@ -180,11 +182,17 @@ impl AxisChromeStyle {
                     .or_else(|| text_defaults.color.clone())
                     .expect("text color default")
                     .resolve(palette);
-                (TextStyle::new(size_pt), mk_brush(color), true)
+                (
+                    TextStyle::new(size_pt),
+                    mk_brush(color),
+                    crate::plot::plot::text_outline_from(el, palette, dpi),
+                    true,
+                )
             }
             None => (
                 TextStyle::new(LABEL_FONT_SIZE_PT),
                 mk_brush(axis_ink()),
+                None,
                 false,
             ),
         };
@@ -205,6 +213,7 @@ impl AxisChromeStyle {
             title_gap_px: pt_to_px(resolved.title_gap.resolve(TITLE_GAP_PT), dpi),
             text_style,
             text_brush,
+            text_outline,
             draw_labels,
         }
     }
@@ -289,6 +298,7 @@ pub(crate) fn draw_linear_axis_at(
                 label,
                 &style.text_style,
                 &style.text_brush,
+                style.text_outline.as_ref(),
                 AxisLabelAt {
                     anchor,
                     direction: (outward_tx, outward_ty),
@@ -317,11 +327,16 @@ pub(crate) struct AxisLabelAt {
 /// anchor / direction internally) and by the polar chrome's
 /// angular-axis ticks, which need to place labels at a different
 /// direction for each break.
+///
+/// `outline`, when present, is emitted as a stroke-only pass behind
+/// the fill.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_axis_label(
     scene: &mut dyn SceneBuilder,
     text: &str,
     style: &TextStyle,
     brush: &Brush,
+    outline: Option<&crate::plot::plot::TextOutline>,
     at: AxisLabelAt,
     dpi: f64,
 ) {
@@ -371,6 +386,7 @@ pub(crate) fn draw_axis_label(
 
     let x = label_cx - label_w * 0.5;
     let y = label_cy - cap_h * 0.5 - cap_top_offset;
+    crate::plot::plot::draw_text_outline_pass(scene, outline, &run, x, y, Affine::IDENTITY);
     draw_text(scene, &run, x, y, brush, Affine::IDENTITY, PickId::Skip);
 }
 

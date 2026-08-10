@@ -291,3 +291,41 @@ fn font_features_merge_by_tag() {
     assert!(merged.features.iter().any(|f| f.tag == *b"liga")); // parent kept
     assert!(merged.features.iter().any(|f| f.tag == *b"ss01")); // child added
 }
+
+#[test]
+fn text_element_cascade_merges_outline_fields_independently() {
+    let parent = TextElement {
+        text_stroke: Some(ThemeColor::Ink),
+        text_linewidth_pt: Some(Length::Abs(2.0)),
+        ..TextElement::default()
+    };
+
+    // Child sets only the width: the parent's outline color survives.
+    let child_width = TextElement {
+        text_linewidth_pt: Some(Length::Abs(0.5)),
+        ..TextElement::default()
+    };
+    let merged = child_width.cascade(&parent);
+    assert_eq!(merged.text_stroke, Some(ThemeColor::Ink));
+    assert_eq!(merged.text_linewidth_pt, Some(Length::Abs(0.5)));
+
+    // Child sets only the color: the parent's width survives.
+    let child_color = TextElement {
+        text_stroke: Some(ThemeColor::Accent),
+        ..TextElement::default()
+    };
+    let merged = child_color.cascade(&parent);
+    assert_eq!(merged.text_stroke, Some(ThemeColor::Accent));
+    assert_eq!(merged.text_linewidth_pt, Some(Length::Abs(2.0)));
+}
+
+#[test]
+fn text_concrete_defaults_leaves_text_stroke_unset() {
+    let d = text_concrete_defaults();
+    // `None` is the terminal "fill only" value — a concrete color here
+    // would outline every string in the figure.
+    assert!(d.text_stroke.is_none());
+    // The width, by contrast, has a concrete fallback so a resolved
+    // outline color always has a pen to draw with.
+    assert_eq!(d.text_linewidth_pt, Some(Length::Abs(DEFAULT_LINEWIDTH_PT)));
+}

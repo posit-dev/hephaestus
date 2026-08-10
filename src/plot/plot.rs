@@ -1659,6 +1659,7 @@ impl Plot {
                 .or_else(|| text_defaults.color.clone())
                 .expect("text_concrete_defaults sets color");
             let brush = Brush::Solid(color.resolve(&theme.palette));
+            let outline = text_outline_from(&el, &theme.palette, dpi);
             let angle = el
                 .angle
                 .or(text_defaults.angle)
@@ -1672,7 +1673,7 @@ impl Plot {
                 TitleLocation::Outside => {
                     let slot = cartesian_axis_title_slot(side);
                     if let Some(rect) = layout.get(&self.patch_id, slot) {
-                        draw_axis_title(scene, &run, rect, side, &brush, angle);
+                        draw_axis_title(scene, &run, rect, side, &brush, outline.as_ref(), angle);
                     }
                 }
                 TitleLocation::Inside => {
@@ -1890,6 +1891,76 @@ pub(crate) fn text_style_from(
     style
 }
 
+/// A resolved per-glyph outline for chrome text — palette and dpi
+/// already applied, ready for [`crate::text::draw_text_outline`].
+#[cfg(feature = "text")]
+#[derive(Debug, Clone)]
+pub(crate) struct TextOutline {
+    /// Brush the outline pass paints with.
+    pub brush: crate::brush::Brush,
+    /// Glyph outline pen, width in device pixels.
+    pub stroke: crate::stroke::Stroke,
+}
+
+/// Resolve a [`TextElement`](crate::plot::theme::TextElement)'s outline
+/// fields into a concrete brush + pen. `None` when `text_stroke` names
+/// no color or the width resolves to a non-positive pixel count — in
+/// both cases the caller emits no outline pass.
+///
+/// `text_linewidth_pt` resolves against
+/// [`DEFAULT_LINEWIDTH_PT`](crate::plot::theme::DEFAULT_LINEWIDTH_PT),
+/// so no text-size parent needs threading here.
+#[cfg(feature = "text")]
+pub(crate) fn text_outline_from(
+    el: &crate::plot::theme::TextElement,
+    palette: &crate::plot::theme::Palette,
+    dpi: f64,
+) -> Option<TextOutline> {
+    let color = el.text_stroke.as_ref()?.resolve(palette);
+    let width_pt = el
+        .text_linewidth_pt
+        .or_else(|| crate::plot::theme::text_concrete_defaults().text_linewidth_pt)
+        .expect("text_concrete_defaults sets text_linewidth_pt")
+        .resolve(crate::plot::theme::DEFAULT_LINEWIDTH_PT);
+    let width_px = width_pt * dpi / 72.0;
+    if !width_px.is_finite() || width_px <= 0.0 {
+        return None;
+    }
+    Some(TextOutline {
+        brush: crate::brush::Brush::Solid(color),
+        stroke: crate::stroke::Stroke::new(width_px),
+    })
+}
+
+/// Emit the stroke-only glyph pass for `run` when `outline` is present.
+///
+/// Call immediately before the matching [`crate::text::draw_text`] with
+/// identical `x`, `y` and `transform` so the outline registers behind
+/// the fill. The fill pass owns picking, so this pass records
+/// [`PickId::Skip`](crate::pick::PickId::Skip).
+#[cfg(feature = "text")]
+pub(crate) fn draw_text_outline_pass(
+    scene: &mut dyn SceneBuilder,
+    outline: Option<&TextOutline>,
+    run: &crate::text::TextRun,
+    x: f64,
+    y: f64,
+    transform: crate::geometry::Affine,
+) {
+    if let Some(o) = outline {
+        crate::text::draw_text_outline(
+            scene,
+            run,
+            x,
+            y,
+            &o.brush,
+            &o.stroke,
+            transform,
+            crate::pick::PickId::Skip,
+        );
+    }
+}
+
 /// Resolve the effective [`TextElement`](crate::plot::theme::TextElement)
 /// for an `Element<TextElement>` slot. `Blank` short-circuits to
 /// `None`; otherwise the slot's sparse fields cascade onto `root`,
@@ -2022,6 +2093,7 @@ pub(crate) fn draw_text_element_in_rect(
         .or_else(|| defaults.color.clone())
         .expect("color default");
     let brush = Brush::Solid(color.resolve(palette));
+    let outline = text_outline_from(el, palette, dpi);
     let run = TextRun::new(text, &style, dpi);
     let align = el.align.or(defaults.align).expect("align default");
     let alignment = match align {
@@ -2055,15 +2127,9 @@ pub(crate) fn draw_text_element_in_rect(
         Rotation::Along | Rotation::Across => 0.0,
     };
     if angle_rad.abs() < 1e-9 {
-        draw_text(
-            scene,
-            &run,
-            inset.x0,
-            inset.y0 + y_offset - ascender_offset,
-            &brush,
-            Affine::IDENTITY,
-            pick_id,
-        );
+        let (tx, ty) = (inset.x0, inset.y0 + y_offset - ascender_offset);
+        draw_text_outline_pass(scene, outline.as_ref(), &run, tx, ty, Affine::IDENTITY);
+        draw_text(scene, &run, tx, ty, &brush, Affine::IDENTITY, pick_id);
     } else {
         let content_w = run.content_width();
         let pivot_x = inset.x0 + (inner_w as f64) * 0.5;
@@ -2078,6 +2144,9 @@ pub(crate) fn draw_text_element_in_rect(
         let transform = Affine::translate(Vec2::new(pivot_x, pivot_y))
             * Affine::rotate(angle_rad)
             * Affine::translate(Vec2::new(-content_w * 0.5, -inked_centre_y));
+        // Both passes take the same transform and origin, so the
+        // outline lands exactly under the rotated fill.
+        draw_text_outline_pass(scene, outline.as_ref(), &run, 0.0, 0.0, transform);
         draw_text(scene, &run, 0.0, 0.0, &brush, transform, pick_id);
     }
 }
@@ -2088,13 +2157,18 @@ pub(crate) fn draw_text_element_in_rect(
 /// rotates -90° (text reads bottom-to-top), Right rotates +90°. A
 /// concrete `Rotation::Degrees(_)` bypasses that and uses the
 /// absolute angle.
+///
+/// `outline`, when present, is emitted as a stroke-only pass behind
+/// the fill.
 #[cfg(feature = "text")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_axis_title(
     scene: &mut dyn SceneBuilder,
     run: &crate::text::TextRun,
     rect: Rect,
     side: AxisSide,
     brush: &crate::brush::Brush,
+    outline: Option<&TextOutline>,
     angle: crate::plot::theme::Rotation,
 ) {
     use crate::geometry::{Affine, Vec2};
@@ -2112,6 +2186,7 @@ pub(crate) fn draw_axis_title(
     if theta.abs() < 1e-9 {
         let w = (rect.x1 - rect.x0) as f32;
         run.set_max_width(w, Alignment::Center);
+        draw_text_outline_pass(scene, outline, run, rect.x0, rect.y0, Affine::IDENTITY);
         draw_text(scene, run, rect.x0, rect.y0, brush, Affine::IDENTITY, pid);
     } else {
         // Lay out unconstrained so the run stays single-line; the
@@ -2121,6 +2196,7 @@ pub(crate) fn draw_axis_title(
         let transform = Affine::translate(Vec2::new(cx, cy))
             * Affine::rotate(theta)
             * Affine::translate(Vec2::new(-w * 0.5, -h * 0.5));
+        draw_text_outline_pass(scene, outline, run, 0.0, 0.0, transform);
         draw_text(scene, run, 0.0, 0.0, brush, transform, pid);
     }
 }
@@ -2359,6 +2435,164 @@ mod tests {
             text_style_from(&abs, 10.0).line_height,
             LineHeight::Absolute(14.0)
         );
+    }
+
+    // ─── Chrome text outlines ────────────────────────────────────────
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn text_outline_from_is_none_without_a_stroke_color() {
+        use crate::plot::theme::{Length, Palette, TextElement};
+        let el = TextElement {
+            text_linewidth_pt: Some(Length::Abs(2.0)),
+            ..TextElement::default()
+        };
+        assert!(text_outline_from(&el, &Palette::default(), 96.0).is_none());
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn text_outline_from_resolves_palette_and_dpi() {
+        use crate::plot::theme::{Length, Palette, TextElement, ThemeColor};
+        let el = TextElement {
+            text_stroke: Some(ThemeColor::Accent),
+            text_linewidth_pt: Some(Length::Abs(2.0)),
+            ..TextElement::default()
+        };
+        let palette = Palette::default();
+        let o = text_outline_from(&el, &palette, 144.0).expect("outline");
+        // 2 pt at 144 dpi = 4 px.
+        assert!((o.stroke.width - 4.0).abs() < 1e-9, "{}", o.stroke.width);
+        assert_eq!(o.brush, crate::brush::Brush::Solid(palette.accent));
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn text_outline_from_is_none_for_zero_width() {
+        use crate::plot::theme::{Length, Palette, TextElement, ThemeColor};
+        // The documented way for a child layer to clear an outline a
+        // parent set, since `text_stroke: None` cannot express it.
+        let el = TextElement {
+            text_stroke: Some(ThemeColor::Ink),
+            text_linewidth_pt: Some(Length::Abs(0.0)),
+            ..TextElement::default()
+        };
+        assert!(text_outline_from(&el, &Palette::default(), 96.0).is_none());
+    }
+
+    /// Every recorded glyph run, split into (stroked, filled) passes in
+    /// emission order.
+    #[cfg(feature = "text")]
+    fn glyph_passes(
+        scene: &crate::scene::recording::RecordingScene,
+    ) -> (
+        Vec<crate::scene::recording::OwnedGlyphRun>,
+        Vec<crate::scene::recording::OwnedGlyphRun>,
+    ) {
+        use crate::scene::recording::Op;
+        let runs: Vec<_> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::DrawGlyphs(g) => Some(g.clone()),
+                _ => None,
+            })
+            .collect();
+        let stroked = runs.iter().filter(|g| g.style.is_some()).cloned().collect();
+        let filled = runs.iter().filter(|g| g.style.is_none()).cloned().collect();
+        (stroked, filled)
+    }
+
+    #[cfg(feature = "text")]
+    fn outlined_text_element(
+        angle: Option<crate::plot::theme::Rotation>,
+    ) -> crate::plot::theme::TextElement {
+        use crate::plot::theme::{Length, TextElement, ThemeColor};
+        TextElement {
+            text_stroke: Some(ThemeColor::Fixed(crate::color::rgb(0.0, 0.0, 1.0))),
+            text_linewidth_pt: Some(Length::Abs(1.5)),
+            angle,
+            ..TextElement::default()
+        }
+    }
+
+    #[cfg(feature = "text")]
+    fn record_text_element(
+        el: &crate::plot::theme::TextElement,
+    ) -> crate::scene::recording::RecordingScene {
+        use crate::plot::theme::Palette;
+        let mut scene = crate::scene::recording::RecordingScene::default();
+        draw_text_element_in_rect(
+            &mut scene,
+            "Outlined",
+            el,
+            Rect::new(0.0, 0.0, 200.0, 40.0),
+            &Palette::default(),
+            11.0,
+            96.0,
+            crate::pick::PickId::Id(7),
+        );
+        scene
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn chrome_text_emits_the_outline_pass_before_the_fill() {
+        use crate::scene::recording::Op;
+        let scene = record_text_element(&outlined_text_element(None));
+        let (stroked, filled) = glyph_passes(&scene);
+        assert!(!stroked.is_empty(), "expected a stroked pass");
+        assert!(!filled.is_empty(), "expected a filled pass");
+
+        // The stroke pass must come first so it sits behind the fill.
+        let first_stroked = scene
+            .ops
+            .iter()
+            .position(|op| matches!(op, Op::DrawGlyphs(g) if g.style.is_some()))
+            .expect("stroked op");
+        let first_filled = scene
+            .ops
+            .iter()
+            .position(|op| matches!(op, Op::DrawGlyphs(g) if g.style.is_none()))
+            .expect("filled op");
+        assert!(
+            first_stroked < first_filled,
+            "outline pass must precede the fill: {first_stroked} vs {first_filled}"
+        );
+
+        // The fill owns picking; the outline stays out of the hitmap.
+        assert_eq!(stroked[0].pick_id, crate::pick::PickId::Skip);
+        assert_eq!(filled[0].pick_id, crate::pick::PickId::Id(7));
+        // Same glyphs, so the outline traces the visible text.
+        assert_eq!(stroked[0].glyphs.len(), filled[0].glyphs.len());
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn chrome_text_without_a_stroke_color_emits_no_outline_pass() {
+        use crate::plot::theme::TextElement;
+        let scene = record_text_element(&TextElement::default());
+        let (stroked, filled) = glyph_passes(&scene);
+        assert!(
+            stroked.is_empty(),
+            "unset text_stroke must not halo chrome text"
+        );
+        assert!(!filled.is_empty(), "expected a filled pass");
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn rotated_chrome_text_outlines_under_the_same_transform() {
+        use crate::plot::theme::Rotation;
+        let scene = record_text_element(&outlined_text_element(Some(Rotation::Degrees(45.0))));
+        let (stroked, filled) = glyph_passes(&scene);
+        assert!(!stroked.is_empty() && !filled.is_empty());
+        // A mismatched transform would slide the halo off the glyphs.
+        assert_eq!(stroked[0].transform, filled[0].transform);
+        assert_eq!(stroked[0].glyphs.len(), filled[0].glyphs.len());
+        for (s, f) in stroked[0].glyphs.iter().zip(filled[0].glyphs.iter()) {
+            assert_eq!((s.x, s.y), (f.x, f.y));
+        }
     }
 
     #[test]

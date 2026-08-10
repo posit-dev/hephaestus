@@ -249,6 +249,7 @@ pub fn draw_angular_axis(
             &text,
             &style,
             &chrome_style.text_brush,
+            chrome_style.text_outline.as_ref(),
             AxisLabelAt {
                 anchor,
                 direction: (rx, ry),
@@ -677,11 +678,10 @@ fn draw_radius_title(
     }
     let baseline_ref = glyphs[0].y as f64;
 
-    let _ = palette; // title brush sourced below via title_el.color
-                     // Perpendicular distance from the spoke to the title's bbox
-                     // centre: tick + label_gap + label extent + title_gap clears the
-                     // label rail; the extra title_h / 2 puts the title's near edge
-                     // at exactly title_gap past the labels.
+    // Perpendicular distance from the spoke to the title's bbox
+    // centre: tick + label_gap + label extent + title_gap clears the
+    // label rail; the extra title_h / 2 puts the title's near edge
+    // at exactly title_gap past the labels.
     let perp_distance = tick_px + label_gap_px + label_extent_px + title_gap_px + title_h * 0.5;
 
     // Midpoint of the visible spoke segment, offset perpendicular by
@@ -725,6 +725,7 @@ fn draw_radius_title(
         .map(|c| c.resolve(palette))
         .unwrap_or_else(axis_ink);
     let brush = Brush::Solid(title_color);
+    let outline = crate::plot::plot::text_outline_from(title_el, palette, dpi);
     for g_glyph in &glyphs {
         let y_above_baseline = g_glyph.y as f64 - baseline_ref;
         let xform = Affine::translate(Vec2::new(origin_x, origin_y))
@@ -735,6 +736,24 @@ fn draw_radius_title(
             x: 0.0,
             y: 0.0,
         };
+        // Text-on-path stamps one run per glyph, each with its own
+        // transform, so the outline duplicates that run rather than
+        // going through `draw_text_outline` (which re-walks the layout
+        // and would emit un-rotated per-line runs).
+        if let Some(o) = &outline {
+            let stroke_run = GlyphRun {
+                font: &g_glyph.font,
+                font_size: g_glyph.font_size,
+                transform: xform,
+                glyph_transform: None,
+                brush: &o.brush,
+                brush_alpha: 1.0,
+                hint: false,
+                glyphs: std::slice::from_ref(&stamp),
+                style: Some(&o.stroke),
+            };
+            scene.draw_glyphs(&stroke_run, PickId::Skip);
+        }
         let glyph_run = GlyphRun {
             font: &g_glyph.font,
             font_size: g_glyph.font_size,
@@ -874,6 +893,7 @@ fn draw_angular_title(
         .map(|c| c.resolve(palette))
         .unwrap_or_else(axis_ink);
     let brush = Brush::Solid(title_color);
+    let outline = crate::plot::plot::text_outline_from(title_el, palette, dpi);
     for gph in &glyphs {
         let half_advance = gph.advance as f64 * 0.5;
         let d_glyph = hjust_shift + gph.x as f64 + half_advance;
@@ -904,6 +924,22 @@ fn draw_angular_title(
             x: 0.0,
             y: 0.0,
         };
+        // One run per glyph along the arc, so the outline duplicates
+        // this run under the same per-glyph transform.
+        if let Some(o) = &outline {
+            let stroke_run = GlyphRun {
+                font: &gph.font,
+                font_size: gph.font_size,
+                transform: xform,
+                glyph_transform: None,
+                brush: &o.brush,
+                brush_alpha: 1.0,
+                hint: false,
+                glyphs: std::slice::from_ref(&stamp),
+                style: Some(&o.stroke),
+            };
+            scene.draw_glyphs(&stroke_run, PickId::Skip);
+        }
         let glyph_run = GlyphRun {
             font: &gph.font,
             font_size: gph.font_size,

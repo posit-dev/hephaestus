@@ -490,3 +490,190 @@ fn user_formatter_receives_locale() {
         .format(&hephaestus::scales::Value::Number(0.5), &Locale::DE_DE)
         .ends_with(" DE"));
 }
+
+// ─── Chrome text outlines ───────────────────────────────────────────────────
+
+/// Count glyph runs emitted as a stroke pass (`style: Some(_)`) whose
+/// brush is `target` — i.e. themed text outlines actually reaching the
+/// scene.
+fn stroked_glyph_runs_with_color(ops: &[Op], target: Color, eps: f32) -> usize {
+    ops.iter()
+        .filter(|op| match op {
+            Op::DrawGlyphs(g) => {
+                g.style.is_some()
+                    && solid_color(&g.brush)
+                        .map(|c| color_eq(c, target, eps))
+                        .unwrap_or(false)
+            }
+            _ => false,
+        })
+        .count()
+}
+
+fn any_stroked_glyph_run(ops: &[Op]) -> bool {
+    ops.iter()
+        .any(|op| matches!(op, Op::DrawGlyphs(g) if g.style.is_some()))
+}
+
+/// A `TextElement` carrying a blue outline, for asserting the themed
+/// stroke reaches the scene.
+fn outlined_text(color: Color) -> hephaestus::plot::theme::TextElement {
+    hephaestus::plot::theme::TextElement {
+        text_stroke: Some(ThemeColor::Fixed(color)),
+        text_linewidth_pt: Some(Length::Abs(1.5)),
+        ..hephaestus::plot::theme::TextElement::default()
+    }
+}
+
+#[test]
+fn default_theme_emits_no_stroked_glyph_runs() {
+    // Guards the `text_concrete_defaults().text_stroke == None`
+    // decision: no theme field set means no halo anywhere.
+    let (mut view, mut scene) = single_plot_view(Theme::default());
+    render_view(&mut view, &mut scene);
+    assert!(
+        !any_stroked_glyph_run(&scene.ops),
+        "default theme must not outline any chrome text"
+    );
+}
+
+#[test]
+fn axis_text_outline_reaches_the_scene() {
+    let blue = rgb(0.0, 0.0, 1.0);
+    let mut theme = Theme::default();
+    theme.axis.all.text = Element::Set(outlined_text(blue));
+    let (mut view, mut scene) = single_plot_view(theme);
+    render_view(&mut view, &mut scene);
+    assert!(
+        stroked_glyph_runs_with_color(&scene.ops, blue, 1e-4) > 0,
+        "themed axis tick-label outline should emit stroked glyph runs"
+    );
+}
+
+#[test]
+fn axis_title_outline_reaches_the_scene() {
+    let blue = rgb(0.0, 0.0, 1.0);
+    let mut theme = Theme::default();
+    theme.axis.all.title = Element::Set(outlined_text(blue));
+    // Titles only draw when set; the left title also exercises the
+    // rotated branch of `draw_axis_title`.
+    let template = beside(Patch::new("p"), Patch::new("__pad"));
+    let mut view = PlotComposition::new(&template)
+        .theme(theme)
+        .add_scale("x", scale::continuous(0.0..=1.0))
+        .add_scale("y", scale::continuous(0.0..=1.0));
+    let dummy: Composition = beside(Patch::new("p"), Patch::new("__pad"));
+    let mut p = Plot::new(&dummy, "p").bind("x", "x").bind("y", "y");
+    p.add_geom(
+        PointGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .build(),
+    );
+    p.add_axis(Axis::rail("x", AxisPlacement::Cartesian(AxisSide::Bottom)).title("X"));
+    p.add_axis(Axis::rail("y", AxisPlacement::Cartesian(AxisSide::Left)).title("Y"));
+    view.attach_plot(p);
+    let mut scene = RecordingScene::default();
+    render_view(&mut view, &mut scene);
+    assert!(
+        stroked_glyph_runs_with_color(&scene.ops, blue, 1e-4) > 0,
+        "themed axis-title outline should emit stroked glyph runs"
+    );
+}
+
+#[test]
+fn plot_title_outline_reaches_the_scene() {
+    let blue = rgb(0.0, 0.0, 1.0);
+    let theme = Theme {
+        plot_title: Element::Set(outlined_text(blue)),
+        ..Theme::default()
+    };
+    let (mut view, mut scene) = single_plot_view(theme);
+    view.update_plot("p", |p| p.set_title("Outlined title"));
+    render_view(&mut view, &mut scene);
+    assert!(
+        stroked_glyph_runs_with_color(&scene.ops, blue, 1e-4) > 0,
+        "themed plot-title outline should emit stroked glyph runs"
+    );
+}
+
+#[test]
+fn legend_title_outline_reaches_the_scene() {
+    use hephaestus::plot::chrome::legend::{Legend, LegendKeySpec};
+    use hephaestus::scales::value::Value;
+    use std::sync::Arc;
+
+    let blue = rgb(0.0, 0.0, 1.0);
+    let mut theme = Theme::default();
+    theme.legend.title = Element::Set(outlined_text(blue));
+
+    let template = beside(Patch::new("p"), Patch::new("__pad"));
+    let mut view = PlotComposition::new(&template)
+        .theme(theme)
+        .add_scale("x", scale::continuous(0.0..=1.0))
+        .add_scale("y", scale::continuous(0.0..=1.0))
+        .add_scale(
+            "cat",
+            scale::discrete([Value::String(Arc::from("a")), Value::String(Arc::from("b"))])
+                .range_colors([rgb(1.0, 0.0, 0.0), rgb(0.0, 1.0, 0.0)]),
+        );
+    let dummy: Composition = beside(Patch::new("p"), Patch::new("__pad"));
+    let mut p = Plot::new(&dummy, "p").bind("x", "x").bind("y", "y");
+    p.add_geom(
+        PointGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .build(),
+    );
+    p.add_legend(
+        Legend::new("cat")
+            .title("Category")
+            .key(LegendKeySpec::rect().scaled("fill", "cat")),
+    );
+    view.attach_plot(p);
+    let mut scene = RecordingScene::default();
+    render_view(&mut view, &mut scene);
+    assert!(
+        stroked_glyph_runs_with_color(&scene.ops, blue, 1e-4) > 0,
+        "themed legend-title outline should emit stroked glyph runs"
+    );
+}
+
+#[test]
+fn polar_axis_title_outline_reaches_the_scene() {
+    // The polar titles build their glyph runs by hand (text-on-path,
+    // one run per glyph), so they are the only outline path that does
+    // not go through `draw_text_outline`.
+    use hephaestus::plot::chrome::axis::PolarRing;
+    use hephaestus::plot::projection::{PolarProjection, Projection};
+
+    let blue = rgb(0.0, 0.0, 1.0);
+    let mut theme = Theme::default();
+    theme.axis.all.title = Element::Set(outlined_text(blue));
+
+    let template = beside(Patch::new("p"), Patch::new("__pad"));
+    let mut view = PlotComposition::new(&template)
+        .theme(theme)
+        .add_scale("theta", scale::continuous(0.0..=1.0))
+        .add_scale("r", scale::continuous(0.0..=1.0));
+    let dummy: Composition = beside(Patch::new("p"), Patch::new("__pad"));
+    let mut p = Plot::new(&dummy, "p")
+        .bind("x", "theta")
+        .bind("y", "r")
+        .projection(Projection::Polar(PolarProjection::full_circle()));
+    p.add_geom(
+        PointGeom::builder()
+            .set("x", vec![0.25_f64, 0.75])
+            .set("y", vec![0.5_f64, 0.9])
+            .build(),
+    );
+    p.add_axis(Axis::rail("theta", AxisPlacement::PolarAngular(PolarRing::Outer)).title("Theta"));
+    p.add_axis(Axis::rail("r", AxisPlacement::PolarRadius { theta_frac: 0.0 }).title("Radius"));
+    view.attach_plot(p);
+    let mut scene = RecordingScene::default();
+    render_view(&mut view, &mut scene);
+    assert!(
+        stroked_glyph_runs_with_color(&scene.ops, blue, 1e-4) > 0,
+        "themed polar axis-title outline should emit stroked glyph runs"
+    );
+}

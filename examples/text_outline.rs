@@ -1,10 +1,16 @@
-//! Demonstrates the per-glyph `text_stroke` + `text_linewidth` channels
-//! on `TextGeom`. Renders two side-by-side panels:
+//! Demonstrates glyph outlines at both API levels — the per-glyph
+//! `text_stroke` + `text_linewidth` channels on `TextGeom`, and the
+//! matching `text_stroke` / `text_linewidth_pt` fields on the theme's
+//! `TextElement` that outline chrome text. Renders two side-by-side
+//! panels:
 //!
 //! - Left: plain labels on a busy colored backdrop — readability
 //!   suffers where labels cross strong color contrast.
 //! - Right: the same labels with a contrasting outline (white stroke
 //!   under black fill) so they pop against any backdrop.
+//!
+//! Both panels' titles and axis labels are outlined through the theme,
+//! so chrome and data labels use the same specification.
 //!
 //! Writes `examples/text_outline.png`.
 
@@ -12,8 +18,33 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{Composition, Patch, Span};
 use hephaestus::geometry::Size;
+use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
+use hephaestus::plot::theme::{Element, Length, TextElement, Theme, ThemeColor};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom, TextGeom};
+use hephaestus::scales::chrome::AxisSide;
 use hephaestus::Renderer;
+
+/// A theme whose titles and axis titles are drawn as knocked-out white
+/// text over a dark halo — the chrome-side counterpart of the geoms'
+/// `text_stroke` channel, and the reason `TextElement` carries the same
+/// pair of fields.
+///
+/// Overlays onto whatever each slot already holds, so the built-in
+/// theme's bold title and sized axis text survive.
+fn outlined_chrome_theme() -> Theme {
+    /// Knock the text out in white over a dark outline.
+    fn haloed(slot: &Element<TextElement>, width_pt: f64) -> Element<TextElement> {
+        let mut el = slot.as_set().cloned().unwrap_or_default();
+        el.color = Some(ThemeColor::Fixed(rgb8(255, 255, 255)));
+        el.text_stroke = Some(ThemeColor::Fixed(rgb8(25, 25, 40)));
+        el.text_linewidth_pt = Some(Length::Abs(width_pt));
+        Element::Set(el)
+    }
+    let mut theme = Theme::default();
+    theme.plot_title = haloed(&theme.plot_title, 3.5);
+    theme.axis.all.title = haloed(&theme.axis.all.title, 3.0);
+    theme
+}
 
 fn main() {
     let (w, h) = (1200u32, 500u32);
@@ -97,7 +128,15 @@ fn main() {
             .build(),
     );
 
+    // Axes on both panels so the theme's outlined tick labels and axis
+    // titles are visible alongside the outlined geom labels.
+    for p in [&mut plain, &mut outlined] {
+        p.add_axis(Axis::rail("x", AxisPlacement::Cartesian(AxisSide::Bottom)).title("x position"));
+        p.add_axis(Axis::rail("y", AxisPlacement::Cartesian(AxisSide::Left)).title("y position"));
+    }
+
     let mut view = PlotComposition::new(&comp())
+        .theme(outlined_chrome_theme())
         .add_scale("x", scale::continuous(0.0..=100.0))
         .add_scale("y", scale::continuous(0.0..=100.0))
         .with_plot(plain)

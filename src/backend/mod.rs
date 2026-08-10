@@ -21,7 +21,13 @@ pub trait Renderer {
     fn scene(&mut self) -> &mut Self::Scene;
 
     /// Render the current scene into `out`, which must be exactly
-    /// `width * height * 4` bytes (RGBA8, premultiplied).
+    /// `width * height * 4` bytes.
+    ///
+    /// Pixels are RGBA8 with **straight (un-premultiplied) alpha** — the
+    /// convention PNG and most CPU-side image libraries expect. Callers
+    /// feeding the buffer to a compositor that assumes premultiplied alpha
+    /// (CoreGraphics, Skia, Cairo, a SrcOver blend on the GPU) must
+    /// premultiply first.
     fn render_to_buffer(
         &mut self,
         width: u32,
@@ -47,6 +53,11 @@ pub trait Renderer {
 /// directly. Hosts whose presentation surface uses a different format
 /// (typical for swap chains, which are usually `Bgra8UnormSrgb`) are
 /// responsible for blitting from this view to the surface.
+///
+/// **Alpha.** The view receives straight (un-premultiplied) alpha, matching
+/// [`Renderer::render_to_buffer`]. A host presenting translucent content
+/// through `CompositeAlphaMode::PreMultiplied`, or blending the view with a
+/// standard SrcOver pipeline, must premultiply in its blit shader.
 ///
 /// **Picking.** Picking (when enabled at construction) still rasterises the
 /// parallel pick scene into the backend's own pick target and reads it back

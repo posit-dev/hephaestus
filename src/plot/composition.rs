@@ -597,12 +597,14 @@ impl CompositionChrome {
                 .or(text_defaults.angle)
                 .expect("text_concrete_defaults sets angle");
             let run = TextRun::new(title, &super::plot::text_style_from(&el, root_pt), dpi);
+            let outline = super::plot::text_outline_from(&el, &theme.palette, dpi);
             draw_axis_title(
                 scene,
                 &run,
                 rect,
                 side,
                 &Brush::Solid(color.resolve(&theme.palette)),
+                outline.as_ref(),
                 angle,
             );
         }

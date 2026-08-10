@@ -93,6 +93,18 @@ Legends reuse `AxisTheme` for their tick-labels-and-ticks component (`LegendThem
 
 `Rotation::Degrees(d)` is unconditional — always a single straight rotation regardless of surface.
 
+## Text outlines
+
+`TextElement::text_stroke` / `text_linewidth_pt` mirror the `text_stroke` / `text_linewidth` channels on `TextGeom` and `TextFitGeom`, so an outlined chrome label and an outlined data label are specified the same way. A resolved outline color emits a stroke-only glyph pass *behind* the fill pass, so the visible band is the outer half of the width. The fill pass owns picking; the outline records `PickId::Skip`.
+
+Three things worth knowing:
+
+- **`text_stroke` is the one field `text_concrete_defaults()` leaves `None`.** A concrete value there would halo every string in the figure. Because `None` is the terminal "fill only" value rather than a hole to fill, chrome reads it directly instead of through the `.expect("… default")` pattern the other fields use — and a child layer cannot *clear* an outline a parent set by writing `None`. Set `text_linewidth_pt: Abs(0.0)` for that; the resolver's positive-width guard turns it into no outline pass.
+- **`text_linewidth_pt` resolves against `DEFAULT_LINEWIDTH_PT`, not the text size.** An outline is a linewidth, and every other linewidth in the theme resolves against that constant. With the text size as parent, `Length::default() == Rel(1.0)` would mean a full em of ink instead of one hairline.
+- **Outline thickness does not participate in measurement**, matching the text geoms — otherwise every themed halo would shift axis and legend layout. A deliberately heavy outline needs clearance from `margin`, which *is* measured.
+
+`crate::plot::plot::text_outline_from` resolves the pair into a `TextOutline { brush, stroke }`; `draw_text_outline_pass` emits it. Chrome that only receives a resolved brush carries the outline alongside it: `AxisChromeStyle.text_outline` (covering cartesian tick labels, polar radius labels, and both legend tick rails) and `LegendTextPaint.outline`. The polar titles build glyph runs by hand, one per glyph for text-on-path, so they duplicate the run with `style: Some(&stroke)` rather than calling `draw_text_outline`.
+
 ## Geom defaults
 
 `GeomTheme` mirrors every geom's old hardcoded `DEFAULT_*` constants. Geoms read defaults at draw time from `ctx.theme.geom.<geom>.<field>` via the `resolve_color_channel_or_theme` / `resolve_cap_channel` / etc. helpers in `plot/geom/resolve.rs`. The pattern:

@@ -1231,18 +1231,27 @@ pub fn render_legend(
     }
 }
 
+/// Resolved paint for one legend text slot — shaped style, fill brush,
+/// and the optional outline pass drawn behind the fill.
+struct LegendTextPaint {
+    style: TextStyle,
+    brush: Brush,
+    outline: Option<crate::plot::plot::TextOutline>,
+}
+
 /// Resolved per-legend text styling. Each slot is `None` when the
 /// matching `Element` is `Blank` — call sites use that to skip the
 /// draw entirely. `Inherit` and `Set` both resolve to `Some` with
 /// the appropriate cascaded values.
 struct LegendTextStyles {
-    title: Option<(TextStyle, Brush)>,
-    label: Option<(TextStyle, Brush)>,
+    title: Option<LegendTextPaint>,
+    label: Option<LegendTextPaint>,
 }
 
 fn legend_text_styles(
     lt: &crate::plot::theme::LegendTheme,
     palette: &crate::plot::theme::Palette,
+    dpi: f64,
 ) -> LegendTextStyles {
     use crate::plot::theme::{text_concrete_defaults, Element, TextElement, DEFAULT_TEXT_SIZE_PT};
     let defaults = text_concrete_defaults();
@@ -1252,7 +1261,8 @@ fn legend_text_styles(
         defaults: &TextElement,
         palette: &crate::plot::theme::Palette,
         root_pt: f64,
-    ) -> Option<(TextStyle, Brush)> {
+        dpi: f64,
+    ) -> Option<LegendTextPaint> {
         let merged = match el {
             Element::Set(child) => child.cascade(defaults),
             Element::Blank => return None,
@@ -1263,14 +1273,18 @@ fn legend_text_styles(
             .as_ref()
             .expect("text color default")
             .resolve(palette);
-        Some((
-            crate::plot::plot::text_style_from(&merged, root_pt),
-            Brush::Solid(color),
-        ))
+        Some(LegendTextPaint {
+            style: crate::plot::plot::text_style_from(&merged, root_pt),
+            brush: Brush::Solid(color),
+            // Resolve off the cascaded element so `Inherit` picks up
+            // the safety net's unset outline and `Set` picks up the
+            // child's value merged over it.
+            outline: crate::plot::plot::text_outline_from(&merged, palette, dpi),
+        })
     }
     LegendTextStyles {
-        title: resolve(&lt.title, &defaults, palette, root_pt),
-        label: resolve(&lt.axis.text, &defaults, palette, root_pt),
+        title: resolve(&lt.title, &defaults, palette, root_pt, dpi),
+        label: resolve(&lt.axis.text, &defaults, palette, root_pt, dpi),
     }
 }
 
@@ -1392,7 +1406,7 @@ fn render_stack_body(
     } else {
         0.0
     };
-    let styles = legend_text_styles(lt, palette);
+    let styles = legend_text_styles(lt, palette, dpi);
 
     let entries = domain.breaks(DEFAULT_BREAK_COUNT);
     let entries: Vec<&Value> = entries
@@ -1417,15 +1431,23 @@ fn render_stack_body(
     let entries_x = title_x;
     let entries_y = title_y + measure.title_h_px + title_gap;
 
-    if let (Some(title), Some((title_style, title_brush))) = (&legend.title, &styles.title) {
-        let run = TextRun::new(title, title_style, dpi);
+    if let (Some(title), Some(paint)) = (&legend.title, &styles.title) {
+        let run = TextRun::new(title, &paint.style, dpi);
         let _ = run.set_max_width(f32::INFINITY, Alignment::Start);
+        crate::plot::plot::draw_text_outline_pass(
+            scene,
+            paint.outline.as_ref(),
+            &run,
+            title_x,
+            title_y,
+            Affine::IDENTITY,
+        );
         draw_text(
             scene,
             &run,
             title_x,
             title_y,
-            title_brush,
+            &paint.brush,
             Affine::IDENTITY,
             PickId::Skip,
         );
@@ -1461,14 +1483,15 @@ fn render_stack_body(
         if let Some(frame_el) = key_frame {
             paint_rect_frame(scene, frame_el, palette, swatch_rect, dpi, false, true);
         }
-        if let Some((label_style, label_brush)) = &styles.label {
+        if let Some(paint) = &styles.label {
             let label = domain.format(v, locale);
             let anchor = Point::new(label_rect.x0, (label_rect.y0 + label_rect.y1) * 0.5);
             draw_axis_label(
                 scene,
                 &label,
-                label_style,
-                label_brush,
+                &paint.style,
+                &paint.brush,
+                paint.outline.as_ref(),
                 AxisLabelAt {
                     anchor,
                     direction: (1.0, 0.0),
@@ -1477,6 +1500,38 @@ fn render_stack_body(
             );
         }
     }
+}
+
+/// Numeric bin edges for a binned body: the domain scale's breaks
+/// projected to f64, dropping nulls, non-numeric variants and
+/// non-finite values. `N` edges describe `N - 1` bins.
+fn bin_edges(breaks: &[Value]) -> Vec<f64> {
+    breaks
+        .iter()
+        .filter_map(|v| v.as_number().or_else(|| v.as_temporal_f64()))
+        .filter(|n| n.is_finite())
+        .collect()
+}
+
+/// Sample value per bin between adjacent `edges` — the midpoint each
+/// bin's keys resolve at. Empty when `edges` describes no bins or the
+/// edge span collapses, so the measure pass reserves nothing exactly
+/// where the renderer draws nothing.
+///
+/// Both passes derive their rows from this, which is what keeps
+/// reserved space equal to drawn space for a binned body.
+fn bin_midpoints(edges: &[f64]) -> Vec<Value> {
+    if edges.len() < 2 {
+        return Vec::new();
+    }
+    let span = edges[edges.len() - 1] - edges[0];
+    if !span.is_finite() || span.abs() < f64::EPSILON {
+        return Vec::new();
+    }
+    edges
+        .windows(2)
+        .map(|w| Value::Number((w[0] + w[1]) * 0.5))
+        .collect()
 }
 
 /// Render a binned-stack legend: N+1 breaks define N bins; one row
@@ -1499,7 +1554,7 @@ fn render_binned_stack_body(
     geom: &crate::plot::theme::GeomTheme,
     locale: &crate::scales::Locale,
 ) {
-    let styles = legend_text_styles(lt, palette);
+    let styles = legend_text_styles(lt, palette, dpi);
     let domain = match registry.get(&legend.domain_scale) {
         Some(s) => s,
         None => return,
@@ -1509,20 +1564,18 @@ fn render_binned_stack_body(
         BodyMeasure::BinnedStack { row_cells_px, .. } => row_cells_px.as_slice(),
         _ => return,
     };
-    let breaks: Vec<f64> = domain
-        .breaks(DEFAULT_BREAK_COUNT)
-        .iter()
-        .filter_map(|v| v.as_number().or_else(|| v.as_temporal_f64()))
-        .filter(|n| n.is_finite())
-        .collect();
-    if breaks.len() < 2 {
+    let breaks = bin_edges(&domain.breaks(DEFAULT_BREAK_COUNT));
+    let midpoints = bin_midpoints(&breaks);
+    if midpoints.is_empty() {
         return;
     }
+    debug_assert_eq!(
+        row_cells_px.len(),
+        midpoints.len(),
+        "measure and draw must agree on bin count"
+    );
     let (min, max) = (breaks[0], *breaks.last().unwrap());
     let span = max - min;
-    if !span.is_finite() || span.abs() < f64::EPSILON {
-        return;
-    }
 
     let padding = measure.padding_px;
     let title_gap = if legend.title.is_some() && measure.title_h_px > 0.0 {
@@ -1531,7 +1584,7 @@ fn render_binned_stack_body(
         0.0
     };
     let block_h = measure.primary_dim_px(dpi);
-    let n_bins = breaks.len() - 1;
+    let n_bins = midpoints.len();
     // For binned legends the bar's bins touch each other. Vertical
     // legends use each row's height for the bin along-extent and
     // the max width as the bar thickness; horizontal legends swap
@@ -1557,15 +1610,23 @@ fn render_binned_stack_body(
         measure.title_w_px,
         bar_thickness,
     );
-    if let (Some(title), Some((title_style, title_brush))) = (&legend.title, &styles.title) {
-        let run = TextRun::new(title, title_style, dpi);
+    if let (Some(title), Some(paint)) = (&legend.title, &styles.title) {
+        let run = TextRun::new(title, &paint.style, dpi);
         let _ = run.set_max_width(f32::INFINITY, Alignment::Start);
+        crate::plot::plot::draw_text_outline_pass(
+            scene,
+            paint.outline.as_ref(),
+            &run,
+            title_x,
+            title_y,
+            Affine::IDENTITY,
+        );
         draw_text(
             scene,
             &run,
             title_x,
             title_y,
-            title_brush,
+            &paint.brush,
             Affine::IDENTITY,
             PickId::Skip,
         );
@@ -1616,7 +1677,7 @@ fn render_binned_stack_body(
     let equal_bins = legend.bin_spacing == BinSpacing::Equal;
     for i in 0..n_bins {
         let (lo, hi) = (breaks[i], breaks[i + 1]);
-        let midpoint = Value::Number((lo + hi) * 0.5);
+        let midpoint = &midpoints[i];
         let (lo_t, hi_t) = if equal_bins {
             (i as f64 / n_bins as f64, (i + 1) as f64 / n_bins as f64)
         } else {
@@ -1639,7 +1700,7 @@ fn render_binned_stack_body(
             )
         };
         for key in keys {
-            let resolved = resolve_key(key, registry, &midpoint);
+            let resolved = resolve_key(key, registry, midpoint);
             render_key(key.kind, &resolved, cell, shapes, scene, dpi, geom, palette);
         }
     }
@@ -1695,7 +1756,7 @@ fn render_colorbar_body(
     palette: &crate::plot::theme::Palette,
     locale: &crate::scales::Locale,
 ) {
-    let styles = legend_text_styles(lt, palette);
+    let styles = legend_text_styles(lt, palette, dpi);
     let domain = match registry.get(&legend.domain_scale) {
         Some(s) => s,
         None => return,
@@ -1727,15 +1788,23 @@ fn render_colorbar_body(
         bar_thickness_px,
     );
 
-    if let (Some(title), Some((title_style, title_brush))) = (&legend.title, &styles.title) {
-        let run = TextRun::new(title, title_style, dpi);
+    if let (Some(title), Some(paint)) = (&legend.title, &styles.title) {
+        let run = TextRun::new(title, &paint.style, dpi);
         let _ = run.set_max_width(f32::INFINITY, Alignment::Start);
+        crate::plot::plot::draw_text_outline_pass(
+            scene,
+            paint.outline.as_ref(),
+            &run,
+            title_x,
+            title_y,
+            Affine::IDENTITY,
+        );
         draw_text(
             scene,
             &run,
             title_x,
             title_y,
-            title_brush,
+            &paint.brush,
             Affine::IDENTITY,
             PickId::Skip,
         );
@@ -2135,9 +2204,14 @@ enum BodyMeasure {
         no_keys: bool,
     },
     /// Binned stack — N-bins-from-N+1-breaks layout with a between-row
-    /// tick rail. Per-row dimensions live in `row_cells_px` (binned
-    /// rows touch, so the row gap doesn't apply). `no_keys`
-    /// short-circuits the measure to zero when the stack is empty.
+    /// tick rail. `row_cells_px` holds one entry per **bin**, sized at
+    /// the bin's midpoint so it matches what the renderer paints
+    /// there; binned rows touch, so the row gap doesn't apply. Bin
+    /// count and per-bin dimensions are independent of
+    /// [`BinSpacing`] — spacing only redistributes bins along the
+    /// finished bar. An empty `row_cells_px` means the domain yields
+    /// no bins and the body draws nothing. `no_keys` short-circuits
+    /// the measure to zero when the stack is empty.
     BinnedStack {
         row_cells_px: Vec<(f64, f64)>,
         no_keys: bool,
@@ -2218,9 +2292,13 @@ impl LegendMeasure {
             LegendBody::Stack(stack) if stack.binned => {
                 let key_w_floor = pt_to_px(lt.key.width.resolve(0.0), dpi);
                 let key_h_floor = pt_to_px(lt.key.height.resolve(0.0), dpi);
-                let row_cells_px: Vec<(f64, f64)> = breaks
+                // One row per bin, sized from the bin midpoint — the
+                // value `render_binned_stack_body` resolves its keys
+                // at — so reserved bar length and thickness match the
+                // draw. Sampling the edges instead would yield one
+                // row too many and size them off values no bin uses.
+                let row_cells_px: Vec<(f64, f64)> = bin_midpoints(&bin_edges(&breaks))
                     .iter()
-                    .filter(|v| !matches!(v, Value::Null))
                     .map(|v| {
                         let (mut row_w, mut row_h) = (0.0_f64, 0.0_f64);
                         for key in &stack.keys {
@@ -2338,6 +2416,14 @@ impl LegendMeasure {
 
     fn is_empty(&self) -> bool {
         if self.entry_count == 0 {
+            return true;
+        }
+        // A binned body with no bins reserves nothing: fewer than two
+        // finite numeric breaks (a discrete domain, a collapsed span)
+        // leaves `render_binned_stack_body` with nothing to draw, so
+        // reserving space would leave a blank band.
+        if matches!(&self.body, BodyMeasure::BinnedStack { row_cells_px, .. } if row_cells_px.is_empty())
+        {
             return true;
         }
         matches!(
@@ -2964,6 +3050,148 @@ mod tests {
             l_w > s_w,
             "legend with scaled size up to 12pt should be wider than fixed-4pt: {s_w} vs {l_w}"
         );
+    }
+
+    // ─── Binned-stack measure / draw symmetry ────────────────────────
+
+    /// Four edges → three bins. `bin_fill` indexes a palette by bin;
+    /// `bin_size` gives each bin a distinct pt size so per-bin row
+    /// extents are strictly increasing and measurable.
+    fn binned_registry() -> ScaleRegistry {
+        let mut reg = ScaleRegistry::new();
+        let edges = vec![0.0, 10.0, 20.0, 30.0];
+        reg.insert(
+            "bin_fill",
+            scale::binned(0.0..=30.0, edges.clone()).range_colors([
+                rgb(1.0, 0.0, 0.0),
+                rgb(0.0, 1.0, 0.0),
+                rgb(0.0, 0.0, 1.0),
+            ]),
+        );
+        reg.insert(
+            "bin_size",
+            scale::binned(0.0..=30.0, edges).range_numbers([12.0, 18.0, 24.0]),
+        );
+        reg
+    }
+
+    fn binned_rows(legend: &Legend, reg: &ScaleRegistry, theme: &Theme) -> Vec<(f64, f64)> {
+        let m = LegendMeasure::new(
+            legend,
+            reg,
+            dpi_96(),
+            theme.legend_for(legend.theme_variant.as_deref()),
+            &theme.geom,
+            0.0,
+            &theme.locale,
+        );
+        match m.body {
+            BodyMeasure::BinnedStack { row_cells_px, .. } => row_cells_px,
+            _ => panic!("expected a binned stack body"),
+        }
+    }
+
+    #[test]
+    fn bin_edges_drops_nulls_and_non_numeric_breaks() {
+        let breaks = vec![
+            Value::Null,
+            Value::Number(0.0),
+            Value::String(Arc::from("x")),
+            Value::Number(10.0),
+            Value::Number(f64::NAN),
+        ];
+        assert_eq!(bin_edges(&breaks), vec![0.0, 10.0]);
+    }
+
+    #[test]
+    fn bin_midpoints_yields_one_value_per_bin() {
+        let mids: Vec<f64> = bin_midpoints(&[0.0, 10.0, 20.0, 30.0])
+            .iter()
+            .filter_map(|v| v.as_number())
+            .collect();
+        assert_eq!(mids, vec![5.0, 15.0, 25.0]);
+        // No bins: too few edges, or a collapsed span.
+        assert!(bin_midpoints(&[]).is_empty());
+        assert!(bin_midpoints(&[5.0]).is_empty());
+        assert!(bin_midpoints(&[5.0, 5.0]).is_empty());
+    }
+
+    #[test]
+    fn binned_stack_measures_one_row_per_bin() {
+        let legend = Legend::new("bin_fill")
+            .binned()
+            .key(LegendKeySpec::rect().scaled("fill", "bin_fill"));
+        let theme = default_theme();
+        let rows = binned_rows(&legend, &binned_registry(), &theme);
+        // Three bins from four edges — not four rows from four edges.
+        assert_eq!(rows.len(), 3, "one row per bin, got {rows:?}");
+    }
+
+    #[test]
+    fn binned_size_legend_measures_at_bin_midpoints() {
+        let legend = Legend::new("bin_size")
+            .binned()
+            .key(LegendKeySpec::point().scaled("size", "bin_size"));
+        let theme = default_theme();
+        let rows = binned_rows(&legend, &binned_registry(), &theme);
+        assert_eq!(rows.len(), 3, "one row per bin, got {rows:?}");
+        // Bins 0/1/2 resolve to 12/18/24 pt, so row extents must be
+        // strictly increasing. Edge sampling would repeat the last bin
+        // (edges 0,10,20,30 land in bins 0,1,2,2) and give a flat tail.
+        assert!(
+            rows[0].1 < rows[1].1 && rows[1].1 < rows[2].1,
+            "row heights should follow the per-bin size palette: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn binned_stack_reserved_length_matches_the_bins_drawn() {
+        let legend = Legend::new("bin_fill")
+            .binned()
+            .key(LegendKeySpec::rect().scaled("fill", "bin_fill"));
+        let theme = default_theme();
+        let reg = binned_registry();
+        let m = LegendMeasure::new(
+            &legend,
+            &reg,
+            dpi_96(),
+            theme.legend_for(None),
+            &theme.geom,
+            0.0,
+            &theme.locale,
+        );
+        // Derive the expectation from the bin count independently of
+        // the measure, so an extra reserved row can't hide inside a
+        // self-consistent sum. Rect keys sit at the theme floor.
+        let n_bins = bin_midpoints(&bin_edges(
+            &reg.get("bin_fill").expect("bin_fill").breaks(5),
+        ))
+        .len();
+        assert_eq!(n_bins, 3);
+        let key_h_floor = pt_to_px(theme.legend.key.height.resolve(0.0), dpi_96());
+        // No title, so the reserved cross extent is bar + padding only.
+        let expected = (n_bins as f64) * key_h_floor + 2.0 * m.padding_px;
+        assert!(
+            (m.cross_dim_px(dpi_96()) - expected).abs() < 1e-9,
+            "reserved {} should equal {n_bins} bins + padding {}",
+            m.cross_dim_px(dpi_96()),
+            expected
+        );
+    }
+
+    #[test]
+    fn binned_stack_over_a_non_numeric_domain_reserves_nothing() {
+        // A discrete domain yields no numeric edges, so the renderer
+        // draws no body — the measure must not reserve a band for it.
+        let legend = Legend::new("category_color")
+            .binned()
+            .key(LegendKeySpec::rect().scaled("fill", "category_color"));
+        let theme = default_theme();
+        let reg = build_registry();
+        assert!(binned_rows(&legend, &reg, &theme).is_empty());
+        let measure = legend_measure(&legend, &reg, dpi_96(), &theme);
+        assert_eq!(measure.width_hint(dpi_96()), WidthHint::Min(0.0));
+        assert_eq!(measure.height_at(0.0, dpi_96()), 0.0);
     }
 
     fn sample_majors() -> Vec<(f64, String)> {

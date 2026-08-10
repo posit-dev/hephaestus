@@ -28,6 +28,6 @@ A host crate that wants to plug in its own shaper can do so by preserving `TextR
 - `scene/` — `draw_text` issues `SceneBuilder::draw_glyphs` calls with `GlyphRun` values.
 - `layout/` — `TextRun` implements `Measure` (`width_hint`, `height_at`, `width_at`) so it participates in Auto sizing and the iteration loop.
 - `composition/` — text drops into anatomical slots via `Cell::measured(run)`.
-- `plot/scale/axis.rs`, `plot/scale/legend.rs` — chrome rendering depends on this module.
+- `plot/chrome/` — axis / legend / strip / polar rendering depends on this module.
 - `plot/geom/text.rs`, `plot/geom/text_fit.rs`, `plot/geom/text_path.rs` — text-based geoms.
 - `shape.rs` — glyph-backed shape markers also use `SceneBuilder::draw_glyphs` (via a different path).

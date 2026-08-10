@@ -6,13 +6,15 @@ Scales — value mappers. Map a domain `Value` to a visual output (panel fractio
 
 **Leaf-module convention.** Nothing inside `src/scales/` imports from `crate::plot::*`, `crate::scene::*`, `crate::backend::*`, `crate::primitives::*`, or `crate::text::*`. It depends only on `std`, peniko (via `crate::color`), and its own siblings. The module is structured this way so it can be lifted into its own crate (`scales`) when the API settles. The lift is a `mv src/scales crates/scales/src && cargo init --lib`-style migration — no surface changes.
 
-**No `Scale` aggregate here.** The hephaestus `Scale` struct (bundle of scale_type + transform + ranges + generation counter) lives in `src/plot/scale.rs`. Future consumers of the scales crate roll their own bundle and call the free functions directly. The Scale struct's methods are 1-line shims that match on the enum tags and delegate.
+**No `Scale` aggregate here.** The hephaestus `Scale` struct (bundle of scale_type + transform + ranges + bin edges + break spec + formatter + generation counter) lives in `src/plot/scale/mod.rs`, with its named constructors in `src/plot/scale/constructors.rs`. Future consumers of the scales crate roll their own bundle and call the free functions directly. The Scale struct's methods are 1-line shims that match on the enum tags and delegate.
 
 Axes and legends — *rendering* of a scale's ticks / breaks against a `SceneBuilder` — live in `src/plot/chrome/` (hephaestus-internal; feature-gated on `text`). The scale layer here defines *what* to draw; chrome draws it.
 
+**Locale, not formatter, crosses the boundary.** `Locale` lives here because break labels are a scale-layer concern, but the `LabelFormatter` that overrides them hangs off hephaestus's `Scale`. A future crate consumer supplies its own formatter and reuses `Locale` as-is.
+
 ## What this module does
 
-A `Scale` combines a `ScaleType` (Continuous / Discrete / Ordinal / Binned / Identity), an optional `Transform` (Identity in v1), an `InputRange` (domain), an optional `OutputRange` (visual range), and — for `Binned` — a bin-edge list. Mapping flow:
+A `Scale` combines a `ScaleType` (Continuous / Discrete / Ordinal / Binned / Identity / Temporal), an optional `Transform`, an `InputRange` (domain), an optional `OutputRange` (visual range), and — for `Binned` — a bin-edge list. Mapping flow:
 
 1. Apply the transform (continuous scales only).
 2. Normalise to `[0, 1]` against the input range.
@@ -22,16 +24,19 @@ Scales are *stateless mappers*: all config lives on `Scale` itself. The same sca
 
 ## Core types
 
-- **`ScaleTypeKind`** (`scale_type.rs`) — enum tagging the scale family: `Continuous`, `Discrete`, `Ordinal`, `Binned`, `Identity`. Pure data; algorithms are free functions matching on this tag.
+- **`ScaleTypeKind`** (`scale_type.rs`) — enum tagging the scale family: `Continuous`, `Discrete`, `Ordinal`, `Binned`, `Identity`, `Temporal(TemporalUnit)`. Pure data; algorithms are free functions matching on this tag.
 - **`Transform`** (`transform.rs`) — POD struct `{ kind: TransformKind }`. Convenience methods (`forward`, `inverse`, `allowed_domain`) delegate to free functions of the same name with `_` suffix.
-- **`TransformKind`** — enum tagging the transform family. Identity is wired today; Log10/Log2/Log/Sqrt/Square/Exp10/Exp2/Exp/Asinh/PseudoLog land in Phase E.1.
+- **`TransformKind`** — enum tagging the transform family. Thirteen kinds are wired: `Identity`, `Log10`, `Log2`, `Log`, `Sqrt`, `Square`, `Exp10`, `Exp2`, `Exp`, `Asinh`, `PseudoLog`, `PseudoLog2`, `PseudoLog10`. Each has a forward, inverse and allowed-domain arm; `allowed_domain` is what keeps a log scale's domain off zero.
+- **`TemporalUnit`** (`scale_type.rs`) — `Date` / `DateTime` / `Time` / `Duration`, the calendar quantity a `Temporal` scale's f64 domain stands for. Decides which calendar-alignment family generates breaks and how tick values are wrapped back into typed `Value`s.
+- **`Locale`** (`locale.rs`) — number and date formatting rules (decimal / grouping separators, month and weekday names, first day of week). Threaded into label generation so tick text is locale-correct without the scale layer owning a formatter.
 - **`InputRange`** (`input.rs`) — `Continuous { min: f64, max: f64 }` (closed interval; temporal data projects to f64) or `Discrete(Vec<Value>)` (explicit list, user-ordered for ordinal scales). Accessors: `extent()`, `discrete_len()`.
 - **`OutputRange`** (`output.rs`) — `Numbers(Vec<f64>)` (pt for absolute sizes, unitless otherwise), `Strings(Vec<Arc<str>>)`, `Colors(Vec<Color>)`, `Linetypes(Vec<Arc<[LinetypeStep]>>)`. Position scales typically leave this unset; continuous scales then return `[0, 1]` fraction. Never doubles as configuration — a binned scale's edges are a separate argument, so any family can carry any palette.
 - **`AxisSide`** / **`LegendSide`** (`chrome.rs`) — placement enums (Left / Right / Bottom / Top, Top / Bottom / Left / Right). No logic; rendering lives in `crate::plot::chrome::{axis, legend}`.
 - **`Geometry`** (`geometry.rs`) — spatial-feature enum (Point / MultiPoint / LineString / MultiLineString / Polygon / MultiPolygon / GeometryCollection / Empty). Carried by `Value::Geometry(Arc<Geometry>)` so a column of features behaves like any other typed channel. **Opaque to scales** — geometries don't enter continuous or discrete domains and cannot be mapped through `scale.map`; the consuming geom walks the geometry and routes each coordinate through the bound `x` / `y` scales itself. Optional WKT / WKB / GeoJSON constructors gate behind `geom-wkt` / `geom-wkb` / `geom-geojson` features; each parser is hand-rolled and dependency-free.
-- **Per-kind free functions** (`scale_type.rs`): `continuous_map`, `discrete_map`, `ordinal_map`, `binned_map`, `identity_map`; `continuous_breaks`, `discrete_breaks`, `binned_breaks`; `binned_map_break`; `discrete_band_width`, `binned_band_width`, `binned_band_width_at`.
-- **Transform dispatch** (`transform.rs`): `transform_forward`, `transform_inverse`, `transform_allowed_domain` — all take `kind: TransformKind`.
-- **Tick selection** (`breaks.rs`): `extended_breaks` (Wilkinson), `linear_breaks` (evenly-spaced). E.1 will add `log_pretty_breaks`, `log_minor_breaks`, `sqrt_breaks`, `symlog_breaks`, etc.
+- **Per-kind free functions** (`scale_type.rs`): `continuous_map`, `discrete_map`, `ordinal_map`, `binned_map`, `identity_map`; `continuous_breaks`, `continuous_minor_breaks`, `discrete_breaks`, `binned_breaks`, `temporal_breaks`, `temporal_breaks_with_interval`, `temporal_minor_breaks`; `binned_map_break`; `discrete_band_width`, `binned_band_width`, `binned_band_width_at`.
+- **Transform dispatch** (`transform.rs`): `transform_forward`, `transform_inverse`, `transform_allowed_domain` — all take `kind: TransformKind`. Break generation dispatches on the same tag through the private `transform_breaks` / `transform_minor_breaks` in `scale_type.rs`, reached via `continuous_breaks` / `continuous_minor_breaks` — a continuous scale's ticks follow its transform without the caller choosing an algorithm.
+- **Tick selection** (`breaks.rs`): `extended_breaks` (Wilkinson) and `linear_breaks` (evenly-spaced) for linear domains; `log_pretty_breaks` / `log_minor_breaks` for the log family; `sqrt_breaks`; `symlog_breaks` / `symlog_minor_breaks` for Asinh and the PseudoLog family; `linear_minor_breaks_between` for subdividing majors.
+- **Calendar arithmetic** (`breaks.rs`): `pick_temporal_interval` sizes a `TemporalInterval` to a target tick count; `derive_minor_interval` picks the sub-interval. Per-type `align_*`, `advance_*`, `retreat_*`, `temporal_breaks_*` and `temporal_minor_breaks_*` families cover `Date` (days), `DateTime` (µs) and `Time` (ns), with `temporal_breaks_from_f64` / `temporal_minor_breaks_from_f64` as the projected-f64 entry points.
 
 Rendering of axis and legend chrome lives in `crate::plot::chrome::{axis, legend}`, not here — that's hephaestus's own surface against `SceneBuilder`. Future `scales`-crate consumers (e.g. ggsql) supply their own rendering.
 
@@ -42,6 +47,7 @@ Rendering of axis and legend chrome lives in `crate::plot::chrome::{axis, legend
 - **Ordinal** — ordered discrete domain with continuous output. Input position `idx / (n - 1)` interpolated through the output range — intermediate domain entries fall on gradient stops.
 - **Binned** — continuous domain pre-binned by explicit edges. With no output range it positions data at bin centres; with one, the bin index picks a palette entry the ordinal way (N entries over N bins is one-to-one, fewer interpolate). The edges travel in their own argument (`bins: Option<&[f64]>` on the free functions, a `bins` field on hephaestus's `Scale`), so `OutputRange` means the same thing here as for every other family.
 - **Identity** — pass-through; input returned untouched.
+- **Temporal** — a continuous domain carrying a calendar quantity, tagged by `TemporalUnit`. Maps linearly exactly as Continuous does; the difference is break generation, which lands on calendar boundaries (year / quarter / month / week / day / hour / minute / second) instead of Wilkinson "nice numbers", and tick values come back as typed `Value::Date` / `DateTime` / `Time` / `Duration` so formatters can reverse the f64 projection.
 
 ## Conventions
 
@@ -65,4 +71,4 @@ Rendering of axis and legend chrome lives in `crate::plot::chrome::{axis, legend
 - `src/scales/value.rs` — the `Value` enum scales map; `DataColumn`; temporal newtypes (`Date`, `DateTime`, `Time`, `Duration`); `LinetypeStep`. Co-located with scales because they're the data scales operate on.
 - `src/plot/geom/resolve.rs` — the helpers geoms use to apply a scale per row. `resolve_position` (Value → panel fraction), `resolve_color_channel` (Value → Color), `resolve_linetype_channel` (Value → dash pattern).
 - `src/plot/composition.rs` — `PlotComposition::add_scale` / `update_scale` are the user-facing entry points. Scale mutations through `update_scale` bump the generation and mark dependent plots dirty.
-- `src/plot/chrome/{axis,legend}.rs` (gated on `text`) — axis / legend rendering. Pulls breaks / format / band info from `Scale` and draws them via `SceneBuilder` + `TextRun`.
+- `src/plot/chrome/` (gated on `text`) — axis / legend rendering: `axis.rs`, `linear_axis.rs`, `polar.rs`, `strip.rs`, `panel.rs`, and `legend/`. Pulls breaks / format / band info from `Scale` and draws them via `SceneBuilder` + `TextRun`.

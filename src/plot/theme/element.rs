@@ -224,6 +224,24 @@ pub struct TextElement {
     pub strikethrough: Option<bool>,
     /// Margin around the text block, each side independent.
     pub margin: Option<Margin>,
+    /// Per-glyph outline color. `None` renders no outline — the one
+    /// field [`text_concrete_defaults`] leaves unset, since a concrete
+    /// value here would halo every string in the figure. A child layer
+    /// therefore cannot clear an outline a parent set by writing
+    /// `None`; set `text_linewidth_pt` to `Abs(0.0)` instead.
+    ///
+    /// Mirrors the `"text_stroke"` channel on the text geoms.
+    pub text_stroke: Option<ThemeColor>,
+    /// Outline thickness. Resolves against [`DEFAULT_LINEWIDTH_PT`],
+    /// the parent every other linewidth in the theme resolves against,
+    /// so `Rel(2.0)` is twice the standard hairline rather than a
+    /// multiple of the font size. Has no effect unless `text_stroke`
+    /// resolves to a color.
+    ///
+    /// The stroke centres on the glyph contour and does not grow the
+    /// text's measured box, matching the text geoms — a deliberately
+    /// heavy outline needs clearance from `margin`, which is measured.
+    pub text_linewidth_pt: Option<Length>,
 }
 
 impl TextElement {
@@ -244,6 +262,11 @@ impl TextElement {
             underline: self.underline.or(parent.underline),
             strikethrough: self.strikethrough.or(parent.strikethrough),
             margin: self.margin.or(parent.margin),
+            text_stroke: self
+                .text_stroke
+                .clone()
+                .or_else(|| parent.text_stroke.clone()),
+            text_linewidth_pt: self.text_linewidth_pt.or(parent.text_linewidth_pt),
         }
     }
 }
@@ -258,8 +281,14 @@ pub const DEFAULT_TEXT_SIZE_PT: f64 = 11.0;
 pub const DEFAULT_TEXT_LINEHEIGHT: f64 = 1.2;
 
 /// Concrete fallback values for a `TextElement` — 10pt regular ink
-/// text, centered, no rotation, 1.2× lineheight, zero margin. Used
-/// as the safety net for any field still `None` after cascading.
+/// text, centered, no rotation, 1.2× lineheight, zero margin, no
+/// glyph outline. Used as the safety net for any field still `None`
+/// after cascading.
+///
+/// `text_stroke` is the single field left `None`: it is a terminal
+/// value meaning "fill only", not a hole to fill, so chrome reads it
+/// directly rather than through the `.expect("… default")` pattern the
+/// other fields use.
 pub fn text_concrete_defaults() -> TextElement {
     TextElement {
         font: FontSpec::default(),
@@ -273,6 +302,8 @@ pub fn text_concrete_defaults() -> TextElement {
         underline: Some(false),
         strikethrough: Some(false),
         margin: Some(Margin::ZERO),
+        text_stroke: None,
+        text_linewidth_pt: Some(Length::Abs(DEFAULT_LINEWIDTH_PT)),
     }
 }
 

@@ -11,22 +11,33 @@
 //! - [`Value`] / [`DataColumn`] / [`Date`] / [`DateTime`] / [`Time`] /
 //!   [`Duration`] / [`LinetypeStep`] — the data scales operate on.
 //! - [`InputRange`] / [`OutputRange`] — POD configuration types.
-//! - [`Transform`] + [`TransformKind`] — value transforms (Identity in
-//!   v1; Log / Sqrt / Asinh / PseudoLog land in Phase E.1).
-//! - [`ScaleTypeKind`] — discriminator for the five scale families.
+//! - [`Transform`] + [`TransformKind`] — value transforms: Identity,
+//!   Log10 / Log2 / Log, Sqrt, Square, Exp10 / Exp2 / Exp, Asinh, and
+//!   PseudoLog / PseudoLog2 / PseudoLog10.
+//! - [`ScaleTypeKind`] — discriminator for the six scale families.
 //! - [`AxisSide`] / [`LegendSide`] — placement enums.
+//! - [`Locale`] — number / date formatting rules threaded into label
+//!   generation.
 //! - Free-function algorithms:
 //!   - Per scale type: [`continuous_map`], [`discrete_map`],
 //!     [`ordinal_map`], [`binned_map`], [`identity_map`].
-//!   - Per scale type: [`continuous_breaks`], [`discrete_breaks`],
-//!     [`binned_breaks`].
+//!   - Per scale type: [`continuous_breaks`], [`continuous_minor_breaks`],
+//!     [`discrete_breaks`], [`binned_breaks`], [`temporal_breaks`],
+//!     [`temporal_breaks_with_interval`], [`temporal_minor_breaks`].
 //!   - Break placement, where it differs from the data mapping:
 //!     [`binned_map_break`].
 //!   - Band-width queries: [`discrete_band_width`],
 //!     [`binned_band_width`], [`binned_band_width_at`].
 //!   - Transform dispatch: [`transform_forward`], [`transform_inverse`],
 //!     [`transform_allowed_domain`].
-//!   - Tick selection: [`extended_breaks`], [`linear_breaks`].
+//!   - Tick selection: [`extended_breaks`] (Wilkinson), [`linear_breaks`],
+//!     [`log_pretty_breaks`], [`log_minor_breaks`], [`sqrt_breaks`],
+//!     [`symlog_breaks`], [`symlog_minor_breaks`],
+//!     [`linear_minor_breaks_between`].
+//!   - Calendar arithmetic behind the temporal families:
+//!     [`pick_temporal_interval`], [`derive_minor_interval`], and the
+//!     `align_*` / `advance_*` / `retreat_*` / `temporal_breaks_*`
+//!     families over [`Date`] / [`DateTime`] / [`Time`].
 //!
 //! ## What's not here
 //!

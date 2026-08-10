@@ -15,12 +15,12 @@ For tests and one-off renders, `Plot` is independently usable with a hand-built 
 - **`geom/`** — vectorised drawing primitives (`PointGeom`, `LineGeom`, `PolygonGeom`, `RectGeom`, `EllipseGeom`, `SegmentGeom`, `WedgeGeom`, plus `TextGeom` / `TextFitGeom` / `TextPathGeom` when the `text` feature is on). See `src/plot/geom/CLAUDE.md`.
 - **`chrome/`** — axis and legend rendering. Feature-gated on `text`. The scale layer (in `crate::scales`) defines what to draw; this module draws it against `SceneBuilder`.
 
-## Re-export shims
+## Scale bundle and re-export shims
 
-- **`scale.rs`** — re-exports `crate::scales::*` so legacy `crate::plot::scale::*` paths keep working.
-- **`value.rs`** — re-exports `crate::scales::value::*` so legacy `crate::plot::value::*` paths keep working.
+- **`scale/`** — hephaestus's own `Scale` bundle, `ScaleRegistry`, and the ggplot-style constructors (`scale::continuous(...)`, `scale::binned(...)`, …) in `scale/constructors.rs`. Hephaestus-only: none of it ships in the lift-ready scales crate. The module also re-exports `crate::scales::*`, so `crate::plot::scale::*` resolves both the bundle and the underlying enums / free functions.
+- **`value.rs`** — pure re-export of `crate::scales::value::*`.
 
-The canonical home for scales / values is [`crate::scales`]; see `src/scales/CLAUDE.md`.
+The algorithms `Scale` delegates to live in [`crate::scales`]; see `src/scales/CLAUDE.md`.
 
 ## Core types (this folder, not in subdirectories)
 
@@ -64,7 +64,7 @@ Chrome belongs to whichever thing owns the space it sits in: a patch's title goe
 - **Two plots sharing a scale name share the same `Scale`.** This is by design and is the only way to share axis configuration across plots.
 - **`Raw(...)` bypasses scales.** Wrapping a channel value in `Raw(...)` produces `Channel::RawConstant` / `Channel::RawData`, which the per-row resolver passes through untouched. Used when a value is already in the geom's output space (panel fraction, `Color`, pt size).
 - **Temporal values project to f64 before entering a continuous scale.** Dates → days, DateTimes → microseconds, etc. Tick labels reverse the projection.
-- **Chrome (axes, legends, text) is feature-gated on `text`.** The orchestrator's full `wire` and the axis / legend renderers in `scale/axis.rs` and `scale/legend.rs` require `text`; `wire_panel` is always available so the panel rect still appears in the layout for `draw_panel_into`.
+- **Chrome (axes, legends, text) is feature-gated on `text`.** The orchestrator's full `wire` and the renderers in `chrome/` (`axis.rs`, `linear_axis.rs`, `polar.rs`, `strip.rs`, `legend/`) require `text`; `wire_panel` is always available so the panel rect still appears in the layout for `draw_panel_into`.
 - **Legend collapse runs per render, not on attach.** `add_legend` / `add_legend_separate` (on both `Plot` and `PlotComposition`) only store the legend and hand back an id; `chrome::legend::collapse_legends` folds compatible legends together inside `wire` and `draw_chrome_into`, which must call it with the same registry + locale so measured space matches what's drawn. Compatibility compares the *scales* the two legends resolve to (`Scale::legend_equivalent_to`: same family, transform, domain, breaks and labels) rather than the scale names, so two separately configured scales trained to the same values share one legend. Colorbars collapse under a stricter condition: since the surviving bar has to stand in for both, the bodies must agree on step mode, sample count and every aesthetic binding, and the scales behind those bindings must be `Scale::visual_equivalent_to` (legend-equivalent *plus* the same output range). `add_legend_separate` sets `Legend::merge = false` to opt a legend out of being folded into an earlier one.
 
 ## Cross-references
