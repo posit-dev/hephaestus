@@ -13,7 +13,7 @@ use super::breaks::{
     extended_breaks, linear_minor_breaks_between, log_minor_breaks, log_pretty_breaks, sqrt_breaks,
     symlog_breaks, symlog_minor_breaks, temporal_breaks_date, temporal_breaks_datetime,
     temporal_breaks_from_f64, temporal_breaks_time, temporal_minor_breaks_from_f64,
-    TemporalInterval,
+    temporal_minor_breaks_from_f64_with_interval, TemporalInterval,
 };
 use super::input::InputRange;
 use super::output::OutputRange;
@@ -298,7 +298,29 @@ pub fn temporal_minor_breaks(
         .collect()
 }
 
-fn wrap_temporal_value(raw: f64, unit: TemporalUnit) -> Value {
+/// Calendar-aligned minor breaks under a caller-chosen major interval.
+/// Subdivides `interval` — the counterpart to
+/// [`temporal_breaks_with_interval`], so majors pinned to an interval and
+/// their minors agree on what they're subdividing.
+pub fn temporal_minor_breaks_with_interval(
+    input_range: Option<&InputRange>,
+    unit: TemporalUnit,
+    interval: TemporalInterval,
+) -> Vec<Value> {
+    let (min, max) = match input_range {
+        Some(InputRange::Continuous { min, max }) => (*min, *max),
+        _ => return Vec::new(),
+    };
+    temporal_minor_breaks_from_f64_with_interval(min, max, unit, interval)
+        .into_iter()
+        .map(|raw| wrap_temporal_value(raw, unit))
+        .collect()
+}
+
+/// Wrap a raw f64 domain position as the typed [`Value`] its
+/// [`TemporalUnit`] stands for — the inverse of the projection a temporal
+/// scale applies on the way in.
+pub fn wrap_temporal_value(raw: f64, unit: TemporalUnit) -> Value {
     match unit {
         TemporalUnit::Date => Value::Date(raw as i32),
         TemporalUnit::DateTime => Value::DateTime(raw as i64),

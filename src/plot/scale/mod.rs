@@ -35,10 +35,10 @@ pub use crate::scales::{
     discrete_breaks, discrete_map, extended_breaks, identity_map, input, linear_breaks,
     linear_minor_breaks_between, log_minor_breaks, log_pretty_breaks, ordinal_map, output,
     scale_type, sqrt_breaks, symlog_breaks, symlog_minor_breaks, temporal_breaks,
-    temporal_breaks_with_interval, temporal_minor_breaks, transform, transform_allowed_domain,
-    transform_forward, transform_inverse, value, AxisSide, CalendarUnit, InputRange, LegendSide,
-    OutputRange, ScaleTypeKind, TemporalInterval, TemporalUnit, Transform, TransformKind,
-    DEFAULT_BREAK_COUNT,
+    temporal_breaks_with_interval, temporal_minor_breaks, temporal_minor_breaks_with_interval,
+    transform, transform_allowed_domain, transform_forward, transform_inverse, value,
+    wrap_temporal_value, AxisSide, CalendarUnit, InputRange, LegendSide, OutputRange,
+    ScaleTypeKind, TemporalInterval, TemporalUnit, Transform, TransformKind, DEFAULT_BREAK_COUNT,
 };
 
 // Axis / legend chrome renderers live in src/plot/chrome/ — re-exported
@@ -86,6 +86,33 @@ pub enum BreaksSpec {
     TemporalInterval(TemporalInterval),
 }
 
+// ─── MinorBreaksSpec ─────────────────────────────────────────────────────────
+
+/// User-supplied minor-break specification. When set on a [`Scale`],
+/// replaces the scale-type's automatic minor-break algorithm at
+/// [`Scale::minor_breaks`]. Minor breaks carry no labels, so there is no
+/// counterpart to [`BreaksSpec::Labeled`].
+#[derive(Clone, Debug)]
+pub enum MinorBreaksSpec {
+    /// Pin exact minor positions. An empty vector suppresses minor
+    /// breaks entirely.
+    Explicit(Vec<Value>),
+    /// Subdivide each consecutive pair of major breaks into
+    /// `n + 1` gaps, placing `n` evenly-spaced minors per interval and
+    /// none on the majors themselves. `0` suppresses minor breaks.
+    CountBetween(usize),
+    /// Numeric "every N" — multiples of `step` across the continuous
+    /// domain, minus the positions already carrying a major break.
+    /// Falls back to the automatic algorithm on scales without a
+    /// continuous domain.
+    NumericInterval(f64),
+    /// Calendar interval (e.g. weekly minors under monthly majors),
+    /// minus the positions already carrying a major break. Used by
+    /// temporal scales; falls back to the automatic algorithm on
+    /// non-temporal scales.
+    TemporalInterval(TemporalInterval),
+}
+
 // ─── Scale ───────────────────────────────────────────────────────────────────
 
 /// A configurable value mapper. Bundles a [`ScaleTypeKind`] with optional
@@ -110,6 +137,11 @@ pub struct Scale {
     /// User-supplied break override, if any. `None` ⇒ use the scale
     /// type's automatic break algorithm.
     breaks_spec: Option<BreaksSpec>,
+    /// User-supplied minor-break override, if any. `None` ⇒ use the
+    /// scale type's automatic minor-break algorithm. Independent of
+    /// [`Self::breaks_spec`]: pinned majors still get automatic minors
+    /// and vice versa.
+    minor_breaks_spec: Option<MinorBreaksSpec>,
     /// User-supplied tick-label formatter, if any. `None` ⇒ use the
     /// default per-variant formatter (see [`Scale::default_format`]).
     formatter: Option<Arc<LabelFormatter>>,
@@ -129,6 +161,7 @@ impl Scale {
             output_range: None,
             bins: None,
             breaks_spec: None,
+            minor_breaks_spec: None,
             formatter: None,
             generation: Cell::new(0),
         }
@@ -347,6 +380,75 @@ impl Scale {
         self.bump_generation();
     }
 
+    // ── Minor-break overrides (`&mut self`; bump generation) ──
+
+    /// Pin exact minor (sub-tick) positions, overriding the scale-type's
+    /// automatic minor algorithm. An empty vector draws no minors at all.
+    pub fn with_minor_breaks(mut self, breaks: Vec<Value>) -> Self {
+        self.minor_breaks_spec = Some(MinorBreaksSpec::Explicit(breaks));
+        self
+    }
+
+    /// Replace the minor-break override with the given pinned positions.
+    /// Bumps the generation counter.
+    pub fn set_minor_breaks(&mut self, breaks: Vec<Value>) {
+        self.minor_breaks_spec = Some(MinorBreaksSpec::Explicit(breaks));
+        self.bump_generation();
+    }
+
+    /// Place `per_interval` evenly-spaced minors between each
+    /// consecutive pair of major breaks. `0` draws no minors.
+    pub fn with_minor_count(mut self, per_interval: usize) -> Self {
+        self.minor_breaks_spec = Some(MinorBreaksSpec::CountBetween(per_interval));
+        self
+    }
+
+    /// Replace the minor-break override with a per-interval count.
+    /// Bumps the generation counter.
+    pub fn set_minor_count(&mut self, per_interval: usize) {
+        self.minor_breaks_spec = Some(MinorBreaksSpec::CountBetween(per_interval));
+        self.bump_generation();
+    }
+
+    /// Numeric "every N" minors: multiples of `step` across the
+    /// continuous domain, skipping positions that already carry a major
+    /// break. For calendar-aware minors on a [`temporal`] scale use
+    /// [`Self::with_minor_temporal_interval`].
+    pub fn with_minor_interval(mut self, step: f64) -> Self {
+        self.minor_breaks_spec = Some(MinorBreaksSpec::NumericInterval(step));
+        self
+    }
+
+    /// Replace the minor-break override with a numeric interval. Bumps
+    /// the generation counter.
+    pub fn set_minor_interval(&mut self, step: f64) {
+        self.minor_breaks_spec = Some(MinorBreaksSpec::NumericInterval(step));
+        self.bump_generation();
+    }
+
+    /// Calendar interval minors (e.g. every week), skipping positions
+    /// that already carry a major break. Applies to scales constructed
+    /// via [`temporal`]; on a non-temporal scale this falls back to the
+    /// automatic algorithm (no panic).
+    pub fn with_minor_temporal_interval(mut self, interval: TemporalInterval) -> Self {
+        self.minor_breaks_spec = Some(MinorBreaksSpec::TemporalInterval(interval));
+        self
+    }
+
+    /// Replace the minor-break override with a calendar interval. Bumps
+    /// the generation counter.
+    pub fn set_minor_temporal_interval(&mut self, interval: TemporalInterval) {
+        self.minor_breaks_spec = Some(MinorBreaksSpec::TemporalInterval(interval));
+        self.bump_generation();
+    }
+
+    /// Clear any pinned minor breaks / count / interval; revert to the
+    /// scale type's automatic algorithm. Bumps the generation counter.
+    pub fn clear_minor_breaks(&mut self) {
+        self.minor_breaks_spec = None;
+        self.bump_generation();
+    }
+
     // ── Formatter override ──
 
     /// Set a custom formatter applied to each break value before
@@ -517,6 +619,17 @@ impl Scale {
     // continuous domain. Returns `None` on non-continuous scales or
     // invalid steps so the caller falls back.
     fn breaks_numeric_interval(&self, step: f64) -> Option<Vec<Value>> {
+        Some(
+            self.numeric_interval_positions(step)?
+                .into_iter()
+                .map(Value::Number)
+                .collect(),
+        )
+    }
+
+    // Raw f64 positions for a numeric "every N" spec, shared by the
+    // major and minor paths.
+    fn numeric_interval_positions(&self, step: f64) -> Option<Vec<f64>> {
         if !step.is_finite() || step <= 0.0 {
             return None;
         }
@@ -536,7 +649,7 @@ impl Scale {
         let mut out = Vec::with_capacity(count);
         let mut k = first_k;
         while k <= last_k {
-            out.push(Value::Number(k * step));
+            out.push(k * step);
             k += 1.0;
         }
         Some(out)
@@ -547,18 +660,124 @@ impl Scale {
     /// aware: log scales emit geometric 2..9 between decades; sqrt /
     /// identity / etc. emit one midpoint between consecutive majors.
     /// For temporal scales it emits sub-unit calendar ticks (year →
-    /// quarter, month → week, …).
+    /// quarter, month → week, …) — subdividing the interval pinned by
+    /// [`Self::with_temporal_interval`] when there is one, and the
+    /// interval the tick target `n` implies otherwise.
+    ///
+    /// When a [`MinorBreaksSpec`] has been set via
+    /// [`Self::with_minor_breaks`] / [`Self::with_minor_count`] / etc.,
+    /// the override takes precedence. A mismatch between override
+    /// variant and scale type (e.g.
+    /// [`MinorBreaksSpec::TemporalInterval`] on a numeric scale)
+    /// silently falls back to the automatic algorithm.
     pub fn minor_breaks(&self, n: usize) -> Vec<Value> {
+        if let Some(spec) = &self.minor_breaks_spec {
+            if let Some(ms) = self.minor_breaks_from_spec(spec, n) {
+                return ms;
+            }
+        }
+        self.minor_breaks_auto(n)
+    }
+
+    // Scale-type's automatic minor-break algorithm — extracted so
+    // `minor_breaks` can short-circuit on a `minor_breaks_spec` override
+    // and fall back here for mismatches.
+    fn minor_breaks_auto(&self, n: usize) -> Vec<Value> {
         match self.scale_type {
             ScaleTypeKind::Continuous => {
                 let majors = self.breaks(n);
                 continuous_minor_breaks(self.input_range.as_ref(), &self.transform, &majors)
             }
             ScaleTypeKind::Temporal(unit) => {
+                // A calendar interval pinned on the majors drives the
+                // minors too: subdivide the interval the caller asked
+                // for, not the one the target tick count would pick.
+                if let Some(BreaksSpec::TemporalInterval(interval)) = &self.breaks_spec {
+                    return temporal_minor_breaks_with_interval(
+                        self.input_range.as_ref(),
+                        unit,
+                        *interval,
+                    );
+                }
                 let majors = self.breaks(n);
                 temporal_minor_breaks(self.input_range.as_ref(), unit, &majors, n)
             }
             _ => Vec::new(),
+        }
+    }
+
+    // Apply a user-supplied `MinorBreaksSpec`. Returns `None` when the
+    // spec is incompatible with the scale type (caller falls back to
+    // `minor_breaks_auto`).
+    fn minor_breaks_from_spec(&self, spec: &MinorBreaksSpec, n: usize) -> Option<Vec<Value>> {
+        match spec {
+            MinorBreaksSpec::Explicit(vs) => Some(vs.clone()),
+            MinorBreaksSpec::CountBetween(per_interval) => {
+                self.minor_breaks_count_between(*per_interval, n)
+            }
+            MinorBreaksSpec::NumericInterval(step) => {
+                let raw = self.numeric_interval_positions(*step)?;
+                let raw = self.drop_major_positions(raw, n, step.abs() * 1e-9);
+                Some(self.wrap_positions(raw))
+            }
+            MinorBreaksSpec::TemporalInterval(interval) => match self.scale_type {
+                ScaleTypeKind::Temporal(unit) => {
+                    let raw: Vec<f64> =
+                        temporal_breaks_with_interval(self.input_range.as_ref(), unit, *interval)
+                            .iter()
+                            .filter_map(|v| v.as_number())
+                            .collect();
+                    let raw = self.drop_major_positions(raw, n, 0.0);
+                    Some(self.wrap_positions(raw))
+                }
+                _ => None,
+            },
+        }
+    }
+
+    // Evenly subdivide the gaps between consecutive major breaks.
+    // Non-numeric majors (a discrete domain) leave nothing to subdivide.
+    fn minor_breaks_count_between(&self, per_interval: usize, n: usize) -> Option<Vec<Value>> {
+        if per_interval == 0 {
+            return Some(Vec::new());
+        }
+        let majors: Vec<f64> = self
+            .breaks(n)
+            .iter()
+            .filter_map(|v| v.as_number())
+            .collect();
+        if majors.len() < 2 {
+            return Some(Vec::new());
+        }
+        let raw = linear_minor_breaks_between(&majors, per_interval);
+        Some(self.wrap_positions(raw))
+    }
+
+    // Drop positions that already carry a major break: minor ticks sit
+    // *between* majors by convention (log minors skip the decade powers,
+    // calendar minors skip the aligned major), so an interval that
+    // divides the major spacing evenly must not double-draw.
+    fn drop_major_positions(&self, positions: Vec<f64>, n: usize, tol: f64) -> Vec<f64> {
+        let majors: Vec<f64> = self
+            .breaks(n)
+            .iter()
+            .filter_map(|v| v.as_number())
+            .collect();
+        positions
+            .into_iter()
+            .filter(|p| !majors.iter().any(|m| (m - p).abs() <= tol))
+            .collect()
+    }
+
+    // Type raw f64 positions as break values: temporal scales get their
+    // calendar variant back, every other family stays numeric.
+    fn wrap_positions(&self, positions: Vec<f64>) -> Vec<Value> {
+        match self.scale_type {
+            ScaleTypeKind::Temporal(unit) => positions
+                .into_iter()
+                .map(|raw| wrap_temporal_value(raw, unit))
+                .collect(),
+            _ => positions.into_iter().map(Value::Number).collect(),
         }
     }
 
@@ -646,6 +865,12 @@ impl Scale {
         self.breaks_spec.as_ref()
     }
 
+    /// Borrow the configured minor-break override, if any. `None` ⇒ the
+    /// scale uses its automatic minor-break algorithm.
+    pub fn minor_breaks_spec(&self) -> Option<&MinorBreaksSpec> {
+        self.minor_breaks_spec.as_ref()
+    }
+
     /// Built-in per-variant tick-label formatter, given a locale.
     /// Exposed so user closures supplied to [`Self::with_format`]
     /// can fall through to the default for variants they don't care
@@ -718,6 +943,7 @@ impl std::fmt::Debug for Scale {
             .field("output_range", &self.output_range)
             .field("bins", &self.bins)
             .field("breaks_spec", &self.breaks_spec)
+            .field("minor_breaks_spec", &self.minor_breaks_spec)
             .field(
                 "formatter",
                 &self.formatter.as_ref().map(|_| "<fn>").unwrap_or("none"),
@@ -2087,6 +2313,194 @@ mod tests {
         assert!(bs.iter().all(|v| matches!(v, Value::Number(_))));
     }
 
+    // ── Minor break overrides ──
+
+    #[test]
+    fn explicit_minor_breaks_pin_positions() {
+        let s = continuous(0.0..=10.0).with_minor_breaks(vec![
+            Value::Number(2.5),
+            Value::Number(5.0),
+            Value::Number(7.5),
+        ]);
+        let ms: Vec<f64> = s
+            .minor_breaks(5)
+            .iter()
+            .filter_map(|v| v.as_number())
+            .collect();
+        assert_eq!(ms, vec![2.5, 5.0, 7.5]);
+    }
+
+    #[test]
+    fn empty_minor_breaks_suppress_minors() {
+        let s = continuous(0.0..=10.0).with_minor_breaks(Vec::new());
+        assert!(s.minor_breaks(5).is_empty());
+    }
+
+    #[test]
+    fn explicit_minor_breaks_apply_to_discrete_scales() {
+        // The automatic algorithm has nothing to offer a discrete
+        // domain, but a pinned list still positions gridlines.
+        let s = discrete(["a", "b", "c"].into_iter().map(Into::into))
+            .with_minor_breaks(vec![Value::Number(0.5)]);
+        let ms: Vec<f64> = s
+            .minor_breaks(0)
+            .iter()
+            .filter_map(|v| v.as_number())
+            .collect();
+        assert_eq!(ms, vec![0.5]);
+    }
+
+    #[test]
+    fn minor_count_subdivides_each_major_interval() {
+        let s = continuous(0.0..=10.0)
+            .with_breaks(vec![
+                Value::Number(0.0),
+                Value::Number(5.0),
+                Value::Number(10.0),
+            ])
+            .with_minor_count(4);
+        let ms: Vec<f64> = s
+            .minor_breaks(5)
+            .iter()
+            .filter_map(|v| v.as_number())
+            .collect();
+        assert_eq!(ms, vec![1.0, 2.0, 3.0, 4.0, 6.0, 7.0, 8.0, 9.0]);
+    }
+
+    #[test]
+    fn minor_count_zero_suppresses_minors() {
+        let s = continuous(0.0..=10.0).with_minor_count(0);
+        assert!(s.minor_breaks(5).is_empty());
+    }
+
+    #[test]
+    fn minor_count_overrides_the_transform_default() {
+        // Log10 minors are normally the geometric 2..9 per decade.
+        let s = continuous(1.0..=100.0)
+            .with_transform(TransformKind::Log10)
+            .with_minor_count(1);
+        let majors: Vec<f64> = s.breaks(5).iter().filter_map(|v| v.as_number()).collect();
+        let ms: Vec<f64> = s
+            .minor_breaks(5)
+            .iter()
+            .filter_map(|v| v.as_number())
+            .collect();
+        assert_eq!(ms.len(), majors.len().saturating_sub(1));
+    }
+
+    #[test]
+    fn minor_interval_skips_positions_carrying_a_major() {
+        let s = continuous(0.0..=10.0)
+            .with_interval(2.0)
+            .with_minor_interval(0.5);
+        let ms: Vec<f64> = s
+            .minor_breaks(5)
+            .iter()
+            .filter_map(|v| v.as_number())
+            .collect();
+        assert!(
+            ms.iter().all(|m| (m / 2.0).fract() != 0.0),
+            "minor landed on a major: {ms:?}"
+        );
+        assert_eq!(ms.first(), Some(&0.5));
+        assert_eq!(ms.len(), 15, "21 half-steps minus 6 majors: {ms:?}");
+    }
+
+    #[test]
+    fn minor_interval_falls_back_on_discrete() {
+        let s = discrete(["a", "b", "c"].into_iter().map(Into::into)).with_minor_interval(0.5);
+        assert!(s.minor_breaks(0).is_empty());
+    }
+
+    #[test]
+    fn minor_temporal_interval_emits_calendar_aligned_dates() {
+        let s = temporal(Date::from_ymd(2024, 1, 1)..=Date::from_ymd(2024, 6, 30))
+            .with_temporal_interval(TemporalInterval::new(1, CalendarUnit::Month))
+            .with_minor_temporal_interval(TemporalInterval::new(1, CalendarUnit::Week));
+        let minors = s.minor_breaks(5);
+        assert!(!minors.is_empty(), "expected weekly minors in the span");
+        assert!(
+            minors.iter().all(|v| matches!(v, Value::Date(_))),
+            "minors should carry the scale's calendar variant: {minors:?}"
+        );
+        // Month starts are majors; the weekly minors must skip them.
+        let majors: Vec<f64> = s.breaks(5).iter().filter_map(|v| v.as_number()).collect();
+        for m in minors.iter().filter_map(|v| v.as_number()) {
+            assert!(!majors.contains(&m), "minor {m} coincides with a major");
+        }
+    }
+
+    #[test]
+    fn minor_temporal_interval_falls_back_on_numeric_scale() {
+        let s = continuous(0.0..=100.0)
+            .with_minor_temporal_interval(TemporalInterval::new(1, CalendarUnit::Week));
+        let ms = s.minor_breaks(5);
+        assert!(!ms.is_empty(), "fallback should still produce minors");
+        assert!(ms.iter().all(|v| matches!(v, Value::Number(_))));
+    }
+
+    #[test]
+    fn minor_numeric_interval_wraps_temporal_variants() {
+        let s = temporal(Date::from_ymd(2024, 1, 1)..=Date::from_ymd(2024, 1, 31))
+            .with_minor_interval(2.0);
+        let ms = s.minor_breaks(5);
+        assert!(!ms.is_empty());
+        assert!(ms.iter().all(|v| matches!(v, Value::Date(_))), "{ms:?}");
+    }
+
+    #[test]
+    fn clear_minor_breaks_reverts_to_auto() {
+        let mut s = continuous(0.0..=10.0).with_minor_breaks(Vec::new());
+        assert!(s.minor_breaks(5).is_empty());
+        s.clear_minor_breaks();
+        assert!(
+            !s.minor_breaks(5).is_empty(),
+            "expected automatic minors after clear"
+        );
+    }
+
+    #[test]
+    fn auto_minors_subdivide_a_pinned_major_interval() {
+        // Quarterly majors → monthly minors, one per month that isn't
+        // itself a quarter start. Without the pinned interval the auto
+        // algorithm sizes minors from the tick target instead.
+        let s = temporal(Date::from_ymd(2024, 1, 1)..=Date::from_ymd(2024, 12, 31))
+            .with_temporal_interval(TemporalInterval::new(3, CalendarUnit::Month));
+        let months: Vec<u8> = s
+            .minor_breaks(5)
+            .iter()
+            .filter_map(|v| match v {
+                Value::Date(d) => Some(Date::from_days(*d).to_ymd().1),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(months, vec![2, 3, 5, 6, 8, 9, 11, 12]);
+    }
+
+    #[test]
+    fn explicit_minors_win_over_a_pinned_major_interval() {
+        let mid = Date::from_ymd(2024, 6, 15);
+        let s = temporal(Date::from_ymd(2024, 1, 1)..=Date::from_ymd(2024, 12, 31))
+            .with_temporal_interval(TemporalInterval::new(3, CalendarUnit::Month))
+            .with_minor_breaks(vec![Value::Date(mid.to_days())]);
+        let ms = s.minor_breaks(5);
+        assert_eq!(ms.len(), 1);
+        assert!(ms[0].key_eq(&Value::Date(mid.to_days())), "{ms:?}");
+    }
+
+    #[test]
+    fn minor_override_leaves_majors_untouched() {
+        let s = continuous(0.0..=10.0).with_minor_count(3);
+        let auto = continuous(0.0..=10.0);
+        let a: Vec<f64> = s.breaks(5).iter().filter_map(|v| v.as_number()).collect();
+        let b: Vec<f64> = auto
+            .breaks(5)
+            .iter()
+            .filter_map(|v| v.as_number())
+            .collect();
+        assert_eq!(a, b);
+    }
+
     // ── Introspection ──
 
     #[test]
@@ -2097,6 +2511,17 @@ mod tests {
         assert!(matches!(
             s.breaks_spec(),
             Some(BreaksSpec::NumericInterval(2.5))
+        ));
+    }
+
+    #[test]
+    fn minor_breaks_spec_accessor_reflects_state() {
+        let s = continuous(0.0..=10.0);
+        assert!(s.minor_breaks_spec().is_none());
+        let s = s.with_minor_count(3);
+        assert!(matches!(
+            s.minor_breaks_spec(),
+            Some(MinorBreaksSpec::CountBetween(3))
         ));
     }
 
@@ -2117,6 +2542,26 @@ mod tests {
         let g3 = s.generation();
         s.clear_breaks();
         assert!(s.generation() > g3);
+    }
+
+    #[test]
+    fn minor_override_mutators_bump_generation() {
+        let mut s = continuous(0.0..=10.0);
+        let g0 = s.generation();
+        s.set_minor_breaks(vec![Value::Number(5.0)]);
+        assert!(s.generation() > g0);
+        let g1 = s.generation();
+        s.set_minor_count(2);
+        assert!(s.generation() > g1);
+        let g2 = s.generation();
+        s.set_minor_interval(0.5);
+        assert!(s.generation() > g2);
+        let g3 = s.generation();
+        s.set_minor_temporal_interval(TemporalInterval::new(1, CalendarUnit::Week));
+        assert!(s.generation() > g3);
+        let g4 = s.generation();
+        s.clear_minor_breaks();
+        assert!(s.generation() > g4);
     }
 
     #[test]

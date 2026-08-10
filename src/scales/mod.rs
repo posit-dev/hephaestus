@@ -23,9 +23,11 @@
 //!     [`ordinal_map`], [`binned_map`], [`identity_map`].
 //!   - Per scale type: [`continuous_breaks`], [`continuous_minor_breaks`],
 //!     [`discrete_breaks`], [`binned_breaks`], [`temporal_breaks`],
-//!     [`temporal_breaks_with_interval`], [`temporal_minor_breaks`].
+//!     [`temporal_breaks_with_interval`], [`temporal_minor_breaks`],
+//!     [`temporal_minor_breaks_with_interval`].
 //!   - Break placement, where it differs from the data mapping:
-//!     [`binned_map_break`].
+//!     [`binned_map_break`]; [`wrap_temporal_value`] types a raw f64
+//!     position back into its calendar [`Value`].
 //!   - Band-width queries: [`discrete_band_width`],
 //!     [`binned_band_width`], [`binned_band_width_at`].
 //!   - Transform dispatch: [`transform_forward`], [`transform_inverse`],
@@ -79,8 +81,9 @@ pub use breaks::{
     log_minor_breaks, log_pretty_breaks, pick_temporal_interval, retreat_date_by_interval,
     retreat_datetime_by_interval, retreat_time_by_interval, sqrt_breaks, symlog_breaks,
     symlog_minor_breaks, temporal_breaks_date, temporal_breaks_datetime, temporal_breaks_time,
-    temporal_minor_breaks_date, temporal_minor_breaks_datetime, temporal_minor_breaks_time,
-    CalendarUnit, TemporalInterval, DEFAULT_BREAK_COUNT,
+    temporal_minor_breaks_date, temporal_minor_breaks_datetime,
+    temporal_minor_breaks_from_f64_with_interval, temporal_minor_breaks_time, CalendarUnit,
+    TemporalInterval, DEFAULT_BREAK_COUNT,
 };
 pub use chrome::{AxisSide, LegendSide};
 pub use geometry::{Coord, Geometry, ParseError as GeometryParseError, Polygon as GeometryPolygon};
@@ -91,7 +94,8 @@ pub use scale_type::{
     binned_band_width, binned_band_width_at, binned_breaks, binned_map, binned_map_break,
     continuous_breaks, continuous_map, continuous_minor_breaks, discrete_band_width,
     discrete_breaks, discrete_map, identity_map, ordinal_map, temporal_breaks,
-    temporal_breaks_with_interval, temporal_minor_breaks, ScaleTypeKind, TemporalUnit,
+    temporal_breaks_with_interval, temporal_minor_breaks, temporal_minor_breaks_with_interval,
+    wrap_temporal_value, ScaleTypeKind, TemporalUnit,
 };
 pub use transform::{
     transform_allowed_domain, transform_forward, transform_inverse, Transform, TransformKind,

@@ -1084,7 +1084,8 @@ pub fn temporal_breaks_from_f64(min: f64, max: f64, unit: TemporalUnit, n: usize
     }
 }
 
-/// Minor temporal breaks from f64-typed input range.
+/// Minor temporal breaks from f64-typed input range. Sizes the major
+/// interval to `n`, then subdivides it.
 pub fn temporal_minor_breaks_from_f64(
     min: f64,
     max: f64,
@@ -1096,6 +1097,23 @@ pub fn temporal_minor_breaks_from_f64(
     }
     let target = (n.max(2)) as f64;
     let interval = pick_temporal_interval(max - min, target, unit);
+    temporal_minor_breaks_from_f64_with_interval(min, max, unit, interval)
+}
+
+/// Minor temporal breaks under a caller-chosen major interval —
+/// subdivides `interval` by its derived sub-interval (see
+/// [`derive_minor_interval`]) rather than by whatever a target tick
+/// count would have picked. Returns empty when the major interval has no
+/// sensible subdivision (a `Second` major).
+pub fn temporal_minor_breaks_from_f64_with_interval(
+    min: f64,
+    max: f64,
+    unit: TemporalUnit,
+    interval: TemporalInterval,
+) -> Vec<f64> {
+    if !min.is_finite() || !max.is_finite() || min >= max {
+        return Vec::new();
+    }
     match unit {
         TemporalUnit::Date => {
             let majors = temporal_breaks_date(min as i32, max as i32, interval);
