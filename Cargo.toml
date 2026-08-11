@@ -322,6 +322,10 @@ required-features = ["vello", "png", "text"]
 name = "aspect_sqrt"
 required-features = ["vello", "png", "text"]
 
+[[example]]
+name = "long_labels"
+required-features = ["vello", "png", "text"]
+
 [[test]]
 name = "smoke"
 required-features = ["vello"]

@@ -435,10 +435,10 @@ pub fn compute_polar_bleed(axes: &[BleedAxis], dpi: f64, theme: &Theme) -> Polar
             let label_style = title_style_for(&label.kind);
             let run = TextRun::new(&label.text, &label_style.text_style, dpi);
             let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
-            let w = match run.width_hint(dpi) {
-                WidthHint::Min(w) => w,
-                WidthHint::NeedsHeight { seed } => seed,
-            };
+            // Polar tick labels draw on one line — the bleed has to
+            // reserve their full width, not the longest-unbreakable-
+            // cluster bound `width_hint` reports.
+            let w = run.natural_width();
             let anchor_offset = match label.kind {
                 BleedLabelKind::OuterAngular | BleedLabelKind::Radius => {
                     label_style.tick_length_px + label_style.gap_px
@@ -952,5 +952,41 @@ fn draw_angular_title(
             style: None,
         };
         scene.draw_glyphs(&glyph_run, PickId::Skip);
+    }
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DPI: f64 = 96.0;
+
+    fn east_label(text: &str) -> BleedAxis {
+        BleedAxis {
+            labels: vec![BleedLabel {
+                text: text.to_string(),
+                kind: BleedLabelKind::OuterAngular,
+                // Due east: the label extends straight into the right
+                // bleed, so its full width has to be reserved there.
+                direction: (1.0, 0.0),
+            }],
+            title: None,
+        }
+    }
+
+    #[test]
+    fn bleed_covers_a_multi_word_label_in_full() {
+        let theme = Theme::default();
+        let whole = compute_polar_bleed(&[east_label("Species: setosa")], DPI, &theme);
+        let first_word = compute_polar_bleed(&[east_label("Species:")], DPI, &theme);
+        assert!(
+            whole.right_px > first_word.right_px + 1.0,
+            "the reservation has to grow past the label's widest word: \
+             whole={}, first word={}",
+            whole.right_px,
+            first_word.right_px
+        );
     }
 }

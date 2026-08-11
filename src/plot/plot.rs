@@ -2049,6 +2049,16 @@ impl crate::layout::Measure for RotatedAxisTitleMeasure {
     }
 }
 
+/// Wrap width for text rotated by `angle_rad` inside a `w` × `h`
+/// rect: the rect's extent along the text's own advance direction.
+/// Unrotated text wraps at `w` and quarter-turned text at `h`, so a
+/// rotated block breaks against the edge it actually runs along
+/// rather than the one that happens to be horizontal on screen.
+#[cfg(feature = "text")]
+pub(crate) fn rotated_wrap_width(w: f64, h: f64, angle_rad: f64) -> f64 {
+    w * angle_rad.cos().abs() + h * angle_rad.sin().abs()
+}
+
 /// Centre a cartesian axis title inside `rect`. Horizontal sides
 /// (Bottom/Top) layout the run at the slot's full width with
 /// [`crate::text::Alignment::Center`] so the line balances across
@@ -2111,22 +2121,6 @@ pub(crate) fn draw_text_element_in_rect(
         HAlign::End => Alignment::End,
         HAlign::Justify => Alignment::Justify,
     };
-    let inner_w = (inset.x1 - inset.x0) as f32;
-    let _ = run.set_max_width(inner_w, alignment);
-    // Inked height (first-line ascender top → last-line descender
-    // bottom) drives layout. `ascender_offset` is the half-leading
-    // the parley layout reserves above the first line; the draw
-    // helper compensates by shifting the layout up by that much so
-    // the visible glyphs land flush with the slot edge.
-    let block_h = run.inked_height();
-    let ascender_offset = run.first_line_ascender_offset();
-    let inner_h = inset.y1 - inset.y0;
-    let valign = el.valign.or(defaults.valign).expect("valign default");
-    let y_offset = match valign {
-        VAlign::Top | VAlign::Baseline => 0.0,
-        VAlign::Middle => ((inner_h - block_h) * 0.5).max(0.0),
-        VAlign::Bottom => (inner_h - block_h).max(0.0),
-    };
     let angle = el.angle.or(defaults.angle).expect("angle default");
     let angle_rad = match angle {
         Rotation::Degrees(d) => (d as f64).to_radians(),
@@ -2134,6 +2128,25 @@ pub(crate) fn draw_text_element_in_rect(
         // knows the baseline (axis titles, polar rails) handles those
         // variants in its own helper. Default to no rotation here.
         Rotation::Along | Rotation::Across => 0.0,
+    };
+    let inner_w = (inset.x1 - inset.x0) as f32;
+    let inner_h = inset.y1 - inset.y0;
+    let _ = run.set_max_width(
+        rotated_wrap_width(inner_w as f64, inner_h, angle_rad) as f32,
+        alignment,
+    );
+    // Inked height (first-line ascender top → last-line descender
+    // bottom) drives layout. `ascender_offset` is the half-leading
+    // the parley layout reserves above the first line; the draw
+    // helper compensates by shifting the layout up by that much so
+    // the visible glyphs land flush with the slot edge.
+    let block_h = run.inked_height();
+    let ascender_offset = run.first_line_ascender_offset();
+    let valign = el.valign.or(defaults.valign).expect("valign default");
+    let y_offset = match valign {
+        VAlign::Top | VAlign::Baseline => 0.0,
+        VAlign::Middle => ((inner_h - block_h) * 0.5).max(0.0),
+        VAlign::Bottom => (inner_h - block_h).max(0.0),
     };
     if angle_rad.abs() < 1e-9 {
         let (tx, ty) = (inset.x0, inset.y0 + y_offset - ascender_offset);

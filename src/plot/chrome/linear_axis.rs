@@ -18,7 +18,6 @@
 use crate::brush::Brush;
 use crate::color::{rgb, Color};
 use crate::geometry::{Affine, Point};
-use crate::layout::{Measure, WidthHint};
 use crate::path::Path;
 use crate::pick::PickId;
 use crate::plot::geom::resolve::build_stroke_for_pattern;
@@ -342,10 +341,11 @@ pub(crate) fn draw_axis_label(
 ) {
     let run = TextRun::new(text, style, dpi);
     let _ = run.set_max_width(f32::INFINITY, Alignment::Start);
-    let label_w = match run.width_hint(dpi) {
-        WidthHint::Min(w) => w,
-        WidthHint::NeedsHeight { seed } => seed,
-    };
+    // Tick labels draw on one line, so the anchoring width is the
+    // laid-out width. `width_hint` reports the longest unbreakable
+    // cluster instead — a wrap lower bound that undershoots any
+    // label carrying a space and slides it off its tick.
+    let label_w = run.content_width();
     // Use the cap-height band as the "visible height" for vertical
     // positioning — numeric and uppercase labels (the common case
     // for ticks + discrete key labels) then centre on their ink
@@ -404,4 +404,89 @@ fn line_path(p0: Point, p1: Point) -> Path {
 fn stroke_line(scene: &mut dyn SceneBuilder, stroke: &Stroke, brush: &Brush, p0: Point, p1: Point) {
     let path = line_path(p0, p1);
     scene.stroke(stroke, Affine::IDENTITY, brush, None, &path, PickId::Skip);
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::color::rgb;
+    use crate::scene::recording::{Op, RecordingScene};
+
+    const DPI: f64 = 96.0;
+    /// A label with a break opportunity next to a same-shape control
+    /// that has none — the pair isolates wrap-width effects from
+    /// ordinary label width.
+    const SPACED: &str = "Species: setosa";
+    const UNSPACED: &str = "SpeciesZsetosa";
+
+    fn style() -> TextStyle {
+        TextStyle::new(9.0)
+    }
+
+    /// Laid-out width of `text` at the test style — the width the draw
+    /// pass puts on screen.
+    fn drawn_width(text: &str) -> f64 {
+        let run = TextRun::new(text, &style(), DPI);
+        let _ = run.set_max_width(f32::INFINITY, Alignment::Start);
+        run.content_width()
+    }
+
+    /// Leftmost glyph pen position across every emitted run, which is
+    /// where the label's near edge landed.
+    fn left_edge(scene: &RecordingScene) -> f64 {
+        let mut min_x = f64::INFINITY;
+        for op in &scene.ops {
+            if let Op::DrawGlyphs(run) = op {
+                for g in &run.glyphs {
+                    min_x = min_x.min(g.x as f64);
+                }
+            }
+        }
+        assert!(min_x.is_finite(), "no glyphs emitted");
+        min_x
+    }
+
+    fn draw(text: &str, direction: (f64, f64), anchor: Point) -> RecordingScene {
+        let mut scene = RecordingScene::default();
+        draw_axis_label(
+            &mut scene,
+            text,
+            &style(),
+            &Brush::Solid(rgb(0.0, 0.0, 0.0)),
+            None,
+            AxisLabelAt { anchor, direction },
+            DPI,
+        );
+        scene
+    }
+
+    #[test]
+    fn bottom_axis_label_centres_on_its_tick() {
+        let anchor = Point::new(200.0, 100.0);
+        for text in [SPACED, UNSPACED] {
+            let scene = draw(text, (0.0, 1.0), anchor);
+            let centre = left_edge(&scene) + drawn_width(text) * 0.5;
+            assert!(
+                (centre - anchor.x).abs() < 0.5,
+                "{text:?} centred at {centre}, tick at {}",
+                anchor.x
+            );
+        }
+    }
+
+    #[test]
+    fn left_axis_label_ends_at_its_tick() {
+        let anchor = Point::new(200.0, 100.0);
+        for text in [SPACED, UNSPACED] {
+            let scene = draw(text, (-1.0, 0.0), anchor);
+            let right = left_edge(&scene) + drawn_width(text);
+            assert!(
+                (right - anchor.x).abs() < 0.5,
+                "{text:?} ends at {right}, tick at {}",
+                anchor.x
+            );
+        }
+    }
 }
