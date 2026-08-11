@@ -6,8 +6,9 @@
 //! - the **domain scale** whose `breaks()` drive the rows,
 //! - a [`LegendSide`] + optional title,
 //! - a stack of [`LegendKeySpec`]s — each a geom-shaped marker
-//!   primitive ([`LegendKey::Point`] / [`Line`] / [`Rect`]) with
-//!   its own per-aesthetic [`AestheticSource`] map.
+//!   primitive ([`LegendKey::Point`] / [`Line`] / [`Rect`] /
+//!   [`Text`](LegendKey::Text)) with its own per-aesthetic
+//!   [`AestheticSource`] map.
 //!
 //! Each row of the legend computes a [`ResolvedKey`] per stack
 //! member by walking its bindings (scale lookup at the row's domain
@@ -28,6 +29,7 @@
 //! enough when the surviving bar has to stand in for both palettes.
 
 mod render_keys;
+pub use render_keys::DEFAULT_KEY_TEXT;
 use render_keys::{render_key, swatch_dim_for, with_opacity};
 
 use std::collections::HashMap;
@@ -474,6 +476,14 @@ pub enum LegendKey {
     /// stroke_opacity, linewidth, linetype, dash_offset, cap, join,
     /// corner_radius.
     Rect,
+    /// Glyph sample centred in the swatch cell — what a text layer's
+    /// scales read as. Consumes: text, size (as the font size),
+    /// weight, italic, family, letter_spacing, underline,
+    /// strikethrough, fill, fill_opacity, text_stroke,
+    /// text_linewidth, angle. An unbound `text` draws
+    /// [`DEFAULT_KEY_TEXT`]. Background-rect aesthetics belong to a
+    /// [`LegendKey::Rect`] stacked beneath this one.
+    Text,
 }
 
 /// Per-aesthetic source for a [`LegendKeySpec`].
@@ -514,6 +524,15 @@ impl LegendKeySpec {
     pub fn rect() -> Self {
         Self {
             kind: LegendKey::Rect,
+            bindings: HashMap::new(),
+        }
+    }
+    /// Start a `Text` key with no aesthetic bindings. The glyph is
+    /// [`DEFAULT_KEY_TEXT`] until a `"text"` aesthetic names another
+    /// one.
+    pub fn text() -> Self {
+        Self {
+            kind: LegendKey::Text,
             bindings: HashMap::new(),
         }
     }
@@ -1009,6 +1028,33 @@ pub struct ResolvedKey {
     pub start_marker: EndpointMarkerKey,
     /// Counterpart of [`Self::start_marker`] for the line's far end.
     pub end_marker: EndpointMarkerKey,
+    /// Glyph string a [`LegendKey::Text`] draws, as the geom's
+    /// `"text"` channel supplies it.
+    pub text: Option<Arc<str>>,
+    /// CSS font weight (100..=900) for [`LegendKey::Text`], from the
+    /// geom's `"weight"` channel.
+    pub weight: Option<u16>,
+    /// Italic / oblique face for [`LegendKey::Text`], from the geom's
+    /// `"italic"` channel.
+    pub italic: Option<bool>,
+    /// Font family name for [`LegendKey::Text`], from the geom's
+    /// `"family"` channel.
+    pub family: Option<Arc<str>>,
+    /// Extra advance between glyphs in pt, from the geom's
+    /// `"letter_spacing"` channel.
+    pub letter_spacing_pt: Option<f64>,
+    /// Underline decoration for [`LegendKey::Text`], from the geom's
+    /// `"underline"` channel.
+    pub underline: Option<bool>,
+    /// Strikethrough decoration for [`LegendKey::Text`], from the
+    /// geom's `"strikethrough"` channel.
+    pub strikethrough: Option<bool>,
+    /// Per-glyph outline colour for [`LegendKey::Text`], from the
+    /// geom's `"text_stroke"` channel.
+    pub text_stroke: Option<Color>,
+    /// Per-glyph outline width in pt, from the geom's
+    /// `"text_linewidth"` channel.
+    pub text_linewidth_pt: Option<f64>,
 }
 
 /// One end of a [`LegendKey::Line`]'s marker pair. Mirrors the geom's
@@ -1096,6 +1142,53 @@ impl ResolvedKey {
             "join" => {
                 if let Some(j) = value.as_str().and_then(join_from_str) {
                     self.join = Some(j);
+                }
+            }
+            "text" => {
+                if let Some(s) = value.as_str() {
+                    self.text = Some(Arc::from(s));
+                }
+            }
+            "weight" => {
+                if let Some(n) = value.as_number() {
+                    self.weight = Some((n.round() as i64).clamp(1, 1000) as u16);
+                }
+            }
+            // `TextGeom` takes its italic channel as either a boolean
+            // or a face name, so the key reads both vocabularies too.
+            "italic" => match value {
+                Value::Bool(b) => self.italic = Some(b),
+                Value::String(ref s) => self.italic = Some(matches!(&**s, "italic" | "oblique")),
+                _ => {}
+            },
+            "family" => {
+                if let Some(s) = value.as_str() {
+                    self.family = Some(Arc::from(s));
+                }
+            }
+            "letter_spacing" => {
+                if let Some(n) = value.as_number() {
+                    self.letter_spacing_pt = Some(n);
+                }
+            }
+            "underline" => {
+                if let Some(b) = value.as_bool() {
+                    self.underline = Some(b);
+                }
+            }
+            "strikethrough" => {
+                if let Some(b) = value.as_bool() {
+                    self.strikethrough = Some(b);
+                }
+            }
+            "text_stroke" => {
+                if let Some(c) = value.as_color() {
+                    self.text_stroke = Some(c);
+                }
+            }
+            "text_linewidth" => {
+                if let Some(n) = value.as_number() {
+                    self.text_linewidth_pt = Some(n);
                 }
             }
             "start_marker" | "start_marker_size" | "start_marker_fill" | "start_marker_invert" => {
@@ -2930,6 +3023,49 @@ mod tests {
         // The specific opacity channels win over the general one.
         assert_eq!(resolved.fill_opacity, Some(0.25));
         assert_eq!(resolved.stroke_opacity, Some(0.75));
+    }
+
+    #[test]
+    fn text_aesthetics_reach_the_resolved_key() {
+        let spec = LegendKeySpec::text()
+            .fixed("text", Value::String(Arc::from("Aa")))
+            .fixed("weight", 700.0_f64)
+            .fixed("family", Value::String(Arc::from("Helvetica")))
+            .fixed("letter_spacing", 1.5_f64)
+            .fixed("underline", Value::Bool(true))
+            .fixed("strikethrough", Value::Bool(true))
+            .fixed("text_stroke", Value::Color(rgb(1.0, 0.0, 0.0)))
+            .fixed("text_linewidth", 2.0_f64);
+        let resolved = resolve_key(&spec, &build_registry(), &Value::String(Arc::from("A")));
+        assert_eq!(resolved.text.as_deref(), Some("Aa"));
+        assert_eq!(resolved.weight, Some(700));
+        assert_eq!(resolved.family.as_deref(), Some("Helvetica"));
+        assert_eq!(resolved.letter_spacing_pt, Some(1.5));
+        assert_eq!(resolved.underline, Some(true));
+        assert_eq!(resolved.strikethrough, Some(true));
+        assert_eq!(resolved.text_stroke, Some(rgb(1.0, 0.0, 0.0)));
+        assert_eq!(resolved.text_linewidth_pt, Some(2.0));
+    }
+
+    #[test]
+    fn the_italic_aesthetic_reads_both_vocabularies() {
+        // `TextGeom` accepts a boolean or a face name on `"italic"`, so
+        // a key bound to either kind of scale output has to agree.
+        let reg = build_registry();
+        let row = Value::String(Arc::from("A"));
+        for (bound, expected) in [
+            (Value::Bool(true), Some(true)),
+            (Value::String(Arc::from("italic")), Some(true)),
+            (Value::String(Arc::from("oblique")), Some(true)),
+            (Value::String(Arc::from("normal")), Some(false)),
+        ] {
+            let spec = LegendKeySpec::text().fixed("italic", bound.clone());
+            assert_eq!(
+                resolve_key(&spec, &reg, &row).italic,
+                expected,
+                "italic bound to {bound:?}"
+            );
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Per-key swatch dim + render for legend rows.
 //!
-//! Each row's marker (Point / Line / Rect) is drawn by one of the
-//! per-shape helpers in this module. The top-level [`Legend`] renderer
+//! Each row's marker (Point / Line / Rect / Text) is drawn by one of
+//! the per-shape helpers in this module. The top-level [`Legend`] renderer
 //! computes the cell rect for each row, walks the stack of keys, and
 //! dispatches to [`render_key`] which fans out to the right shape
 //! emitter. [`swatch_dim_for`] reports the minimum cell size each
@@ -24,11 +24,17 @@ use crate::scene::{Glyph, GlyphRun, SceneBuilder};
 use crate::shape::builtin::REFERENCE_RADIUS as POINT_SHAPE_RADIUS;
 use crate::shape::{ShapeKind, ShapeRegistry, ShapeStyle};
 use crate::stroke::{Cap, Join, Stroke};
+use crate::text::{draw_text, draw_text_outline, Alignment, TextRun, TextStyle};
 
 use kurbo::Shape;
 use std::sync::Arc;
 
 use super::{EndpointMarkerKey, LegendKey, ResolvedKey};
+
+/// Glyph a [`LegendKey::Text`] draws when its `"text"` aesthetic is
+/// unbound — a lowercase letter, so the key shows the ascender and
+/// x-height a font size, weight or family scale is acting on.
+pub const DEFAULT_KEY_TEXT: &str = "a";
 
 /// Per-key minimum cell dimensions `(w, h)` in px — the painted
 /// extent of the key's marker, so nothing a key draws lands outside
@@ -37,9 +43,10 @@ use super::{EndpointMarkerKey, LegendKey, ResolvedKey};
 ///
 /// Points reserve their shape's own bbox — rotated with the marker —
 /// at the resolved size plus the outline width; lines and rects the
-/// stroke width. A round- or square-capped line also reserves a body at
-/// least as long as the stroke is thick, so [`render_line`]'s cap inset
-/// can't collapse a thick key to a dot.
+/// stroke width; text its shaped inked box, likewise rotated. A round-
+/// or square-capped line also reserves a body at least as long as the
+/// stroke is thick, so [`render_line`]'s cap inset can't collapse a
+/// thick key to a dot.
 pub(super) fn swatch_dim_for(
     kind: LegendKey,
     peak: &ResolvedKey,
@@ -91,7 +98,70 @@ pub(super) fn swatch_dim_for(
             };
             (lw, lw)
         }
+        LegendKey::Text => {
+            let Some(run) = text_key_run(peak, dpi, geom) else {
+                return (0.0, 0.0);
+            };
+            // The inked box — ascender top to descender bottom — is
+            // what `render_text` centres, so it's what the cell holds.
+            let (half_w, half_h) = rotate_half_extents(
+                (run.content_width() * 0.5, run.inked_height() * 0.5),
+                peak.angle,
+            );
+            // The glyph outline straddles the letterform, adding half
+            // its width on each side of the text box.
+            let outline = match text_paints_outline(peak, geom) {
+                true => pt_to_px(
+                    peak.text_linewidth_pt
+                        .unwrap_or(geom.text.text_linewidth_pt),
+                    dpi,
+                ),
+                false => 0.0,
+            };
+            (half_w * 2.0 + outline, half_h * 2.0 + outline)
+        }
     }
+}
+
+/// Shape a text key's glyph run from its resolved aesthetics, laid out
+/// unwrapped. `None` when the key would paint nothing — a degenerate
+/// font size or an empty string, the guards `TextGeom` applies per row.
+fn text_key_run(
+    resolved: &ResolvedKey,
+    dpi: f64,
+    geom: &crate::plot::theme::GeomTheme,
+) -> Option<TextRun> {
+    let size_pt = resolved.size_pt.unwrap_or(geom.text.size_pt);
+    if !size_pt.is_finite() || size_pt <= 0.0 {
+        return None;
+    }
+    let text = resolved.text.as_deref().unwrap_or(DEFAULT_KEY_TEXT);
+    if text.is_empty() {
+        return None;
+    }
+    let mut style = TextStyle::new(size_pt as f32)
+        .weight(resolved.weight.unwrap_or(geom.text.weight))
+        .italic(resolved.italic.unwrap_or(false))
+        .letter_spacing_pt(
+            resolved
+                .letter_spacing_pt
+                .unwrap_or(geom.text.letter_spacing_pt) as f32,
+        )
+        .underline(resolved.underline.unwrap_or(geom.text.underline))
+        .strikethrough(resolved.strikethrough.unwrap_or(geom.text.strikethrough));
+    if let Some(family) = resolved.family.as_deref() {
+        style = style.family(family);
+    }
+    let run = TextRun::new(text, &style, dpi);
+    run.set_max_width(f32::INFINITY, Alignment::Start);
+    Some(run)
+}
+
+/// Whether a text key draws a per-glyph outline under its fill. The
+/// aesthetic wins and the geom default backs it up; unlike the shape
+/// keys there's no fallback, since a text key always paints its fill.
+fn text_paints_outline(resolved: &ResolvedKey, geom: &crate::plot::theme::GeomTheme) -> bool {
+    resolved.text_stroke.is_some() || geom.text.text_stroke.is_some()
 }
 
 /// Forward extent and painted height of a line key's endpoint marker,
@@ -255,6 +325,7 @@ pub(super) fn render_key(
         LegendKey::Point => render_point(resolved, cell, shapes, scene, dpi, geom, palette),
         LegendKey::Line => render_line(resolved, cell, shapes, scene, dpi, geom, palette),
         LegendKey::Rect => render_rect(resolved, cell, scene, dpi, geom, palette),
+        LegendKey::Text => render_text(resolved, cell, scene, dpi, geom, palette),
     }
 }
 
@@ -586,6 +657,75 @@ fn render_rect(
             PickId::Skip,
         );
     }
+}
+
+fn render_text(
+    resolved: &ResolvedKey,
+    cell: Rect,
+    scene: &mut dyn SceneBuilder,
+    dpi: f64,
+    geom: &crate::plot::theme::GeomTheme,
+    palette: &crate::plot::theme::Palette,
+) {
+    let Some(run) = text_key_run(resolved, dpi, geom) else {
+        return;
+    };
+    let centre = Point::new(
+        cell.x0 + (cell.x1 - cell.x0) * 0.5,
+        cell.y0 + (cell.y1 - cell.y0) * 0.5,
+    );
+    // `draw_text` places the layout box by its top-left, so the inked
+    // box is centred by backing the ascender's own offset out of the
+    // origin — the glyphs sit on the cell's middle the way an axis
+    // label sits on its tick, rather than hanging off the line box.
+    let x = centre.x - run.content_width() * 0.5;
+    let y = centre.y - run.inked_height() * 0.5 - run.first_line_ascender_offset();
+
+    // Rotation is negated so positive reads counter-clockwise on
+    // screen, and pivots on the cell centre the glyph is placed
+    // against — `TextGeom`'s convention about its own anchor.
+    let angle = resolved.angle.unwrap_or(0.0);
+    let xform = match angle == 0.0 {
+        true => Affine::IDENTITY,
+        false => Affine::rotate_about(-angle, centre),
+    };
+
+    // Palette ink is the backstop for a theme that leaves the text
+    // fill unset, so the row isn't visually empty.
+    let fill = with_opacity(
+        resolved
+            .fill
+            .or_else(|| geom.text.fill.as_ref().map(|c| c.resolve(palette)))
+            .unwrap_or(palette.ink),
+        resolved.fill_opacity,
+    );
+
+    // Outline pass under the fill, the order `TextGeom` draws them in.
+    if text_paints_outline(resolved, geom) {
+        let color = resolved
+            .text_stroke
+            .or_else(|| geom.text.text_stroke.as_ref().map(|c| c.resolve(palette)))
+            .unwrap_or(palette.ink);
+        let width_px = pt_to_px(
+            resolved
+                .text_linewidth_pt
+                .unwrap_or(geom.text.text_linewidth_pt),
+            dpi,
+        );
+        if width_px.is_finite() && width_px > 0.0 {
+            draw_text_outline(
+                scene,
+                &run,
+                x,
+                y,
+                &Brush::Solid(color),
+                &Stroke::new(width_px),
+                xform,
+                PickId::Skip,
+            );
+        }
+    }
+    draw_text(scene, &run, x, y, &Brush::Solid(fill), xform, PickId::Skip);
 }
 
 /// The swatch outline a [`LegendKey::Rect`] paints, rounded when the
@@ -1179,6 +1319,178 @@ mod tests {
         let (_, bbox) = sole_stroke(&scene);
         // No marker, so no trim either — the body spans the full cell.
         assert!((bbox.x1 - cell().x1).abs() < 1e-9, "body bbox {bbox:?}");
+    }
+
+    fn render_text_key(resolved: &ResolvedKey, theme: &Theme) -> RecordingScene {
+        let mut scene = RecordingScene::default();
+        render_text(
+            resolved,
+            cell(),
+            &mut scene,
+            DPI,
+            &theme.geom,
+            &theme.palette,
+        );
+        scene
+    }
+
+    /// The glyph runs a text key emitted, in emission order.
+    fn glyph_runs(scene: &RecordingScene) -> Vec<&crate::scene::recording::OwnedGlyphRun> {
+        scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::DrawGlyphs(run) => Some(run),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn text_key(size_pt: f64) -> ResolvedKey {
+        ResolvedKey {
+            size_pt: Some(size_pt),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn text_key_draws_its_default_glyph() {
+        let scene = render_text_key(&ResolvedKey::default(), &Theme::default());
+        let runs = glyph_runs(&scene);
+        assert_eq!(runs.len(), 1, "expected one filled glyph run");
+        assert!(runs[0].style.is_none(), "the glyph pass should fill");
+        assert!(!runs[0].glyphs.is_empty(), "expected a glyph");
+    }
+
+    #[test]
+    fn text_key_font_size_follows_the_size_aesthetic() {
+        let scene = render_text_key(&text_key(18.0), &Theme::default());
+        let runs = glyph_runs(&scene);
+        let expected = pt_to_px(18.0, DPI) as f32;
+        assert!(
+            (runs[0].font_size - expected).abs() < 1e-3,
+            "font size {} should be the resolved {expected}px",
+            runs[0].font_size
+        );
+    }
+
+    #[test]
+    fn text_key_centres_its_glyphs_in_the_cell() {
+        let theme = Theme::default();
+        let key = text_key(10.0);
+        let scene = render_text_key(&key, &theme);
+        let run = text_key_run(&key, DPI, &theme.geom).expect("a shaped run");
+        let c = cell();
+        let expected_x = (c.x0 + c.x1) * 0.5 - run.content_width() * 0.5;
+        let glyph = glyph_runs(&scene)[0].glyphs[0];
+        assert!(
+            (glyph.x as f64 - expected_x).abs() < 1e-3,
+            "glyph x {} should start half a text box left of centre ({expected_x})",
+            glyph.x
+        );
+        // The baseline sits inside the cell: an uncentred key would put
+        // it at the cell's top edge or beyond it.
+        assert!(
+            (glyph.y as f64) > c.y0 && (glyph.y as f64) < c.y1,
+            "baseline {} should land inside the cell {c:?}",
+            glyph.y
+        );
+    }
+
+    #[test]
+    fn text_key_fill_opacity_overrides_the_colors_alpha() {
+        let key = ResolvedKey {
+            fill: Some(crate::color::Color::new([0.2, 0.4, 0.6, 0.4])),
+            fill_opacity: Some(0.8),
+            ..Default::default()
+        };
+        let scene = render_text_key(&key, &Theme::default());
+        let Brush::Solid(c) = glyph_runs(&scene)[0].brush else {
+            panic!("expected a solid brush");
+        };
+        assert_eq!(c.components[3], 0.8);
+    }
+
+    #[test]
+    fn text_key_outlines_under_its_fill() {
+        let key = ResolvedKey {
+            text_stroke: Some(crate::color::rgb(0.0, 0.0, 0.0)),
+            text_linewidth_pt: Some(2.0),
+            ..text_key(14.0)
+        };
+        let scene = render_text_key(&key, &Theme::default());
+        let runs = glyph_runs(&scene);
+        assert_eq!(runs.len(), 2, "expected an outline pass and a fill pass");
+        let outline = runs[0].style.as_ref().expect("first pass should stroke");
+        assert!((outline.width - pt_to_px(2.0, DPI)).abs() < 1e-9);
+        assert!(runs[1].style.is_none(), "the fill pass should follow");
+    }
+
+    #[test]
+    fn text_cell_grows_with_the_font_size() {
+        let theme = Theme::default();
+        let shapes = ShapeRegistry::with_builtins();
+        let (small_w, small_h) =
+            swatch_dim_for(LegendKey::Text, &text_key(8.0), DPI, &theme.geom, &shapes);
+        let (big_w, big_h) =
+            swatch_dim_for(LegendKey::Text, &text_key(24.0), DPI, &theme.geom, &shapes);
+        assert!(
+            big_w > small_w && big_h > small_h,
+            "a 24pt glyph ({big_w}×{big_h}) should reserve more than an 8pt one ({small_w}×{small_h})"
+        );
+    }
+
+    #[test]
+    fn text_cell_reserves_the_glyph_outline() {
+        let theme = Theme::default();
+        let shapes = ShapeRegistry::with_builtins();
+        let plain = swatch_dim_for(LegendKey::Text, &text_key(12.0), DPI, &theme.geom, &shapes);
+        let outlined = ResolvedKey {
+            text_stroke: Some(crate::color::rgb(0.0, 0.0, 0.0)),
+            text_linewidth_pt: Some(4.0),
+            ..text_key(12.0)
+        };
+        let (w, h) = swatch_dim_for(LegendKey::Text, &outlined, DPI, &theme.geom, &shapes);
+        let outline = pt_to_px(4.0, DPI);
+        assert!((w - (plain.0 + outline)).abs() < 1e-9, "reserved width {w}");
+        assert!(
+            (h - (plain.1 + outline)).abs() < 1e-9,
+            "reserved height {h}"
+        );
+    }
+
+    #[test]
+    fn rotated_text_cell_covers_the_turned_glyph() {
+        let theme = Theme::default();
+        let shapes = ShapeRegistry::with_builtins();
+        let mut key = text_key(12.0);
+        key.text = Some(Arc::from("Legend"));
+        let (flat_w, flat_h) = swatch_dim_for(LegendKey::Text, &key, DPI, &theme.geom, &shapes);
+        key.angle = Some(std::f64::consts::FRAC_PI_2);
+        let (turned_w, turned_h) = swatch_dim_for(LegendKey::Text, &key, DPI, &theme.geom, &shapes);
+        assert!(
+            (turned_w - flat_h).abs() < 1e-9 && (turned_h - flat_w).abs() < 1e-9,
+            "a quarter turn should swap the reserved extents: {flat_w}×{flat_h} → {turned_w}×{turned_h}"
+        );
+    }
+
+    #[test]
+    fn a_degenerate_text_key_draws_and_reserves_nothing() {
+        let theme = Theme::default();
+        let shapes = ShapeRegistry::with_builtins();
+        for key in [
+            text_key(0.0),
+            ResolvedKey {
+                text: Some(Arc::from("")),
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                swatch_dim_for(LegendKey::Text, &key, DPI, &theme.geom, &shapes),
+                (0.0, 0.0)
+            );
+            assert!(render_text_key(&key, &theme).ops.is_empty());
+        }
     }
 
     #[test]

@@ -14,6 +14,10 @@
 //! 3. **Bottom**: a `Line` key whose linetype is scaled by
 //!    `category_line`.
 //!
+//! 4. **Left**: a `Text` key whose font size is scaled by
+//!    `category_size` and whose ink is scaled by `category_color` —
+//!    what a text layer's scales read as.
+//!
 //! Produces `examples/legends.png`.
 
 use std::sync::Arc;
@@ -170,6 +174,22 @@ fn main() {
                     .scaled("shape", "bin_shape")
                     .fixed("fill", Value::Color(rgb(0.15, 0.15, 0.15)))
                     .fixed("size", 12.0_f64),
+            ),
+    );
+
+    // ── Left side: a text key. The swatch is a glyph sample rather
+    // than a marker, so a font-size scale shows what it actually
+    // does to type. `size` is the font size in pt and `fill` is the
+    // ink; both resolve per row through their own scale.
+    p.add_legend(
+        Legend::new("category_size")
+            .side(LegendSide::Left)
+            .title("Font size")
+            .key(
+                LegendKeySpec::text()
+                    .scaled("size", "category_size")
+                    .scaled("fill", "category_color")
+                    .fixed("text", Value::String(Arc::from("Aa"))),
             ),
     );
 
