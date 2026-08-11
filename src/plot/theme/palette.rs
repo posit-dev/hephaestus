@@ -10,7 +10,7 @@
 //! an element should be locked to a specific colour regardless of
 //! palette (e.g. a red error annotation).
 
-use crate::color::{lerp_color, rgb, Color};
+use crate::color::{lerp_color, rgb, Color, ColorSpace};
 
 /// Three semantic colour anchors that every theme element references.
 ///
@@ -65,10 +65,12 @@ pub enum ThemeColor {
     Ink,
     /// The palette's `accent` anchor.
     Accent,
-    /// Linear interpolation between two `ThemeColor`s. `Mix(a, b, t)`
-    /// returns `lerp(a.resolve(), b.resolve(), t)`. `t = 0` returns
-    /// `a`, `t = 1` returns `b`.
-    Mix(Box<ThemeColor>, Box<ThemeColor>, f32),
+    /// Linear interpolation between two `ThemeColor`s through the given
+    /// [`ColorSpace`]. `t = 0` returns `a`, `t = 1` returns `b`.
+    /// [`ThemeColor::mix`] builds this with [`ColorSpace::Srgb`], which is
+    /// what addresses palette anchors by channel fraction (`mix(Paper,
+    /// Ink, 0.08)` is grey92 against the default palette).
+    Mix(Box<ThemeColor>, Box<ThemeColor>, f32, ColorSpace),
     /// Same colour, modulated alpha. `Alpha(inner, a)` multiplies the
     /// resolved colour's alpha channel by `a`.
     Alpha(Box<ThemeColor>, f32),
@@ -83,8 +85,8 @@ impl ThemeColor {
             ThemeColor::Paper => palette.paper,
             ThemeColor::Ink => palette.ink,
             ThemeColor::Accent => palette.accent,
-            ThemeColor::Mix(a, b, t) => {
-                lerp_color(a.resolve(palette), b.resolve(palette), *t as f64)
+            ThemeColor::Mix(a, b, t, space) => {
+                lerp_color(a.resolve(palette), b.resolve(palette), *t as f64, *space)
             }
             ThemeColor::Alpha(inner, a) => {
                 let c = inner.resolve(palette);
@@ -94,11 +96,20 @@ impl ThemeColor {
         }
     }
 
-    /// `ThemeColor::Mix(a, b, t)` constructor without the `Box::new`
-    /// noise.
+    /// Mix two `ThemeColor`s in sRGB — the space that makes `t` a channel
+    /// fraction between the two anchors, so palette greys land on their
+    /// nominal levels.
     #[inline]
     pub fn mix(a: ThemeColor, b: ThemeColor, t: f32) -> Self {
-        ThemeColor::Mix(Box::new(a), Box::new(b), t)
+        ThemeColor::Mix(Box::new(a), Box::new(b), t, ColorSpace::Srgb)
+    }
+
+    /// Mix two `ThemeColor`s in an explicit space. Use for a perceptually
+    /// even blend between two saturated anchors, where [`Self::mix`]'s
+    /// channel arithmetic would read as a dip in lightness.
+    #[inline]
+    pub fn mix_in(a: ThemeColor, b: ThemeColor, t: f32, space: ColorSpace) -> Self {
+        ThemeColor::Mix(Box::new(a), Box::new(b), t, space)
     }
 
     /// `ThemeColor::Alpha(inner, a)` constructor without the `Box::new`
@@ -106,5 +117,37 @@ impl ThemeColor {
     #[inline]
     pub fn alpha(inner: ThemeColor, a: f32) -> Self {
         ThemeColor::Alpha(Box::new(inner), a)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mix_addresses_palette_greys_by_channel_fraction() {
+        // `mix(Paper, Ink, 0.08)` has to land on grey92 against the
+        // default white-paper / black-ink palette — that's how the
+        // built-in themes name ggplot2's anchor greys.
+        let grey =
+            ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.08).resolve(&Palette::default());
+        for c in &grey.components[0..3] {
+            assert!((c - 0.92).abs() < 1e-5, "expected grey92, got {grey:?}");
+        }
+    }
+
+    #[test]
+    fn mix_defaults_to_srgb_and_mix_in_overrides_it() {
+        assert!(matches!(
+            ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.5),
+            ThemeColor::Mix(_, _, _, ColorSpace::Srgb)
+        ));
+        let ok = ThemeColor::mix_in(ThemeColor::Paper, ThemeColor::Ink, 0.5, ColorSpace::Oklab);
+        assert!(matches!(ok, ThemeColor::Mix(_, _, _, ColorSpace::Oklab)));
+        let palette = Palette::default();
+        assert_ne!(
+            ok.resolve(&palette),
+            ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.5).resolve(&palette)
+        );
     }
 }

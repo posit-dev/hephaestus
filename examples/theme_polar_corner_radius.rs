@@ -55,11 +55,7 @@ fn main() {
     // clipped to the smoothed boundary rather than the sharp wedge.
     let theme = Theme {
         panel_background: Element::Set(RectElement {
-            fill: Some(ThemeColor::Mix(
-                Box::new(ThemeColor::Paper),
-                Box::new(ThemeColor::Accent),
-                0.12,
-            )),
+            fill: Some(ThemeColor::mix(ThemeColor::Paper, ThemeColor::Accent, 0.12)),
             color: Some(ThemeColor::Ink),
             linewidth_pt: Some(Length::Abs(1.0)),
             corner_radius: Some(Length::Abs(16.0)),

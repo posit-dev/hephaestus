@@ -129,9 +129,9 @@ use super::bspline_eval::{
 use super::marks::{build_marks_from_column, unique_values_at_first_rows, MarkSlot};
 use super::outline::{draw_curve_outline, resolve_outline_spec, OutlineChannels, OutlineScales};
 use super::resolve::{
-    apply_per_row_offsets, override_alpha, resolve_color_channel, resolve_color_channel_or_theme,
-    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
-    resolve_str_channel_or, ChannelBind,
+    apply_per_row_offsets, channel_color_space, override_alpha, resolve_color_channel,
+    resolve_color_channel_or_theme, resolve_number_channel, resolve_number_channel_or,
+    resolve_pick_id, resolve_position, resolve_str_channel_or, ChannelBind,
 };
 use super::ribbon::{append_cap_fan_to_mesh, resolve_b_row, CapDirection, Orientation};
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
@@ -902,6 +902,7 @@ fn build_per_vertex_colors(
         )
         .unwrap_or(fallback)
     };
+    let fill_space = channel_color_space(fill_scale);
     let n_rows = row_for_ctrl.len();
     merged_u
         .iter()
@@ -918,7 +919,7 @@ fn build_per_vertex_colors(
             } else {
                 let c0 = resolve_at(row_for_ctrl[lo]);
                 let c1 = resolve_at(row_for_ctrl[hi]);
-                crate::color::lerp_color(c0, c1, t)
+                crate::color::lerp_color(c0, c1, t, fill_space)
             }
         })
         .collect()

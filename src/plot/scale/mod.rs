@@ -19,7 +19,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::color::Color;
+use crate::color::{Color, ColorSpace};
 #[cfg(test)]
 use crate::scales::value::DataColumn;
 use crate::scales::value::{LinetypeStep, Value};
@@ -142,6 +142,10 @@ pub struct Scale {
     /// [`Self::breaks_spec`]: pinned majors still get automatic minors
     /// and vice versa.
     minor_breaks_spec: Option<MinorBreaksSpec>,
+    /// The space a colour output range interpolates through. Ignored by
+    /// every other output type, and by discrete scales, whose palette is a
+    /// one-to-one lookup with nothing to interpolate.
+    color_space: ColorSpace,
     /// User-supplied tick-label formatter, if any. `None` ⇒ use the
     /// default per-variant formatter (see [`Scale::default_format`]).
     formatter: Option<Arc<LabelFormatter>>,
@@ -162,6 +166,7 @@ impl Scale {
             bins: None,
             breaks_spec: None,
             minor_breaks_spec: None,
+            color_space: ColorSpace::default(),
             formatter: None,
             generation: Cell::new(0),
         }
@@ -243,6 +248,15 @@ impl Scale {
         self
     }
 
+    /// Configure the space a colour output range interpolates through.
+    /// Defaults to [`ColorSpace::Oklab`], so a two-stop ramp reads as an
+    /// even perceptual progression rather than dipping dark through the
+    /// middle.
+    pub fn with_color_space(mut self, space: ColorSpace) -> Self {
+        self.color_space = space;
+        self
+    }
+
     // ── Mutators (`&mut self`; bump generation) ──
 
     /// Replace the continuous domain in place. Bumps the generation
@@ -301,6 +315,13 @@ impl Scale {
     /// Replace the transform in place. Bumps the generation counter.
     pub fn set_transform(&mut self, t: TransformKind) {
         self.transform = Transform::of(t);
+        self.bump_generation();
+    }
+
+    /// Replace the colour interpolation space in place. Bumps the
+    /// generation counter.
+    pub fn set_color_space(&mut self, space: ColorSpace) {
+        self.color_space = space;
         self.bump_generation();
     }
 
@@ -499,18 +520,23 @@ impl Scale {
                 self.input_range.as_ref(),
                 self.output_range.as_ref(),
                 &self.transform,
+                self.color_space,
             ),
             ScaleTypeKind::Discrete => {
                 discrete_map(input, self.input_range.as_ref(), self.output_range.as_ref())
             }
-            ScaleTypeKind::Ordinal => {
-                ordinal_map(input, self.input_range.as_ref(), self.output_range.as_ref())
-            }
+            ScaleTypeKind::Ordinal => ordinal_map(
+                input,
+                self.input_range.as_ref(),
+                self.output_range.as_ref(),
+                self.color_space,
+            ),
             ScaleTypeKind::Binned => binned_map(
                 input,
                 self.input_range.as_ref(),
                 self.bins.as_deref(),
                 self.output_range.as_ref(),
+                self.color_space,
             ),
             ScaleTypeKind::Identity => identity_map(input),
         }
@@ -853,6 +879,11 @@ impl Scale {
         self.output_range.as_ref()
     }
 
+    /// The space this scale's colour output range interpolates through.
+    pub fn color_space(&self) -> ColorSpace {
+        self.color_space
+    }
+
     /// Borrow the configured bin edges. Only [`ScaleTypeKind::Binned`]
     /// consults them.
     pub fn bins(&self) -> Option<&[f64]> {
@@ -929,8 +960,13 @@ impl Scale {
     /// This is the check for legends that display the range itself
     /// rather than one glyph per break — a colorbar over a viridis ramp
     /// and one over a magma ramp share a domain but draw different bars.
+    /// Two scales carrying the same colour stops but interpolating them
+    /// in different spaces draw different bars too, so the interpolation
+    /// space counts as part of the visual.
     pub fn visual_equivalent_to(&self, other: &Scale, locale: &Locale) -> bool {
-        self.output_range == other.output_range && self.legend_equivalent_to(other, locale)
+        self.output_range == other.output_range
+            && self.color_space == other.color_space
+            && self.legend_equivalent_to(other, locale)
     }
 }
 
@@ -944,6 +980,7 @@ impl std::fmt::Debug for Scale {
             .field("bins", &self.bins)
             .field("breaks_spec", &self.breaks_spec)
             .field("minor_breaks_spec", &self.minor_breaks_spec)
+            .field("color_space", &self.color_space)
             .field(
                 "formatter",
                 &self.formatter.as_ref().map(|_| "<fn>").unwrap_or("none"),
@@ -1392,7 +1429,9 @@ mod tests {
     fn ordinal_color_interpolates_when_stops_lt_levels() {
         let red = Color::new([1.0, 0.0, 0.0, 1.0]);
         let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
-        let s = ordinal(["L1", "L2", "L3", "L4"]).range_colors([red, blue]);
+        let s = ordinal(["L1", "L2", "L3", "L4"])
+            .range_colors([red, blue])
+            .with_color_space(ColorSpace::Srgb);
         assert_eq!(s.map(&Value::from("L1")).as_color(), Some(red));
         assert_eq!(s.map(&Value::from("L4")).as_color(), Some(blue));
         let c2 = s.map(&Value::from("L2")).as_color().unwrap();
@@ -1444,12 +1483,71 @@ mod tests {
     fn continuous_with_color_range() {
         let red = Color::new([1.0, 0.0, 0.0, 1.0]);
         let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
-        let s = continuous(0.0..=10.0).range_colors([red, blue]);
+        // sRGB so the channel values read directly as the ramp
+        // fraction each input lands on.
+        let s = continuous(0.0..=10.0)
+            .range_colors([red, blue])
+            .with_color_space(ColorSpace::Srgb);
         assert_eq!(s.map(&Value::Number(0.0)).as_color(), Some(red));
         assert_eq!(s.map(&Value::Number(10.0)).as_color(), Some(blue));
         let mid = s.map(&Value::Number(5.0)).as_color().unwrap();
         approx(mid.components[0] as f64, 0.5, 1e-5, "mid.r");
         approx(mid.components[2] as f64, 0.5, 1e-5, "mid.b");
+    }
+
+    #[test]
+    fn color_range_interpolates_in_oklab_by_default() {
+        let red = Color::new([1.0, 0.0, 0.0, 1.0]);
+        let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
+        let s = continuous(0.0..=10.0).range_colors([red, blue]);
+        assert_eq!(s.color_space(), ColorSpace::Oklab);
+        // Endpoints still land on their stops exactly, so a palette's
+        // extremes survive the round trip through the interpolation space.
+        assert_eq!(s.map(&Value::Number(0.0)).as_color(), Some(red));
+        assert_eq!(s.map(&Value::Number(10.0)).as_color(), Some(blue));
+        // The midpoint departs from the channel average — that departure
+        // is the point of interpolating perceptually.
+        let mid = s.map(&Value::Number(5.0)).as_color().unwrap();
+        assert!(
+            (mid.components[0] as f64 - 0.5).abs() > 0.02,
+            "oklab midpoint {mid:?} should not be the channel average"
+        );
+        let srgb_mid = continuous(0.0..=10.0)
+            .range_colors([red, blue])
+            .with_color_space(ColorSpace::Srgb)
+            .map(&Value::Number(5.0))
+            .as_color()
+            .unwrap();
+        assert_ne!(mid, srgb_mid);
+    }
+
+    #[test]
+    fn color_space_survives_mutation_and_bumps_generation() {
+        let mut s = continuous(0.0..=1.0).range_colors([
+            Color::new([1.0, 0.0, 0.0, 1.0]),
+            Color::new([0.0, 0.0, 1.0, 1.0]),
+        ]);
+        let before = s.generation();
+        s.set_color_space(ColorSpace::Srgb);
+        assert_eq!(s.color_space(), ColorSpace::Srgb);
+        assert!(s.generation() > before);
+    }
+
+    #[test]
+    fn colorbars_over_different_spaces_are_not_visually_equivalent() {
+        let stops = [
+            Color::new([1.0, 0.0, 0.0, 1.0]),
+            Color::new([0.0, 0.0, 1.0, 1.0]),
+        ];
+        let a = continuous(0.0..=1.0).range_colors(stops);
+        let b = continuous(0.0..=1.0)
+            .range_colors(stops)
+            .with_color_space(ColorSpace::Srgb);
+        let locale = Locale::default();
+        // Same domain and breaks, so the legend rows still collapse …
+        assert!(a.legend_equivalent_to(&b, &locale));
+        // … but the bars they'd draw differ.
+        assert!(!a.visual_equivalent_to(&b, &locale));
     }
 
     #[test]
@@ -1666,7 +1764,9 @@ mod tests {
     fn binned_color_range_interpolates_when_stops_lt_bins() {
         let red = Color::new([1.0, 0.0, 0.0, 1.0]);
         let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
-        let s = binned(0.0..=40.0, vec![0.0, 10.0, 20.0, 30.0, 40.0]).range_colors([red, blue]);
+        let s = binned(0.0..=40.0, vec![0.0, 10.0, 20.0, 30.0, 40.0])
+            .range_colors([red, blue])
+            .with_color_space(ColorSpace::Srgb);
         assert_eq!(s.map(&Value::Number(5.0)).as_color(), Some(red));
         assert_eq!(s.map(&Value::Number(35.0)).as_color(), Some(blue));
         let c2 = s.map(&Value::Number(15.0)).as_color().unwrap();

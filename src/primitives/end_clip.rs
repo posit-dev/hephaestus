@@ -5,7 +5,7 @@
 //! inside the shape. A polyline that begins outside the shape is left
 //! untouched — incidental crossings in the middle are not clipped.
 
-use crate::color::{lerp_color, Color};
+use crate::color::{lerp_color, Color, ColorSpace};
 use crate::geometry::{Point, Rect};
 use crate::path::Path;
 
@@ -157,9 +157,9 @@ fn trim_start(points: &[Point], clip: &EndClip) -> Vec<Point> {
 /// Apply optional clip-start and clip-end to a polyline carrying parallel
 /// per-vertex `widths` and `colors` arrays. Synthesised intersection
 /// vertices receive width and colour linearly interpolated from the two
-/// bracketing data vertices at the intersection parameter `t`. Used by
-/// ribbon-mode geoms so the clipped polyline keeps its per-vertex
-/// attributes aligned with the points list.
+/// bracketing data vertices at the intersection parameter `t`, the colour
+/// through `space`. Used by ribbon-mode geoms so the clipped polyline
+/// keeps its per-vertex attributes aligned with the points list.
 ///
 /// `widths` and `colors` must have the same length as `points`.
 pub fn clip_polyline_with_attrs(
@@ -168,6 +168,7 @@ pub fn clip_polyline_with_attrs(
     colors: &[Color],
     clip_start: Option<EndClip>,
     clip_end: Option<EndClip>,
+    space: ColorSpace,
 ) -> (Vec<Point>, Vec<f64>, Vec<Color>) {
     debug_assert_eq!(points.len(), widths.len());
     debug_assert_eq!(points.len(), colors.len());
@@ -178,7 +179,7 @@ pub fn clip_polyline_with_attrs(
     let mut ws = widths.to_vec();
     let mut cs = colors.to_vec();
     if let Some(c) = clip_start {
-        let (np, nw, nc) = trim_start_with_attrs(&pts, &ws, &cs, &c);
+        let (np, nw, nc) = trim_start_with_attrs(&pts, &ws, &cs, &c, space);
         pts = np;
         ws = nw;
         cs = nc;
@@ -190,7 +191,7 @@ pub fn clip_polyline_with_attrs(
         pts.reverse();
         ws.reverse();
         cs.reverse();
-        let (np, nw, nc) = trim_start_with_attrs(&pts, &ws, &cs, &c);
+        let (np, nw, nc) = trim_start_with_attrs(&pts, &ws, &cs, &c, space);
         pts = np;
         ws = nw;
         cs = nc;
@@ -206,6 +207,7 @@ fn trim_start_with_attrs(
     widths: &[f64],
     colors: &[Color],
     clip: &EndClip,
+    space: ColorSpace,
 ) -> (Vec<Point>, Vec<f64>, Vec<Color>) {
     let n = points.len();
     if n < 2 {
@@ -218,7 +220,7 @@ fn trim_start_with_attrs(
         if let Some(t) = clip.exit_t(points[i], points[i + 1]) {
             let p_exit = points[i] + (points[i + 1] - points[i]) * t;
             let w_exit = widths[i] + t * (widths[i + 1] - widths[i]);
-            let c_exit = lerp_color(colors[i], colors[i + 1], t);
+            let c_exit = lerp_color(colors[i], colors[i + 1], t, space);
             let mut out_p = Vec::with_capacity(n - i);
             let mut out_w = Vec::with_capacity(n - i);
             let mut out_c = Vec::with_capacity(n - i);
@@ -349,7 +351,7 @@ mod tests {
             radius: 1.0,
         };
         let (out_p, out_w, out_c) =
-            clip_polyline_with_attrs(&pts, &widths, &colors, Some(clip), None);
+            clip_polyline_with_attrs(&pts, &widths, &colors, Some(clip), None, ColorSpace::Srgb);
         assert_eq!(out_p.len(), 2);
         assert_eq!(out_w.len(), 2);
         assert_eq!(out_c.len(), 2);
@@ -379,7 +381,7 @@ mod tests {
             radius: 1.0,
         };
         let (out_p, out_w, _out_c) =
-            clip_polyline_with_attrs(&pts, &widths, &colors, None, Some(clip));
+            clip_polyline_with_attrs(&pts, &widths, &colors, None, Some(clip), ColorSpace::Srgb);
         // Endpoint at (10, 0) is inside? It's *outside* the unit circle (distance 10),
         // so this should be a no-op. Let me adjust the test.
         assert_eq!(out_p.len(), 2);
@@ -408,8 +410,14 @@ mod tests {
             center: pt(10.0, 0.0),
             radius: 1.0,
         };
-        let (out_p, out_w, _out_c) =
-            clip_polyline_with_attrs(&pts, &widths, &colors, Some(clip_a), Some(clip_b));
+        let (out_p, out_w, _out_c) = clip_polyline_with_attrs(
+            &pts,
+            &widths,
+            &colors,
+            Some(clip_a),
+            Some(clip_b),
+            ColorSpace::Srgb,
+        );
         assert_eq!(out_p.len(), 2);
         // Start cut at t = 0.1 → width = 1.0.
         assert!((out_p[0].x - 1.0).abs() < 1e-9);
@@ -432,7 +440,7 @@ mod tests {
             radius: 1.0,
         };
         let (out_p, out_w, _out_c) =
-            clip_polyline_with_attrs(&pts, &widths, &colors, Some(clip), None);
+            clip_polyline_with_attrs(&pts, &widths, &colors, Some(clip), None, ColorSpace::Srgb);
         assert_eq!(out_p, vec![pt(-5.0, 0.0), pt(5.0, 0.0)]);
         assert_eq!(out_w, vec![1.0, 2.0]);
     }

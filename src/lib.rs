@@ -35,7 +35,7 @@ pub mod text;
 // Curated re-exports of the most commonly used types.
 pub use blend::{BlendMode, Compose, Mix};
 pub use brush::{Brush, Sampling};
-pub use color::Color;
+pub use color::{Color, ColorSpace};
 pub use geometry::{Affine, Point, Rect, Size, Vec2};
 pub use layout::{
     Cell, CellId, Grid, Inset, Layout, Length, Measure, Node, Placement, Track, WidthHint,

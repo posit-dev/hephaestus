@@ -64,10 +64,10 @@ use crate::scene::SceneBuilder;
 use super::marks::unique_values_at_first_rows;
 use super::outline::{draw_polygon_fill_and_stroke, expand_polygons, PolygonSpec};
 use super::resolve::{
-    channel_varies_across, override_alpha, pt_to_px, resolve_angle_channel, resolve_cap_channel,
-    resolve_color_channel, resolve_color_channel_or_theme, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
-    resolve_position, ChannelBind,
+    channel_color_space, channel_varies_across, override_alpha, pt_to_px, resolve_angle_channel,
+    resolve_cap_channel, resolve_color_channel, resolve_color_channel_or_theme,
+    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, resolve_position, ChannelBind,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
@@ -596,6 +596,7 @@ fn draw_one_polygon_mark(
         Vec::new()
     };
     let fallback_stroke = stroke_color.unwrap_or_else(|| Color::new([0.0, 0.0, 0.0, 1.0]));
+    let stroke_space = channel_color_space(stroke_scale);
     for ring in &mark.rings {
         let mut points: Vec<Point> = Vec::with_capacity(ring.len());
         let mut widths: Vec<f64> = if ribbon_mode {
@@ -657,7 +658,7 @@ fn draw_one_polygon_mark(
                         for s in &interior_t {
                             points.push(Point::new(s.px, s.py));
                             widths.push(pw + s.t * (curr_w - pw));
-                            colors.push(lerp_color(pc, curr_c, s.t));
+                            colors.push(lerp_color(pc, curr_c, s.t, stroke_space));
                         }
                     } else {
                         interior.clear();
@@ -717,7 +718,7 @@ fn draw_one_polygon_mark(
                         for s in &interior_t {
                             points.push(Point::new(s.px, s.py));
                             widths.push(pw + s.t * (fw - pw));
-                            colors.push(lerp_color(pc, fc, s.t));
+                            colors.push(lerp_color(pc, fc, s.t, stroke_space));
                         }
                     } else {
                         interior.clear();

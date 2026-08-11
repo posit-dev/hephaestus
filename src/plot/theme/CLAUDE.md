@@ -72,7 +72,9 @@ Three semantic anchors:
 - `ink` — foreground (text, axis lines, panel borders, default stroke for geoms).
 - `accent` — highlight (default fill for geoms with no fill scale; legend / strip accents).
 
-`ThemeColor::Mix(a, b, t)` and `ThemeColor::Alpha(inner, a)` build derived shades. Defaults use mixes of paper/ink to reproduce ggplot2's grey anchors — `ThemeColor::mix(Paper, Ink, 0.08)` resolves to grey92 against the default white-paper / black-ink palette, and to the symmetric dark shade after `invert()`. That's the whole reason chrome doesn't hardcode RGB constants: a single `invert()` should round-trip cleanly.
+`ThemeColor::Mix(a, b, t, space)` and `ThemeColor::Alpha(inner, a)` build derived shades. Defaults use mixes of paper/ink to reproduce ggplot2's grey anchors — `ThemeColor::mix(Paper, Ink, 0.08)` resolves to grey92 against the default white-paper / black-ink palette, and to the symmetric dark shade after `invert()`. That's the whole reason chrome doesn't hardcode RGB constants: a single `invert()` should round-trip cleanly.
+
+**Mixes are sRGB, unlike colour scales.** `ThemeColor::mix` builds its `Mix` with `ColorSpace::Srgb` — `t` is a channel fraction between the two anchors, which is what makes the grey anchors land on their nominal levels and what keeps `invert()` symmetric. `ColorSpace::Oklab`, the crate-wide default for data-driven colour, would move grey92 off 0.92. `ThemeColor::mix_in(a, b, t, space)` opts a single mix into another space, for a perceptually even blend between two saturated anchors.
 
 Use `ThemeColor::Fixed(Color::rgb(...))` only for things that must lock to a specific colour regardless of palette (a red error annotation, etc.).
 

@@ -91,11 +91,12 @@ use crate::scene::SceneBuilder;
 use super::marks::{build_marks_from_column, unique_values_at_first_rows, MarkSlot};
 use super::outline::{draw_curve_outline, EndpointMarker, OutlineSpec};
 use super::resolve::{
-    apply_per_row_offsets, auto_endpoint_clip_pt, channel_varies_across, emit_endpoint_marker,
-    endpoint_outward, override_alpha, pt_to_px, resolve_bool_channel_or, resolve_cap_channel,
-    resolve_color_channel, resolve_color_channel_or_theme, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
-    resolve_position, resolve_str_channel_or, ChannelBind,
+    apply_per_row_offsets, auto_endpoint_clip_pt, channel_color_space, channel_varies_across,
+    emit_endpoint_marker, endpoint_outward, override_alpha, pt_to_px, resolve_bool_channel_or,
+    resolve_cap_channel, resolve_color_channel, resolve_color_channel_or_theme,
+    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, resolve_position, resolve_str_channel_or,
+    ChannelBind,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
@@ -708,6 +709,7 @@ fn draw_one_bspline_mark(
                     &ribbon_colors,
                     start_clip,
                     end_clip,
+                    channel_color_space(stroke_scale),
                 );
                 (p, c, w)
             } else {
@@ -852,6 +854,7 @@ fn build_ribbon_attrs(
             resolve_number_channel_or(linewidth_ch, linewidth_scale, ctrl_rows[i], linewidth_pt);
         pt_to_px(w_pt, dpi) * 0.5
     };
+    let stroke_space = channel_color_space(stroke_scale);
     let last = n_rows - 1;
     let mut colors = Vec::with_capacity(samples.len());
     let mut half_widths = Vec::with_capacity(samples.len());
@@ -864,7 +867,7 @@ fn build_ribbon_attrs(
         let c_b = row_color(i_b);
         let w_a = row_half_width_px(i_a);
         let w_b = row_half_width_px(i_b);
-        colors.push(lerp_color(c_a, c_b, frac));
+        colors.push(lerp_color(c_a, c_b, frac, stroke_space));
         half_widths.push(w_a + frac * (w_b - w_a));
     }
     (colors, half_widths)

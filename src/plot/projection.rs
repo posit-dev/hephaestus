@@ -988,7 +988,7 @@ impl Projection {
     /// );
     /// for s in &samples {
     ///     points.push(Point::new(s.px, s.py));
-    ///     colors.push(lerp_color(prev_color, curr_color, s.t));
+    ///     colors.push(lerp_color(prev_color, curr_color, s.t, stroke_space));
     ///     widths.push(prev_width + s.t * (curr_width - prev_width));
     /// }
     /// ```

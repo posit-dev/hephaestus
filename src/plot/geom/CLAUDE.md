@@ -53,6 +53,7 @@ Every geom maps the same kind of raw `(Channel, Option<&Scale>, row_idx)` triple
 - **`resolve_position(raw, scale, band_offset)`** — Value → `[0, 1]` panel fraction. Optional band-offset folded in for scales that report band width.
 - **`resolve_color_channel`** — Value → `Color`.
 - **`resolve_linetype_channel`** — Value → `Arc<[LinetypeStep]>` dash pattern.
+- **`channel_color_space(scale)`** — the `ColorSpace` a colour channel's blends should walk through: the bound scale's, or the crate default for raw / unbound channels. Geoms that blend two rows' resolved colours (densified vertices under a non-linear projection, spline samples between control points, synthesised endpoint-clip vertices) read it once per mark so the blend follows the same ramp the scale walks.
 - **`pt_to_px(pt, dpi)`** — convert pt to px using `pt * dpi / 72.0`. Same convention for every absolute graphical size (point diameter, stroke linewidth, dash lengths).
 
 Principle: **scale mapping is applied to the raw `Value` before the typed extraction**, so a `"size"` column of categorical strings can flow through an ordinal scale to a numeric output, an `"x"` column of dates can flow through a continuous scale to a `[0, 1]` panel fraction.

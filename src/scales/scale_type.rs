@@ -7,7 +7,7 @@
 //! callers either dispatch on the kind themselves (see hephaestus's
 //! `Scale::map`) or call the per-kind function directly.
 
-use crate::color::lerp_color;
+use crate::color::{lerp_color, ColorSpace};
 
 use super::breaks::{
     extended_breaks, linear_minor_breaks_between, log_minor_breaks, log_pretty_breaks, sqrt_breaks,
@@ -97,7 +97,9 @@ impl ScaleTypeKind {
 ///
 /// Applies the transform, normalises to `[0, 1]` against the input range,
 /// then interpolates through the output range (or returns the fraction
-/// directly when the output range is unset).
+/// directly when the output range is unset). `color_space` is the space a
+/// [`OutputRange::Colors`] ramp interpolates in and is ignored by every
+/// other output type.
 ///
 /// Returns `Value::Null` if `input` has no numeric projection or the input
 /// range is missing / not continuous.
@@ -106,6 +108,7 @@ pub fn continuous_map(
     input_range: Option<&InputRange>,
     output_range: Option<&OutputRange>,
     transform: &Transform,
+    color_space: ColorSpace,
 ) -> Value {
     let v = match input.as_number() {
         Some(n) => n,
@@ -123,7 +126,7 @@ pub fn continuous_map(
     } else {
         (v_t - dmin_t) / (dmax_t - dmin_t)
     };
-    interpolate_range(t, output_range)
+    interpolate_range(t, output_range, color_space)
 }
 
 /// Tick positions for a continuous scale, in input space, projected
@@ -385,11 +388,14 @@ pub fn discrete_map(
 /// Ordered discrete domain mapped through a continuous output range.
 /// Each domain entry's normalised position `idx / (n - 1)` is
 /// interpolated through the output range (or returns the band-centre
-/// fraction when the output range is unset).
+/// fraction when the output range is unset). `color_space` is the space a
+/// [`OutputRange::Colors`] ramp interpolates in and is ignored by every
+/// other output type.
 pub fn ordinal_map(
     input: &Value,
     input_range: Option<&InputRange>,
     output_range: Option<&OutputRange>,
+    color_space: ColorSpace,
 ) -> Value {
     let domain = match input_range {
         Some(InputRange::Discrete(d)) => d,
@@ -411,7 +417,7 @@ pub fn ordinal_map(
             } else {
                 0.0
             };
-            interpolate_range(t, Some(range))
+            interpolate_range(t, Some(range), color_space)
         }
     }
 }
@@ -448,12 +454,14 @@ pub fn discrete_band_width(input_range: Option<&InputRange>) -> f64 {
 /// With an output range the bin's index picks a palette entry the way an
 /// ordinal scale picks one for its levels: an N-entry palette over N bins
 /// is a one-to-one lookup, and a shorter palette interpolates across the
-/// bins.
+/// bins. `color_space` is the space a [`OutputRange::Colors`] ramp
+/// interpolates in and is ignored by every other output type.
 pub fn binned_map(
     input: &Value,
     input_range: Option<&InputRange>,
     bins: Option<&[f64]>,
     output_range: Option<&OutputRange>,
+    color_space: ColorSpace,
 ) -> Value {
     let v = match input.as_number() {
         Some(n) => n,
@@ -487,7 +495,7 @@ pub fn binned_map(
             } else {
                 0.0
             };
-            interpolate_range(t, Some(range))
+            interpolate_range(t, Some(range), color_space)
         }
     }
 }
@@ -576,10 +584,9 @@ pub fn identity_map(input: &Value) -> Value {
 ///   with no explicit output range).
 /// - `Numbers(vs)` → piecewise-linear interpolation across `vs.len() - 1`
 ///   segments. Empty vec returns `Null`; single-stop returns that stop.
-/// - `Colors(vs)` → piecewise-linear componentwise interpolation in sRGB
-///   space. Not perceptually uniform — a documented limitation.
+/// - `Colors(vs)` → piecewise-linear interpolation through `color_space`.
 /// - `Strings(_)` → `Null` (strings can't be interpolated).
-fn interpolate_range(t: f64, range: Option<&OutputRange>) -> Value {
+fn interpolate_range(t: f64, range: Option<&OutputRange>, color_space: ColorSpace) -> Value {
     match range {
         None => Value::Number(t),
         Some(OutputRange::Numbers(vs)) => match vs.len() {
@@ -595,7 +602,7 @@ fn interpolate_range(t: f64, range: Option<&OutputRange>) -> Value {
             1 => Value::Color(vs[0]),
             n => {
                 let (lo, frac) = pick_segment(t, n);
-                Value::Color(lerp_color(vs[lo], vs[lo + 1], frac))
+                Value::Color(lerp_color(vs[lo], vs[lo + 1], frac, color_space))
             }
         },
         // Strings have no numeric interpolation; pick the nearest

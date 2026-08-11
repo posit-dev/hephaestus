@@ -91,7 +91,7 @@ use crate::scene::SceneBuilder;
 use super::marks::{build_marks_from_column, unique_values_at_first_rows, MarkSlot};
 use super::outline::{draw_curve_outline, resolve_outline_spec, OutlineChannels, OutlineScales};
 use super::resolve::{
-    channel_varies_across, override_alpha, pt_to_px, resolve_color_channel,
+    channel_color_space, channel_varies_across, override_alpha, pt_to_px, resolve_color_channel,
     resolve_color_channel_or_theme, resolve_number_channel, resolve_number_channel_or,
     resolve_pick_id, resolve_position, ChannelBind,
 };
@@ -1168,6 +1168,7 @@ fn build_per_vertex_colors(
         )
         .unwrap_or(fallback)
     };
+    let fill_space = channel_color_space(fill_scale);
     let mut colors: Vec<Color> = Vec::with_capacity(vertex_origins.len());
     for origin in vertex_origins {
         let c = if origin.prev_row == origin.next_row {
@@ -1175,7 +1176,7 @@ fn build_per_vertex_colors(
         } else {
             let prev = resolve_row(origin.prev_row);
             let next = resolve_row(origin.next_row);
-            crate::color::lerp_color(prev, next, origin.t)
+            crate::color::lerp_color(prev, next, origin.t, fill_space)
         };
         colors.push(c);
     }

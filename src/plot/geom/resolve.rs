@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::brush::Brush;
-use crate::color::Color;
+use crate::color::{Color, ColorSpace};
 use crate::geometry::{Affine, Point, Vec2};
 use crate::path::{FillRule, Path};
 use crate::pick::PickId;
@@ -112,6 +112,16 @@ pub(crate) fn resolve_color_channel(
     i: usize,
 ) -> Option<Color> {
     resolve_value(channel, scale, i)?.as_color()
+}
+
+/// The space a colour channel's gradient interpolates through: the bound
+/// scale's, or the crate default when the channel carries raw colours or
+/// no scale is bound. Geoms that blend between two rows' resolved
+/// colours — densified vertices under a non-linear projection, spline
+/// samples between control points — read it once per mark so the blend
+/// follows the same ramp the scale itself walks.
+pub(crate) fn channel_color_space(scale: Option<&Scale>) -> ColorSpace {
+    scale.map(Scale::color_space).unwrap_or_default()
 }
 
 /// Like [`resolve_color_channel`] but falls back to a theme-provided

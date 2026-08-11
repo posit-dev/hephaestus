@@ -81,7 +81,7 @@ Single-file modules (no CLAUDE.md, one-line descriptions here):
 
 - `blend.rs` — `BlendMode` / `Compose` / `Mix` enums (intersection of Vello + Blend2D).
 - `brush.rs` — `Brush`, `Image`, `Sampling` (Nearest / Bilinear).
-- `color.rs` — re-exports peniko `Color`.
+- `color.rs` — re-exports peniko `Color`; owns `ColorSpace` (Oklab / Srgb) and `lerp_color`, the one place two colors get blended. Every blend names its space; `ColorSpace::default()` is Oklab.
 - `geometry.rs` — re-exports kurbo `Affine`, `Point`, `Rect`, `Size`, `Vec2`.
 - `mesh.rs` — `Mesh`: flat 2D triangle list with per-vertex colour. Used by `primitives::ribbon` and consumed by `SceneBuilder::draw_mesh`.
 - `path.rs` — `Path` (kurbo `BezPath` wrapper) and `FillRule` (intersection enum).

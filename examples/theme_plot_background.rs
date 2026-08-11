@@ -98,11 +98,7 @@ fn main() {
         plot_margin: Margin::all(Length::Abs(24.0)),
         plot_padding: Margin::all(Length::Abs(18.0)),
         plot_background: Element::Set(RectElement {
-            fill: Some(ThemeColor::Mix(
-                Box::new(ThemeColor::Paper),
-                Box::new(ThemeColor::Accent),
-                0.3,
-            )),
+            fill: Some(ThemeColor::mix(ThemeColor::Paper, ThemeColor::Accent, 0.3)),
             color: Some(ThemeColor::Ink),
             linewidth_pt: Some(Length::Abs(2.0)),
             corner_radius: Some(Length::Abs(12.0)),
@@ -122,11 +118,7 @@ fn main() {
         legend: hephaestus::plot::theme::LegendTheme {
             bar: hephaestus::plot::theme::BarTheme {
                 frame: Element::Set(RectElement {
-                    fill: Some(ThemeColor::Mix(
-                        Box::new(ThemeColor::Paper),
-                        Box::new(ThemeColor::Ink),
-                        0.08,
-                    )),
+                    fill: Some(ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.08)),
                     color: Some(ThemeColor::Ink),
                     linewidth_pt: Some(Length::Abs(1.5)),
                     corner_radius: Some(Length::Abs(6.0)),
@@ -138,11 +130,7 @@ fn main() {
                 width: Length::Abs(20.0),
                 height: Length::Abs(20.0),
                 frame: Element::Set(RectElement {
-                    fill: Some(ThemeColor::Mix(
-                        Box::new(ThemeColor::Paper),
-                        Box::new(ThemeColor::Ink),
-                        0.08,
-                    )),
+                    fill: Some(ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.08)),
                     color: Some(ThemeColor::Ink),
                     linewidth_pt: Some(Length::Abs(0.75)),
                     corner_radius: Some(Length::Abs(4.0)),

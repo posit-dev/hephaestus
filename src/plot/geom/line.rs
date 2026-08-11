@@ -81,11 +81,12 @@ use super::linetype;
 use super::marks::{build_marks_from_column, unique_values_at_first_rows, MarkSlot};
 use super::outline::{draw_curve_outline, EndpointMarker, OutlineSpec};
 use super::resolve::{
-    auto_endpoint_clip_pt, channel_varies_across, emit_endpoint_marker, endpoint_outward,
-    override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or, resolve_cap_channel,
-    resolve_color_channel, resolve_color_channel_or_theme, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
-    resolve_position, resolve_str_channel_or, ChannelBind,
+    auto_endpoint_clip_pt, channel_color_space, channel_varies_across, emit_endpoint_marker,
+    endpoint_outward, override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or,
+    resolve_cap_channel, resolve_color_channel, resolve_color_channel_or_theme,
+    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, resolve_position, resolve_str_channel_or,
+    ChannelBind,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
@@ -620,6 +621,7 @@ fn draw_one_mark(
     let ribbon_mode = dash_pattern_pt.is_empty()
         && corner_radius_pt == 0.0
         && (linewidth_varies || stroke_varies);
+    let stroke_space = channel_color_space(stroke_scale);
 
     // ── Per-vertex positions for this mark. ──
     //
@@ -699,7 +701,7 @@ fn draw_one_mark(
                     for s in &interior_t {
                         points.push(Point::new(s.px, s.py));
                         widths.push(pw + s.t * (curr_w - pw));
-                        colors.push(lerp_color(pc, curr_c, s.t));
+                        colors.push(lerp_color(pc, curr_c, s.t, stroke_space));
                     }
                 } else {
                     interior.clear();
@@ -764,7 +766,7 @@ fn draw_one_mark(
                 center: *points.last().unwrap(),
                 radius: pt_to_px(clip_end_pt, ctx.dpi),
             });
-            clip_polyline_with_attrs(&points, &widths, &colors, start, end)
+            clip_polyline_with_attrs(&points, &widths, &colors, start, end, stroke_space)
         } else {
             (points.clone(), widths.clone(), colors.clone())
         };
