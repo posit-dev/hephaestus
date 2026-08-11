@@ -18,6 +18,16 @@
 //! point-by-point at draw time and each coordinate is fed through
 //! `resolve_position` + the panel projection.
 //!
+//! Under a non-linear projection every edge of a linestring or ring is
+//! densified so the feature follows the projected geodesic rather than
+//! cutting across it, matching `LineGeom` / `PolygonGeom`. A ring's
+//! closing edge goes through
+//! [`Projection::interpolate_closing_segment`](crate::plot::projection::Projection::interpolate_closing_segment),
+//! so on a full-turn polar sweep it closes across the theta seam. Rings
+//! that repeat their first coordinate at the end (the OGC convention)
+//! have the duplicate dropped, so the returning edge is the closing one
+//! either way.
+//!
 //! Per-variant theme defaults are read from `theme.geom.point` /
 //! `theme.geom.line` / `theme.geom.polygon`, so a single themed
 //! `GeometryGeom` picks up the same defaults as the corresponding typed
@@ -225,17 +235,6 @@ impl Geom for GeometryGeom {
         let start_marker_invert_ch = channels.get("start_marker_invert");
         let end_marker_invert_ch = channels.get("end_marker_invert");
 
-        // Project an (x, y) data coordinate through the bound scales,
-        // offsets, and panel projection — returns panel-space pixels.
-        // Per-row constants are passed in so the closure stays Fn (no
-        // mutable state).
-        let project = |xy: Coord, x_band: f64, y_band: f64, dx_px: f64, dy_px: f64| -> Point {
-            let x_frac = resolve_position(Value::Number(xy.0), x_scale, x_band);
-            let y_frac = resolve_position(Value::Number(xy.1), y_scale, y_band);
-            let (px, py) = ctx.projection.project_to_panel_px(panel, &[x_frac, y_frac]);
-            Point::new(px + dx_px, py - dy_px)
-        };
-
         for i in 0..n {
             let geom = match geom_col.get(i) {
                 Value::Geometry(g) => g,
@@ -274,7 +273,8 @@ impl Geom for GeometryGeom {
                     dy_px,
                     angle,
                     pick,
-                    project: &project,
+                    x_scale,
+                    y_scale,
                     fill_ch,
                     fill_scale,
                     fill_opacity_ch,
@@ -334,10 +334,7 @@ impl Geom for GeometryGeom {
 /// Bundle of per-row channel context passed down into `draw_geometry`.
 /// Keeps the dispatch helper free of a long parameter list while still
 /// avoiding shared mutable state.
-struct DrawCtx<'a, F>
-where
-    F: Fn(Coord, f64, f64, f64, f64) -> Point,
-{
+struct DrawCtx<'a> {
     i: usize,
     x_band: f64,
     y_band: f64,
@@ -345,7 +342,8 @@ where
     dy_px: f64,
     angle: f64,
     pick: PickId,
-    project: &'a F,
+    x_scale: Option<&'a crate::plot::scale::Scale>,
+    y_scale: Option<&'a crate::plot::scale::Scale>,
     fill_ch: Option<&'a Channel>,
     fill_scale: Option<&'a crate::plot::scale::Scale>,
     fill_opacity_ch: Option<&'a Channel>,
@@ -396,14 +394,120 @@ where
     end_marker_invert_scale: Option<&'a crate::plot::scale::Scale>,
 }
 
-fn draw_geometry<F>(
+impl DrawCtx<'_> {
+    /// Channel-space fractions `[x_frac, y_frac]` for a data
+    /// coordinate, with the row's band offsets folded in.
+    fn frac(&self, c: Coord) -> [f64; 2] {
+        [
+            resolve_position(Value::Number(c.0), self.x_scale, self.x_band),
+            resolve_position(Value::Number(c.1), self.y_scale, self.y_band),
+        ]
+    }
+
+    /// Panel-space pixels for a data coordinate, including the row's
+    /// pt offsets.
+    fn point(&self, ctx: &GeomContext<'_>, c: Coord) -> Point {
+        self.point_at(ctx, &self.frac(c))
+    }
+
+    /// Panel-space pixels for already-resolved channel fractions,
+    /// including the row's pt offsets.
+    fn point_at(&self, ctx: &GeomContext<'_>, frac: &[f64; 2]) -> Point {
+        let (px, py) = ctx.projection.project_to_panel_px(ctx.panel_rect, frac);
+        Point::new(px + self.dx_px, py - self.dy_px)
+    }
+}
+
+/// Project a coordinate sequence to panel pixels, densifying every
+/// edge under a non-linear projection so the path follows the
+/// projected geodesic instead of cutting across it as a pixel-space
+/// chord. Coordinates that don't resolve to a finite position are
+/// skipped; the surrounding coordinates still connect.
+///
+/// `closing` marks the sequence as a **ring**: the edge from the last
+/// coordinate back to the first is densified too, through
+/// [`Projection::interpolate_closing_segment`], so on a cyclic polar
+/// domain the ring closes across the theta seam. A ring that repeats
+/// its first coordinate at the end (the OGC convention) has that
+/// duplicate dropped first, so the returning edge is the closing one
+/// either way.
+///
+/// Per-row pixel offsets apply to the coordinates only — interior
+/// densified points sit on the un-offset geodesic, matching the
+/// policy in `LineGeom` / `PolygonGeom`.
+fn project_path(
+    coords: &[Coord],
+    ctx: &GeomContext<'_>,
+    dc: &DrawCtx<'_>,
+    closing: bool,
+) -> Vec<Point> {
+    let coords = if closing {
+        strip_repeated_first(coords)
+    } else {
+        coords
+    };
+    let is_linear = ctx.projection.is_linear();
+    let mut out: Vec<Point> = Vec::with_capacity(coords.len());
+    let mut interior: Vec<(f64, f64)> = Vec::new();
+    let mut prev_frac: Option<[f64; 2]> = None;
+    let mut first_frac: Option<[f64; 2]> = None;
+    for c in coords {
+        let frac = dc.frac(*c);
+        if !frac[0].is_finite() || !frac[1].is_finite() {
+            continue;
+        }
+        let pt = dc.point_at(ctx, &frac);
+        if !pt.x.is_finite() || !pt.y.is_finite() {
+            continue;
+        }
+        if !is_linear {
+            if let Some(prev) = prev_frac {
+                interior.clear();
+                ctx.projection
+                    .interpolate_segment(ctx.panel_rect, &prev, &frac, &mut interior);
+                out.extend(interior.iter().map(|(px, py)| Point::new(*px, *py)));
+            }
+        }
+        out.push(pt);
+        if first_frac.is_none() {
+            first_frac = Some(frac);
+        }
+        prev_frac = Some(frac);
+    }
+    if closing && !is_linear {
+        if let (Some(prev), Some(first)) = (prev_frac, first_frac) {
+            if prev != first {
+                interior.clear();
+                ctx.projection.interpolate_closing_segment(
+                    ctx.panel_rect,
+                    &prev,
+                    &first,
+                    &mut interior,
+                );
+                out.extend(interior.iter().map(|(px, py)| Point::new(*px, *py)));
+            }
+        }
+    }
+    out
+}
+
+/// A ring without the trailing duplicate of its first coordinate.
+/// Rings are conventionally closed that way; the renderer closes
+/// sub-paths itself, and the closing edge needs to be the synthetic
+/// one so it can cross a cyclic domain's seam.
+fn strip_repeated_first(ring: &[Coord]) -> &[Coord] {
+    match (ring.first(), ring.last()) {
+        (Some(f), Some(l)) if ring.len() > 1 && f == l => &ring[..ring.len() - 1],
+        _ => ring,
+    }
+}
+
+fn draw_geometry(
     scene: &mut dyn SceneBuilder,
     geom: &Geometry,
     ctx: &GeomContext<'_>,
-    dc: DrawCtx<'_, F>,
-) where
-    F: Fn(Coord, f64, f64, f64, f64) -> Point,
-{
+    dc: DrawCtx<'_>,
+) {
     match geom {
         Geometry::Empty => {}
         Geometry::Point(c) => draw_point(scene, &[*c], ctx, &dc),
@@ -417,24 +521,13 @@ fn draw_geometry<F>(
                 // Shallow-copy the per-row context so each child sees the
                 // same row styling — `DrawCtx` is small (references and
                 // resolved scalars), so the clone is cheap.
-                draw_geometry(
-                    scene,
-                    child,
-                    ctx,
-                    DrawCtx {
-                        project: dc.project,
-                        ..clone_ctx(&dc)
-                    },
-                );
+                draw_geometry(scene, child, ctx, clone_ctx(&dc));
             }
         }
     }
 }
 
-fn clone_ctx<'a, F>(dc: &DrawCtx<'a, F>) -> DrawCtx<'a, F>
-where
-    F: Fn(Coord, f64, f64, f64, f64) -> Point,
-{
+fn clone_ctx<'a>(dc: &DrawCtx<'a>) -> DrawCtx<'a> {
     DrawCtx {
         i: dc.i,
         x_band: dc.x_band,
@@ -443,7 +536,8 @@ where
         dy_px: dc.dy_px,
         angle: dc.angle,
         pick: dc.pick,
-        project: dc.project,
+        x_scale: dc.x_scale,
+        y_scale: dc.y_scale,
         fill_ch: dc.fill_ch,
         fill_scale: dc.fill_scale,
         fill_opacity_ch: dc.fill_opacity_ch,
@@ -497,14 +591,12 @@ where
 
 // ─── Point / MultiPoint ──────────────────────────────────────────────────────
 
-fn draw_point<F>(
+fn draw_point(
     scene: &mut dyn SceneBuilder,
     coords: &[Coord],
     ctx: &GeomContext<'_>,
-    dc: &DrawCtx<'_, F>,
-) where
-    F: Fn(Coord, f64, f64, f64, f64) -> Point,
-{
+    dc: &DrawCtx<'_>,
+) {
     let fill_color = override_alpha(
         resolve_color_channel_or_theme(
             dc.fill_ch,
@@ -555,7 +647,7 @@ fn draw_point<F>(
     let stroke_width_local = pt_to_px(stroke_width_pt, ctx.dpi) / size_px;
 
     for c in coords {
-        let pt = (dc.project)(*c, dc.x_band, dc.y_band, dc.dx_px, dc.dy_px);
+        let pt = dc.point(ctx, *c);
         if !pt.x.is_finite() || !pt.y.is_finite() {
             continue;
         }
@@ -633,14 +725,12 @@ fn draw_point<F>(
 
 // ─── LineString / MultiLineString ────────────────────────────────────────────
 
-fn draw_lines<F>(
+fn draw_lines(
     scene: &mut dyn SceneBuilder,
     lines: &[Vec<Coord>],
     ctx: &GeomContext<'_>,
-    dc: &DrawCtx<'_, F>,
-) where
-    F: Fn(Coord, f64, f64, f64, f64) -> Point,
-{
+    dc: &DrawCtx<'_>,
+) {
     let stroke_color = override_alpha(
         resolve_color_channel_or_theme(
             dc.stroke_ch,
@@ -680,7 +770,7 @@ fn draw_lines<F>(
     // else fall back to the stroke color — same contract as `LineGeom`.
     let marker_fill = resolve_color_channel(dc.fill_ch, dc.fill_scale, dc.i).unwrap_or(sc);
 
-    let xform = rotation_about_centroid(lines.iter().flat_map(|l| l.iter().copied()), dc);
+    let xform = rotation_about_centroid(lines.iter().flat_map(|l| l.iter().copied()), ctx, dc);
 
     let corner_rounding = (corner_radius_px > 0.0).then_some(CornerRounding {
         max_cut: corner_radius_px,
@@ -733,11 +823,7 @@ fn draw_lines<F>(
         if line.len() < 2 {
             continue;
         }
-        let projected: Vec<Point> = line
-            .iter()
-            .map(|c| (dc.project)(*c, dc.x_band, dc.y_band, dc.dx_px, dc.dy_px))
-            .filter(|p| p.x.is_finite() && p.y.is_finite())
-            .collect();
+        let projected = project_path(line, ctx, dc, false);
         if projected.len() < 2 {
             continue;
         }
@@ -780,14 +866,12 @@ fn draw_lines<F>(
 
 // ─── Polygon / MultiPolygon ──────────────────────────────────────────────────
 
-fn draw_polygons<F>(
+fn draw_polygons(
     scene: &mut dyn SceneBuilder,
     polys: &[GeoPolygon],
     ctx: &GeomContext<'_>,
-    dc: &DrawCtx<'_, F>,
-) where
-    F: Fn(Coord, f64, f64, f64, f64) -> Point,
-{
+    dc: &DrawCtx<'_>,
+) {
     let fill_color = override_alpha(
         resolve_color_channel_or_theme(
             dc.fill_ch,
@@ -829,7 +913,7 @@ fn draw_polygons<F>(
     let mut ring_owners: Vec<usize> = Vec::new(); // index into `polys` for each entry
     let mut first_outer_idx: Option<usize> = None;
     for (pi, p) in polys.iter().enumerate() {
-        let exterior_px = project_ring(&p.exterior, dc);
+        let exterior_px = project_path(&p.exterior, ctx, dc, true);
         if exterior_px.len() < 3 {
             continue;
         }
@@ -839,7 +923,7 @@ fn draw_polygons<F>(
         all_rings.push(exterior_px);
         ring_owners.push(pi);
         for hole in &p.interiors {
-            let hole_px = project_ring(hole, dc);
+            let hole_px = project_path(hole, ctx, dc, true);
             if hole_px.len() >= 3 {
                 all_rings.push(hole_px);
                 ring_owners.push(pi);
@@ -905,23 +989,12 @@ fn draw_polygons<F>(
     draw_polygon_fill_and_stroke(scene, ctx, &processed_rings, &spec);
 }
 
-fn project_ring<F>(ring: &[Coord], dc: &DrawCtx<'_, F>) -> Vec<Point>
-where
-    F: Fn(Coord, f64, f64, f64, f64) -> Point,
-{
-    ring.iter()
-        .map(|c| (dc.project)(*c, dc.x_band, dc.y_band, dc.dx_px, dc.dy_px))
-        .filter(|p| p.x.is_finite() && p.y.is_finite())
-        .collect()
-}
-
 /// Pivot for `angle` on a multi-coordinate feature: mean of all projected
 /// coordinates. Matches `PolygonGeom`'s "rotate about the outer-ring
 /// centroid" convention for the single-polygon case, and gives a sensible
 /// generalisation when the feature is a line or a multipart shape.
-fn rotation_about_centroid<F, I>(coords: I, dc: &DrawCtx<'_, F>) -> Affine
+fn rotation_about_centroid<I>(coords: I, ctx: &GeomContext<'_>, dc: &DrawCtx<'_>) -> Affine
 where
-    F: Fn(Coord, f64, f64, f64, f64) -> Point,
     I: IntoIterator<Item = Coord>,
 {
     if dc.angle == 0.0 {
@@ -931,7 +1004,7 @@ where
     let mut sum_y = 0.0;
     let mut count = 0usize;
     for c in coords {
-        let p = (dc.project)(c, dc.x_band, dc.y_band, dc.dx_px, dc.dy_px);
+        let p = dc.point(ctx, c);
         if p.x.is_finite() && p.y.is_finite() {
             sum_x += p.x;
             sum_y += p.y;
@@ -1072,6 +1145,148 @@ mod tests {
             scene.ops.iter().any(|op| matches!(op, Op::Stroke { .. })),
             "linestring with stroke should emit a Stroke op"
         );
+    }
+
+    // ── Densification under a non-linear projection ──
+
+    /// Count the vertices of the first path of `op_kind` in the scene.
+    fn path_vertices(scene: &RecordingScene, want_fill: bool) -> usize {
+        for op in &scene.ops {
+            let path = match op {
+                Op::Fill { path, .. } if want_fill => path,
+                Op::Stroke { path, .. } if !want_fill => path,
+                _ => continue,
+            };
+            return path
+                .elements()
+                .iter()
+                .filter(|el| matches!(el, kurbo::PathEl::MoveTo(_) | kurbo::PathEl::LineTo(_)))
+                .count();
+        }
+        panic!("no matching path op emitted");
+    }
+
+    fn unit_scales() -> (crate::plot::scale::Scale, crate::plot::scale::Scale) {
+        (scale::continuous(0.0..=1.0), scale::continuous(0.0..=1.0))
+    }
+
+    #[test]
+    fn linestring_densifies_under_polar() {
+        // A quarter turn at full radius follows the arc instead of
+        // cutting across it as a single chord.
+        let g = GeometryGeom::builder()
+            .set(
+                "geometry",
+                vec![Geometry::LineString(vec![(0.0, 1.0), (0.25, 1.0)])],
+            )
+            .set("stroke", red())
+            .build();
+        let registry = shapes();
+        let (xs, ys) = unit_scales();
+        let resolver = DirectScaleResolver::new().with("x", &xs).with("y", &ys);
+        let panel = Rect::new(0.0, 0.0, 400.0, 400.0);
+        let polar = crate::plot::projection::Projection::polar();
+        let mut scene = RecordingScene::new();
+        g.draw(
+            &mut scene,
+            &GeomContext::with_projection(panel, 96.0, &registry, &resolver, &polar),
+        );
+        assert!(
+            path_vertices(&scene, false) > 10,
+            "polar linestring should densify: {}",
+            path_vertices(&scene, false)
+        );
+    }
+
+    #[test]
+    fn linestring_is_not_densified_under_cartesian() {
+        let g = GeometryGeom::builder()
+            .set(
+                "geometry",
+                vec![Geometry::LineString(vec![
+                    (0.0, 0.0),
+                    (0.5, 1.0),
+                    (1.0, 0.0),
+                ])],
+            )
+            .set("stroke", red())
+            .build();
+        let registry = shapes();
+        let (xs, ys) = unit_scales();
+        let resolver = DirectScaleResolver::new().with("x", &xs).with("y", &ys);
+        let panel = Rect::new(0.0, 0.0, 400.0, 400.0);
+        let mut scene = RecordingScene::new();
+        g.draw(&mut scene, &ctx(panel, &registry, &resolver));
+        assert_eq!(path_vertices(&scene, false), 3);
+    }
+
+    #[test]
+    fn polygon_ring_closes_across_the_seam_on_a_radar() {
+        // Ring vertices at a 5-category radar's band centres: every
+        // edge joins two adjacent spokes, the closing one included,
+        // so the ring is exactly its own 5 vertices.
+        let g = GeometryGeom::builder()
+            .set(
+                "geometry",
+                vec![Geometry::Polygon(GeoPolygon::new(vec![
+                    (0.1, 0.9),
+                    (0.3, 0.35),
+                    (0.5, 0.6),
+                    (0.7, 0.95),
+                    (0.9, 0.5),
+                ]))],
+            )
+            .set("fill", red())
+            .build();
+        let registry = shapes();
+        let (xs, ys) = unit_scales();
+        let resolver = DirectScaleResolver::new().with("x", &xs).with("y", &ys);
+        let panel = Rect::new(0.0, 0.0, 400.0, 400.0);
+        let radar = crate::plot::projection::Projection::radar(5);
+        let mut scene = RecordingScene::new();
+        g.draw(
+            &mut scene,
+            &GeomContext::with_projection(panel, 96.0, &registry, &resolver, &radar),
+        );
+        assert_eq!(path_vertices(&scene, true), 5);
+    }
+
+    #[test]
+    fn explicitly_closed_ring_matches_the_open_form() {
+        // The OGC convention repeats the first coordinate; that
+        // duplicate must not turn the perimeter-closing edge into an
+        // ordinary one (which under polar would retrace the ring).
+        let open = vec![(0.1, 0.9), (0.3, 0.35), (0.5, 0.6), (0.7, 0.95), (0.9, 0.5)];
+        let mut closed = open.clone();
+        closed.push(open[0]);
+        let registry = shapes();
+        let (xs, ys) = unit_scales();
+        let resolver = DirectScaleResolver::new().with("x", &xs).with("y", &ys);
+        let panel = Rect::new(0.0, 0.0, 400.0, 400.0);
+        let radar = crate::plot::projection::Projection::radar(5);
+        let mut paths = Vec::new();
+        for ring in [open, closed] {
+            let g = GeometryGeom::builder()
+                .set("geometry", vec![Geometry::Polygon(GeoPolygon::new(ring))])
+                .set("fill", red())
+                .build();
+            let mut scene = RecordingScene::new();
+            g.draw(
+                &mut scene,
+                &GeomContext::with_projection(panel, 96.0, &registry, &resolver, &radar),
+            );
+            paths.push(
+                scene
+                    .ops
+                    .iter()
+                    .find_map(|op| match op {
+                        Op::Fill { path, .. } => Some(path.elements().to_vec()),
+                        _ => None,
+                    })
+                    .expect("fill"),
+            );
+        }
+        assert_eq!(paths[0], paths[1]);
     }
 
     #[test]

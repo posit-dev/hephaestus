@@ -158,7 +158,9 @@ pub enum PolarEdgeStyle {
     /// The categories live at the [`PolarProjection::theta_break_fracs`]
     /// positions; a polyline crossing K breaks bends K times, with
     /// each bend at the radius linearly interpolated from the
-    /// surrounding data vertices.
+    /// surrounding data vertices. A ring's closing edge counts its
+    /// crossings across the seam on a full-turn sweep — see
+    /// [`Projection::interpolate_closing_segment`].
     ///
     /// `is_linear()` is still **false** under `Chord` — a polyline
     /// crossing one or more breaks isn't a straight line in panel
@@ -518,9 +520,28 @@ impl PolarProjection {
         }
     }
 
+    /// True when the angular sweep covers a complete turn, which makes
+    /// `theta_frac` cyclic — frac 1 and frac 0 land on the same angle,
+    /// so the domain has a **seam** there rather than two free ends.
+    pub fn is_full_circle(&self) -> bool {
+        ((self.theta_end - self.theta_start).abs() - std::f64::consts::TAU).abs() < 1e-6
+    }
+
     fn chord_unit_position(&self, theta_frac: f64) -> (f64, f64) {
-        let span = self.theta_end - self.theta_start;
-        let is_full_circle = (span.abs() - std::f64::consts::TAU).abs() < 1e-6;
+        let is_full_circle = self.is_full_circle();
+
+        // A cyclic domain repeats every turn, so a fraction outside
+        // `[0, 1)` names the same polygon position as its reduction —
+        // frac 1.2 is the Dec→Jan wrap edge again, not a point beyond
+        // it. Without this a multi-turn line (a spiral over several
+        // years) would extrapolate off the polygon instead of winding
+        // round it. Partial arcs have no repeat: out-of-range
+        // fractions clamp to the nearest sweep endpoint below.
+        let theta_frac = if is_full_circle {
+            theta_frac.rem_euclid(1.0)
+        } else {
+            theta_frac
+        };
 
         // Build the polygon vertex list, sorted by frac. For partial
         // arcs include 0.0 and 1.0 as sweep endpoints so points
@@ -968,6 +989,55 @@ impl Projection {
         }
     }
 
+    /// Like [`Self::interpolate_segment`], but for the **synthetic
+    /// closing edge** of a ring — the edge a geom adds from a ring's
+    /// last vertex back to its first.
+    ///
+    /// On a polar projection whose sweep is a full turn, `theta_frac`
+    /// is cyclic: frac 1 and frac 0 are the same angle, so the
+    /// angular domain has a seam. A ring's closing edge is expected to
+    /// close the outline along the perimeter, which means crossing
+    /// that seam whenever the two endpoints sit further apart the
+    /// direct way than the way round through it. This variant
+    /// interpolates through the seam in that case; every other
+    /// projection and every other edge behaves exactly as
+    /// [`Self::interpolate_segment`].
+    ///
+    /// Only ring closure gets this treatment. An ordinary edge between
+    /// two supplied vertices spans the angular distance the data
+    /// states — a bar covering the whole theta domain sweeps the whole
+    /// circle, and a radar polyline running backwards over several
+    /// categories retraces those spokes.
+    pub fn interpolate_closing_segment(
+        &self,
+        panel: Rect,
+        start_channels: &[f64],
+        end_channels: &[f64],
+        out: &mut Vec<(f64, f64)>,
+    ) {
+        let mut samples: Vec<InteriorSample> = Vec::new();
+        self.interpolate_closing_segment_with_t(panel, start_channels, end_channels, &mut samples);
+        for s in samples {
+            out.push((s.px, s.py));
+        }
+    }
+
+    /// Seam-aware counterpart of
+    /// [`Self::interpolate_segment_with_t`], used for a ring's
+    /// synthetic closing edge. See
+    /// [`Self::interpolate_closing_segment`] for when the two differ;
+    /// the emitted `t` fractions run `0 → 1` from the last vertex to
+    /// the first either way, so per-vertex channels lerp the same.
+    pub fn interpolate_closing_segment_with_t(
+        &self,
+        panel: Rect,
+        start_channels: &[f64],
+        end_channels: &[f64],
+        out: &mut Vec<InteriorSample>,
+    ) {
+        self.interpolate_channel_segment(panel, start_channels, end_channels, true, out);
+    }
+
     /// Like [`Self::interpolate_segment`] but also emits each interior
     /// sample's channel-space `t` fraction (`0 < t < 1`, exclusive of
     /// both endpoints).
@@ -1004,6 +1074,20 @@ impl Projection {
         end_channels: &[f64],
         out: &mut Vec<InteriorSample>,
     ) {
+        self.interpolate_channel_segment(panel, start_channels, end_channels, false, out);
+    }
+
+    /// Shared densification body. `closing` marks the segment as a
+    /// ring's synthetic closing edge, which is what licenses crossing
+    /// the theta seam on a cyclic polar domain.
+    fn interpolate_channel_segment(
+        &self,
+        panel: Rect,
+        start_channels: &[f64],
+        end_channels: &[f64],
+        closing: bool,
+        out: &mut Vec<InteriorSample>,
+    ) {
         match self {
             Projection::Cartesian | Projection::Custom(_) => {
                 // No-op: straight segments need no interior samples.
@@ -1015,10 +1099,26 @@ impl Projection {
                     start_channels.first().copied().unwrap_or(0.0),
                     start_channels.get(1).copied().unwrap_or(0.0),
                 );
-                let (theta_b_frac, r_b_frac) = p.theta_r_from_xy(
+                let (mut theta_b_frac, r_b_frac) = p.theta_r_from_xy(
                     end_channels.first().copied().unwrap_or(0.0),
                     end_channels.get(1).copied().unwrap_or(0.0),
                 );
+
+                // Ring closure on a cyclic domain: take the way round
+                // through the seam when it's the shorter one, so the
+                // edge closes the perimeter instead of retracing the
+                // interior. `theta_b_frac` leaves `[0, 1]` here —
+                // `theta_for_frac` extends linearly past the seam and
+                // `chord_unit_position` continues along its wrap edge,
+                // so both edge styles project it correctly.
+                if closing && p.is_full_circle() {
+                    let direct = theta_b_frac - theta_a_frac;
+                    if direct > 0.5 {
+                        theta_b_frac -= 1.0;
+                    } else if direct < -0.5 {
+                        theta_b_frac += 1.0;
+                    }
+                }
 
                 match p.edge_style {
                     PolarEdgeStyle::Geodesic => {
@@ -1133,16 +1233,37 @@ fn polar_chord_samples(
 ) {
     let theta_delta = theta_b_frac - theta_a_frac;
     // Same-theta segments: radial line, no break crossings possible.
-    if theta_delta.abs() < 1e-12 {
+    if !theta_delta.is_finite() || theta_delta.abs() < 1e-12 {
         return;
     }
 
-    // Collect t values of break crossings, strictly in (0, 1).
+    // Collect t values of break crossings, strictly in (0, 1). On a
+    // cyclic domain a break is a spoke the segment crosses once per
+    // turn, so every `break_frac + k` (integer `k`) inside the
+    // segment's fraction span counts — both a seam-crossing closing
+    // edge and a later turn of a multi-turn line run outside
+    // `[0, 1]`. A partial arc has no repeat, so its breaks exist once.
+    let cyclic = p.is_full_circle() && theta_delta.abs() <= MAX_CHORD_TURNS;
+    let (frac_lo, frac_hi) = if theta_delta > 0.0 {
+        (theta_a_frac, theta_b_frac)
+    } else {
+        (theta_b_frac, theta_a_frac)
+    };
     let mut crossings: Vec<f64> = Vec::new();
     for &break_frac in &p.theta_break_fracs {
-        let t = (break_frac - theta_a_frac) / theta_delta;
-        if t > 1e-9 && t < 1.0 - 1e-9 {
-            crossings.push(t);
+        let (k_lo, k_hi) = if cyclic {
+            (
+                (frac_lo - break_frac).ceil() as i64,
+                (frac_hi - break_frac).floor() as i64,
+            )
+        } else {
+            (0, 0)
+        };
+        for k in k_lo..=k_hi {
+            let t = (break_frac + k as f64 - theta_a_frac) / theta_delta;
+            if t > 1e-9 && t < 1.0 - 1e-9 {
+                crossings.push(t);
+            }
         }
     }
     // Sweep direction may be either sign — sort ascending so the
@@ -1193,6 +1314,13 @@ const MAX_THETA_STEP_RAD: f64 = std::f64::consts::PI / 120.0;
 /// degenerate inputs (huge angular extents, tiny radii) producing
 /// unbounded work.
 const MAX_INTERPOLATION_STEPS: usize = 720;
+
+/// Widest fraction span, in turns, over which a chord-style segment
+/// still gets a bend at every spoke it crosses. A single segment
+/// winding further than this reads as a blur whichever way it's
+/// drawn, so it falls back to the breaks' stated positions rather
+/// than scaling the work with the span.
+const MAX_CHORD_TURNS: f64 = 64.0;
 
 /// True when `target` is in the sweep `[theta_start → theta_end]`
 /// (going either CW or CCW depending on sign of the span). Accounts
@@ -1620,6 +1748,200 @@ mod tests {
         for (ap, bs) in a.iter().zip(b.iter()) {
             approx_pt(*ap, (bs.px, bs.py), 1e-9, "agree");
         }
+    }
+
+    // ── Ring closure across the theta seam ──
+
+    #[test]
+    fn radar_closing_edge_hops_the_seam_instead_of_retracing() {
+        // 5-category radar: a ring's closing edge runs from the last
+        // category (frac 0.9) back to the first (0.1). Those two are
+        // adjacent across the seam, so closure is one straight chord
+        // with no spoke crossings.
+        let panel = square_panel();
+        let proj = Projection::radar(5);
+        let mut closing = Vec::new();
+        proj.interpolate_closing_segment(panel, &[0.9, 1.0], &[0.1, 1.0], &mut closing);
+        assert!(
+            closing.is_empty(),
+            "closing edge should cross no spokes: {closing:?}"
+        );
+        // The same endpoints as an ordinary edge keep walking the
+        // direct way, bending at each spoke in between.
+        let mut direct = Vec::new();
+        proj.interpolate_segment(panel, &[0.9, 1.0], &[0.1, 1.0], &mut direct);
+        assert_eq!(direct.len(), 3);
+    }
+
+    #[test]
+    fn radar_closing_edge_bends_at_a_spoke_beyond_the_seam() {
+        // Breaks laid out so the seam itself carries a spoke: the
+        // closing edge 0.9 → 0.1 crosses frac 0.0 ≡ 1.0 halfway.
+        let panel = square_panel();
+        let proj = Projection::Polar(PolarProjection {
+            edge_style: PolarEdgeStyle::Chord,
+            theta_break_fracs: vec![0.0, 0.2, 0.4, 0.6, 0.8],
+            ..PolarProjection::full_circle()
+        });
+        let mut out = Vec::new();
+        proj.interpolate_closing_segment_with_t(panel, &[0.9, 1.0], &[0.1, 1.0], &mut out);
+        assert_eq!(out.len(), 1, "expected the seam spoke only: {out:?}");
+        assert!((out[0].t - 0.5).abs() < 1e-9);
+        let p = proj.as_polar().expect("polar");
+        approx_pt(
+            (out[0].px, out[0].py),
+            p.project_frac(panel, 0.0, 1.0),
+            1e-9,
+            "seam spoke position",
+        );
+    }
+
+    #[test]
+    fn geodesic_closing_edge_takes_the_short_arc_across_the_seam() {
+        let panel = square_panel();
+        let proj = Projection::polar();
+        let mut closing = Vec::new();
+        let mut direct = Vec::new();
+        proj.interpolate_closing_segment(panel, &[0.9, 1.0], &[0.1, 1.0], &mut closing);
+        proj.interpolate_segment(panel, &[0.9, 1.0], &[0.1, 1.0], &mut direct);
+        assert!(
+            closing.len() < direct.len(),
+            "short arc should need fewer samples: closing={} direct={}",
+            closing.len(),
+            direct.len()
+        );
+        assert!(!closing.is_empty(), "the short arc still needs samples");
+        // The seam sits at 12 o'clock, so every sample on the short
+        // arc stays in the panel's upper half.
+        let cy = 0.5 * (panel.y0 + panel.y1);
+        for (px, py) in &closing {
+            assert!(*py < cy, "sample {px},{py} left the upper half");
+        }
+    }
+
+    #[test]
+    fn closing_edge_within_half_the_domain_does_not_wrap() {
+        // 0.5 → 0.1 is already the short way round; closure behaves
+        // exactly like an ordinary edge and bends at the 0.3 spoke.
+        let panel = square_panel();
+        let proj = Projection::radar(5);
+        let mut closing = Vec::new();
+        let mut direct = Vec::new();
+        proj.interpolate_closing_segment(panel, &[0.5, 1.0], &[0.1, 1.0], &mut closing);
+        proj.interpolate_segment(panel, &[0.5, 1.0], &[0.1, 1.0], &mut direct);
+        assert_eq!(closing.len(), 1);
+        assert_eq!(closing, direct);
+    }
+
+    #[test]
+    fn partial_arc_closing_edge_matches_the_plain_segment() {
+        // A gauge sweeps half a turn: two free ends, no seam, nothing
+        // to wrap around.
+        let panel = square_panel();
+        let proj = Projection::gauge();
+        let mut closing = Vec::new();
+        let mut direct = Vec::new();
+        proj.interpolate_closing_segment(panel, &[0.9, 1.0], &[0.1, 0.5], &mut closing);
+        proj.interpolate_segment(panel, &[0.9, 1.0], &[0.1, 0.5], &mut direct);
+        assert!(!direct.is_empty());
+        assert_eq!(closing, direct);
+    }
+
+    #[test]
+    fn full_domain_ordinary_edge_sweeps_the_whole_circle() {
+        // Only ring closure may cross the seam — an edge the data
+        // states spans the whole theta domain (a bar covering every
+        // category) keeps sweeping the whole circle.
+        let panel = square_panel();
+        let proj = Projection::polar();
+        let mut out = Vec::new();
+        proj.interpolate_segment(panel, &[0.0, 1.0], &[1.0, 1.0], &mut out);
+        assert!(
+            out.len() > 100,
+            "full sweep should densify heavily: {}",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn cartesian_closing_edge_is_a_no_op() {
+        let mut out = Vec::new();
+        Projection::Cartesian.interpolate_closing_segment(
+            square_panel(),
+            &[0.9, 1.0],
+            &[0.1, 0.0],
+            &mut out,
+        );
+        assert!(out.is_empty());
+    }
+
+    // ── Multi-turn fractions on a cyclic domain ──
+
+    #[test]
+    fn chord_position_repeats_every_turn() {
+        // Frac 1.2 is the same physical position as 0.2, and stays on
+        // the polygon rather than extrapolating past its wrap edge.
+        let p = match Projection::radar(12) {
+            Projection::Polar(p) => p,
+            _ => panic!("expected Polar"),
+        };
+        for f in [0.2f64, 0.9583, 1.0] {
+            approx_pt(
+                p.unit_position(f + 1.0),
+                p.unit_position(f),
+                1e-12,
+                "one turn later",
+            );
+            approx_pt(
+                p.unit_position(f + 3.0),
+                p.unit_position(f),
+                1e-12,
+                "three turns later",
+            );
+        }
+        // On the polygon means inside the unit circle.
+        for f in [1.2f64, 1.5, 4.05, -0.3] {
+            let (ux, uy) = p.unit_position(f);
+            assert!(
+                (ux * ux + uy * uy).sqrt() <= 1.0 + 1e-9,
+                "frac {f} landed off the polygon: ({ux}, {uy})"
+            );
+        }
+    }
+
+    #[test]
+    fn chord_segment_bends_at_spokes_on_a_later_turn() {
+        // A spiral's fifth year runs frac 3.95 → 4.05, crossing the
+        // last spoke of one turn and the first of the next.
+        let panel = square_panel();
+        let proj = Projection::radar(12);
+        let mut out = Vec::new();
+        proj.interpolate_segment_with_t(panel, &[3.95, 0.6], &[4.05, 0.6], &mut out);
+        assert_eq!(out.len(), 2, "expected two spoke crossings: {out:?}");
+        let p = proj.as_polar().expect("polar");
+        approx_pt(
+            (out[0].px, out[0].py),
+            p.project_frac(panel, 23.0 / 24.0, 0.6),
+            1e-6,
+            "last spoke of turn 3",
+        );
+        approx_pt(
+            (out[1].px, out[1].py),
+            p.project_frac(panel, 1.0 / 24.0, 0.6),
+            1e-6,
+            "first spoke of turn 4",
+        );
+    }
+
+    #[test]
+    fn chord_segment_spanning_absurdly_many_turns_stays_bounded() {
+        // Work must not scale with the span — beyond the turn cap the
+        // segment falls back to the breaks' stated positions.
+        let panel = square_panel();
+        let proj = Projection::radar(12);
+        let mut out = Vec::new();
+        proj.interpolate_segment(panel, &[0.0, 1.0], &[1.0e6, 1.0], &mut out);
+        assert!(out.len() <= 12, "unbounded crossings: {}", out.len());
     }
 
     // ── Radar (Polar with Chord edge style) ──

@@ -574,8 +574,9 @@ fn draw_one_polygon_mark(
     // First pass: build vertex sequences for every ring.
     // Under non-linear projections, edges between consecutive
     // vertices are densified so polygon outlines follow the
-    // projected geodesic. Closes the ring too (last → first
-    // edge gets densified just like the others).
+    // projected geodesic. The closing edge (last → first) is
+    // densified too, through the seam-aware
+    // `interpolate_closing_segment`.
     //
     // In ribbon mode, co-build per-ring `widths` and `colors`
     // alongside `points`, lerping each interior-sample attr at
@@ -701,13 +702,16 @@ fn draw_one_polygon_mark(
             }
             prev_channels = Some(curr_channels);
         }
-        // Densify the closing edge (last vertex back to first).
+        // Densify the closing edge (last vertex back to first). This
+        // one goes through `interpolate_closing_segment`, so on a
+        // full-turn polar projection it closes across the theta seam
+        // rather than retracing the ring's own perimeter backwards.
         if !is_linear {
             if let (Some(prev), Some(first)) = (prev_channels, first_channels) {
                 if prev != first {
                     if ribbon_mode {
                         interior_t.clear();
-                        ctx.projection.interpolate_segment_with_t(
+                        ctx.projection.interpolate_closing_segment_with_t(
                             panel,
                             &prev,
                             &first,
@@ -724,8 +728,12 @@ fn draw_one_polygon_mark(
                         }
                     } else {
                         interior.clear();
-                        ctx.projection
-                            .interpolate_segment(panel, &prev, &first, &mut interior);
+                        ctx.projection.interpolate_closing_segment(
+                            panel,
+                            &prev,
+                            &first,
+                            &mut interior,
+                        );
                         for (ipx, ipy) in &interior {
                             points.push(Point::new(*ipx, *ipy));
                         }
@@ -1038,6 +1046,42 @@ mod tests {
             .filter(|op| matches!(op, Op::Fill { .. }))
             .count();
         assert_eq!(fills, 1);
+    }
+
+    #[test]
+    fn radar_ring_closes_across_the_seam() {
+        // Radar polygon over 5 categories, vertices at the band
+        // centres. Every edge — the closing one included — joins two
+        // adjacent spokes, so the ring is exactly its 5 vertices with
+        // no densification. Retracing the perimeter on the closing
+        // edge would add one point per spoke walked back over.
+        let panel = Rect::new(0.0, 0.0, 400.0, 400.0);
+        let proj = crate::plot::projection::Projection::radar(5);
+        let mut g = PolygonGeom::builder()
+            .set("x", Raw(vec![0.1_f64, 0.3, 0.5, 0.7, 0.9]))
+            .set("y", Raw(vec![0.5_f64, 0.2, 0.4, 0.7, 0.6]))
+            .set("fill", red())
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &GeomContext::with_projection(panel, 96.0, &shapes, &scales, &proj),
+        );
+        for op in &scene.ops {
+            if let Op::Fill { path, .. } = op {
+                let vertices = path
+                    .elements()
+                    .iter()
+                    .filter(|el| matches!(el, kurbo::PathEl::MoveTo(_) | kurbo::PathEl::LineTo(_)))
+                    .count();
+                assert_eq!(vertices, 5, "ring should hold only its own vertices");
+                return;
+            }
+        }
+        panic!("no fill op emitted");
     }
 
     #[test]
