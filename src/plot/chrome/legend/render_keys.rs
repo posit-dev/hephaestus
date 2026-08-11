@@ -11,43 +11,233 @@
 use crate::brush::Brush;
 use crate::color::Color;
 use crate::geometry::{Affine, Point, Rect};
-use crate::path::{FillRule, Path};
+use crate::path::FillRule;
 use crate::pick::PickId;
 use crate::plot::chrome::linear_axis::pt_to_px;
+use crate::plot::geom::outline::{draw_curve_outline, EndpointMarker, OutlineSpec};
 use crate::plot::geom::point::GLYPH_BBOX_REFERENCE;
-use crate::primitives::{circle, segment};
+use crate::plot::geom::resolve::{
+    auto_endpoint_clip_pt, endpoint_marker_outline_px, MARKER_INK_COVERAGE_BOOST,
+};
+use crate::primitives::{circle, rounded_rect};
 use crate::scene::{Glyph, GlyphRun, SceneBuilder};
 use crate::shape::builtin::REFERENCE_RADIUS as POINT_SHAPE_RADIUS;
 use crate::shape::{ShapeKind, ShapeRegistry, ShapeStyle};
-use crate::stroke::Stroke;
+use crate::stroke::{Cap, Join, Stroke};
 
 use kurbo::Shape;
+use std::sync::Arc;
 
-use super::{LegendKey, ResolvedKey};
+use super::{EndpointMarkerKey, LegendKey, ResolvedKey};
 
-/// Per-key minimum cell dimensions `(w, h)` in px. The legend takes
-/// the max across keys to size the cell, then floors at the
-/// `LegendTheme.key` width / height. Lines never grow the cell —
-/// they render at the resolved cell's width via relative
-/// coordinates (line spans 0..1 horizontally, sits at 0.5
-/// vertically). Points grow the cell by their marker diameter.
-/// Rects don't impose a minimum beyond the theme floor.
+/// Per-key minimum cell dimensions `(w, h)` in px — the painted
+/// extent of the key's marker, so nothing a key draws lands outside
+/// its cell. The legend takes the max across keys to size the cell,
+/// then floors at the `LegendTheme.key` width / height.
+///
+/// Points reserve their shape's own bbox — rotated with the marker —
+/// at the resolved size plus the outline width; lines and rects the
+/// stroke width. A round- or square-capped line also reserves a body at
+/// least as long as the stroke is thick, so [`render_line`]'s cap inset
+/// can't collapse a thick key to a dot.
 pub(super) fn swatch_dim_for(
     kind: LegendKey,
     peak: &ResolvedKey,
     dpi: f64,
     geom: &crate::plot::theme::GeomTheme,
+    shapes: &ShapeRegistry,
 ) -> (f64, f64) {
     match kind {
         LegendKey::Point => {
-            let size_pt = peak.size_pt.unwrap_or(geom.point.size_pt);
-            // Match PointGeom's circle path (radius 0.8) so the
-            // rendered marker matches the geom for the same size.
-            let d = pt_to_px(size_pt * 2.0 * POINT_SHAPE_RADIUS, dpi);
-            (d, d)
+            let size_px = pt_to_px(peak.size_pt.unwrap_or(geom.point.size_pt), dpi);
+            let shape = peak.shape.as_deref().and_then(|name| shapes.get(name));
+            let (half_w, half_h) = rotate_half_extents(shape_half_extents(shape), peak.angle);
+            // The outline straddles the path, so it adds half its
+            // width on each side of the marker's own bbox.
+            let outline = match point_paints(peak, geom, shape).1 {
+                true => pt_to_px(peak.linewidth_pt.unwrap_or(geom.point.stroke_width_pt), dpi),
+                false => 0.0,
+            };
+            (
+                half_w * 2.0 * size_px + outline,
+                half_h * 2.0 * size_px + outline,
+            )
         }
-        LegendKey::Line | LegendKey::Rect => (0.0, 0.0),
+        LegendKey::Line => {
+            let lw_pt = peak.linewidth_pt.unwrap_or(geom.line.linewidth_pt);
+            let lw = pt_to_px(lw_pt, dpi);
+            let cap_body = match peak.cap.unwrap_or(geom.line.cap) {
+                Cap::Butt => 0.0,
+                Cap::Round | Cap::Square => lw * 2.0,
+            };
+            // Endpoint markers eat their forward extent off the line, so
+            // the cell carries that on top of a body at least as long as
+            // the stroke is thick — otherwise the trim leaves nothing.
+            let (fwd_start, h_start) = marker_extents(&peak.start_marker, lw_pt, dpi, shapes);
+            let (fwd_end, h_end) = marker_extents(&peak.end_marker, lw_pt, dpi, shapes);
+            let markers = fwd_start + fwd_end;
+            let body = match markers > 0.0 {
+                true => cap_body.max(lw * 2.0),
+                false => cap_body,
+            };
+            (body + markers, lw.max(h_start).max(h_end))
+        }
+        LegendKey::Rect => {
+            // The border is inset to sit inside the cell, so the cell
+            // only has to be wide enough to hold it.
+            let lw = match rect_paints(peak, geom).1 {
+                true => pt_to_px(peak.linewidth_pt.unwrap_or(geom.rect.linewidth_pt), dpi),
+                false => 0.0,
+            };
+            (lw, lw)
+        }
     }
+}
+
+/// Forward extent and painted height of a line key's endpoint marker,
+/// in px. Forward extent is what [`draw_curve_outline`] trims off the
+/// line so the marker's tip lands at the line's own end; the height is
+/// what the cell has to hold, measured from the line the marker sits on
+/// (its anchor) since placement puts that anchor on the baseline.
+/// `(0, 0)` when the endpoint carries no usable marker.
+fn marker_extents(
+    key: &EndpointMarkerKey,
+    linewidth_pt: f64,
+    dpi: f64,
+    shapes: &ShapeRegistry,
+) -> (f64, f64) {
+    let marker = endpoint_marker(key, linewidth_pt);
+    if marker.name.is_empty() || !(marker.size_pt.is_finite() && marker.size_pt > 0.0) {
+        return (0.0, 0.0);
+    }
+    let Some(shape) = shapes.get(&marker.name) else {
+        return (0.0, 0.0);
+    };
+    let size_px = pt_to_px(marker.size_pt, dpi);
+    let forward = pt_to_px(
+        auto_endpoint_clip_pt(&marker.name, marker.size_pt, marker.invert, shapes),
+        dpi,
+    );
+    let bbox = shape.bounding_box();
+    let (half_h, outline) = match shape.kind() {
+        ShapeKind::Paths { style, .. } => {
+            let anchor_y = shape.anchor().y;
+            let half = (bbox.y0 - anchor_y).abs().max((bbox.y1 - anchor_y).abs());
+            // A stroked marker straddles its own path; a filled one
+            // paints inside it.
+            let outline = match style {
+                ShapeStyle::Stroke => endpoint_marker_outline_px(pt_to_px(linewidth_pt, dpi), dpi),
+                ShapeStyle::Fill => 0.0,
+            };
+            (half, outline)
+        }
+        // Glyph markers scale their font size up by the ink-coverage
+        // boost and centre on the anchor.
+        ShapeKind::Glyph { .. } => (bbox.height() * MARKER_INK_COVERAGE_BOOST * 0.5, 0.0),
+    };
+    (forward, half_h * 2.0 * size_px + outline)
+}
+
+/// Half-extents of a marker's box after rotating it by `angle`
+/// radians — the axis-aligned bounds the rotated marker occupies.
+fn rotate_half_extents((half_w, half_h): (f64, f64), angle: Option<f64>) -> (f64, f64) {
+    match angle {
+        Some(a) if a != 0.0 && a.is_finite() => {
+            let (sin, cos) = (a.sin().abs(), a.cos().abs());
+            (half_w * cos + half_h * sin, half_w * sin + half_h * cos)
+        }
+        _ => (half_w, half_h),
+    }
+}
+
+/// Half-width and half-height of a point shape's own bbox, in
+/// multiples of the `"size"` aesthetic. Falls back to the built-in
+/// circle's radius for an absent shape — what [`render_point`] draws
+/// in that case. Off-centre shapes report their widest side, since the
+/// marker is placed by its origin rather than its bbox centre.
+fn shape_half_extents(shape: Option<&crate::shape::Shape>) -> (f64, f64) {
+    let Some(shape) = shape else {
+        return (POINT_SHAPE_RADIUS, POINT_SHAPE_RADIUS);
+    };
+    match shape.kind() {
+        ShapeKind::Paths { paths, .. } => {
+            let (mut half_w, mut half_h) = (0.0_f64, 0.0_f64);
+            for sub in paths {
+                let b = sub.bounding_box();
+                half_w = half_w.max(b.x0.abs()).max(b.x1.abs());
+                half_h = half_h.max(b.y0.abs()).max(b.y1.abs());
+            }
+            (half_w, half_h)
+        }
+        ShapeKind::Glyph { em_bbox, .. } => {
+            // The glyph branch normalises em-box height to
+            // `GLYPH_BBOX_REFERENCE`, so height matches a vector
+            // shape at the same size and width follows the aspect.
+            let h = em_bbox.height();
+            let half_h = GLYPH_BBOX_REFERENCE * 0.5;
+            match h.is_finite() && h > 0.0 {
+                true => (half_h * em_bbox.width() / h, half_h),
+                false => (half_h, half_h),
+            }
+        }
+    }
+}
+
+/// The stroke a dashed or solid key paints with, built through the
+/// same helper the geoms use so a key dashes, phases and caps exactly
+/// as the marks it stands for — including patterns carrying marker
+/// steps, which count as gaps here just as they do for every geom
+/// other than `LineGeom`.
+fn key_stroke(
+    resolved: &ResolvedKey,
+    width_px: f64,
+    linewidth_pt: f64,
+    cap: Cap,
+    join: Join,
+    dpi: f64,
+) -> Stroke {
+    crate::plot::geom::resolve::build_stroke_for_pattern(
+        width_px,
+        cap,
+        join,
+        resolved.linetype.as_deref().unwrap_or(&[]),
+        resolved.dash_offset_pt.unwrap_or(0.0),
+        linewidth_pt,
+        dpi,
+    )
+}
+
+/// Whether a rect key paints a fill and / or a border, as
+/// `(fill, border)`. Aesthetic colours win and the geom defaults back
+/// them up; a key carrying neither falls back on the border so the row
+/// isn't visually empty.
+fn rect_paints(resolved: &ResolvedKey, geom: &crate::plot::theme::GeomTheme) -> (bool, bool) {
+    let fill = resolved.fill.is_some() || geom.rect.fill.is_some();
+    let stroke = resolved.stroke.is_some() || geom.rect.stroke.is_some();
+    (fill, stroke || !fill)
+}
+
+/// Whether a point key paints a fill and / or an outline, as
+/// `(fill, stroke)`. Aesthetic colours win, the geom defaults back
+/// them up, and a key carrying neither still paints through whichever
+/// channel its shape draws with so the row isn't visually empty.
+fn point_paints(
+    resolved: &ResolvedKey,
+    geom: &crate::plot::theme::GeomTheme,
+    shape: Option<&crate::shape::Shape>,
+) -> (bool, bool) {
+    let mut fill = resolved.fill.is_some() || geom.point.fill.is_some();
+    let mut stroke = resolved.stroke.is_some() || geom.point.stroke.is_some();
+    if !fill && !stroke {
+        match shape.map(|s| s.kind()) {
+            Some(ShapeKind::Paths {
+                style: ShapeStyle::Stroke,
+                ..
+            }) => stroke = true,
+            _ => fill = true,
+        }
+    }
+    (fill, stroke)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -63,17 +253,20 @@ pub(super) fn render_key(
 ) {
     match kind {
         LegendKey::Point => render_point(resolved, cell, shapes, scene, dpi, geom, palette),
-        LegendKey::Line => render_line(resolved, cell, scene, dpi, geom, palette),
+        LegendKey::Line => render_line(resolved, cell, shapes, scene, dpi, geom, palette),
         LegendKey::Rect => render_rect(resolved, cell, scene, dpi, geom, palette),
     }
 }
 
-pub(super) fn apply_alpha(c: Color, alpha: Option<f64>) -> Color {
-    match alpha {
+/// Replace a colour's alpha with an explicit opacity, clamped to
+/// `[0, 1]`. Overriding rather than modulating matches what the geoms'
+/// `"fill_opacity"` / `"stroke_opacity"` channels do, so a key shows
+/// the alpha its geom draws with.
+pub(super) fn with_opacity(c: Color, opacity: Option<f64>) -> Color {
+    match opacity {
         Some(a) => {
-            let [r, g, b, base] = c.components;
-            let combined = (base as f64 * a.clamp(0.0, 1.0)) as f32;
-            Color::new([r, g, b, combined])
+            let [r, g, b, _] = c.components;
+            Color::new([r, g, b, a.clamp(0.0, 1.0) as f32])
         }
         None => c,
     }
@@ -106,31 +299,37 @@ fn render_point(
     // shapes (font glyphs) we fall back to the default circle —
     // the legend chrome doesn't currently shape glyph markers.
     let shape = resolved.shape.as_deref().and_then(|name| shapes.get(name));
-    let xform = Affine::translate((centre.x, centre.y)) * Affine::scale(size_px);
-
-    // Aesthetic colours win; the geom defaults backstop them so a key
-    // that only carries a `shape` aesthetic still has something to
-    // paint with. When the theme leaves both unset, palette ink stands
-    // in on whichever channel the shape actually paints through, so
-    // the row isn't visually empty.
-    let mut fill = resolved
-        .fill
-        .or_else(|| geom.point.fill.as_ref().map(|c| c.resolve(palette)));
-    let mut stroke_color = resolved
-        .stroke
-        .or_else(|| geom.point.stroke.as_ref().map(|c| c.resolve(palette)));
-    if fill.is_none() && stroke_color.is_none() {
-        match shape.map(|s| s.kind()) {
-            Some(ShapeKind::Paths {
-                style: ShapeStyle::Stroke,
-                ..
-            }) => stroke_color = Some(palette.ink),
-            _ => fill = Some(palette.ink),
+    // Rotation is negated so positive reads counter-clockwise on
+    // screen, and applied about the marker's own centre — `PointGeom`'s
+    // convention. Glyph markers don't rotate there either.
+    let angle = resolved.angle.unwrap_or(0.0);
+    let xform = match angle == 0.0 {
+        true => Affine::translate((centre.x, centre.y)) * Affine::scale(size_px),
+        false => {
+            Affine::translate((centre.x, centre.y))
+                * Affine::rotate(-angle)
+                * Affine::scale(size_px)
         }
-    }
+    };
 
-    let fill_color = fill.map(|c| Brush::Solid(apply_alpha(c, resolved.alpha)));
-    let stroke_brush = stroke_color.map(|c| Brush::Solid(apply_alpha(c, resolved.alpha)));
+    // Palette ink is the backstop for the channel `point_paints` picks
+    // when neither the key nor the theme names a colour.
+    let (paints_fill, paints_stroke) = point_paints(resolved, geom, shape);
+    let fill = paints_fill.then(|| {
+        resolved
+            .fill
+            .or_else(|| geom.point.fill.as_ref().map(|c| c.resolve(palette)))
+            .unwrap_or(palette.ink)
+    });
+    let stroke_color = paints_stroke.then(|| {
+        resolved
+            .stroke
+            .or_else(|| geom.point.stroke.as_ref().map(|c| c.resolve(palette)))
+            .unwrap_or(palette.ink)
+    });
+
+    let fill_color = fill.map(|c| Brush::Solid(with_opacity(c, resolved.fill_opacity)));
+    let stroke_brush = stroke_color.map(|c| Brush::Solid(with_opacity(c, resolved.stroke_opacity)));
     let stroke_width_px = pt_to_px(
         resolved.linewidth_pt.unwrap_or(geom.point.stroke_width_pt),
         dpi,
@@ -252,6 +451,7 @@ fn render_point(
 fn render_line(
     resolved: &ResolvedKey,
     cell: Rect,
+    shapes: &ShapeRegistry,
     scene: &mut dyn SceneBuilder,
     dpi: f64,
     geom: &crate::plot::theme::GeomTheme,
@@ -261,38 +461,66 @@ fn render_line(
     // back to `fill` (callers sometimes write `color` → fill on the
     // ResolvedKey via the alias in `apply`). Geom-default line stroke
     // backstops both — palette-driven, no hardcoded black fallback.
-    let color = resolved
-        .stroke
-        .or(resolved.fill)
-        .map(|c| apply_alpha(c, resolved.alpha))
-        .unwrap_or_else(|| {
+    let color = with_opacity(
+        resolved.stroke.or(resolved.fill).unwrap_or_else(|| {
             geom.line
                 .stroke
                 .as_ref()
                 .map(|c| c.resolve(palette))
                 .unwrap_or(palette.ink)
-        });
-    let lw_pt = resolved.linewidth_pt.unwrap_or(geom.line.linewidth_pt);
-    let mid_y = cell.y0 + (cell.y1 - cell.y0) * 0.5;
-    let p0 = Point::new(cell.x0, mid_y);
-    let p1 = Point::new(cell.x1, mid_y);
-    let path = segment(p0, p1);
-    let stroke = match &resolved.linetype {
-        Some(pattern) if !pattern.is_empty() => {
-            let dashes_pt = crate::plot::geom::linetype::to_kurbo_dashes(pattern);
-            let dashes_px: Vec<f64> = dashes_pt.into_iter().map(|d| pt_to_px(d, dpi)).collect();
-            Stroke::new(pt_to_px(lw_pt, dpi)).with_dashes(0.0, dashes_px)
-        }
-        _ => Stroke::new(pt_to_px(lw_pt, dpi)),
-    };
-    scene.stroke(
-        &stroke,
-        Affine::IDENTITY,
-        &Brush::Solid(color),
-        None,
-        &path,
-        PickId::Skip,
+        }),
+        resolved.stroke_opacity,
     );
+    let lw_pt = resolved.linewidth_pt.unwrap_or(geom.line.linewidth_pt);
+    let lw_px = pt_to_px(lw_pt, dpi);
+    let cap = resolved.cap.unwrap_or(geom.line.cap);
+    let join = resolved.join.unwrap_or(geom.line.join);
+    // Caps that extend past the endpoint eat into the line's span so
+    // the painted stroke stays inside the cell. Clamped to half the
+    // cell so a stroke thicker than the cell degenerates to a dot
+    // instead of reversing the segment.
+    let inset = match cap {
+        Cap::Butt => 0.0,
+        Cap::Round | Cap::Square => (lw_px * 0.5).min((cell.x1 - cell.x0) * 0.5),
+    };
+    let mid_y = cell.y0 + (cell.y1 - cell.y0) * 0.5;
+    let p0 = Point::new(cell.x0 + inset, mid_y);
+    let p1 = Point::new(cell.x1 - inset, mid_y);
+    // Stroke through the geoms' own curve helper: the key then dashes,
+    // phases, clips for its endpoint markers and stamps them exactly as
+    // `LineGeom` does for the marks it stands for.
+    let spec = OutlineSpec {
+        stroke_color: color,
+        linewidth_pt: lw_pt,
+        dash_pattern_pt: resolved
+            .linetype
+            .clone()
+            .unwrap_or_else(|| Arc::from(Vec::new())),
+        dash_offset_pt: resolved.dash_offset_pt.unwrap_or(0.0),
+        cap,
+        join,
+        marker_fill: color,
+        user_clip_start_pt: 0.0,
+        user_clip_end_pt: 0.0,
+        start_marker: endpoint_marker(&resolved.start_marker, lw_pt),
+        end_marker: endpoint_marker(&resolved.end_marker, lw_pt),
+        pick: PickId::Skip,
+        xform: Affine::IDENTITY,
+        corner_rounding: None,
+    };
+    draw_curve_outline(scene, shapes, dpi, geom.marker_outline_pt, &[p0, p1], &spec);
+}
+
+/// Translate a key's endpoint-marker aesthetics into the geoms'
+/// [`EndpointMarker`], applying the same `3 × linewidth` size default
+/// `LineGeom` uses. An unset shape yields a disabled marker.
+fn endpoint_marker(key: &EndpointMarkerKey, linewidth_pt: f64) -> EndpointMarker {
+    EndpointMarker {
+        name: key.shape.as_deref().unwrap_or("").to_string(),
+        size_pt: key.size_pt.unwrap_or(3.0 * linewidth_pt),
+        fill: key.fill,
+        invert: key.invert.unwrap_or(false),
+    }
 }
 
 fn render_rect(
@@ -303,41 +531,69 @@ fn render_rect(
     geom: &crate::plot::theme::GeomTheme,
     palette: &crate::plot::theme::Palette,
 ) {
-    let path: Path = cell.to_path(0.0);
-    if let Some(fill) = resolved.fill {
+    // Palette ink is the backstop for the border `rect_paints` falls
+    // back on when neither the key nor the theme names a colour, so the
+    // row isn't visually empty — and ink rather than black so dark
+    // themes don't draw an invisible stub.
+    let (paints_fill, paints_border) = rect_paints(resolved, geom);
+    let radius_px = pt_to_px(resolved.corner_radius_pt.unwrap_or(0.0), dpi).max(0.0);
+    if paints_fill {
+        let color = resolved
+            .fill
+            .or_else(|| geom.rect.fill.as_ref().map(|c| c.resolve(palette)))
+            .unwrap_or(palette.ink);
         scene.fill(
             FillRule::NonZero,
             Affine::IDENTITY,
-            &Brush::Solid(apply_alpha(fill, resolved.alpha)),
+            &Brush::Solid(with_opacity(color, resolved.fill_opacity)),
             None,
-            &path,
+            &rect_key_path(cell, radius_px),
             PickId::Skip,
         );
     }
-    if let Some(stroke_color) = resolved.stroke {
-        let lw = resolved.linewidth_pt.unwrap_or(geom.rect.linewidth_pt);
-        let stroke = Stroke::new(pt_to_px(lw, dpi));
+    // The border straddles the path it follows, so it runs half a
+    // linewidth inside the cell to keep the painted ring off the
+    // neighbouring rows.
+    if paints_border {
+        let color = with_opacity(
+            resolved
+                .stroke
+                .or_else(|| geom.rect.stroke.as_ref().map(|c| c.resolve(palette)))
+                .unwrap_or(palette.ink),
+            resolved.stroke_opacity,
+        );
+        let lw_pt = resolved.linewidth_pt.unwrap_or(geom.rect.linewidth_pt);
+        let lw = pt_to_px(lw_pt, dpi);
+        let inset = (lw * 0.5)
+            .min((cell.x1 - cell.x0) * 0.5)
+            .min((cell.y1 - cell.y0) * 0.5);
+        let stroke = key_stroke(
+            resolved,
+            lw,
+            lw_pt,
+            resolved.cap.unwrap_or(geom.rect.cap),
+            resolved.join.unwrap_or(geom.rect.join),
+            dpi,
+        );
         scene.stroke(
             &stroke,
             Affine::IDENTITY,
-            &Brush::Solid(apply_alpha(stroke_color, resolved.alpha)),
+            &Brush::Solid(color),
             None,
-            &path,
+            // Shrinking the radius with the inset keeps the border's
+            // corners concentric with the fill's.
+            &rect_key_path(cell.inset(-inset), radius_px - inset),
             PickId::Skip,
         );
-    } else if resolved.fill.is_none() {
-        // Placeholder outline so the row isn't visually empty —
-        // palette ink so dark themes don't render an invisible
-        // black-on-black stub.
-        let stroke = Stroke::new(pt_to_px(geom.rect.linewidth_pt, dpi));
-        scene.stroke(
-            &stroke,
-            Affine::IDENTITY,
-            &Brush::Solid(palette.ink),
-            None,
-            &path,
-            PickId::Skip,
-        );
+    }
+}
+
+/// The swatch outline a [`LegendKey::Rect`] paints, rounded when the
+/// key carries a corner radius.
+fn rect_key_path(cell: Rect, radius_px: f64) -> crate::path::Path {
+    match radius_px > 0.0 {
+        true => rounded_rect(cell, radius_px),
+        false => cell.to_path(0.0),
     }
 }
 
@@ -429,5 +685,519 @@ mod tests {
             scene.ops.iter().any(|op| matches!(op, Op::Stroke { .. })),
             "a stroke-style shape key should paint via its outline"
         );
+    }
+
+    fn render_line_key(resolved: &ResolvedKey, theme: &Theme) -> RecordingScene {
+        let mut scene = RecordingScene::default();
+        render_line(
+            resolved,
+            cell(),
+            &ShapeRegistry::with_builtins(),
+            &mut scene,
+            DPI,
+            &theme.geom,
+            &theme.palette,
+        );
+        scene
+    }
+
+    /// The one stroke a key renderer emitted, as `(stroke, path bbox)`.
+    fn sole_stroke(scene: &RecordingScene) -> (crate::stroke::Stroke, Rect) {
+        let mut it = scene.ops.iter().filter_map(|op| match op {
+            Op::Stroke { stroke, path, .. } => Some((stroke.clone(), path.bounding_box())),
+            _ => None,
+        });
+        let first = it.next().expect("expected a stroke");
+        assert!(it.next().is_none(), "expected exactly one stroke");
+        first
+    }
+
+    /// The rect a stroke actually paints into: its path bounds grown by
+    /// the half-width the outline straddles, plus the cap projection on
+    /// the ends for caps that extend past the endpoint.
+    fn painted_bounds(stroke: &crate::stroke::Stroke, path_bbox: Rect) -> Rect {
+        let half = stroke.width * 0.5;
+        let along = match stroke.start_cap {
+            Cap::Butt => 0.0,
+            Cap::Round | Cap::Square => half,
+        };
+        Rect::new(
+            path_bbox.x0 - along,
+            path_bbox.y0 - half,
+            path_bbox.x1 + along,
+            path_bbox.y1 + half,
+        )
+    }
+
+    #[test]
+    fn line_key_takes_its_cap_and_join_from_the_theme() {
+        let theme = Theme::default();
+        let (stroke, _) = sole_stroke(&render_line_key(&ResolvedKey::default(), &theme));
+        assert_eq!(stroke.start_cap, theme.geom.line.cap);
+        assert_eq!(stroke.end_cap, theme.geom.line.cap);
+        assert_eq!(stroke.join, theme.geom.line.join);
+    }
+
+    #[test]
+    fn line_key_cap_aesthetic_overrides_the_theme() {
+        let key = ResolvedKey {
+            cap: Some(Cap::Round),
+            join: Some(Join::Bevel),
+            ..Default::default()
+        };
+        let (stroke, _) = sole_stroke(&render_line_key(&key, &Theme::default()));
+        assert_eq!(stroke.start_cap, Cap::Round);
+        assert_eq!(stroke.join, Join::Bevel);
+    }
+
+    #[test]
+    fn thick_line_key_paints_inside_its_cell() {
+        // Both caps, at a linewidth the cell only just holds: a
+        // round-capped key has to give up the cap projection at each
+        // end rather than overhang into the label column.
+        for cap in [Cap::Butt, Cap::Round, Cap::Square] {
+            let key = ResolvedKey {
+                linewidth_pt: Some(21.0),
+                cap: Some(cap),
+                ..Default::default()
+            };
+            let (stroke, bbox) = sole_stroke(&render_line_key(&key, &Theme::default()));
+            let painted = painted_bounds(&stroke, bbox);
+            let c = cell();
+            assert!(
+                painted.x0 >= c.x0 - 1e-9
+                    && painted.x1 <= c.x1 + 1e-9
+                    && painted.y0 >= c.y0 - 1e-9
+                    && painted.y1 <= c.y1 + 1e-9,
+                "{cap:?} line key painted {painted:?} outside its cell {c:?}"
+            );
+            assert!(bbox.x1 > bbox.x0, "{cap:?} line key collapsed to a point");
+        }
+    }
+
+    #[test]
+    fn rect_key_border_paints_inside_its_cell() {
+        let key = ResolvedKey {
+            stroke: Some(crate::color::rgb(0.0, 0.0, 0.0)),
+            linewidth_pt: Some(9.0),
+            ..Default::default()
+        };
+        let mut scene = RecordingScene::default();
+        let theme = Theme::default();
+        render_rect(&key, cell(), &mut scene, DPI, &theme.geom, &theme.palette);
+        let (stroke, bbox) = sole_stroke(&scene);
+        let painted = painted_bounds(&stroke, bbox);
+        let c = cell();
+        assert!(
+            painted.x0 >= c.x0 - 1e-9
+                && painted.x1 <= c.x1 + 1e-9
+                && painted.y0 >= c.y0 - 1e-9
+                && painted.y1 <= c.y1 + 1e-9,
+            "rect key border painted {painted:?} outside its cell {c:?}"
+        );
+        assert_eq!(stroke.join, theme.geom.rect.join);
+    }
+
+    #[test]
+    fn line_and_rect_cells_grow_with_the_linewidth() {
+        let theme = Theme::default();
+        let shapes = ShapeRegistry::with_builtins();
+        let key = ResolvedKey {
+            linewidth_pt: Some(20.0),
+            ..Default::default()
+        };
+        let lw = pt_to_px(20.0, DPI);
+        for kind in [LegendKey::Line, LegendKey::Rect] {
+            let (_, h) = swatch_dim_for(kind, &key, DPI, &theme.geom, &shapes);
+            assert!(
+                (h - lw).abs() < 1e-9,
+                "{kind:?} key should reserve its {lw}px stroke, reserved {h}"
+            );
+        }
+    }
+
+    #[test]
+    fn round_capped_line_cell_reserves_a_body_past_the_caps() {
+        let theme = Theme::default();
+        let shapes = ShapeRegistry::with_builtins();
+        let key = ResolvedKey {
+            linewidth_pt: Some(20.0),
+            cap: Some(Cap::Round),
+            ..Default::default()
+        };
+        let lw = pt_to_px(20.0, DPI);
+        let (w, _) = swatch_dim_for(LegendKey::Line, &key, DPI, &theme.geom, &shapes);
+        assert!(
+            w > lw,
+            "a round-capped key needs room for the caps plus a visible body, reserved {w} for a {lw}px stroke"
+        );
+    }
+
+    #[test]
+    fn point_cell_follows_the_shape_bbox() {
+        // `star` reaches further from its centre than the reference
+        // circle, so it has to reserve more than a circle key does.
+        let theme = Theme::default();
+        let shapes = ShapeRegistry::with_builtins();
+        let mut key = shape_only_key("star");
+        key.size_pt = Some(12.0);
+        let (star_w, star_h) = swatch_dim_for(LegendKey::Point, &key, DPI, &theme.geom, &shapes);
+        let circle = ResolvedKey {
+            size_pt: Some(12.0),
+            ..Default::default()
+        };
+        let (circle_w, circle_h) =
+            swatch_dim_for(LegendKey::Point, &circle, DPI, &theme.geom, &shapes);
+        assert!(
+            star_w > circle_w && star_h > circle_h,
+            "star ({star_w}×{star_h}) should reserve more than the circle ({circle_w}×{circle_h})"
+        );
+    }
+
+    #[test]
+    fn point_cell_reserves_the_marker_outline() {
+        let mut theme = Theme::default();
+        theme.geom.point.stroke = Some(crate::plot::theme::ThemeColor::Ink);
+        let shapes = ShapeRegistry::with_builtins();
+        let key = ResolvedKey {
+            size_pt: Some(8.0),
+            linewidth_pt: Some(12.0),
+            ..Default::default()
+        };
+        let (w, h) = swatch_dim_for(LegendKey::Point, &key, DPI, &theme.geom, &shapes);
+        let marker = pt_to_px(8.0, DPI) * 2.0 * POINT_SHAPE_RADIUS;
+        let outline = pt_to_px(12.0, DPI);
+        assert!((w - (marker + outline)).abs() < 1e-9, "reserved width {w}");
+        assert!((h - (marker + outline)).abs() < 1e-9, "reserved height {h}");
+    }
+
+    #[test]
+    fn fill_only_point_cell_reserves_no_outline() {
+        // No stroke colour anywhere means no outline pass, so the
+        // linewidth mustn't inflate the cell.
+        let mut theme = Theme::default();
+        theme.geom.point.fill = Some(crate::plot::theme::ThemeColor::Ink);
+        let shapes = ShapeRegistry::with_builtins();
+        let key = ResolvedKey {
+            size_pt: Some(8.0),
+            linewidth_pt: Some(12.0),
+            ..Default::default()
+        };
+        let (w, _) = swatch_dim_for(LegendKey::Point, &key, DPI, &theme.geom, &shapes);
+        let marker = pt_to_px(8.0, DPI) * 2.0 * POINT_SHAPE_RADIUS;
+        assert!((w - marker).abs() < 1e-9, "reserved width {w}");
+    }
+
+    /// Alpha of the one fill and the one stroke a point key emitted.
+    fn point_alphas(resolved: &ResolvedKey, theme: &Theme) -> (Option<f32>, Option<f32>) {
+        let scene = render(resolved, theme);
+        let mut fill = None;
+        let mut stroke = None;
+        for op in &scene.ops {
+            let (slot, brush) = match op {
+                Op::Fill { brush, .. } => (&mut fill, brush),
+                Op::Stroke { brush, .. } => (&mut stroke, brush),
+                _ => continue,
+            };
+            if let Brush::Solid(c) = brush {
+                *slot = Some(c.components[3]);
+            }
+        }
+        (fill, stroke)
+    }
+
+    fn opaque_point_key() -> ResolvedKey {
+        ResolvedKey {
+            fill: Some(crate::color::rgb(0.2, 0.4, 0.6)),
+            stroke: Some(crate::color::rgb(0.0, 0.0, 0.0)),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn fill_and_stroke_opacity_act_independently() {
+        let key = ResolvedKey {
+            fill_opacity: Some(0.25),
+            stroke_opacity: Some(0.75),
+            ..opaque_point_key()
+        };
+        let (fill, stroke) = point_alphas(&key, &Theme::default());
+        assert_eq!(fill, Some(0.25));
+        assert_eq!(stroke, Some(0.75));
+    }
+
+    #[test]
+    fn an_unset_opacity_leaves_the_colors_own_alpha() {
+        let key = ResolvedKey {
+            fill: Some(crate::color::Color::new([0.2, 0.4, 0.6, 0.3])),
+            stroke_opacity: Some(1.0),
+            ..opaque_point_key()
+        };
+        let (fill, stroke) = point_alphas(&key, &Theme::default());
+        assert_eq!(fill, Some(0.3), "no fill_opacity → the colour decides");
+        assert_eq!(stroke, Some(1.0));
+    }
+
+    #[test]
+    fn opacity_overrides_the_colors_own_alpha() {
+        // The geoms' `*_opacity` channels replace the colour's alpha
+        // rather than scaling it, so a key over a semi-transparent
+        // colour has to land on the requested value, not the product.
+        let key = ResolvedKey {
+            fill: Some(crate::color::Color::new([0.2, 0.4, 0.6, 0.4])),
+            fill_opacity: Some(0.8),
+            ..Default::default()
+        };
+        let (fill, _) = point_alphas(&key, &Theme::default());
+        assert_eq!(fill, Some(0.8));
+    }
+
+    #[test]
+    fn point_key_rotates_with_the_angle_aesthetic() {
+        use std::f64::consts::FRAC_PI_2;
+        let mut key = shape_only_key("triangle-up");
+        key.size_pt = Some(10.0);
+        key.angle = Some(FRAC_PI_2);
+        let scene = render(&key, &Theme::default());
+        let xforms: Vec<Affine> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Fill { transform, .. } => Some(*transform),
+                _ => None,
+            })
+            .collect();
+        assert!(!xforms.is_empty(), "expected a filled marker");
+        // The apex sits at path-local (0, -0.92); a quarter turn
+        // counter-clockwise on screen sends it to the left of centre.
+        let centre = Point::new(20.0, 20.0);
+        for x in xforms {
+            let apex = x * Point::new(0.0, -0.92);
+            assert!(
+                apex.x < centre.x - 1.0 && (apex.y - centre.y).abs() < 1e-6,
+                "apex {apex:?} should swing left of centre {centre:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rotated_point_cell_covers_the_turned_marker() {
+        let theme = Theme::default();
+        let shapes = ShapeRegistry::with_builtins();
+        // `hline` is wide and flat, so a quarter turn swaps its extents.
+        let mut key = shape_only_key("hline");
+        key.size_pt = Some(12.0);
+        let (flat_w, flat_h) = swatch_dim_for(LegendKey::Point, &key, DPI, &theme.geom, &shapes);
+        key.angle = Some(std::f64::consts::FRAC_PI_2);
+        let (turned_w, turned_h) =
+            swatch_dim_for(LegendKey::Point, &key, DPI, &theme.geom, &shapes);
+        assert!(
+            (turned_w - flat_h).abs() < 1e-9 && (turned_h - flat_w).abs() < 1e-9,
+            "a quarter turn should swap the reserved extents: {flat_w}×{flat_h} → {turned_w}×{turned_h}"
+        );
+    }
+
+    #[test]
+    fn rect_key_border_dashes_with_the_linetype() {
+        let key = ResolvedKey {
+            stroke: Some(crate::color::rgb(0.0, 0.0, 0.0)),
+            linetype: Some(Arc::from(crate::plot::geom::linetype::dashed().to_vec())),
+            ..Default::default()
+        };
+        let mut scene = RecordingScene::default();
+        let theme = Theme::default();
+        render_rect(&key, cell(), &mut scene, DPI, &theme.geom, &theme.palette);
+        let (stroke, _) = sole_stroke(&scene);
+        assert!(
+            !stroke.dash_pattern.is_empty(),
+            "a rect key with a dashed linetype should dash its border"
+        );
+    }
+
+    #[test]
+    fn dash_offset_phases_the_pattern() {
+        let key = ResolvedKey {
+            linetype: Some(Arc::from(crate::plot::geom::linetype::dashed().to_vec())),
+            dash_offset_pt: Some(3.0),
+            ..Default::default()
+        };
+        let (stroke, _) = sole_stroke(&render_line_key(&key, &Theme::default()));
+        assert!((stroke.dash_offset - pt_to_px(3.0, DPI)).abs() < 1e-9);
+    }
+
+    fn marker_bearing_pattern() -> ResolvedKey {
+        let pattern = crate::plot::geom::linetype::pattern([
+            crate::scales::value::LinetypeStep::Dash(4.0),
+            crate::scales::value::LinetypeStep::Gap(2.0),
+            crate::scales::value::LinetypeStep::Marker(Arc::from("circle")),
+            crate::scales::value::LinetypeStep::Gap(4.0),
+        ]);
+        ResolvedKey {
+            stroke: Some(crate::color::rgb(0.0, 0.0, 0.0)),
+            linewidth_pt: Some(1.5),
+            linetype: Some(Arc::from(pattern.to_vec())),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn line_key_stamps_the_markers_in_its_linetype() {
+        // A line key stands for a `LineGeom`, which walks the pattern and
+        // stamps each marker; the dash steps alone would misrepresent it.
+        let scene = render_line_key(&marker_bearing_pattern(), &Theme::default());
+        let fills = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count();
+        assert!(fills > 0, "expected stamped markers along the key");
+    }
+
+    #[test]
+    fn rect_key_renders_linetype_markers_as_gaps() {
+        // `RectGeom` doesn't stamp — its border dashes through the
+        // marker-as-gap path — so its key mustn't stamp either.
+        let mut scene = RecordingScene::default();
+        let theme = Theme::default();
+        render_rect(
+            &marker_bearing_pattern(),
+            cell(),
+            &mut scene,
+            DPI,
+            &theme.geom,
+            &theme.palette,
+        );
+        let (stroke, _) = sole_stroke(&scene);
+        assert_eq!(stroke.dash_pattern.len(), 4);
+    }
+
+    fn arrow_key() -> ResolvedKey {
+        ResolvedKey {
+            stroke: Some(crate::color::rgb(0.0, 0.0, 0.0)),
+            linewidth_pt: Some(1.5),
+            end_marker: EndpointMarkerKey {
+                shape: Some(Arc::from("arrow-closed")),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn line_key_stamps_its_endpoint_marker() {
+        let plain = render_line_key(
+            &ResolvedKey {
+                end_marker: EndpointMarkerKey::default(),
+                ..arrow_key()
+            },
+            &Theme::default(),
+        );
+        let with_arrow = render_line_key(&arrow_key(), &Theme::default());
+        assert!(
+            with_arrow.ops.len() > plain.ops.len(),
+            "an end marker should add draw calls: {} vs {}",
+            with_arrow.ops.len(),
+            plain.ops.len()
+        );
+    }
+
+    #[test]
+    fn endpoint_marker_trims_the_line_it_terminates() {
+        // The arrow's tip has to land at the line's own end, so the
+        // stroke gives up the marker's forward extent.
+        let plain = sole_stroke(&render_line_key(
+            &ResolvedKey {
+                end_marker: EndpointMarkerKey::default(),
+                ..arrow_key()
+            },
+            &Theme::default(),
+        ));
+        let key = arrow_key();
+        let scene = render_line_key(&key, &Theme::default());
+        let stroked = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Stroke { path, .. } => Some(path.bounding_box()),
+                _ => None,
+            })
+            .next()
+            .expect("expected a stroked body");
+        assert!(
+            stroked.x1 < plain.1.x1 - 1e-9,
+            "marker should trim the line: {stroked:?} vs {:?}",
+            plain.1
+        );
+        // Nothing may spill past the cell: the trim is exactly the
+        // marker's forward extent, so the tip lands on the far edge.
+        assert!(stroked.x1 <= cell().x1 + 1e-9);
+    }
+
+    #[test]
+    fn marked_line_cell_covers_the_marker() {
+        let theme = Theme::default();
+        let shapes = ShapeRegistry::with_builtins();
+        let key = arrow_key();
+        let (w, h) = swatch_dim_for(LegendKey::Line, &key, DPI, &theme.geom, &shapes);
+        let lw = pt_to_px(1.5, DPI);
+        // Default marker size is 3 × linewidth, and `arrow-closed`
+        // reaches a full size unit either side of its axis.
+        let marker = pt_to_px(3.0 * 1.5, DPI);
+        assert!(
+            h >= marker && h > lw,
+            "cell height {h} should clear the {marker}px marker"
+        );
+        assert!(
+            w > lw * 2.0,
+            "cell width {w} should hold a body plus the marker's reach"
+        );
+    }
+
+    #[test]
+    fn a_key_with_no_marker_reserves_no_marker_room() {
+        let theme = Theme::default();
+        let shapes = ShapeRegistry::with_builtins();
+        let key = ResolvedKey {
+            linewidth_pt: Some(1.5),
+            ..Default::default()
+        };
+        let (w, h) = swatch_dim_for(LegendKey::Line, &key, DPI, &theme.geom, &shapes);
+        assert_eq!(w, 0.0, "butt-capped markerless key needs no width floor");
+        assert!((h - pt_to_px(1.5, DPI)).abs() < 1e-9, "height {h}");
+    }
+
+    #[test]
+    fn unknown_marker_shape_draws_nothing_extra() {
+        let key = ResolvedKey {
+            end_marker: EndpointMarkerKey {
+                shape: Some(Arc::from("no-such-shape")),
+                ..Default::default()
+            },
+            ..arrow_key()
+        };
+        let scene = render_line_key(&key, &Theme::default());
+        let (_, bbox) = sole_stroke(&scene);
+        // No marker, so no trim either — the body spans the full cell.
+        assert!((bbox.x1 - cell().x1).abs() < 1e-9, "body bbox {bbox:?}");
+    }
+
+    #[test]
+    fn rect_key_rounds_its_corners() {
+        let key = ResolvedKey {
+            fill: Some(crate::color::rgb(0.2, 0.4, 0.6)),
+            corner_radius_pt: Some(4.0),
+            ..Default::default()
+        };
+        let mut scene = RecordingScene::default();
+        let theme = Theme::default();
+        render_rect(&key, cell(), &mut scene, DPI, &theme.geom, &theme.palette);
+        let curved = scene.ops.iter().any(|op| match op {
+            Op::Fill { path, .. } => path
+                .elements()
+                .iter()
+                .any(|el| matches!(el, kurbo::PathEl::CurveTo(..) | kurbo::PathEl::QuadTo(..))),
+            _ => false,
+        });
+        assert!(curved, "a corner radius should round the swatch");
     }
 }

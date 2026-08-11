@@ -767,7 +767,14 @@ fn draw_lines<F>(
             xform,
             corner_rounding,
         };
-        draw_curve_outline(scene, ctx, &projected, &spec);
+        draw_curve_outline(
+            scene,
+            ctx.shapes,
+            ctx.dpi,
+            ctx.theme.geom.marker_outline_pt,
+            &projected,
+            &spec,
+        );
     }
 }
 

@@ -33,7 +33,7 @@
 //!   `Value::Bool` or the conventional `"italic"` / `"normal"` strings.
 //! - `"family"` — font family name (optional; per mark).
 //! - `"fill"` — glyph colour (optional; default black; per mark).
-//! - `"alpha"` — overrides the alpha component of `"fill"` (optional;
+//! - `"fill_opacity"` — overrides the alpha component of `"fill"` (optional;
 //!   `0..=1`; per mark).
 //! - `"offset"` — pt offset along the path where the text layout starts
 //!   (optional; default `0.0`; per mark). Positive values shift text
@@ -106,7 +106,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("text_stroke", ExpectedOutput::Colors),
     ("text_linewidth", ExpectedOutput::Numbers),
     ("fill", ExpectedOutput::Colors),
-    ("alpha", ExpectedOutput::Numbers),
+    ("fill_opacity", ExpectedOutput::Numbers),
     ("offset", ExpectedOutput::Numbers),
     ("hjust", ExpectedOutput::Numbers),
     ("upright", ExpectedOutput::Any),
@@ -258,7 +258,7 @@ impl Geom for TextPathGeom {
         let text_stroke_scale = ctx.scale_for("text_stroke");
         let text_linewidth_scale = ctx.scale_for("text_linewidth");
         let fill_scale = ctx.scale_for("fill");
-        let alpha_scale = ctx.scale_for("alpha");
+        let fill_opacity_scale = ctx.scale_for("fill_opacity");
         let offset_scale = ctx.scale_for("offset");
         let hjust_scale = ctx.scale_for("hjust");
         let upright_scale = ctx.scale_for("upright");
@@ -293,7 +293,7 @@ impl Geom for TextPathGeom {
         let text_stroke_ch = channels.get("text_stroke");
         let text_linewidth_ch = channels.get("text_linewidth");
         let fill_ch = channels.get("fill");
-        let alpha_ch = channels.get("alpha");
+        let fill_opacity_ch = channels.get("fill_opacity");
         let offset_ch = channels.get("offset");
         let hjust_ch = channels.get("hjust");
         let upright_ch = channels.get("upright");
@@ -374,7 +374,7 @@ impl Geom for TextPathGeom {
                     ctx.theme.geom.text_path.fill.as_ref(),
                     &ctx.theme.palette,
                 ),
-                resolve_number_channel(alpha_ch, alpha_scale, i0),
+                resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i0),
             )
             .unwrap_or_else(default_fill);
 
@@ -743,6 +743,28 @@ mod tests {
             .build();
         g.rebuild_diff_against_previous();
         g
+    }
+
+    #[test]
+    fn fill_opacity_overrides_the_glyph_fill_alpha() {
+        let mut g = TextPathGeom::builder()
+            .set("x", Raw(vec![0.25_f64, 0.75]))
+            .set("y", Raw(vec![0.5_f64, 0.5]))
+            .set("text", "AB")
+            .set("size", 20.0_f64)
+            .set("fill", crate::color::Color::new([1.0, 0.0, 0.0, 1.0]))
+            .set("fill_opacity", 0.35_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let scene = drained(&g);
+        let runs = glyph_ops(&scene);
+        assert!(!runs.is_empty(), "expected glyph runs");
+        for run in runs {
+            let crate::brush::Brush::Solid(c) = run.brush else {
+                panic!("expected a solid glyph brush");
+            };
+            assert!((c.components[3] - 0.35).abs() < 1e-6, "fill alpha {c:?}");
+        }
     }
 
     #[test]

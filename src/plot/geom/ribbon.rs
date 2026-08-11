@@ -43,20 +43,22 @@
 //!   addresses curve B.
 //! - `"fill"` — band fill color (per-mark, but read at every row when
 //!   the channel varies across the mark — see below). Default: none.
-//! - `"alpha"` — overrides the alpha of `"fill"` (per-mark or per-row,
-//!   same dispatch rule as `"fill"`). Folded in via
+//! - `"fill_opacity"` — overrides the alpha of `"fill"` (per-mark or
+//!   per-row, same dispatch rule as `"fill"`). Folded in via
 //!   [`override_alpha`](super::resolve::override_alpha).
 //! - `"stroke"` — outline color for curve A (per-mark; first-row-of-mark).
 //!   Bound → curve A is stroked; unbound → no outline on curve A.
 //! - `"stroke2"` — outline color for curve B (per-mark). Independent of
 //!   `"stroke"`; either, both, or neither may be bound.
+//! - `"stroke_opacity"` / `"stroke_opacity2"` — override the alpha of
+//!   each curve's outline colour (per-mark).
 //! - `"linewidth"` — width in pt of curve A's outline (per-mark;
 //!   default 1.0 pt). Consulted only when `"stroke"` is bound.
 //! - `"linewidth2"` — width in pt of curve B's outline (per-mark;
 //!   default 1.0 pt). Consulted only when `"stroke2"` is bound.
 //! - `"pick_id"` — per-mark pick id (resolved at the mark's first row).
 //!
-//! Variance in `"fill"` / `"alpha"` across a mark dispatches to one of
+//! Variance in `"fill"` / `"fill_opacity"` across a mark dispatches to one of
 //! two render paths:
 //!
 //! - Axis-aligned (horizontal / vertical) **and** linear projection —
@@ -118,10 +120,11 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("x2_band", ExpectedOutput::Numbers),
     ("y2_band", ExpectedOutput::Numbers),
     ("fill", ExpectedOutput::Colors),
-    ("alpha", ExpectedOutput::Numbers),
+    ("fill_opacity", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
     // Curve A outline.
     ("stroke", ExpectedOutput::Colors),
+    ("stroke_opacity", ExpectedOutput::Numbers),
     ("linewidth", ExpectedOutput::Numbers),
     ("linetype", ExpectedOutput::Linetypes),
     ("dash_offset", ExpectedOutput::Numbers),
@@ -139,6 +142,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("end_marker_invert", ExpectedOutput::Any),
     // Curve B outline (mirror of curve A's surface).
     ("stroke2", ExpectedOutput::Colors),
+    ("stroke_opacity2", ExpectedOutput::Numbers),
     ("linewidth2", ExpectedOutput::Numbers),
     ("linetype2", ExpectedOutput::Linetypes),
     ("dash_offset2", ExpectedOutput::Numbers),
@@ -231,7 +235,7 @@ impl BuildableGeom for RibbonGeom {
 /// Channel + scale references and orientation handed to
 /// [`draw_one_ribbon_mark`] for one draw call. Bundles curve-A/-B
 /// outline handles (already aggregated by [`OutlineChannels`] /
-/// [`OutlineScales`]) with the fill, alpha, and pick-id channels and
+/// [`OutlineScales`]) with the fill, fill-opacity, and pick-id channels and
 /// the x/x2/y/y2 positional inputs.
 #[derive(Clone, Copy)]
 struct RibbonDrawCtx<'a> {
@@ -251,7 +255,7 @@ struct RibbonDrawCtx<'a> {
     x2_band: ChannelBind<'a>,
     y2_band: ChannelBind<'a>,
     fill: ChannelBind<'a>,
-    alpha: ChannelBind<'a>,
+    fill_opacity: ChannelBind<'a>,
     pick_id: ChannelBind<'a>,
     outline_a_ch: OutlineChannels<'a>,
     outline_b_ch: OutlineChannels<'a>,
@@ -296,7 +300,7 @@ impl<'a> RibbonDrawCtx<'a> {
             x2_band: b("x2_band"),
             y2_band: b("y2_band"),
             fill: b("fill"),
-            alpha: b("alpha"),
+            fill_opacity: b("fill_opacity"),
             pick_id: b("pick_id"),
             outline_a_ch: OutlineChannels::from_map(channels, ""),
             outline_b_ch: OutlineChannels::from_map(channels, "2"),
@@ -463,10 +467,11 @@ fn draw_one_ribbon_mark(
             ch: fill_ch,
             scale: fill_scale,
         },
-        alpha: ChannelBind {
-            ch: alpha_ch,
-            scale: alpha_scale,
-        },
+        fill_opacity:
+            ChannelBind {
+                ch: fill_opacity_ch,
+                scale: fill_opacity_scale,
+            },
         pick_id:
             ChannelBind {
                 ch: pick_id_ch,
@@ -480,8 +485,8 @@ fn draw_one_ribbon_mark(
 
     let i0 = mark.first_row;
 
-    // Per-mark fill colour at first row, blended with per-mark
-    // alpha. Used for both the uniform `Brush::Solid` path and as
+    // Per-mark fill colour at first row, at the per-mark fill
+    // opacity. Used for both the uniform `Brush::Solid` path and as
     // a fallback colour when building gradient stops if a row's
     // own fill is unresolved.
     let mark_fill = override_alpha(
@@ -492,7 +497,7 @@ fn draw_one_ribbon_mark(
             ctx.theme.geom.ribbon.fill.as_ref(),
             &ctx.theme.palette,
         ),
-        resolve_number_channel(alpha_ch, alpha_scale, i0),
+        resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i0),
     );
     let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
     let outline_a_spec = resolve_outline_spec(
@@ -500,8 +505,6 @@ fn draw_one_ribbon_mark(
         &ctx.theme.geom.ribbon,
         &outline_a_ch,
         &outline_a_scales,
-        alpha_ch,
-        alpha_scale,
         i0,
         pick,
     );
@@ -510,8 +513,6 @@ fn draw_one_ribbon_mark(
         &ctx.theme.geom.ribbon,
         &outline_b_ch,
         &outline_b_scales,
-        alpha_ch,
-        alpha_scale,
         i0,
         pick,
     );
@@ -715,7 +716,7 @@ fn draw_one_ribbon_mark(
     // axis.
     if let Some(mark_color) = mark_fill {
         let varies = channel_varies_across(fill_ch, fill_scale, &row_for_vertex)
-            || channel_varies_across(alpha_ch, alpha_scale, &row_for_vertex);
+            || channel_varies_across(fill_opacity_ch, fill_opacity_scale, &row_for_vertex);
         let axis_aligned = matches!(orientation, Orientation::Horizontal | Orientation::Vertical);
         let use_mesh = varies && (!axis_aligned || !is_linear);
 
@@ -724,8 +725,8 @@ fn draw_one_ribbon_mark(
                 &vertex_origins,
                 fill_ch,
                 fill_scale,
-                alpha_ch,
-                alpha_scale,
+                fill_opacity_ch,
+                fill_opacity_scale,
                 mark_color,
             );
             let mut mesh = crate::primitives::ribbon_band_mesh(
@@ -788,8 +789,8 @@ fn draw_one_ribbon_mark(
                     curve_a_pts.len() - row_for_vertex.len(),
                     fill_ch,
                     fill_scale,
-                    alpha_ch,
-                    alpha_scale,
+                    fill_opacity_ch,
+                    fill_opacity_scale,
                     mark_color,
                 )
                 .map(Brush::Gradient)
@@ -815,10 +816,24 @@ fn draw_one_ribbon_mark(
     // markers, endpoint clipping all flow through the same
     // helper that LineGeom / BSplineGeom use.
     if let Some(ref spec) = outline_a_spec {
-        draw_curve_outline(scene, ctx, &curve_a_pts, spec);
+        draw_curve_outline(
+            scene,
+            ctx.shapes,
+            ctx.dpi,
+            ctx.theme.geom.marker_outline_pt,
+            &curve_a_pts,
+            spec,
+        );
     }
     if let Some(ref spec) = outline_b_spec {
-        draw_curve_outline(scene, ctx, &curve_b_pts, spec);
+        draw_curve_outline(
+            scene,
+            ctx.shapes,
+            ctx.dpi,
+            ctx.theme.geom.marker_outline_pt,
+            &curve_b_pts,
+            spec,
+        );
     }
 }
 
@@ -827,7 +842,7 @@ fn draw_one_ribbon_mark(
 /// would be degenerate (fewer than two stops with distinct offsets, or
 /// zero shared-axis span).
 ///
-/// Stops carry the per-row resolved fill (with per-row alpha folded in)
+/// Stops carry the per-row resolved fill (at the per-row fill opacity)
 /// at offsets proportional to each vertex's projected position along
 /// the shared axis. Densified interior points (added between rows under
 /// polar projection) are skipped — only the real per-row vertices
@@ -840,8 +855,8 @@ fn build_gradient_brush(
     _interior_count: usize,
     fill_ch: Option<&Channel>,
     fill_scale: Option<&crate::plot::scale::Scale>,
-    alpha_ch: Option<&Channel>,
-    alpha_scale: Option<&crate::plot::scale::Scale>,
+    fill_opacity_ch: Option<&Channel>,
+    fill_opacity_scale: Option<&crate::plot::scale::Scale>,
     fallback: Color,
 ) -> Option<peniko::Gradient> {
     // Indices of curve_a_pts that correspond to real per-row vertices
@@ -956,7 +971,7 @@ fn build_gradient_brush(
         let offset = ((coords[k] - min_c) / span).clamp(0.0, 1.0);
         let row_color = override_alpha(
             resolve_color_channel(fill_ch, fill_scale, i),
-            resolve_number_channel(alpha_ch, alpha_scale, i),
+            resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i),
         )
         .unwrap_or(fallback);
         pairs.push((offset, row_color));
@@ -1148,8 +1163,8 @@ fn resolve_optional_position(
 }
 
 /// Build per-vertex colours for both curve sides of the mesh path.
-/// Real vertices take the per-row resolved fill (with per-row alpha
-/// folded in); densified interior vertices lerp linearly between the
+/// Real vertices take the per-row resolved fill at the per-row fill
+/// opacity; densified interior vertices lerp linearly between the
 /// two bracketing rows' colours along `t`. Both sides share the same
 /// colour at the same vertex index — the ribbon has one fill per
 /// vertex pair.
@@ -1157,14 +1172,14 @@ fn build_per_vertex_colors(
     vertex_origins: &[VertexOrigin],
     fill_ch: Option<&Channel>,
     fill_scale: Option<&crate::plot::scale::Scale>,
-    alpha_ch: Option<&Channel>,
-    alpha_scale: Option<&crate::plot::scale::Scale>,
+    fill_opacity_ch: Option<&Channel>,
+    fill_opacity_scale: Option<&crate::plot::scale::Scale>,
     fallback: Color,
 ) -> (Vec<Color>, Vec<Color>) {
     let resolve_row = |row: usize| -> Color {
         override_alpha(
             resolve_color_channel(fill_ch, fill_scale, row),
-            resolve_number_channel(alpha_ch, alpha_scale, row),
+            resolve_number_channel(fill_opacity_ch, fill_opacity_scale, row),
         )
         .unwrap_or(fallback)
     };
@@ -1215,6 +1230,56 @@ mod tests {
 
     fn blue() -> Color {
         Color::new([0.0, 0.0, 1.0, 1.0])
+    }
+
+    /// Alpha of every fill and stroke a drawn ribbon emitted.
+    fn painted_alphas(g: &mut RibbonGeom) -> (Vec<f32>, Vec<f32>) {
+        g.rebuild_diff_against_previous();
+        let panel = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let registry = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &ctx(panel, &registry, &scales));
+        let (mut fills, mut strokes) = (Vec::new(), Vec::new());
+        for op in &scene.ops {
+            match op {
+                Op::Fill {
+                    brush: crate::brush::Brush::Solid(c),
+                    ..
+                } => fills.push(c.components[3]),
+                Op::Stroke {
+                    brush: crate::brush::Brush::Solid(c),
+                    ..
+                } => strokes.push(c.components[3]),
+                _ => {}
+            }
+        }
+        (fills, strokes)
+    }
+
+    #[test]
+    fn fill_opacity_and_per_curve_stroke_opacity_act_independently() {
+        let mut g = RibbonGeom::builder()
+            .set("x", Raw(vec![0.1_f64, 0.5, 0.9]))
+            .set("y", Raw(vec![0.8_f64, 0.7, 0.9]))
+            .set("y2", Raw(vec![0.2_f64, 0.3, 0.1]))
+            .set("fill", red())
+            .set("fill_opacity", 0.3_f64)
+            .set("stroke", blue())
+            .set("stroke_opacity", 0.6_f64)
+            .set("stroke2", blue())
+            .set("stroke_opacity2", 0.9_f64)
+            .build();
+        let (fills, mut strokes) = painted_alphas(&mut g);
+        assert!(
+            fills.iter().all(|a| (a - 0.3).abs() < 1e-6),
+            "band fill alphas {fills:?}"
+        );
+        strokes.sort_by(f32::total_cmp);
+        strokes.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        assert_eq!(strokes.len(), 2, "one alpha per outline: {strokes:?}");
+        assert!((strokes[0] - 0.6).abs() < 1e-6, "curve A {:?}", strokes[0]);
+        assert!((strokes[1] - 0.9).abs() < 1e-6, "curve B {:?}", strokes[1]);
     }
 
     // ── build() ──

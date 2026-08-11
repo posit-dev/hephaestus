@@ -245,7 +245,7 @@ fn main() {
             .set("y2", y2s)
             .set("interpolation", "panel")
             .set("fill", fills)
-            .set("alpha", 0.65_f64)
+            .set("fill_opacity", 0.65_f64)
             .build(),
     );
     // Outer ring tickbars.

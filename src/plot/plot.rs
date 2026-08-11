@@ -1513,7 +1513,12 @@ impl Plot {
                 slot,
                 Cell::measured(BoxMeasure::new(
                     crate::plot::chrome::legend::legend_stack_measure(
-                        &group, side, registry, dpi, theme,
+                        &group,
+                        side,
+                        registry,
+                        &self.shapes,
+                        dpi,
+                        theme,
                     ),
                 )),
             );
@@ -1577,7 +1582,11 @@ impl Plot {
                 }
                 let inset_px = inset_pt * dpi / 72.0;
                 let (w, h) = crate::plot::chrome::legend::legend_stack_natural_size(
-                    &group, registry, dpi, theme,
+                    &group,
+                    registry,
+                    &self.shapes,
+                    dpi,
+                    theme,
                 );
                 if w <= 0.0 || h <= 0.0 {
                     continue;

@@ -255,6 +255,36 @@ pub fn validate_pick_id_channel(channels: &HashMap<String, Channel>, geom_label:
     }
 }
 
+/// Validate that every supplied channel name appears in the geom's
+/// catalog. A name the geom doesn't declare can only be a caller
+/// mistake — a typo, or a channel that belongs to a different geom —
+/// and nothing downstream would ever read it, so it fails here rather
+/// than rendering as the default. Panics with the offending names.
+pub fn validate_known_channels(
+    channels: &HashMap<String, Channel>,
+    catalog: &[(&'static str, ExpectedOutput)],
+    geom_label: &str,
+) {
+    let mut unknown: Vec<&str> = channels
+        .keys()
+        .map(String::as_str)
+        .filter(|name| !catalog.iter().any(|(known, _)| known == name))
+        .collect();
+    if unknown.is_empty() {
+        return;
+    }
+    unknown.sort_unstable();
+    let names: Vec<String> = unknown.iter().map(|n| format!("\"{n}\"")).collect();
+    let label = match unknown.len() {
+        1 => "channel",
+        _ => "channels",
+    };
+    panic!(
+        "{geom_label}::build: unknown {label} {} — not declared by this geom",
+        names.join(", ")
+    );
+}
+
 /// Filter the geom's channel catalog against the channels actually
 /// supplied by the user. Each catalog entry is `(name, expected_output)`;
 /// supplied channels become [`ChannelDecl`] entries, others are dropped.
@@ -278,9 +308,9 @@ pub fn filter_declared(
 }
 
 /// Run the universal validate-then-build tail every `BuildableGeom`
-/// implementation finishes with: [`validate_channel_lengths`],
-/// [`validate_pick_id_channel`], [`filter_declared`], then
-/// [`GeomState::from_builder`].
+/// implementation finishes with: [`validate_known_channels`],
+/// [`validate_channel_lengths`], [`validate_pick_id_channel`],
+/// [`filter_declared`], then [`GeomState::from_builder`].
 pub fn finalize_state(
     keys_opt: Option<DataColumn>,
     channels: HashMap<String, Channel>,
@@ -289,6 +319,7 @@ pub fn finalize_state(
     catalog: &[(&'static str, ExpectedOutput)],
     geom_label: &str,
 ) -> GeomState {
+    validate_known_channels(&channels, catalog, geom_label);
     validate_channel_lengths(&channels, n, geom_label);
     validate_pick_id_channel(&channels, geom_label);
     let declared = filter_declared(&channels, catalog);

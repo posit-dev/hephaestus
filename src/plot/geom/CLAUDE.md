@@ -65,7 +65,7 @@ The hot draw loop matches on the `DataColumn` variant **once** at the top, then 
 ## Adding a new geom
 
 1. Define the struct as `pub struct MyGeom { state: GeomState }` plus any extra caches (e.g. `LineGeom` adds `Vec<MarkSlot>`).
-2. Declare the channel list at the top: `const CHANNELS: &[(&str, ExpectedOutput)] = &[("x", ExpectedOutput::Position), ...]`.
+2. Declare the channel list at the top: `const CHANNELS: &[(&str, ExpectedOutput)] = &[("x", ExpectedOutput::Position), ...]`. The catalog is authoritative — `finalize_state` rejects any supplied name that isn't in it, so a channel the draw loop reads has to be listed here.
 3. Implement `BuildableGeom::build_from`: validate (required channels present, lengths match the row count, channel column variants are acceptable), inject defaults, then call `GeomState::from_builder(keys, channels, n, strategy, declared)` and wrap in `Self { state, ...caches }`.
 4. Implement `Geom`: four required methods (`state`, `state_mut`, `draw`, `as_any_mut`). Override `mark_count` and `invalidate_caches` only if you cache per-mark layout (`LineGeom`, `PolygonGeom`). Override `rebuild_diff_against_previous` only if you need to rebuild caches after the diff (delegate to `self.state_mut().rebuild_diff_against_previous()` then rebuild the cache).
 5. In `draw`: for each channel, get `ctx.scale_for("name")`, then in the per-row loop call the right `resolve_*` helper. Issue scene primitives via the `&mut dyn SceneBuilder`.
@@ -73,7 +73,7 @@ The hot draw loop matches on the `DataColumn` variant **once** at the top, then 
 ## Conventions
 
 - **Per-row vs per-mark.** `PointGeom` uses positional one-per-row keys; `LineGeom` uses explicit one-per-mark keys so all rows sharing a key form one mark. The diff machinery respects the distinction — `LineGeom` overrides `rebuild_diff_against_previous` to rebuild its mark cache after the state-level diff.
-- **Validation panics at the call site, not at draw.** Wrong column variants, missing required channels, and length mismatches panic from `build_from` so the runtime geom never has to handle them.
+- **Validation panics at the call site, not at draw.** Wrong column variants, missing required channels, length mismatches, and channel names the geom doesn't declare all panic from `build_from` so the runtime geom never has to handle them. The unknown-name check (`validate_known_channels`, run first in `finalize_state`) is what keeps a typo or a stale channel name from silently rendering as the default — nothing downstream ever reads a name outside the geom's `CHANNELS` catalog.
 - **Defaults injected at `build_from` time, not at `draw` time.** A missing `"size"` channel is replaced by `Channel::Constant(default_size_pt)` during build, so the draw loop is always fed a valid channel.
 - **Raw channels are output-space values.** `Raw(vec![0.1, 0.5, 0.9])` on `"x"` means "these are already panel fractions; bypass any `"x"` scale". Useful when the scale is bound elsewhere but a specific geom should use pre-scaled data.
 

@@ -32,15 +32,17 @@ use crate::primitives::{
     clip_polyline, polyline, round_corners, CornerRounding, EndClip, PolylineOptions,
 };
 use crate::scene::SceneBuilder;
+use crate::shape::ShapeRegistry;
 use crate::stroke::{Cap, Join};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::resolve::{
-    auto_endpoint_clip_pt, draw_stroke_with_linetype, emit_endpoint_marker, endpoint_outward,
-    override_alpha, pt_to_px, resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel,
-    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_str_channel_or,
+    auto_endpoint_clip_pt, draw_stroke_with_linetype, emit_endpoint_marker,
+    endpoint_marker_outline_px, endpoint_outward, override_alpha, pt_to_px,
+    resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel, resolve_join_channel,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or,
+    resolve_str_channel_or,
 };
 use super::{Channel, GeomContext};
 
@@ -55,6 +57,7 @@ use super::{Channel, GeomContext};
 #[derive(Clone, Copy)]
 pub(crate) struct OutlineChannels<'a> {
     pub stroke: Option<&'a Channel>,
+    pub stroke_opacity: Option<&'a Channel>,
     pub linewidth: Option<&'a Channel>,
     pub linetype: Option<&'a Channel>,
     pub dash_offset: Option<&'a Channel>,
@@ -80,6 +83,7 @@ impl<'a> OutlineChannels<'a> {
         let g = |base: &str| channels.get(&format!("{base}{suffix}"));
         OutlineChannels {
             stroke: g("stroke"),
+            stroke_opacity: g("stroke_opacity"),
             linewidth: g("linewidth"),
             linetype: g("linetype"),
             dash_offset: g("dash_offset"),
@@ -104,6 +108,7 @@ impl<'a> OutlineChannels<'a> {
 #[derive(Clone, Copy)]
 pub(crate) struct OutlineScales<'a> {
     pub stroke: Option<&'a Scale>,
+    pub stroke_opacity: Option<&'a Scale>,
     pub linewidth: Option<&'a Scale>,
     pub linetype: Option<&'a Scale>,
     pub dash_offset: Option<&'a Scale>,
@@ -128,6 +133,7 @@ impl<'a> OutlineScales<'a> {
         let g = |base: &str| ctx.scale_for(&format!("{base}{suffix}"));
         OutlineScales {
             stroke: g("stroke"),
+            stroke_opacity: g("stroke_opacity"),
             linewidth: g("linewidth"),
             linetype: g("linetype"),
             dash_offset: g("dash_offset"),
@@ -151,24 +157,20 @@ impl<'a> OutlineScales<'a> {
 /// [`OutlineScales`] handles at the mark's first row.
 ///
 /// Returns `None` when no stroke colour is bound (no outline to draw).
-/// `alpha_ch` / `alpha_scale` supply the shared per-mark alpha that
-/// overrides each colour channel's resolved alpha; pass `None` for both
-/// when there is no shared alpha channel.
-#[allow(clippy::too_many_arguments)]
+/// The curve's `"stroke_opacity"` channel overrides the stroke colour's
+/// own alpha.
 pub(crate) fn resolve_outline_spec(
     ctx: &GeomContext<'_>,
     defaults: &crate::plot::theme::ShapeDefaults,
     ch: &OutlineChannels<'_>,
     sc: &OutlineScales<'_>,
-    alpha_ch: Option<&Channel>,
-    alpha_scale: Option<&Scale>,
     i0: usize,
     pick: PickId,
 ) -> Option<OutlineSpec> {
     let _ = ctx;
     let stroke_color = override_alpha(
         resolve_color_channel(ch.stroke, sc.stroke, i0),
-        resolve_number_channel(alpha_ch, alpha_scale, i0),
+        resolve_number_channel(ch.stroke_opacity, sc.stroke_opacity, i0),
     )?;
     let linewidth_pt =
         resolve_number_channel_or(ch.linewidth, sc.linewidth, i0, defaults.linewidth_pt);
@@ -470,11 +472,18 @@ pub(crate) fn expand_polygons(
 /// marker, dispatches the stroke (fast path or dashed-with-markers
 /// walker), and emits the end marker.
 ///
+/// `marker_outline_pt` is the theme's outline width for marker stamps
+/// inside a dash pattern. Taking the registry / dpi / that width
+/// directly rather than a [`GeomContext`] lets legend chrome stroke a
+/// key through the same code the geoms use.
+///
 /// No-op when `points.len() < 2`, linewidth is non-finite or
 /// non-positive, or the post-clip polyline has fewer than two vertices.
 pub(crate) fn draw_curve_outline(
     scene: &mut dyn SceneBuilder,
-    ctx: &GeomContext<'_>,
+    shapes: &ShapeRegistry,
+    dpi: f64,
+    marker_outline_pt: f64,
     points: &[Point],
     spec: &OutlineSpec,
 ) {
@@ -482,7 +491,7 @@ pub(crate) fn draw_curve_outline(
         return;
     }
 
-    let linewidth_px = pt_to_px(spec.linewidth_pt, ctx.dpi);
+    let linewidth_px = pt_to_px(spec.linewidth_pt, dpi);
     if !linewidth_px.is_finite() || linewidth_px <= 0.0 {
         return;
     }
@@ -491,13 +500,13 @@ pub(crate) fn draw_curve_outline(
         &spec.start_marker.name,
         spec.start_marker.size_pt,
         spec.start_marker.invert,
-        ctx.shapes,
+        shapes,
     );
     let auto_clip_end_pt = auto_endpoint_clip_pt(
         &spec.end_marker.name,
         spec.end_marker.size_pt,
         spec.end_marker.invert,
-        ctx.shapes,
+        shapes,
     );
     let clip_start_pt = spec.user_clip_start_pt + auto_clip_start_pt;
     let clip_end_pt = spec.user_clip_end_pt + auto_clip_end_pt;
@@ -505,11 +514,11 @@ pub(crate) fn draw_curve_outline(
     let clipped: Vec<Point> = if clip_start_pt > 0.0 || clip_end_pt > 0.0 {
         let start = (clip_start_pt > 0.0).then(|| EndClip::Circle {
             center: points[0],
-            radius: pt_to_px(clip_start_pt, ctx.dpi),
+            radius: pt_to_px(clip_start_pt, dpi),
         });
         let end = (clip_end_pt > 0.0).then(|| EndClip::Circle {
             center: *points.last().unwrap(),
-            radius: pt_to_px(clip_end_pt, ctx.dpi),
+            radius: pt_to_px(clip_end_pt, dpi),
         });
         clip_polyline(points, start, end)
     } else {
@@ -524,11 +533,11 @@ pub(crate) fn draw_curve_outline(
     } else {
         polyline(&clipped, PolylineOptions::default())
     };
-    let marker_outline_px = linewidth_px.max(pt_to_px(0.5, ctx.dpi));
+    let marker_outline_px = endpoint_marker_outline_px(linewidth_px, dpi);
     let xform = spec.xform;
 
     if !spec.start_marker.name.is_empty() {
-        let size_px = pt_to_px(spec.start_marker.size_pt, ctx.dpi);
+        let size_px = pt_to_px(spec.start_marker.size_pt, dpi);
         let fill = spec.start_marker.fill.unwrap_or(spec.marker_fill);
         let outward = endpoint_outward(&clipped, points, true, clip_start_pt > 0.0);
         emit_endpoint_marker(
@@ -542,7 +551,7 @@ pub(crate) fn draw_curve_outline(
             spec.stroke_color,
             marker_outline_px,
             xform,
-            ctx.shapes,
+            shapes,
             spec.pick,
         );
     }
@@ -561,13 +570,13 @@ pub(crate) fn draw_curve_outline(
         spec.dash_offset_pt,
         xform,
         spec.pick,
-        ctx.shapes,
-        ctx.theme.geom.marker_outline_pt,
-        ctx.dpi,
+        shapes,
+        marker_outline_pt,
+        dpi,
     );
 
     if !spec.end_marker.name.is_empty() {
-        let size_px = pt_to_px(spec.end_marker.size_pt, ctx.dpi);
+        let size_px = pt_to_px(spec.end_marker.size_pt, dpi);
         let fill = spec.end_marker.fill.unwrap_or(spec.marker_fill);
         let outward = endpoint_outward(&clipped, points, false, clip_end_pt > 0.0);
         let placement = *clipped.last().unwrap();
@@ -582,7 +591,7 @@ pub(crate) fn draw_curve_outline(
             spec.stroke_color,
             marker_outline_px,
             xform,
-            ctx.shapes,
+            shapes,
             spec.pick,
         );
     }

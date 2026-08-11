@@ -169,6 +169,10 @@ struct RebuildCtx<'a> {
     dpi: f64,
     theme: &'a Theme,
     chrome: &'a HashMap<String, CompositionChrome>,
+    /// Registry the composition's own legend keys size their markers
+    /// against — the same one their draw step resolves shapes through.
+    #[cfg(feature = "text")]
+    shapes: &'a ShapeRegistry,
 }
 
 impl ElementTemplate {
@@ -502,6 +506,7 @@ impl CompositionChrome {
                     &group,
                     side,
                     ctx.registry,
+                    ctx.shapes,
                     ctx.dpi,
                     theme,
                 )),
@@ -1085,6 +1090,8 @@ impl PlotComposition {
                 dpi,
                 theme: &self.theme,
                 chrome: &self.chrome,
+                #[cfg(feature = "text")]
+                shapes: &self.shapes,
             });
             self.last_layout = Some(comp.solve(size, dpi));
             self.last_size = Some(size);

@@ -123,14 +123,14 @@ fn main() {
 
     // ── Right side, legend #3: a continuous gradient colorbar
     // driven by `gradient_scale`. Stacks below the discrete ones
-    // via the same per-side stacker. The colorbar also pulls an
-    // alpha from `gradient_alpha` — same domain → low values are
+    // via the same per-side stacker. The colorbar also pulls its
+    // opacity from `gradient_opacity` — same domain → low values are
     // mostly transparent, high values fully opaque.
     p.add_legend(
         Legend::colorbar("gradient_scale")
             .side(LegendSide::Right)
             .title("Gradient")
-            .scaled("alpha", "gradient_alpha"),
+            .scaled("fill_opacity", "gradient_opacity"),
     );
 
     // ── Bottom side, legend #3: same gradient scale but rendered
@@ -245,7 +245,7 @@ fn main() {
             ]),
         )
         .add_scale(
-            "gradient_alpha",
+            "gradient_opacity",
             scale::continuous(0.0..=100.0).range_numbers([0.1, 1.0]),
         )
         .add_scale(

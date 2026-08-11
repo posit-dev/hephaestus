@@ -64,7 +64,7 @@ fn main() {
                 .set("y", ys)
                 .set("y2", 0.0_f64)
                 .set("fill", rgb8(60, 130, 200))
-                .set("alpha", 0.35_f64)
+                .set("fill_opacity", 0.35_f64)
                 .set("stroke", rgb8(20, 60, 130))
                 .set("linewidth", 1.5_f64)
                 .build(),
@@ -110,7 +110,7 @@ fn main() {
                 .set("y", ys)
                 .set("x2", 0.0_f64)
                 .set("fill", rgb8(200, 120, 60))
-                .set("alpha", 0.5_f64)
+                .set("fill_opacity", 0.5_f64)
                 .build(),
         );
         plot.add_axis(
@@ -172,7 +172,7 @@ fn main() {
                 .set("y", y_top)
                 .set("y2", y_bot)
                 .set("fill", fills)
-                .set("alpha", 0.75_f64)
+                .set("fill_opacity", 0.75_f64)
                 .set("stroke", rgb8(30, 30, 60))
                 .set("stroke2", rgb8(30, 30, 60))
                 .set("linewidth", 1.2_f64)
@@ -232,7 +232,7 @@ fn main() {
                 .set("y", outer)
                 .set("y2", inner)
                 .set("fill", fills)
-                .set("alpha", 0.7_f64)
+                .set("fill_opacity", 0.7_f64)
                 .set("stroke", rgb8(70, 40, 130))
                 .set("stroke2", rgb8(70, 40, 130))
                 .set("linewidth", 1.5_f64)
@@ -302,7 +302,7 @@ fn main() {
                 .set("x2", x_b)
                 .set("y2", y_b)
                 .set("fill", fills)
-                .set("alpha", 0.85_f64)
+                .set("fill_opacity", 0.85_f64)
                 .set("stroke", rgb8(20, 60, 100))
                 .set("stroke2", rgb8(120, 30, 50))
                 .set("linewidth", 1.2_f64)

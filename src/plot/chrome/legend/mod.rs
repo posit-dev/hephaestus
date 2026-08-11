@@ -28,7 +28,7 @@
 //! enough when the surviving bar has to stand in for both palettes.
 
 mod render_keys;
-use render_keys::{apply_alpha, render_key, swatch_dim_for};
+use render_keys::{render_key, swatch_dim_for, with_opacity};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -40,9 +40,11 @@ use crate::layout::{Cell, CellId, Grid, Measure, Placement, Track, WidthHint};
 use crate::path::{FillRule, Path};
 use crate::pick::PickId;
 use crate::plot::chrome::linear_axis::{draw_axis_label, pt_to_px, AxisLabelAt};
+use crate::plot::geom::resolve::{cap_from_str, join_from_str};
 use crate::plot::scale::ScaleRegistry;
 use crate::scales::breaks::DEFAULT_BREAK_COUNT;
 use crate::scales::chrome::{Anchor, LegendSide};
+use crate::stroke::{Cap, Join};
 
 /// Map a [`LegendSide`] to the cardinal direction the legend renders
 /// against. The four anatomical-slot variants pass through; the
@@ -154,6 +156,7 @@ pub fn resolve_anchor(panel: Rect, anchor: Anchor, inset_px: f64, size: (f64, f6
 pub fn legend_stack_natural_size(
     legends: &[&Legend],
     registry: &ScaleRegistry,
+    shapes: &ShapeRegistry,
     dpi: f64,
     theme: &crate::plot::theme::Theme,
 ) -> (f64, f64) {
@@ -164,6 +167,7 @@ pub fn legend_stack_natural_size(
             LegendMeasure::new(
                 l,
                 registry,
+                shapes,
                 dpi,
                 theme.legend_for(l.theme_variant.as_deref()),
                 &theme.geom,
@@ -456,14 +460,19 @@ pub struct LegendId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LegendKey {
     /// Sized marker (default shape: `circle` from the registry).
-    /// Consumes: fill, stroke, size, shape (TODO), alpha, linewidth
-    /// (as the marker's outline width).
+    /// Consumes: fill, stroke, fill_opacity, stroke_opacity, size,
+    /// shape, angle, linewidth (as the marker's outline width).
     Point,
-    /// Short horizontal stroke. Consumes: stroke (or `color` as a
-    /// fallback), linewidth, linetype, alpha.
+    /// Short horizontal stroke, stamped with endpoint markers when
+    /// bound. Consumes: stroke (or `color` as a fallback),
+    /// stroke_opacity, linewidth, linetype, dash_offset, cap, join,
+    /// start_marker / end_marker and their `_size` / `_fill` /
+    /// `_invert` companions.
     Line,
-    /// Filled rectangle covering the swatch cell. Consumes: fill,
-    /// stroke, alpha.
+    /// Filled rectangle covering the swatch cell, with its border
+    /// inside the cell. Consumes: fill, stroke, fill_opacity,
+    /// stroke_opacity, linewidth, linetype, dash_offset, cap, join,
+    /// corner_radius.
     Rect,
 }
 
@@ -613,16 +622,16 @@ pub struct StackBody {
 ///
 /// Like [`LegendKeySpec`], a colorbar carries per-aesthetic
 /// `bindings`. Each gradient stop resolves a [`ResolvedKey`] from
-/// these and uses its `fill` (with `alpha` modulating the
-/// per-channel opacity) as the stop colour. By default the `fill`
-/// binding is the legend's `domain_scale` — so the simplest
-/// colorbar (`Legend::colorbar("scale_name")`) gradients over that
-/// scale's colour output range. Layering an `alpha` scale on top
-/// just means adding another binding:
+/// these and uses its `fill`, at its `fill_opacity`, as the stop
+/// colour. By default the `fill` binding is the legend's
+/// `domain_scale` — so the simplest colorbar
+/// (`Legend::colorbar("scale_name")`) gradients over that scale's
+/// colour output range. Layering an opacity scale on top just means
+/// adding another binding:
 ///
 /// ```ignore
 /// Legend::colorbar("value_scale")
-///     .scaled("alpha", "value_alpha_scale")
+///     .scaled("fill_opacity", "value_opacity_scale")
 /// ```
 #[derive(Clone, Debug)]
 pub struct ColorbarSpec {
@@ -765,8 +774,8 @@ impl Legend {
         self
     }
 
-    /// Bind a colorbar aesthetic to a scale (e.g. `alpha` keyed off
-    /// a separate alpha scale). The fill is implicitly bound to the
+    /// Bind a colorbar aesthetic to a scale (e.g. `fill_opacity` keyed
+    /// off its own scale). The fill is implicitly bound to the
     /// legend's `domain_scale` unless overridden here. No-op on
     /// stack legends — use [`LegendKeySpec::scaled`] there.
     pub fn scaled(mut self, aesthetic: impl Into<String>, scale_name: impl Into<String>) -> Self {
@@ -972,9 +981,51 @@ pub struct ResolvedKey {
     pub stroke: Option<Color>,
     pub size_pt: Option<f64>,
     pub shape: Option<Arc<str>>,
-    pub alpha: Option<f64>,
+    /// Opacity of the key's fill, overriding the fill colour's own
+    /// alpha as the geom `"fill_opacity"` channel does.
+    pub fill_opacity: Option<f64>,
+    /// Opacity of the key's stroke, overriding the stroke colour's own
+    /// alpha as the geom `"stroke_opacity"` channel does.
+    pub stroke_opacity: Option<f64>,
     pub linewidth_pt: Option<f64>,
     pub linetype: Option<Arc<[LinetypeStep]>>,
+    /// Dash-pattern phase shift in pt, as the geom `"dash_offset"`
+    /// channel applies it.
+    pub dash_offset_pt: Option<f64>,
+    /// Endpoint cap for the stroked keys, from the same `"butt"` /
+    /// `"round"` / `"square"` vocabulary the geom `"cap"` channel uses.
+    pub cap: Option<Cap>,
+    /// Segment join for the stroked keys, from the same `"miter"` /
+    /// `"round"` / `"bevel"` vocabulary the geom `"join"` channel uses.
+    pub join: Option<Join>,
+    /// Corner radius in pt for [`LegendKey::Rect`], as the geom
+    /// `"corner_radius"` channel applies it.
+    pub corner_radius_pt: Option<f64>,
+    /// Marker rotation in radians for [`LegendKey::Point`], positive
+    /// counter-clockwise — the geom `"angle"` channel's convention.
+    pub angle: Option<f64>,
+    /// Marker stamped at the start of a [`LegendKey::Line`], from the
+    /// geom's `"start_marker"` family of channels.
+    pub start_marker: EndpointMarkerKey,
+    /// Counterpart of [`Self::start_marker`] for the line's far end.
+    pub end_marker: EndpointMarkerKey,
+}
+
+/// One end of a [`LegendKey::Line`]'s marker pair. Mirrors the geom's
+/// per-endpoint marker channels; unset fields fall back the way the
+/// geoms' do — size to `3 × linewidth`, fill to the stroke colour.
+#[derive(Clone, Debug, Default)]
+pub struct EndpointMarkerKey {
+    /// Registered shape name. `None`, or a name the registry doesn't
+    /// know, draws no marker.
+    pub shape: Option<Arc<str>>,
+    /// Marker size in pt.
+    pub size_pt: Option<f64>,
+    /// Marker interior colour.
+    pub fill: Option<Color>,
+    /// Flip the outward direction, mirroring the shape across the
+    /// line's end.
+    pub invert: Option<bool>,
 }
 
 impl ResolvedKey {
@@ -1002,9 +1053,14 @@ impl ResolvedKey {
                     self.shape = Some(Arc::from(s));
                 }
             }
-            "alpha" | "fill_opacity" | "stroke_opacity" => {
+            "fill_opacity" => {
                 if let Some(n) = value.as_number() {
-                    self.alpha = Some(n);
+                    self.fill_opacity = Some(n);
+                }
+            }
+            "stroke_opacity" => {
+                if let Some(n) = value.as_number() {
+                    self.stroke_opacity = Some(n);
                 }
             }
             "linewidth" => {
@@ -1017,6 +1073,67 @@ impl ResolvedKey {
                     self.linetype = Some(Arc::from(p.to_vec()));
                 }
             }
+            "dash_offset" => {
+                if let Some(n) = value.as_number() {
+                    self.dash_offset_pt = Some(n);
+                }
+            }
+            "corner_radius" => {
+                if let Some(n) = value.as_number() {
+                    self.corner_radius_pt = Some(n);
+                }
+            }
+            "angle" => {
+                if let Some(n) = value.as_number() {
+                    self.angle = Some(n);
+                }
+            }
+            "cap" => {
+                if let Some(c) = value.as_str().and_then(cap_from_str) {
+                    self.cap = Some(c);
+                }
+            }
+            "join" => {
+                if let Some(j) = value.as_str().and_then(join_from_str) {
+                    self.join = Some(j);
+                }
+            }
+            "start_marker" | "start_marker_size" | "start_marker_fill" | "start_marker_invert" => {
+                self.start_marker.apply(&aesthetic["start_".len()..], value)
+            }
+            "end_marker" | "end_marker_size" | "end_marker_fill" | "end_marker_invert" => {
+                self.end_marker.apply(&aesthetic["end_".len()..], value)
+            }
+            _ => {}
+        }
+    }
+}
+
+impl EndpointMarkerKey {
+    /// Apply one of the `marker` / `marker_size` / `marker_fill` /
+    /// `marker_invert` suffixes of an endpoint's channel name.
+    fn apply(&mut self, suffix: &str, value: Value) {
+        match suffix {
+            "marker" => {
+                if let Some(s) = value.as_str() {
+                    self.shape = Some(Arc::from(s));
+                }
+            }
+            "marker_size" => {
+                if let Some(n) = value.as_number() {
+                    self.size_pt = Some(n);
+                }
+            }
+            "marker_fill" => {
+                if let Some(c) = value.as_color() {
+                    self.fill = Some(c);
+                }
+            }
+            "marker_invert" => {
+                if let Value::Bool(b) = value {
+                    self.invert = Some(b);
+                }
+            }
             _ => {}
         }
     }
@@ -1027,16 +1144,20 @@ impl ResolvedKey {
 /// Pre-shape a legend into a [`Measure`] so the composition solver
 /// can reserve space for its slot. Same machinery (peak resolved
 /// aesthetics + per-key swatch dims) drives the draw step, so what
-/// is reserved matches what is drawn.
+/// is reserved matches what is drawn — including `shapes`, which has
+/// to be the registry the draw step resolves markers through for the
+/// reserved cells to match the markers' bounds.
 pub fn legend_measure(
     legend: &Legend,
     registry: &ScaleRegistry,
+    shapes: &ShapeRegistry,
     dpi: f64,
     theme: &crate::plot::theme::Theme,
 ) -> Box<dyn Measure> {
     Box::new(LegendMeasure::new(
         legend,
         registry,
+        shapes,
         dpi,
         theme.legend_for(legend.theme_variant.as_deref()),
         &theme.geom,
@@ -1048,12 +1169,13 @@ pub fn legend_measure(
 /// Pre-shape a stack of legends sharing the same side. Reserves the
 /// max primary extent (column width / row height) across children
 /// and the sum of cross extents plus inter-legend gaps. Pair with
-/// [`render_legend_stack`] at draw time so what's reserved matches
-/// what's drawn.
+/// [`render_legend_stack`] at draw time, passing the same `shapes`
+/// registry, so what's reserved matches what's drawn.
 pub fn legend_stack_measure(
     legends: &[&Legend],
     side: LegendSide,
     registry: &ScaleRegistry,
+    shapes: &ShapeRegistry,
     dpi: f64,
     theme: &crate::plot::theme::Theme,
 ) -> Box<dyn Measure> {
@@ -1065,6 +1187,7 @@ pub fn legend_stack_measure(
             LegendMeasure::new(
                 l,
                 registry,
+                shapes,
                 dpi,
                 theme.legend_for(l.theme_variant.as_deref()),
                 &theme.geom,
@@ -1109,6 +1232,7 @@ pub fn render_legend_stack(
                 LegendMeasure::new(
                     l,
                     registry,
+                    shapes,
                     dpi,
                     theme.legend_for(l.theme_variant.as_deref()),
                     &theme.geom,
@@ -1169,6 +1293,7 @@ pub fn render_legend(
     let measure = LegendMeasure::new(
         legend,
         registry,
+        shapes,
         dpi,
         lt,
         &theme.geom,
@@ -1978,7 +2103,7 @@ fn colorbar_majors(
 
 /// Fill the bar with a single linear-gradient brush whose stops
 /// resolve a [`ResolvedKey`] per sample from the spec's bindings,
-/// picking `fill` (modulated by `alpha` if set) as the stop colour.
+/// picking `fill`, at its `fill_opacity` if set, as the stop colour.
 /// `fill` defaults to the legend's `domain_scale` if not in
 /// `bindings`. Single `scene.fill` call — no AA seams between
 /// adjacent sample rects.
@@ -2028,8 +2153,8 @@ fn draw_gradient_bar(
         spec.bindings.contains_key("fill") || spec.bindings.contains_key("color");
 
     // Resolve one stop colour at a domain value, honouring the
-    // spec's bindings, the implicit fill fallback, and alpha
-    // modulation. Shared between the smooth and stepped paths.
+    // spec's bindings, the implicit fill fallback, and the fill
+    // opacity. Shared between the smooth and stepped paths.
     let resolve_stop_colour = |value: Value| -> Color {
         let mut resolved = ResolvedKey::default();
         for (aesthetic, source) in &spec.bindings {
@@ -2047,9 +2172,9 @@ fn draw_gradient_bar(
                 resolved.fill = Some(c);
             }
         }
-        apply_alpha(
+        with_opacity(
             resolved.fill.unwrap_or_else(|| rgb(0.5, 0.5, 0.5)),
-            resolved.alpha,
+            resolved.fill_opacity,
         )
     };
 
@@ -2229,6 +2354,7 @@ impl LegendMeasure {
     fn new(
         legend: &Legend,
         registry: &ScaleRegistry,
+        shapes: &ShapeRegistry,
         dpi: f64,
         lt: &crate::plot::theme::LegendTheme,
         geom: &crate::plot::theme::GeomTheme,
@@ -2303,7 +2429,7 @@ impl LegendMeasure {
                         let (mut row_w, mut row_h) = (0.0_f64, 0.0_f64);
                         for key in &stack.keys {
                             let resolved = resolve_key(key, registry, v);
-                            let (w, h) = swatch_dim_for(key.kind, &resolved, dpi, geom);
+                            let (w, h) = swatch_dim_for(key.kind, &resolved, dpi, geom, shapes);
                             row_w = row_w.max(w);
                             row_h = row_h.max(h);
                         }
@@ -2333,7 +2459,7 @@ impl LegendMeasure {
                     let (mut row_w, mut row_h) = (0.0_f64, 0.0_f64);
                     for key in &stack.keys {
                         let resolved = resolve_key(key, registry, v);
-                        let (w, h) = swatch_dim_for(key.kind, &resolved, dpi, geom);
+                        let (w, h) = swatch_dim_for(key.kind, &resolved, dpi, geom, shapes);
                         row_w = row_w.max(w);
                         row_h = row_h.max(h);
                     }
@@ -2694,6 +2820,10 @@ mod tests {
         t
     }
 
+    fn shape_reg() -> ShapeRegistry {
+        ShapeRegistry::with_builtins()
+    }
+
     fn build_registry() -> ScaleRegistry {
         let mut reg = ScaleRegistry::new();
         reg.insert(
@@ -2725,7 +2855,7 @@ mod tests {
     fn empty_legend_reports_zero_size() {
         let legend = Legend::new("category_color");
         let reg = build_registry();
-        let m = legend_measure(&legend, &reg, dpi_96(), &default_theme());
+        let m = legend_measure(&legend, &reg, &shape_reg(), dpi_96(), &default_theme());
         assert_eq!(m.width_hint(dpi_96()), WidthHint::Min(0.0));
         assert_eq!(m.height_at(100.0, dpi_96()), 0.0);
     }
@@ -2736,7 +2866,7 @@ mod tests {
             .title("Category")
             .key(LegendKeySpec::point().scaled("fill", "category_color"));
         let reg = build_registry();
-        let m = legend_measure(&legend, &reg, dpi_96(), &default_theme());
+        let m = legend_measure(&legend, &reg, &shape_reg(), dpi_96(), &default_theme());
         let w = match m.width_hint(dpi_96()) {
             WidthHint::Min(w) => w,
             WidthHint::NeedsHeight { seed } => seed,
@@ -2778,6 +2908,113 @@ mod tests {
             .count();
         assert_eq!(fills, 3);
         assert_eq!(strokes, 3);
+    }
+
+    #[test]
+    fn geom_style_aesthetics_reach_the_resolved_key() {
+        // Every style channel a key can mirror from its geom, pinned at
+        // once: names the spec accepts but `apply` drops would silently
+        // render as the default.
+        let spec = LegendKeySpec::point()
+            .fixed("fill_opacity", 0.25_f64)
+            .fixed("stroke_opacity", 0.75_f64)
+            .fixed("dash_offset", 3.0_f64)
+            .fixed("corner_radius", 4.0_f64)
+            .fixed("angle", 1.5_f64);
+        let resolved = resolve_key(&spec, &build_registry(), &Value::String(Arc::from("A")));
+        assert_eq!(resolved.fill_opacity, Some(0.25));
+        assert_eq!(resolved.stroke_opacity, Some(0.75));
+        assert_eq!(resolved.dash_offset_pt, Some(3.0));
+        assert_eq!(resolved.corner_radius_pt, Some(4.0));
+        assert_eq!(resolved.angle, Some(1.5));
+        // The specific opacity channels win over the general one.
+        assert_eq!(resolved.fill_opacity, Some(0.25));
+        assert_eq!(resolved.stroke_opacity, Some(0.75));
+    }
+
+    #[test]
+    fn endpoint_marker_aesthetics_reach_the_resolved_key() {
+        let spec = LegendKeySpec::line()
+            .fixed("start_marker", Value::String(Arc::from("arrow-open")))
+            .fixed("start_marker_size", 6.0_f64)
+            .fixed("start_marker_fill", Value::Color(rgb(1.0, 0.0, 0.0)))
+            .fixed("start_marker_invert", Value::Bool(true))
+            .fixed("end_marker", Value::String(Arc::from("arrow-closed")))
+            .fixed("end_marker_size", 9.0_f64);
+        let resolved = resolve_key(&spec, &build_registry(), &Value::String(Arc::from("A")));
+        assert_eq!(resolved.start_marker.shape.as_deref(), Some("arrow-open"));
+        assert_eq!(resolved.start_marker.size_pt, Some(6.0));
+        assert_eq!(resolved.start_marker.fill, Some(rgb(1.0, 0.0, 0.0)));
+        assert_eq!(resolved.start_marker.invert, Some(true));
+        assert_eq!(resolved.end_marker.shape.as_deref(), Some("arrow-closed"));
+        assert_eq!(resolved.end_marker.size_pt, Some(9.0));
+        // Each end resolves on its own — the start's fill and invert
+        // must not leak across.
+        assert_eq!(resolved.end_marker.fill, None);
+        assert_eq!(resolved.end_marker.invert, None);
+    }
+
+    #[test]
+    fn cap_and_join_aesthetics_reach_the_resolved_key() {
+        let spec = LegendKeySpec::line()
+            .fixed("cap", Value::String(Arc::from("square")))
+            .fixed("join", Value::String(Arc::from("bevel")));
+        let resolved = resolve_key(&spec, &build_registry(), &Value::String(Arc::from("A")));
+        assert_eq!(resolved.cap, Some(Cap::Square));
+        assert_eq!(resolved.join, Some(Join::Bevel));
+    }
+
+    #[test]
+    fn linewidth_scaled_line_keys_do_not_overlap_their_neighbours() {
+        // The widest row of a linewidth legend is several times the
+        // theme's key height, so the rows have to be sized from the
+        // strokes they draw rather than from the floor alone.
+        let mut reg = build_registry();
+        reg.insert(
+            "category_linewidth",
+            scale::discrete([
+                Value::String(Arc::from("A")),
+                Value::String(Arc::from("B")),
+                Value::String(Arc::from("C")),
+            ])
+            .range_numbers([25.0, 30.0, 35.0]),
+        );
+        let legend = Legend::new("category_color")
+            .key(LegendKeySpec::line().scaled("linewidth", "category_linewidth"));
+        let mut scene = RecordingScene::default();
+        let shapes = ShapeRegistry::with_builtins();
+        render_legend(
+            &legend,
+            &reg,
+            &shapes,
+            Rect::new(0.0, 0.0, 300.0, 300.0),
+            &mut scene,
+            dpi_96(),
+            &default_theme(),
+        );
+        // Each key is a horizontal segment, so its painted band is the
+        // baseline ± half the stroke width (butt caps by default).
+        let mut bands: Vec<(f64, f64)> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Stroke { stroke, path, .. } => {
+                    let b = path.bounding_box();
+                    Some((b.y0 - stroke.width * 0.5, b.y1 + stroke.width * 0.5))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bands.len(), 3, "one line key per break");
+        bands.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for pair in bands.windows(2) {
+            assert!(
+                pair[0].1 <= pair[1].0 + 1e-9,
+                "key bands overlap: {:?} into {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
     }
 
     #[test]
@@ -2903,7 +3140,7 @@ mod tests {
 
     /// Two continuous colour scales over one domain: `ramp` and
     /// `same_ramp` share a palette, `other_ramp` doesn't, and
-    /// `ramp_alpha` maps the same domain to numbers.
+    /// `ramp_opacity` maps the same domain to numbers.
     fn colorbar_registry() -> ScaleRegistry {
         let mut reg = ScaleRegistry::new();
         let palette = [rgb(1.0, 1.0, 0.0), rgb(0.0, 0.0, 1.0)];
@@ -2917,7 +3154,7 @@ mod tests {
             scale::continuous(0.0..=100.0).range_colors([rgb(0.0, 0.0, 0.0), rgb(1.0, 1.0, 1.0)]),
         );
         reg.insert(
-            "ramp_alpha",
+            "ramp_opacity",
             scale::continuous(0.0..=100.0).range_numbers([0.1, 1.0]),
         );
         reg
@@ -2967,11 +3204,11 @@ mod tests {
         let plain = Legend::colorbar("ramp").title("Value");
         let faded = Legend::colorbar("ramp")
             .title("Value")
-            .scaled("alpha", "ramp_alpha");
+            .scaled("fill_opacity", "ramp_opacity");
         assert!(!plain.is_compatible_with(&faded, &reg, &loc));
         let also_faded = Legend::colorbar("ramp")
             .title("Value")
-            .scaled("alpha", "ramp_alpha");
+            .scaled("fill_opacity", "ramp_opacity");
         assert!(faded.is_compatible_with(&also_faded, &reg, &loc));
     }
 
@@ -3036,16 +3273,18 @@ mod tests {
                 .scaled("size", "category_size"),
         );
         let reg = build_registry();
-        let s_w =
-            match legend_measure(&small, &reg, dpi_96(), &default_theme()).width_hint(dpi_96()) {
-                WidthHint::Min(w) => w,
-                _ => 0.0,
-            };
-        let l_w =
-            match legend_measure(&large, &reg, dpi_96(), &default_theme()).width_hint(dpi_96()) {
-                WidthHint::Min(w) => w,
-                _ => 0.0,
-            };
+        let s_w = match legend_measure(&small, &reg, &shape_reg(), dpi_96(), &default_theme())
+            .width_hint(dpi_96())
+        {
+            WidthHint::Min(w) => w,
+            _ => 0.0,
+        };
+        let l_w = match legend_measure(&large, &reg, &shape_reg(), dpi_96(), &default_theme())
+            .width_hint(dpi_96())
+        {
+            WidthHint::Min(w) => w,
+            _ => 0.0,
+        };
         assert!(
             l_w > s_w,
             "legend with scaled size up to 12pt should be wider than fixed-4pt: {s_w} vs {l_w}"
@@ -3079,6 +3318,7 @@ mod tests {
         let m = LegendMeasure::new(
             legend,
             reg,
+            &shape_reg(),
             dpi_96(),
             theme.legend_for(legend.theme_variant.as_deref()),
             &theme.geom,
@@ -3154,6 +3394,7 @@ mod tests {
         let m = LegendMeasure::new(
             &legend,
             &reg,
+            &shape_reg(),
             dpi_96(),
             theme.legend_for(None),
             &theme.geom,
@@ -3189,7 +3430,7 @@ mod tests {
         let theme = default_theme();
         let reg = build_registry();
         assert!(binned_rows(&legend, &reg, &theme).is_empty());
-        let measure = legend_measure(&legend, &reg, dpi_96(), &theme);
+        let measure = legend_measure(&legend, &reg, &shape_reg(), dpi_96(), &theme);
         assert_eq!(measure.width_hint(dpi_96()), WidthHint::Min(0.0));
         assert_eq!(measure.height_at(0.0, dpi_96()), 0.0);
     }
@@ -3346,7 +3587,8 @@ mod tests {
             })
             .key(LegendKeySpec::point().scaled("fill", "category_color"));
         let reg = build_registry();
-        let (w, h) = legend_stack_natural_size(&[&legend], &reg, dpi_96(), &default_theme());
+        let (w, h) =
+            legend_stack_natural_size(&[&legend], &reg, &shape_reg(), dpi_96(), &default_theme());
         assert!(w > 0.0);
         assert!(h > 0.0);
     }
@@ -3358,7 +3600,8 @@ mod tests {
             inset_pt: 6.0,
         });
         let reg = build_registry();
-        let (w, h) = legend_stack_natural_size(&[&legend], &reg, dpi_96(), &default_theme());
+        let (w, h) =
+            legend_stack_natural_size(&[&legend], &reg, &shape_reg(), dpi_96(), &default_theme());
         assert_eq!(w, 0.0);
         assert_eq!(h, 0.0);
     }

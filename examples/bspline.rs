@@ -143,7 +143,7 @@ fn parallel_coordinates(renderer: &mut VelloRenderer, w: u32, h: u32, dpi: f64, 
             .set("y", ys)
             .set("stroke", keys)
             .set("linewidth", 2.0_f64)
-            .set("alpha", 0.85_f64)
+            .set("stroke_opacity", 0.85_f64)
             .build(),
     );
     plot.add_axis(Axis::rail("axis", AxisPlacement::Cartesian(AxisSide::Bottom)).title("Axis"));

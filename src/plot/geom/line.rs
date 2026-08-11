@@ -888,7 +888,14 @@ fn draw_one_mark(
         xform,
         corner_rounding,
     };
-    draw_curve_outline(scene, ctx, &points, &spec);
+    draw_curve_outline(
+        scene,
+        ctx.shapes,
+        ctx.dpi,
+        ctx.theme.geom.marker_outline_pt,
+        &points,
+        &spec,
+    );
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -915,6 +922,50 @@ mod tests {
         scales: &'a DirectScaleResolver<'a>,
     ) -> GeomContext<'a> {
         GeomContext::new(panel, 96.0, shapes, scales)
+    }
+
+    #[test]
+    fn stroke_style_endpoint_marker_outline_lands_at_requested_width() {
+        // The marker's subpaths are stroked under `Affine::scale(size_px)`,
+        // so the width has to invert that scale — otherwise the outline
+        // thickens with the marker size and swallows the shape.
+        let linewidth_pt = 1.5;
+        let mut g = LineGeom::builder()
+            .set("x", Raw(vec![0.1_f64, 0.9]))
+            .set("y", Raw(vec![0.5_f64, 0.5]))
+            .set("stroke", Color::new([0.0, 0.0, 1.0, 1.0]))
+            .set("linewidth", linewidth_pt)
+            .set("end_marker", "arrow-open")
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 200.0, 200.0), &shapes, &scales),
+        );
+        let expected = pt_to_px(linewidth_pt, 96.0);
+        let widths: Vec<f64> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Stroke {
+                    stroke, transform, ..
+                } => {
+                    let c = transform.as_coeffs();
+                    Some(stroke.width * c[0].abs().max(c[3].abs()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(widths.len() > 1, "expected a body and a marker stroke");
+        for w in widths {
+            assert!(
+                (w - expected).abs() < 1e-9,
+                "effective stroke width {w} should be {expected}"
+            );
+        }
     }
 
     // ── build() validation ──

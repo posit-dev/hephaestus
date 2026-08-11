@@ -32,7 +32,7 @@
 //!   Cartesian projections collapse the two modes to the same result.
 //! - `"stroke"` — outline color (per-mark). Also used as the marker
 //!   stroke color for any markers in the linetype.
-//! - `"alpha"` — overrides alpha of `"stroke"` (per-mark).
+//! - `"stroke_opacity"` — overrides alpha of `"stroke"` (per-mark).
 //! - `"fill"` — marker interior color for linetype markers (per-mark;
 //!   defaults to the resolved stroke color when unset). The curve
 //!   itself is stroked, not filled — `"fill"` only affects marker
@@ -125,7 +125,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("interpolation", ExpectedOutput::Strings),
     ("fill", ExpectedOutput::Colors),
     ("stroke", ExpectedOutput::Colors),
-    ("alpha", ExpectedOutput::Numbers),
+    ("stroke_opacity", ExpectedOutput::Numbers),
     ("linewidth", ExpectedOutput::Numbers),
     ("linetype", ExpectedOutput::Linetypes),
     ("dash_offset", ExpectedOutput::Numbers),
@@ -204,7 +204,7 @@ struct BSplineDrawCtx<'a> {
     interpolation: ChannelBind<'a>,
     fill: ChannelBind<'a>,
     stroke: ChannelBind<'a>,
-    alpha: ChannelBind<'a>,
+    stroke_opacity: ChannelBind<'a>,
     linewidth: ChannelBind<'a>,
     linetype: ChannelBind<'a>,
     dash_offset: ChannelBind<'a>,
@@ -255,7 +255,7 @@ impl<'a> BSplineDrawCtx<'a> {
             interpolation: b("interpolation"),
             fill: b("fill"),
             stroke: b("stroke"),
-            alpha: b("alpha"),
+            stroke_opacity: b("stroke_opacity"),
             linewidth: b("linewidth"),
             linetype: b("linetype"),
             dash_offset: b("dash_offset"),
@@ -418,10 +418,11 @@ fn draw_one_bspline_mark(
             ch: stroke_ch,
             scale: stroke_scale,
         },
-        alpha: ChannelBind {
-            ch: alpha_ch,
-            scale: alpha_scale,
-        },
+        stroke_opacity:
+            ChannelBind {
+                ch: stroke_opacity_ch,
+                scale: stroke_opacity_scale,
+            },
         linewidth:
             ChannelBind {
                 ch: linewidth_ch,
@@ -512,7 +513,7 @@ fn draw_one_bspline_mark(
             ctx.theme.geom.bspline.stroke.as_ref(),
             &ctx.theme.palette,
         ),
-        resolve_number_channel(alpha_ch, alpha_scale, i0),
+        resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i0),
     );
     let stroke_color = match stroke_color {
         Some(c) => c,
@@ -608,7 +609,7 @@ fn draw_one_bspline_mark(
     // the mark, gated to solid linetype.
     let linewidth_varies = channel_varies_across(linewidth_ch, linewidth_scale, &mark.rows);
     let stroke_varies = channel_varies_across(stroke_ch, stroke_scale, &mark.rows)
-        || channel_varies_across(alpha_ch, alpha_scale, &mark.rows);
+        || channel_varies_across(stroke_opacity_ch, stroke_opacity_scale, &mark.rows);
     let ribbon_mode = dash_pattern_pt.is_empty() && (linewidth_varies || stroke_varies);
 
     // A non-positive width means "nothing to stroke" only when a
@@ -693,8 +694,8 @@ fn draw_one_bspline_mark(
             ctx.dpi,
             stroke_ch,
             stroke_scale,
-            alpha_ch,
-            alpha_scale,
+            stroke_opacity_ch,
+            stroke_opacity_scale,
             linewidth_ch,
             linewidth_scale,
         );
@@ -821,7 +822,14 @@ fn draw_one_bspline_mark(
         xform: Affine::IDENTITY,
         corner_rounding: None,
     };
-    draw_curve_outline(scene, ctx, &sample_points, &spec);
+    draw_curve_outline(
+        scene,
+        ctx.shapes,
+        ctx.dpi,
+        ctx.theme.geom.marker_outline_pt,
+        &sample_points,
+        &spec,
+    );
 }
 
 // ─── Ribbon-mode per-sample attributes ───────────────────────────────────────
@@ -829,7 +837,7 @@ fn draw_one_bspline_mark(
 /// Build per-sample (color, half-width) for ribbon-mode dispatch.
 /// Each sample carries a row position `u` in `[0, n_ctrl − 1]`
 /// (computed by [`build_spline_flatten`] or the polyline fallback);
-/// per-row stroke / linewidth / alpha values lerp linearly between
+/// per-row stroke / linewidth / stroke-opacity values lerp linearly between
 /// `ctrl_rows[⌊u⌋]` and `ctrl_rows[⌈u⌉]`. This matches LineGeom's
 /// per-segment lerp convention, generalised to spline parameter space.
 #[allow(clippy::too_many_arguments)]
@@ -841,8 +849,8 @@ fn build_ribbon_attrs(
     dpi: f64,
     stroke_ch: Option<&Channel>,
     stroke_scale: Option<&crate::plot::scale::Scale>,
-    alpha_ch: Option<&Channel>,
-    alpha_scale: Option<&crate::plot::scale::Scale>,
+    stroke_opacity_ch: Option<&Channel>,
+    stroke_opacity_scale: Option<&crate::plot::scale::Scale>,
     linewidth_ch: Option<&Channel>,
     linewidth_scale: Option<&crate::plot::scale::Scale>,
 ) -> (Vec<Color>, Vec<f64>) {
@@ -850,7 +858,7 @@ fn build_ribbon_attrs(
     let row_color = |i: usize| -> Color {
         override_alpha(
             resolve_color_channel(stroke_ch, stroke_scale, ctrl_rows[i]),
-            resolve_number_channel(alpha_ch, alpha_scale, ctrl_rows[i]),
+            resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, ctrl_rows[i]),
         )
         .unwrap_or(fallback_stroke)
     };
@@ -1124,6 +1132,37 @@ mod tests {
             .filter(|op| matches!(op, Op::Stroke { .. }))
             .count();
         assert_eq!(strokes, 1);
+    }
+
+    #[test]
+    fn stroke_opacity_overrides_the_stroke_alpha() {
+        let panel = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let mut g = BSplineGeom::builder()
+            .set("x", Raw(vec![0.1_f64, 0.3, 0.7, 0.9]))
+            .set("y", Raw(vec![0.2_f64, 0.8, 0.4, 0.6]))
+            .set("stroke", red())
+            .set("stroke_opacity", 0.4_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &ctx(panel, &shapes, &scales));
+        let alphas: Vec<f32> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Stroke {
+                    brush: crate::brush::Brush::Solid(c),
+                    ..
+                } => Some(c.components[3]),
+                _ => None,
+            })
+            .collect();
+        assert!(!alphas.is_empty(), "expected a stroked curve");
+        for a in alphas {
+            assert!((a - 0.4).abs() < 1e-6, "stroke alpha {a}");
+        }
     }
 
     #[test]

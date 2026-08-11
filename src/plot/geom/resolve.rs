@@ -250,6 +250,28 @@ pub(crate) fn resolve_str_channel_or(
     }
 }
 
+/// The `"cap"` channel's string vocabulary: `"butt"` / `"round"` /
+/// `"square"`. `None` for anything else.
+pub(crate) fn cap_from_str(s: &str) -> Option<Cap> {
+    match s {
+        "butt" => Some(Cap::Butt),
+        "round" => Some(Cap::Round),
+        "square" => Some(Cap::Square),
+        _ => None,
+    }
+}
+
+/// The `"join"` channel's string vocabulary: `"miter"` / `"round"` /
+/// `"bevel"`. `None` for anything else.
+pub(crate) fn join_from_str(s: &str) -> Option<Join> {
+    match s {
+        "miter" => Some(Join::Miter),
+        "round" => Some(Join::Round),
+        "bevel" => Some(Join::Bevel),
+        _ => None,
+    }
+}
+
 /// Resolve a cap channel from a string-named value. Recognises `"butt"`
 /// / `"round"` / `"square"`; falls back to `default` otherwise.
 pub(crate) fn resolve_cap_channel(
@@ -258,16 +280,9 @@ pub(crate) fn resolve_cap_channel(
     i: usize,
     default: Cap,
 ) -> Cap {
-    let v = match resolve_value(channel, scale, i) {
-        Some(v) => v,
-        None => return default,
-    };
-    match v.as_str() {
-        Some("butt") => Cap::Butt,
-        Some("round") => Cap::Round,
-        Some("square") => Cap::Square,
-        _ => default,
-    }
+    resolve_value(channel, scale, i)
+        .and_then(|v| v.as_str().and_then(cap_from_str))
+        .unwrap_or(default)
 }
 
 /// Resolve a join channel from a string-named value. Recognises
@@ -278,16 +293,9 @@ pub(crate) fn resolve_join_channel(
     i: usize,
     default: Join,
 ) -> Join {
-    let v = match resolve_value(channel, scale, i) {
-        Some(v) => v,
-        None => return default,
-    };
-    match v.as_str() {
-        Some("miter") => Join::Miter,
-        Some("round") => Join::Round,
-        Some("bevel") => Join::Bevel,
-        _ => default,
-    }
+    resolve_value(channel, scale, i)
+        .and_then(|v| v.as_str().and_then(join_from_str))
+        .unwrap_or(default)
 }
 
 /// Build a kurbo [`Stroke`] from the resolved per-mark channels.
@@ -734,6 +742,23 @@ fn resolve_pattern_px(
 /// non-positive in size, or has no forward extent. Callers add the
 /// result to any user-supplied `clip_*_radius` channel value before
 /// trimming.
+/// Scale-up applied to a glyph-backed marker's font size: the visible
+/// ink of a typical glyph fills ~85% of its em-box height, so the boost
+/// makes glyph markers read at the same visual extent as the vector
+/// shapes at the same size.
+pub(crate) const MARKER_INK_COVERAGE_BOOST: f64 = 1.0 / 0.85;
+
+/// Minimum outline width for a stamped marker, in pt. A marker's
+/// outline follows the curve's linewidth but never thins below this, so
+/// hairline curves still get a visible marker edge.
+pub(crate) const MIN_MARKER_OUTLINE_PT: f64 = 0.5;
+
+/// Outline width a stamped endpoint marker paints at: the curve's own
+/// linewidth, floored at [`MIN_MARKER_OUTLINE_PT`].
+pub(crate) fn endpoint_marker_outline_px(linewidth_px: f64, dpi: f64) -> f64 {
+    linewidth_px.max(pt_to_px(MIN_MARKER_OUTLINE_PT, dpi))
+}
+
 pub(crate) fn auto_endpoint_clip_pt(
     marker_name: &str,
     size_pt: f64,
@@ -874,8 +899,15 @@ pub(crate) fn emit_marker_shape(
 ) {
     match shape.kind() {
         ShapeKind::Paths { paths, style } => {
+            if !(scale_factor.is_finite() && scale_factor > 0.0) {
+                return;
+            }
             let xform = xform_unscaled * Affine::scale(scale_factor);
-            let outline_spec = Stroke::new(outline_px);
+            // The subpaths are stroked under `Affine::scale(scale_factor)`,
+            // so the width is divided by the same factor to land at
+            // `outline_px` in output pixels — the inversion `PointGeom`
+            // applies for the identical transform.
+            let outline_spec = Stroke::new(outline_px / scale_factor);
             for sub in paths {
                 match style {
                     ShapeStyle::Fill => {
@@ -922,8 +954,7 @@ pub(crate) fn emit_marker_shape(
             // picks the matching bitmap strike for colour-emoji
             // fonts — `font_size: 1.0` with a transform scale would
             // pick the smallest strike and upscale (= fuzzy).
-            const INK_COVERAGE_BOOST: f64 = 1.0 / 0.85;
-            let effective_font_size = scale_factor * INK_COVERAGE_BOOST;
+            let effective_font_size = scale_factor * MARKER_INK_COVERAGE_BOOST;
             // Centring is in em-space; convert to pixel space at the
             // effective font size, then apply the unscaled outer
             // transform (which carries the rotation + translation).

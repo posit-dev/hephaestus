@@ -74,7 +74,9 @@
 //!   `"domain"` or `"panel"` (see above).
 //! - `"fill"` — band fill colour (per-row or per-mark; varying drives
 //!   mesh dispatch).
-//! - `"alpha"` — overrides `"fill"` / outline-stroke alphas.
+//! - `"fill_opacity"` — overrides the alpha of `"fill"`.
+//! - `"stroke_opacity"` / `"stroke_opacity2"` — override the alpha of
+//!   each curve's outline colour.
 //! - `"pick_id"` — per-mark pick id (resolved at the mark's first row).
 //!
 //! Per-curve outlines (every channel exists in both unsuffixed (curve A)
@@ -103,7 +105,7 @@
 //!
 //! - Uniform `"fill"` across a mark → single `Brush::Solid` over the
 //!   closed-contour path (fast path).
-//! - Varying `"fill"` (or `"alpha"`) → per-vertex quad-strip mesh via
+//! - Varying `"fill"` (or `"fill_opacity"`) → per-vertex quad-strip mesh via
 //!   [`ribbon_band_mesh`](crate::primitives::ribbon_band_mesh). Unlike
 //!   [`RibbonGeom`], B-spline ribbons always use the mesh for varying
 //!   fill — the gradient-brush fast path needs row-aligned stops, which
@@ -159,10 +161,11 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("degree", ExpectedOutput::Numbers),
     ("interpolation", ExpectedOutput::Strings),
     ("fill", ExpectedOutput::Colors),
-    ("alpha", ExpectedOutput::Numbers),
+    ("fill_opacity", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
     // Curve A outline.
     ("stroke", ExpectedOutput::Colors),
+    ("stroke_opacity", ExpectedOutput::Numbers),
     ("linewidth", ExpectedOutput::Numbers),
     ("linetype", ExpectedOutput::Linetypes),
     ("dash_offset", ExpectedOutput::Numbers),
@@ -180,6 +183,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("end_marker_invert", ExpectedOutput::Any),
     // Curve B outline.
     ("stroke2", ExpectedOutput::Colors),
+    ("stroke_opacity2", ExpectedOutput::Numbers),
     ("linewidth2", ExpectedOutput::Numbers),
     ("linetype2", ExpectedOutput::Linetypes),
     ("dash_offset2", ExpectedOutput::Numbers),
@@ -251,7 +255,7 @@ impl BuildableGeom for RibbonBSplineGeom {
 /// Channel + scale references and orientation handed to
 /// [`draw_one_ribbon_bspline_mark`] for one draw call. Bundles curve-A/-B
 /// outline handles (already aggregated by [`OutlineChannels`] /
-/// [`OutlineScales`]) with the fill, alpha, pick-id, and B-spline
+/// [`OutlineScales`]) with the fill, fill-opacity, pick-id, and B-spline
 /// configuration channels plus the x/x2/y/y2 positional inputs.
 #[derive(Clone, Copy)]
 struct RibbonBSplineDrawCtx<'a> {
@@ -271,7 +275,7 @@ struct RibbonBSplineDrawCtx<'a> {
     x2_band: ChannelBind<'a>,
     y2_band: ChannelBind<'a>,
     fill: ChannelBind<'a>,
-    alpha: ChannelBind<'a>,
+    fill_opacity: ChannelBind<'a>,
     degree: ChannelBind<'a>,
     interpolation: ChannelBind<'a>,
     pick_id: ChannelBind<'a>,
@@ -318,7 +322,7 @@ impl<'a> RibbonBSplineDrawCtx<'a> {
             x2_band: b("x2_band"),
             y2_band: b("y2_band"),
             fill: b("fill"),
-            alpha: b("alpha"),
+            fill_opacity: b("fill_opacity"),
             degree: b("degree"),
             interpolation: b("interpolation"),
             pick_id: b("pick_id"),
@@ -486,10 +490,11 @@ fn draw_one_ribbon_bspline_mark(
             ch: fill_ch,
             scale: fill_scale,
         },
-        alpha: ChannelBind {
-            ch: alpha_ch,
-            scale: alpha_scale,
-        },
+        fill_opacity:
+            ChannelBind {
+                ch: fill_opacity_ch,
+                scale: fill_opacity_scale,
+            },
         degree: ChannelBind {
             ch: degree_ch,
             scale: degree_scale,
@@ -520,7 +525,7 @@ fn draw_one_ribbon_bspline_mark(
             ctx.theme.geom.ribbon_bspline.fill.as_ref(),
             &ctx.theme.palette,
         ),
-        resolve_number_channel(alpha_ch, alpha_scale, i0),
+        resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i0),
     );
     let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
     let outline_a_spec = resolve_outline_spec(
@@ -528,8 +533,6 @@ fn draw_one_ribbon_bspline_mark(
         &ctx.theme.geom.ribbon_bspline,
         &outline_a_ch,
         &outline_a_scales,
-        alpha_ch,
-        alpha_scale,
         i0,
         pick,
     );
@@ -538,8 +541,6 @@ fn draw_one_ribbon_bspline_mark(
         &ctx.theme.geom.ribbon_bspline,
         &outline_b_ch,
         &outline_b_scales,
-        alpha_ch,
-        alpha_scale,
         i0,
         pick,
     );
@@ -687,7 +688,11 @@ fn draw_one_ribbon_bspline_mark(
     // so paired (A, B) vertices align across the two curves.
     if let Some(mark_color) = mark_fill {
         let varies = super::resolve::channel_varies_across(fill_ch, fill_scale, &row_for_ctrl)
-            || super::resolve::channel_varies_across(alpha_ch, alpha_scale, &row_for_ctrl);
+            || super::resolve::channel_varies_across(
+                fill_opacity_ch,
+                fill_opacity_scale,
+                &row_for_ctrl,
+            );
 
         if varies {
             let (mut curve_a_merged, mut curve_b_merged, merged_u) = build_merged_grid(
@@ -728,8 +733,8 @@ fn draw_one_ribbon_bspline_mark(
                     &row_for_ctrl,
                     fill_ch,
                     fill_scale,
-                    alpha_ch,
-                    alpha_scale,
+                    fill_opacity_ch,
+                    fill_opacity_scale,
                     mark_color,
                 );
                 let mut mesh = crate::primitives::ribbon_band_mesh(
@@ -802,10 +807,24 @@ fn draw_one_ribbon_bspline_mark(
 
     // Per-curve outlines.
     if let Some(ref spec) = outline_a_spec {
-        draw_curve_outline(scene, ctx, &curve_a_pts, spec);
+        draw_curve_outline(
+            scene,
+            ctx.shapes,
+            ctx.dpi,
+            ctx.theme.geom.marker_outline_pt,
+            &curve_a_pts,
+            spec,
+        );
     }
     if let Some(ref spec) = outline_b_spec {
-        draw_curve_outline(scene, ctx, &curve_b_pts, spec);
+        draw_curve_outline(
+            scene,
+            ctx.shapes,
+            ctx.dpi,
+            ctx.theme.geom.marker_outline_pt,
+            &curve_b_pts,
+            spec,
+        );
     }
 }
 
@@ -884,21 +903,21 @@ fn build_merged_grid(
 }
 
 /// Build per-vertex colours for the mesh path. Each sample's `u`
-/// position lerps the bracketing rows' resolved `(fill, alpha)`.
+/// position lerps the bracketing rows' resolved `(fill, fill_opacity)`.
 #[allow(clippy::too_many_arguments)]
 fn build_per_vertex_colors(
     merged_u: &[f64],
     row_for_ctrl: &[usize],
     fill_ch: Option<&Channel>,
     fill_scale: Option<&crate::plot::scale::Scale>,
-    alpha_ch: Option<&Channel>,
-    alpha_scale: Option<&crate::plot::scale::Scale>,
+    fill_opacity_ch: Option<&Channel>,
+    fill_opacity_scale: Option<&crate::plot::scale::Scale>,
     fallback: Color,
 ) -> Vec<Color> {
     let resolve_at = |row: usize| -> Color {
         override_alpha(
             resolve_color_channel(fill_ch, fill_scale, row),
-            resolve_number_channel(alpha_ch, alpha_scale, row),
+            resolve_number_channel(fill_opacity_ch, fill_opacity_scale, row),
         )
         .unwrap_or(fallback)
     };
@@ -962,6 +981,42 @@ mod tests {
             &ctx(Rect::new(0.0, 0.0, 200.0, 200.0), &shapes, &scales),
         );
         scene
+    }
+
+    #[test]
+    fn fill_opacity_and_per_curve_stroke_opacity_act_independently() {
+        let scene = draw_and_record(
+            RibbonBSplineGeom::builder()
+                .set("x", Raw(vec![0.1_f64, 0.4, 0.6, 0.9]))
+                .set("y", Raw(vec![0.8_f64, 0.7, 0.9, 0.8]))
+                .set("y2", Raw(vec![0.2_f64, 0.3, 0.1, 0.2]))
+                .set("fill", red())
+                .set("fill_opacity", 0.3_f64)
+                .set("stroke", blue())
+                .set("stroke_opacity", 0.6_f64)
+                .set("stroke2", blue())
+                .set("stroke_opacity2", 0.9_f64)
+                .build(),
+        );
+        let mut strokes: Vec<f32> = Vec::new();
+        for op in &scene.ops {
+            match op {
+                Op::Fill {
+                    brush: crate::brush::Brush::Solid(c),
+                    ..
+                } => assert!((c.components[3] - 0.3).abs() < 1e-6, "band fill {c:?}"),
+                Op::Stroke {
+                    brush: crate::brush::Brush::Solid(c),
+                    ..
+                } => strokes.push(c.components[3]),
+                _ => {}
+            }
+        }
+        strokes.sort_by(f32::total_cmp);
+        strokes.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        assert_eq!(strokes.len(), 2, "one alpha per outline: {strokes:?}");
+        assert!((strokes[0] - 0.6).abs() < 1e-6, "curve A {:?}", strokes[0]);
+        assert!((strokes[1] - 0.9).abs() < 1e-6, "curve B {:?}", strokes[1]);
     }
 
     // ── Builder & orientation selection ──

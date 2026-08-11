@@ -476,6 +476,27 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "unknown channel \"colour\"")]
+    fn builder_unknown_channel_panics() {
+        PointGeom::builder()
+            .set("x", vec![1.0_f64, 2.0])
+            .set("y", vec![1.0_f64, 2.0])
+            .set("colour", vec!["a", "b"])
+            .build();
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown channels \"alpha\", \"width\"")]
+    fn builder_lists_every_unknown_channel_sorted() {
+        PointGeom::builder()
+            .set("x", vec![1.0_f64, 2.0])
+            .set("y", vec![1.0_f64, 2.0])
+            .set("width", 2.0)
+            .set("alpha", 0.5)
+            .build();
+    }
+
+    #[test]
     #[should_panic(expected = "must be data, not constant")]
     fn builder_x_constant_panics() {
         PointGeom::builder()
