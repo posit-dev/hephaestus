@@ -551,9 +551,6 @@ fn draw_one_mark(
         ctx.theme.geom.line.linewidth_pt,
     );
     let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
-    if !linewidth_px.is_finite() || linewidth_px <= 0.0 {
-        return;
-    }
 
     let dash_pattern_pt = resolve_linetype_channel(linetype_ch, linetype_scale, i0);
     let dash_offset_pt = resolve_number_channel_or(dash_offset_ch, dash_offset_scale, i0, 0.0);
@@ -623,6 +620,14 @@ fn draw_one_mark(
         && (linewidth_varies || stroke_varies);
     let stroke_space = channel_color_space(stroke_scale);
 
+    // A non-positive width means "nothing to stroke" only when a
+    // single width governs the whole mark. In ribbon mode each vertex
+    // carries its own width, so a zero at the first row is a pinch
+    // point on an otherwise visible ribbon.
+    if !ribbon_mode && (!linewidth_px.is_finite() || linewidth_px <= 0.0) {
+        return;
+    }
+
     // ── Per-vertex positions for this mark. ──
     //
     // Under non-linear projections (polar, future ternary) the
@@ -675,7 +680,9 @@ fn draw_one_mark(
                 i,
                 ctx.theme.geom.line.linewidth_pt,
             );
-            let w_half_px = pt_to_px(w_pt, ctx.dpi) * 0.5;
+            // Clamp so a scale range reaching below zero pinches the
+            // ribbon shut instead of flipping its shoulders.
+            let w_half_px = (pt_to_px(w_pt, ctx.dpi) * 0.5).max(0.0);
             let c = override_alpha(
                 resolve_color_channel(stroke_ch, stroke_scale, i),
                 resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i),
@@ -2381,6 +2388,108 @@ mod tests {
         );
         assert_eq!(stroke_count(&scene), 1);
         assert!(mesh_ops(&scene).is_empty());
+    }
+
+    #[test]
+    fn zero_linewidth_at_first_row_still_renders_ribbon() {
+        // A `linewidth` range starting at 0 puts a zero on the mark's
+        // first row. The rest of the mark is wide, so the ribbon
+        // renders with a pinch at the start rather than vanishing.
+        let mut g = LineGeom::builder()
+            .keys(vec!["A", "A", "A"])
+            .set("x", Raw(vec![0.0_f64, 0.5, 1.0]))
+            .set("y", Raw(vec![0.5_f64, 0.5, 0.5]))
+            .set("stroke", red_solid())
+            .set("linewidth", vec![0.0_f64, 15.0, 30.0])
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        assert_eq!(stroke_count(&scene), 0);
+        let meshes = mesh_ops(&scene);
+        assert_eq!(meshes.len(), 1);
+        // The zero-width end pinches to the centreline (y = 50) while
+        // the wide end spans half of 30 pt = 20 px either side.
+        let ys_at_start: Vec<f64> = meshes[0]
+            .vertices
+            .iter()
+            .filter(|v| v.x < 1.0)
+            .map(|v| v.y)
+            .collect();
+        assert!(
+            ys_at_start.iter().all(|y| (y - 50.0).abs() < 1e-6),
+            "expected pinched start shoulders at y = 50, got {ys_at_start:?}"
+        );
+        let max_y = meshes[0]
+            .vertices
+            .iter()
+            .map(|v| v.y)
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            (max_y - 70.0).abs() < 1e-6,
+            "expected widest shoulder at y = 70, got {max_y}"
+        );
+    }
+
+    #[test]
+    fn all_zero_linewidth_draws_nothing() {
+        // No within-mark variance and a non-positive width → nothing to
+        // stroke, and no ribbon upgrade to reinterpret it.
+        let mut g = LineGeom::builder()
+            .keys(vec!["A", "A", "A"])
+            .set("x", Raw(vec![0.0_f64, 0.5, 1.0]))
+            .set("y", Raw(vec![0.5_f64, 0.5, 0.5]))
+            .set("stroke", red_solid())
+            .set("linewidth", vec![0.0_f64, 0.0, 0.0])
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        assert_eq!(stroke_count(&scene), 0);
+        assert!(mesh_ops(&scene).is_empty());
+    }
+
+    #[test]
+    fn negative_linewidth_pinches_instead_of_flipping() {
+        // A scale range reaching below zero clamps to a pinch — the
+        // ribbon's shoulders never cross the centreline.
+        let mut g = LineGeom::builder()
+            .keys(vec!["A", "A"])
+            .set("x", Raw(vec![0.0_f64, 1.0]))
+            .set("y", Raw(vec![0.5_f64, 0.5]))
+            .set("stroke", red_solid())
+            .set("linewidth", vec![-10.0_f64, 30.0])
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let meshes = mesh_ops(&scene);
+        assert_eq!(meshes.len(), 1);
+        let ys_at_start: Vec<f64> = meshes[0]
+            .vertices
+            .iter()
+            .filter(|v| v.x < 1.0)
+            .map(|v| v.y)
+            .collect();
+        assert!(
+            ys_at_start.iter().all(|y| (y - 50.0).abs() < 1e-6),
+            "expected clamped start shoulders at y = 50, got {ys_at_start:?}"
+        );
     }
 
     #[test]

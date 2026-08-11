@@ -632,7 +632,9 @@ fn draw_one_polygon_mark(
                     i,
                     ctx.theme.geom.polygon.linewidth_pt,
                 );
-                let w_half_px = pt_to_px(w_pt, ctx.dpi) * 0.5;
+                // Clamp so a scale range reaching below zero pinches
+                // the ribbon shut instead of flipping its shoulders.
+                let w_half_px = (pt_to_px(w_pt, ctx.dpi) * 0.5).max(0.0);
                 let c = override_alpha(
                     resolve_color_channel(stroke_ch, stroke_scale, i),
                     resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i),
@@ -802,26 +804,24 @@ fn draw_one_polygon_mark(
     };
     draw_polygon_fill_and_stroke(scene, ctx, &offset_rings, &spec);
 
+    // The per-ring widths carry the outline's thickness in ribbon
+    // mode, so the per-mark `linewidth` value has no say here — a zero
+    // at the mark's first row is a pinch point, not an empty outline.
     if ribbon_mode {
-        if let Some(_sc) = stroke_color {
-            let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
-            if linewidth_px.is_finite() && linewidth_px > 0.0 {
-                let opts = RibbonOptions {
-                    half_width: 0.0,
-                    cap,
-                    join,
-                    miter_limit: MITER_LIMIT,
-                };
-                for (r, ring) in offset_rings.iter().enumerate() {
-                    if ring.len() < 3 {
-                        continue;
-                    }
-                    let widths = &rings_widths[r];
-                    let colors = &rings_colors[r];
-                    let mesh = polygon_ribbon_full(ring, Some(colors), Some(widths), &opts);
-                    scene.draw_mesh(&mesh, xform, pick);
-                }
+        let opts = RibbonOptions {
+            half_width: 0.0,
+            cap,
+            join,
+            miter_limit: MITER_LIMIT,
+        };
+        for (r, ring) in offset_rings.iter().enumerate() {
+            if ring.len() < 3 {
+                continue;
             }
+            let widths = &rings_widths[r];
+            let colors = &rings_colors[r];
+            let mesh = polygon_ribbon_full(ring, Some(colors), Some(widths), &opts);
+            scene.draw_mesh(&mesh, xform, pick);
         }
     }
 }
@@ -1474,6 +1474,30 @@ mod tests {
             .set("fill", red_c)
             .set("stroke", vec![red_c, blue_c, red_c, blue_c])
             .set("linewidth", 2.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let r = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &r, &scales),
+        );
+        assert_eq!(stroke_count(&scene), 0);
+        assert_eq!(mesh_count(&scene), 1);
+    }
+
+    #[test]
+    fn polygon_zero_linewidth_at_first_row_still_renders_outline() {
+        // A `linewidth` range starting at 0 puts a zero on the mark's
+        // first row. The per-ring widths carry the rest, so the outline
+        // renders with a pinch at that vertex rather than vanishing.
+        let mut g = PolygonGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 1.0, 1.0, 0.0]))
+            .set("y", Raw(vec![0.0_f64, 0.0, 1.0, 1.0]))
+            .set("fill", red())
+            .set("stroke", red())
+            .set("linewidth", vec![0.0_f64, 10.0, 20.0, 30.0])
             .build();
         g.rebuild_diff_against_previous();
         let r = shapes();

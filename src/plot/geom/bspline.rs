@@ -526,9 +526,6 @@ fn draw_one_bspline_mark(
         ctx.theme.geom.bspline.linewidth_pt,
     );
     let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
-    if !linewidth_px.is_finite() || linewidth_px <= 0.0 {
-        return;
-    }
 
     let degree_raw = resolve_number_channel_or(degree_ch, degree_scale, i0, DEFAULT_DEGREE as f64);
     let degree_req = if degree_raw.is_finite() && degree_raw >= 1.0 {
@@ -613,6 +610,14 @@ fn draw_one_bspline_mark(
     let stroke_varies = channel_varies_across(stroke_ch, stroke_scale, &mark.rows)
         || channel_varies_across(alpha_ch, alpha_scale, &mark.rows);
     let ribbon_mode = dash_pattern_pt.is_empty() && (linewidth_varies || stroke_varies);
+
+    // A non-positive width means "nothing to stroke" only when a
+    // single width governs the whole mark. In ribbon mode each sample
+    // carries its own width, so a zero at the first control point is a
+    // pinch point on an otherwise visible ribbon.
+    if !ribbon_mode && (!linewidth_px.is_finite() || linewidth_px <= 0.0) {
+        return;
+    }
 
     // ── Endpoint-marker constants (per-mark). ──
     //
@@ -852,7 +857,9 @@ fn build_ribbon_attrs(
     let row_half_width_px = |i: usize| -> f64 {
         let w_pt =
             resolve_number_channel_or(linewidth_ch, linewidth_scale, ctrl_rows[i], linewidth_pt);
-        pt_to_px(w_pt, dpi) * 0.5
+        // Clamp so a scale range reaching below zero pinches the ribbon
+        // shut instead of flipping its shoulders.
+        (pt_to_px(w_pt, dpi) * 0.5).max(0.0)
     };
     let stroke_space = channel_color_space(stroke_scale);
     let last = n_rows - 1;
@@ -1209,6 +1216,57 @@ mod tests {
             .count();
         assert_eq!(strokes, 0, "ribbon-mode upgrade bypasses Op::Stroke");
         assert_eq!(meshes, 1, "expected one mesh op");
+    }
+
+    #[test]
+    fn zero_linewidth_at_first_row_still_renders_ribbon() {
+        // A `linewidth` range starting at 0 puts a zero on the mark's
+        // first control point. The rest of the mark is wide, so the
+        // ribbon renders with a pinch at the start rather than
+        // vanishing.
+        let mut g = BSplineGeom::builder()
+            .keys(vec!["A"; 4])
+            .set("x", Raw(vec![0.1_f64, 0.3, 0.7, 0.9]))
+            .set("y", Raw(vec![0.5_f64, 0.8, 0.2, 0.5]))
+            .set("linewidth", vec![0.0_f64, 10.0, 20.0, 30.0])
+            .set("stroke", red())
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 200.0, 200.0), &shapes, &scales),
+        );
+        let meshes = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::DrawMesh { .. }))
+            .count();
+        assert_eq!(meshes, 1, "expected one mesh op");
+    }
+
+    #[test]
+    fn all_zero_linewidth_draws_nothing() {
+        // No within-mark variance and a non-positive width → nothing to
+        // stroke, and no ribbon upgrade to reinterpret it.
+        let mut g = BSplineGeom::builder()
+            .keys(vec!["A"; 4])
+            .set("x", Raw(vec![0.1_f64, 0.3, 0.7, 0.9]))
+            .set("y", Raw(vec![0.5_f64, 0.8, 0.2, 0.5]))
+            .set("linewidth", 0.0_f64)
+            .set("stroke", red())
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 200.0, 200.0), &shapes, &scales),
+        );
+        assert!(scene.ops.is_empty(), "expected no ops, got {:?}", scene.ops);
     }
 
     #[test]
