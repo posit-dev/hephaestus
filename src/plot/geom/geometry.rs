@@ -174,6 +174,7 @@ impl Geom for GeometryGeom {
         let corner_radius_scale = ctx.scale_for("corner_radius");
         let corner_max_angle_scale = ctx.scale_for("corner_max_angle");
         let size_scale = ctx.scale_for("size");
+        let shape_scale = ctx.scale_for("shape");
         let angle_scale = ctx.scale_for("angle");
         let pick_id_scale = ctx.scale_for("pick_id");
         let clip_start_radius_scale = ctx.scale_for("clip_start_radius");
@@ -301,6 +302,7 @@ impl Geom for GeometryGeom {
                     size_ch,
                     size_scale,
                     shape_ch,
+                    shape_scale,
                     clip_start_radius_ch,
                     clip_start_radius_scale,
                     clip_end_radius_ch,
@@ -371,6 +373,7 @@ where
     size_ch: Option<&'a Channel>,
     size_scale: Option<&'a crate::plot::scale::Scale>,
     shape_ch: Option<&'a Channel>,
+    shape_scale: Option<&'a crate::plot::scale::Scale>,
     clip_start_radius_ch: Option<&'a Channel>,
     clip_start_radius_scale: Option<&'a crate::plot::scale::Scale>,
     clip_end_radius_ch: Option<&'a Channel>,
@@ -468,6 +471,7 @@ where
         size_ch: dc.size_ch,
         size_scale: dc.size_scale,
         shape_ch: dc.shape_ch,
+        shape_scale: dc.shape_scale,
         clip_start_radius_ch: dc.clip_start_radius_ch,
         clip_start_radius_scale: dc.clip_start_radius_scale,
         clip_end_radius_ch: dc.clip_end_radius_ch,
@@ -532,7 +536,12 @@ fn draw_point<F>(
     if !size_px.is_finite() || size_px <= 0.0 {
         return;
     }
-    let shape_name = resolve_str_channel_or(dc.shape_ch, None, dc.i, &ctx.theme.geom.point.shape);
+    let shape_name = resolve_str_channel_or(
+        dc.shape_ch,
+        dc.shape_scale,
+        dc.i,
+        &ctx.theme.geom.point.shape,
+    );
     let shape: &Shape = match ctx.shapes.get(&shape_name) {
         Some(s) => s,
         None => return,
@@ -1077,6 +1086,41 @@ mod tests {
             scene.ops.iter().any(|op| matches!(op, Op::Fill { .. })),
             "point with fill should emit at least one Fill op"
         );
+    }
+
+    #[test]
+    fn shape_channel_maps_through_its_scale() {
+        // Domain values reach the registry only after the bound
+        // `"shape"` scale maps them to registered names.
+        let g = GeometryGeom::builder()
+            .set(
+                "geometry",
+                vec![Geometry::Point((0.5, 0.5)), Geometry::Point((0.25, 0.75))],
+            )
+            .set("fill", red())
+            .set("shape", vec!["a", "b"])
+            .build();
+        let registry = shapes();
+        let xs = scale::continuous(0.0..=1.0);
+        let ys = scale::continuous(0.0..=1.0);
+        let shape_scale = scale::ordinal(["a", "b"]).range_strings([
+            std::sync::Arc::from("circle"),
+            std::sync::Arc::from("square"),
+        ]);
+        let resolver = DirectScaleResolver::new()
+            .with("x", &xs)
+            .with("y", &ys)
+            .with("shape", &shape_scale);
+        let panel = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let ctx = ctx(panel, &registry, &resolver);
+        let mut scene = RecordingScene::new();
+        g.draw(&mut scene, &ctx);
+        let fills = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count();
+        assert_eq!(fills, 2, "unmapped shape names drop the row entirely");
     }
 
     #[test]

@@ -62,7 +62,7 @@ pub(super) fn render_key(
     palette: &crate::plot::theme::Palette,
 ) {
     match kind {
-        LegendKey::Point => render_point(resolved, cell, shapes, scene, dpi, geom),
+        LegendKey::Point => render_point(resolved, cell, shapes, scene, dpi, geom, palette),
         LegendKey::Line => render_line(resolved, cell, scene, dpi, geom, palette),
         LegendKey::Rect => render_rect(resolved, cell, scene, dpi, geom, palette),
     }
@@ -86,9 +86,15 @@ fn render_point(
     scene: &mut dyn SceneBuilder,
     dpi: f64,
     geom: &crate::plot::theme::GeomTheme,
+    palette: &crate::plot::theme::Palette,
 ) {
     let size_pt = resolved.size_pt.unwrap_or(geom.point.size_pt);
     let size_px = pt_to_px(size_pt, dpi);
+    // A degenerate size collapses the marker to nothing; bail before
+    // it can divide the stroke width. Matches `PointGeom`'s guard.
+    if !size_px.is_finite() || size_px <= 0.0 {
+        return;
+    }
     let centre = Point::new(
         cell.x0 + (cell.x1 - cell.x0) * 0.5,
         cell.y0 + (cell.y1 - cell.y0) * 0.5,
@@ -102,18 +108,41 @@ fn render_point(
     let shape = resolved.shape.as_deref().and_then(|name| shapes.get(name));
     let xform = Affine::translate((centre.x, centre.y)) * Affine::scale(size_px);
 
-    let fill_color = resolved
+    // Aesthetic colours win; the geom defaults backstop them so a key
+    // that only carries a `shape` aesthetic still has something to
+    // paint with. When the theme leaves both unset, palette ink stands
+    // in on whichever channel the shape actually paints through, so
+    // the row isn't visually empty.
+    let mut fill = resolved
         .fill
-        .map(|c| Brush::Solid(apply_alpha(c, resolved.alpha)));
-    let stroke_brush = resolved
+        .or_else(|| geom.point.fill.as_ref().map(|c| c.resolve(palette)));
+    let mut stroke_color = resolved
         .stroke
-        .map(|c| Brush::Solid(apply_alpha(c, resolved.alpha)));
-    let stroke = stroke_brush.as_ref().map(|_| {
-        Stroke::new(pt_to_px(
-            resolved.linewidth_pt.unwrap_or(geom.point.stroke_width_pt),
-            dpi,
-        ))
-    });
+        .or_else(|| geom.point.stroke.as_ref().map(|c| c.resolve(palette)));
+    if fill.is_none() && stroke_color.is_none() {
+        match shape.map(|s| s.kind()) {
+            Some(ShapeKind::Paths {
+                style: ShapeStyle::Stroke,
+                ..
+            }) => stroke_color = Some(palette.ink),
+            _ => fill = Some(palette.ink),
+        }
+    }
+
+    let fill_color = fill.map(|c| Brush::Solid(apply_alpha(c, resolved.alpha)));
+    let stroke_brush = stroke_color.map(|c| Brush::Solid(apply_alpha(c, resolved.alpha)));
+    let stroke_width_px = pt_to_px(
+        resolved.linewidth_pt.unwrap_or(geom.point.stroke_width_pt),
+        dpi,
+    );
+    // Path-backed shapes draw under `Affine::scale(size_px)`, so the
+    // stroke width is divided by the same factor to land at
+    // `stroke_width_px` in output pixels — the inversion `PointGeom`
+    // applies for the identical transform.
+    let path_stroke = stroke_brush
+        .as_ref()
+        .map(|_| Stroke::new(stroke_width_px / size_px));
+    let stroke = stroke_brush.as_ref().map(|_| Stroke::new(stroke_width_px));
 
     if let Some(s) = shape {
         match s.kind() {
@@ -124,12 +153,16 @@ fn render_point(
                             if let Some(fill) = &fill_color {
                                 scene.fill(FillRule::NonZero, xform, fill, None, sub, PickId::Skip);
                             }
-                            if let (Some(stroke_brush), Some(stroke)) = (&stroke_brush, &stroke) {
+                            if let (Some(stroke_brush), Some(stroke)) =
+                                (&stroke_brush, &path_stroke)
+                            {
                                 scene.stroke(stroke, xform, stroke_brush, None, sub, PickId::Skip);
                             }
                         }
                         ShapeStyle::Stroke => {
-                            if let (Some(stroke_brush), Some(stroke)) = (&stroke_brush, &stroke) {
+                            if let (Some(stroke_brush), Some(stroke)) =
+                                (&stroke_brush, &path_stroke)
+                            {
                                 scene.stroke(stroke, xform, stroke_brush, None, sub, PickId::Skip);
                             }
                         }
@@ -304,6 +337,97 @@ fn render_rect(
             None,
             &path,
             PickId::Skip,
+        );
+    }
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plot::theme::Theme;
+    use crate::scene::recording::{Op, RecordingScene};
+    use std::sync::Arc;
+
+    const DPI: f64 = 96.0;
+
+    fn cell() -> Rect {
+        Rect::new(0.0, 0.0, 40.0, 40.0)
+    }
+
+    /// A key carrying only a `shape` aesthetic — the state a shape
+    /// legend produces when no colour scale is bound alongside it.
+    fn shape_only_key(name: &str) -> ResolvedKey {
+        ResolvedKey {
+            shape: Some(Arc::from(name)),
+            ..Default::default()
+        }
+    }
+
+    fn render(resolved: &ResolvedKey, theme: &Theme) -> RecordingScene {
+        let shapes = ShapeRegistry::with_builtins();
+        let mut scene = RecordingScene::default();
+        render_point(
+            resolved,
+            cell(),
+            &shapes,
+            &mut scene,
+            DPI,
+            &theme.geom,
+            &theme.palette,
+        );
+        scene
+    }
+
+    #[test]
+    fn path_shape_stroke_lands_at_requested_pixel_width() {
+        let mut theme = Theme::default();
+        theme.geom.point.stroke = Some(crate::plot::theme::ThemeColor::Ink);
+        let mut key = shape_only_key("square");
+        key.size_pt = Some(6.0);
+        key.linewidth_pt = Some(1.0);
+        let scene = render(&key, &theme);
+
+        let size_px = pt_to_px(6.0, DPI);
+        let expected = pt_to_px(1.0, DPI) / size_px;
+        let widths: Vec<f64> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Stroke { stroke, .. } => Some(stroke.width),
+                _ => None,
+            })
+            .collect();
+        assert!(!widths.is_empty(), "expected a stroked outline");
+        for w in widths {
+            assert!(
+                (w - expected).abs() < 1e-9,
+                "stroke width {w} should invert the size_px transform (expected {expected})"
+            );
+        }
+    }
+
+    #[test]
+    fn shape_only_key_paints_without_a_color_aesthetic() {
+        let scene = render(&shape_only_key("square"), &Theme::default());
+        assert!(
+            scene
+                .ops
+                .iter()
+                .any(|op| matches!(op, Op::Fill { .. } | Op::Stroke { .. })),
+            "a shape key with no colour aesthetic should still paint"
+        );
+    }
+
+    #[test]
+    fn stroke_style_shape_falls_back_on_the_stroke_channel() {
+        // `plus` has no fill subpaths, so an ink fill would leave the
+        // key blank; the backstop has to land on the stroke instead.
+        let scene = render(&shape_only_key("plus"), &Theme::default());
+        assert!(
+            scene.ops.iter().any(|op| matches!(op, Op::Stroke { .. })),
+            "a stroke-style shape key should paint via its outline"
         );
     }
 }

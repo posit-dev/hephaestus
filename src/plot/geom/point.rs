@@ -203,6 +203,7 @@ impl Geom for PointGeom {
         let y_band_scale = ctx.scale_for("y_band");
         let size_scale = ctx.scale_for("size");
         let size_band_scale = ctx.scale_for("size_band");
+        let shape_scale = ctx.scale_for("shape");
         let linewidth_scale = ctx.scale_for("linewidth");
         let angle_scale = ctx.scale_for("angle");
         let pick_id_scale = ctx.scale_for("pick_id");
@@ -284,7 +285,8 @@ impl Geom for PointGeom {
             );
             let size_pt =
                 resolve_number_channel_or(size_ch, size_scale, i, ctx.theme.geom.point.size_pt);
-            let shape_name = resolve_str_channel_or(shape_ch, None, i, &ctx.theme.geom.point.shape);
+            let shape_name =
+                resolve_str_channel_or(shape_ch, shape_scale, i, &ctx.theme.geom.point.shape);
 
             // Glyph diameter: pt contribution + band contribution. band_px
             // is the smallest non-zero band width across x and y at the
@@ -565,6 +567,32 @@ mod tests {
             .filter(|op| matches!(op, Op::Fill { .. }))
             .count();
         assert_eq!(fills, 3);
+    }
+
+    #[test]
+    fn shape_channel_maps_through_its_scale() {
+        // Domain values reach the registry only after the bound
+        // `"shape"` scale maps them to registered names.
+        let shape_scale = crate::plot::scale::ordinal(["a", "b"])
+            .range_strings([Arc::from("circle"), Arc::from("square")]);
+        let mut g = PointGeom::builder()
+            .set("x", vec![0.0_f64, 1.0])
+            .set("y", vec![0.0_f64, 1.0])
+            .set("fill", red_solid())
+            .set("shape", vec!["a", "b"])
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = DirectScaleResolver::new().with("shape", &shape_scale);
+        let c = ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales);
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &c);
+        let fills = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count();
+        assert_eq!(fills, 2, "unmapped shape names drop the row entirely");
     }
 
     fn synthetic_glyph_shape() -> crate::shape::Shape {
