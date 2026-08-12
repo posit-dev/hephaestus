@@ -132,6 +132,10 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
 
 /// A vectorised line geom. Non-generic; all channel data flows through
 /// [`DataColumn`].
+///
+/// A row whose `x` or `y` is missing breaks the line it belongs to: the
+/// vertices before it and the vertices after it are stroked as separate
+/// polylines with a gap between them.
 pub struct LineGeom {
     pub(crate) state: GeomState,
     /// Cached mark layout — rebuilt at the start of each `draw` /
@@ -628,7 +632,12 @@ fn draw_one_mark(
         return;
     }
 
-    // ── Per-vertex positions for this mark. ──
+    // ── Per-vertex positions for this mark, split into runs. ──
+    //
+    // A row whose x or y doesn't resolve to a finite position ends
+    // the run in progress and opens the next one, so the missing
+    // value leaves a gap rather than a segment bridging the anchors
+    // on either side of it.
     //
     // Under non-linear projections (polar, future ternary) the
     // channel-space line between two vertices doesn't project
@@ -647,6 +656,7 @@ fn draw_one_mark(
     // `interpolate_segment_with_t`. The three arrays stay
     // length-aligned through densification.
     let is_linear = ctx.projection.is_linear();
+    let mut runs: Vec<VertexRun> = Vec::new();
     let mut interior: Vec<(f64, f64)> = Vec::new();
     let mut interior_t: Vec<InteriorSample> = Vec::new();
     let mut prev_channels: Option<[f64; 2]> = None;
@@ -669,6 +679,10 @@ fn draw_one_mark(
         let px_frac = resolve_position(x_col.get(i), x_scale, x_band);
         let py_frac = resolve_position(y_col.get(i), y_scale, y_band);
         if !px_frac.is_finite() || !py_frac.is_finite() {
+            flush_run(&mut runs, &mut points, &mut widths, &mut colors);
+            prev_channels = None;
+            prev_w = None;
+            prev_c = None;
             continue;
         }
         let curr_channels = [px_frac, py_frac];
@@ -738,106 +752,125 @@ fn draw_one_mark(
         }
         prev_channels = Some(curr_channels);
     }
-    if points.len() < 2 {
+    flush_run(&mut runs, &mut points, &mut widths, &mut colors);
+    if runs.is_empty() {
         return;
     }
 
     // ── Rotation: per-mark angle around the centroid of finite
-    // vertex positions. Computed from `points` (after band +
+    // vertex positions. Computed from the run vertices (after band +
     // offset resolution, before clip / round) so clip and corner
     // rounding still happen in the unrotated frame and the rigid
-    // line is then rotated as a whole around the centroid.
+    // line — every run of it — is then rotated as a whole around the
+    // one centroid.
     let angle = resolve_angle_channel(angle_ch, angle_scale, i0);
     let xform = if angle == 0.0 {
         Affine::IDENTITY
     } else {
-        let n_pts = points.len() as f64;
-        let cx = points.iter().map(|p| p.x).sum::<f64>() / n_pts;
-        let cy = points.iter().map(|p| p.y).sum::<f64>() / n_pts;
+        let all = || runs.iter().flat_map(|r| r.points.iter());
+        let n_pts = all().count() as f64;
+        let cx = all().map(|p| p.x).sum::<f64>() / n_pts;
+        let cy = all().map(|p| p.y).sum::<f64>() / n_pts;
         Affine::rotate_about(-angle, Point::new(cx, cy))
     };
 
     let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
 
+    // Endpoint clipping and endpoint markers belong to the mark's
+    // terminals, not to every run's: only the first run opens the line
+    // and only the last one closes it. Interior run ends are gap edges.
+    let last_run = runs.len() - 1;
+
     if ribbon_mode {
         // ── Ribbon-mode path: per-vertex tessellated mesh. Clip threads
         // widths / colors through so the post-clip mesh stays
         // attr-aligned.
-        let (clipped, clipped_widths, clipped_colors) = if clip_start_pt > 0.0 || clip_end_pt > 0.0
-        {
-            let start = (clip_start_pt > 0.0).then(|| EndClip::Circle {
-                center: points[0],
-                radius: pt_to_px(clip_start_pt, ctx.dpi),
-            });
-            let end = (clip_end_pt > 0.0).then(|| EndClip::Circle {
-                center: *points.last().unwrap(),
-                radius: pt_to_px(clip_end_pt, ctx.dpi),
-            });
-            clip_polyline_with_attrs(&points, &widths, &colors, start, end, stroke_space)
-        } else {
-            (points.clone(), widths.clone(), colors.clone())
-        };
-        if clipped.len() < 2 {
-            return;
-        }
-
         let marker_outline_px = linewidth_px.max(pt_to_px(0.5, ctx.dpi));
 
-        if !start_name.is_empty() {
-            let size_px = pt_to_px(start_marker_size_pt, ctx.dpi);
-            let fill = resolve_color_channel(start_marker_fill_ch, start_marker_fill_scale, i0)
-                .unwrap_or(marker_fill);
-            let outward = endpoint_outward(&clipped, &points, true, clip_start_pt > 0.0);
-            emit_endpoint_marker(
-                scene,
-                clipped[0],
-                outward,
-                start_invert,
-                &start_name,
-                size_px,
-                fill,
-                stroke_color,
-                marker_outline_px,
-                xform,
-                ctx.shapes,
-                pick,
-            );
-        }
+        for (ri, run) in runs.iter().enumerate() {
+            let run_clip_start_pt = if ri == 0 { clip_start_pt } else { 0.0 };
+            let run_clip_end_pt = if ri == last_run { clip_end_pt } else { 0.0 };
+            let (clipped, clipped_widths, clipped_colors) =
+                if run_clip_start_pt > 0.0 || run_clip_end_pt > 0.0 {
+                    let start = (run_clip_start_pt > 0.0).then(|| EndClip::Circle {
+                        center: run.points[0],
+                        radius: pt_to_px(run_clip_start_pt, ctx.dpi),
+                    });
+                    let end = (run_clip_end_pt > 0.0).then(|| EndClip::Circle {
+                        center: *run.points.last().unwrap(),
+                        radius: pt_to_px(run_clip_end_pt, ctx.dpi),
+                    });
+                    clip_polyline_with_attrs(
+                        &run.points,
+                        &run.widths,
+                        &run.colors,
+                        start,
+                        end,
+                        stroke_space,
+                    )
+                } else {
+                    (run.points.clone(), run.widths.clone(), run.colors.clone())
+                };
+            if clipped.len() < 2 {
+                continue;
+            }
 
-        let opts = RibbonOptions {
-            half_width: 0.0, // superseded by per-vertex half_widths
-            cap,
-            join,
-            miter_limit: 4.0,
-        };
-        let mesh = polyline_ribbon_full(
-            &clipped,
-            Some(&clipped_colors),
-            Some(&clipped_widths),
-            &opts,
-        );
-        scene.draw_mesh(&mesh, xform, pick);
+            if ri == 0 && !start_name.is_empty() {
+                let size_px = pt_to_px(start_marker_size_pt, ctx.dpi);
+                let fill = resolve_color_channel(start_marker_fill_ch, start_marker_fill_scale, i0)
+                    .unwrap_or(marker_fill);
+                let outward = endpoint_outward(&clipped, &run.points, true, clip_start_pt > 0.0);
+                emit_endpoint_marker(
+                    scene,
+                    clipped[0],
+                    outward,
+                    start_invert,
+                    &start_name,
+                    size_px,
+                    fill,
+                    stroke_color,
+                    marker_outline_px,
+                    xform,
+                    ctx.shapes,
+                    pick,
+                );
+            }
 
-        if !end_name.is_empty() {
-            let size_px = pt_to_px(end_marker_size_pt, ctx.dpi);
-            let fill = resolve_color_channel(end_marker_fill_ch, end_marker_fill_scale, i0)
-                .unwrap_or(marker_fill);
-            let outward = endpoint_outward(&clipped, &points, false, clip_end_pt > 0.0);
-            let placement = *clipped.last().unwrap();
-            emit_endpoint_marker(
-                scene,
-                placement,
-                outward,
-                end_invert,
-                &end_name,
-                size_px,
-                fill,
-                stroke_color,
-                marker_outline_px,
-                xform,
-                ctx.shapes,
-                pick,
+            let opts = RibbonOptions {
+                half_width: 0.0, // superseded by per-vertex half_widths
+                cap,
+                join,
+                miter_limit: 4.0,
+            };
+            let mesh = polyline_ribbon_full(
+                &clipped,
+                Some(&clipped_colors),
+                Some(&clipped_widths),
+                &opts,
             );
+            scene.draw_mesh(&mesh, xform, pick);
+
+            if ri == last_run && !end_name.is_empty() {
+                let size_px = pt_to_px(end_marker_size_pt, ctx.dpi);
+                let fill = resolve_color_channel(end_marker_fill_ch, end_marker_fill_scale, i0)
+                    .unwrap_or(marker_fill);
+                let outward = endpoint_outward(&clipped, &run.points, false, clip_end_pt > 0.0);
+                let placement = *clipped.last().unwrap();
+                emit_endpoint_marker(
+                    scene,
+                    placement,
+                    outward,
+                    end_invert,
+                    &end_name,
+                    size_px,
+                    fill,
+                    stroke_color,
+                    marker_outline_px,
+                    xform,
+                    ctx.shapes,
+                    pick,
+                );
+            }
         }
         return;
     }
@@ -862,40 +895,87 @@ fn draw_one_mark(
         resolve_color_channel(start_marker_fill_ch, start_marker_fill_scale, i0);
     let end_marker_fill_resolved =
         resolve_color_channel(end_marker_fill_ch, end_marker_fill_scale, i0);
-    let spec = OutlineSpec {
-        stroke_color,
-        linewidth_pt,
-        dash_pattern_pt,
-        dash_offset_pt,
-        cap,
-        join,
-        marker_fill,
-        user_clip_start_pt,
-        user_clip_end_pt,
-        start_marker: EndpointMarker {
-            name: start_name,
-            size_pt: start_marker_size_pt,
-            fill: start_marker_fill_resolved,
-            invert: start_invert,
-        },
-        end_marker: EndpointMarker {
-            name: end_name,
-            size_pt: end_marker_size_pt,
-            fill: end_marker_fill_resolved,
-            invert: end_invert,
-        },
-        pick,
-        xform,
-        corner_rounding,
-    };
-    draw_curve_outline(
-        scene,
-        ctx.shapes,
-        ctx.dpi,
-        ctx.theme.geom.marker_outline_pt,
-        &points,
-        &spec,
-    );
+    for (ri, run) in runs.iter().enumerate() {
+        let opens = ri == 0;
+        let closes = ri == last_run;
+        let spec = OutlineSpec {
+            stroke_color,
+            linewidth_pt,
+            dash_pattern_pt: dash_pattern_pt.clone(),
+            dash_offset_pt,
+            cap,
+            join,
+            marker_fill,
+            user_clip_start_pt: if opens { user_clip_start_pt } else { 0.0 },
+            user_clip_end_pt: if closes { user_clip_end_pt } else { 0.0 },
+            start_marker: EndpointMarker {
+                name: if opens {
+                    start_name.clone()
+                } else {
+                    String::new()
+                },
+                size_pt: start_marker_size_pt,
+                fill: start_marker_fill_resolved,
+                invert: start_invert,
+            },
+            end_marker: EndpointMarker {
+                name: if closes {
+                    end_name.clone()
+                } else {
+                    String::new()
+                },
+                size_pt: end_marker_size_pt,
+                fill: end_marker_fill_resolved,
+                invert: end_invert,
+            },
+            pick,
+            xform,
+            corner_rounding,
+        };
+        draw_curve_outline(
+            scene,
+            ctx.shapes,
+            ctx.dpi,
+            ctx.theme.geom.marker_outline_pt,
+            &run.points,
+            &spec,
+        );
+    }
+}
+
+/// One contiguous stretch of drawable vertices inside a mark. A row
+/// whose position doesn't resolve ends the run it falls in and opens
+/// the next, so a mark with missing values renders as several
+/// independent polylines separated by gaps.
+struct VertexRun {
+    /// Panel-pixel vertices, projection-densified.
+    points: Vec<Point>,
+    /// Per-vertex half-widths in px. Empty outside ribbon mode.
+    widths: Vec<f64>,
+    /// Per-vertex stroke colors. Empty outside ribbon mode.
+    colors: Vec<Color>,
+}
+
+// Close off the vertices accumulated so far, keeping them only if they
+// form something strokeable, and leave the buffers ready for the next
+// run.
+fn flush_run(
+    runs: &mut Vec<VertexRun>,
+    points: &mut Vec<Point>,
+    widths: &mut Vec<f64>,
+    colors: &mut Vec<Color>,
+) {
+    if points.len() >= 2 {
+        runs.push(VertexRun {
+            points: std::mem::take(points),
+            widths: std::mem::take(widths),
+            colors: std::mem::take(colors),
+        });
+    } else {
+        points.clear();
+        widths.clear();
+        colors.clear();
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -1794,7 +1874,36 @@ mod tests {
     }
 
     #[test]
-    fn nonfinite_vertex_skipped() {
+    fn nonfinite_vertex_splits_the_line() {
+        // The NaN row breaks the mark in two: rows 0-1 and rows 3-4 are
+        // stroked independently, with no segment bridging the gap.
+        let mut g = LineGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 0.25, 0.5, 0.75, 1.0]))
+            .set("y", Raw(vec![0.5_f64, 0.5, f64::NAN, 0.5, 0.5]))
+            .set("stroke", red_solid())
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let c = ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales);
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &c);
+        let paths = stroke_paths(&scene);
+        assert_eq!(paths.len(), 2);
+        let first = path_points(&paths[0]);
+        let second = path_points(&paths[1]);
+        assert_eq!(first.len(), 2);
+        assert_eq!(second.len(), 2);
+        assert!((first[0].x - 0.0).abs() < 1e-6);
+        assert!((first[1].x - 25.0).abs() < 1e-6);
+        assert!((second[0].x - 75.0).abs() < 1e-6);
+        assert!((second[1].x - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn split_run_of_one_vertex_draws_nothing() {
+        // Single anchors on either side of the gap have nothing to
+        // connect to, so neither side produces a stroke.
         let mut g = LineGeom::builder()
             .set("x", vec![0.0_f64, 0.5, 1.0])
             .set("y", vec![0.0_f64, f64::NAN, 1.0])
@@ -1806,12 +1915,57 @@ mod tests {
         let c = ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales);
         let mut scene = RecordingScene::default();
         g.draw(&mut scene, &c);
-        let strokes = scene
-            .ops
-            .iter()
-            .filter(|op| matches!(op, Op::Stroke { .. }))
-            .count();
-        assert_eq!(strokes, 1);
+        assert_eq!(stroke_paths(&scene).len(), 0);
+    }
+
+    #[test]
+    fn split_line_markers_stay_at_the_mark_terminals() {
+        // Endpoint markers belong to the whole mark: one at the very
+        // start, one at the very end, none at the gap edges.
+        let mut g = LineGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 0.25, 0.5, 0.75, 1.0]))
+            .set("y", Raw(vec![0.5_f64, 0.5, f64::NAN, 0.5, 0.5]))
+            .set("stroke", red_solid())
+            .set("start_marker", "arrow-closed")
+            .set("end_marker", "arrow-closed")
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let c = ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales);
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &c);
+        let mut strokes_seen = 0;
+        let mut fill_positions = Vec::new();
+        for op in &scene.ops {
+            match op {
+                Op::Stroke { .. } => strokes_seen += 1,
+                Op::Fill { .. } => fill_positions.push(strokes_seen),
+                _ => {}
+            }
+        }
+        assert_eq!(strokes_seen, 2);
+        // One marker before any stroke, one after both.
+        assert_eq!(fill_positions, vec![0, 2]);
+    }
+
+    #[test]
+    fn nonfinite_vertex_splits_ribbon_mode_mesh() {
+        // Varying linewidth routes through the mesh path; the gap has to
+        // split that too rather than tessellating across it.
+        let mut g = LineGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 0.25, 0.5, 0.75, 1.0]))
+            .set("y", Raw(vec![0.5_f64, 0.5, f64::NAN, 0.5, 0.5]))
+            .set("stroke", red_solid())
+            .set("linewidth", Raw(vec![1.0_f64, 3.0, 3.0, 5.0, 7.0]))
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let c = ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales);
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &c);
+        assert_eq!(mesh_ops(&scene).len(), 2);
     }
 
     // ── Diff at mark level ──
@@ -1858,6 +2012,27 @@ mod tests {
             Op::Stroke { path, .. } => Some(path.clone()),
             _ => None,
         })
+    }
+
+    fn stroke_paths(scene: &RecordingScene) -> Vec<crate::path::Path> {
+        scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Stroke { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn path_points(path: &crate::path::Path) -> Vec<Point> {
+        path.elements()
+            .iter()
+            .filter_map(|el| match el {
+                kurbo::PathEl::MoveTo(p) | kurbo::PathEl::LineTo(p) => Some(*p),
+                _ => None,
+            })
+            .collect()
     }
 
     fn count_curves(path: &crate::path::Path) -> usize {

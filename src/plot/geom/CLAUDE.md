@@ -9,7 +9,7 @@ A geom is a trait-erased (`Box<dyn Geom>`) drawing primitive that holds typed co
 ## Concrete geoms
 
 - **`PointGeom`** — markers from `ShapeRegistry`, one mark per row.
-- **`LineGeom`** — polylines, one mark per key group (multi-row-per-mark). Maintains a `Vec<MarkSlot>` cache.
+- **`LineGeom`** — polylines, one mark per key group (multi-row-per-mark). Maintains a `Vec<MarkSlot>` cache. A row whose `x` or `y` doesn't resolve to a finite position splits the mark: the run in progress ends and the next one starts after the gap, so missing values interrupt the line instead of being bridged. Runs left with fewer than two vertices drop out. Endpoint clip radii and endpoint markers belong to the mark's terminals — the first run's start and the last run's end — not to the gap edges; every other per-mark property (rotation centroid, dash phase, pick id) is resolved once and shared by all runs.
 - **`BSplineGeom`** — clamped uniform-knot B-spline curves, one mark per key group. Per-row `(x, y)` are control points; per-mark `degree` (default 3) selects curve order. The `"interpolation"` channel (`"domain"` / `"panel"`) picks whether the spline is built in channel-fraction space and projected (faithful) or in pixel space after projecting control points (smoothed polyline through projected vertices). Inherits LineGeom's full stroke / linetype / dash / marker channel surface including ribbon-mode variance-detect upgrade and Phase C.5 endpoint markers.
 - **`SegmentGeom`** — 2-point line segments (`x0`, `y0`, `x1`, `y1`).
 - **`RectGeom`** — axis-aligned rectangles.
