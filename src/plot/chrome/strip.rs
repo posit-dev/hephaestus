@@ -480,6 +480,21 @@ mod tests {
         }
     }
 
+    /// Screen-space glyph origins: the recorded positions pushed
+    /// through each run's own transform, so a rotated strip reports
+    /// where its label actually landed on the canvas.
+    fn glyph_points(scene: &RecordingScene) -> Vec<crate::geometry::Point> {
+        let mut out = Vec::new();
+        for op in &scene.ops {
+            if let Op::DrawGlyphs(run) = op {
+                for g in &run.glyphs {
+                    out.push(run.transform * crate::geometry::Point::new(g.x as f64, g.y as f64));
+                }
+            }
+        }
+        out
+    }
+
     /// Distinct glyph baselines in draw order — one per line the draw
     /// pass emitted. Positions are pre-transform, so a rotated strip
     /// reports its lines the same way an upright one does.
@@ -546,6 +561,83 @@ mod tests {
             1,
             "a label that fits the panel edge must not break across the \
              strip's thickness"
+        );
+    }
+
+    #[test]
+    fn vertical_strip_label_centres_along_the_panel_edge() {
+        let theme = Theme::default();
+        let text = "Adelie";
+        let height = 420.0;
+        for side in [AxisSide::Left, AxisSide::Right] {
+            let m = measure(text, side, &theme);
+            let rect = Rect::new(0.0, 0.0, m.width_at(height, DPI), height);
+            let mut scene = RecordingScene::default();
+            draw_strip(&mut scene, text, rect, side, &theme, DPI);
+            let ys: Vec<f64> = glyph_points(&scene).iter().map(|p| p.y).collect();
+            let lo = ys.iter().cloned().fold(f64::INFINITY, f64::min);
+            let hi = ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            // Glyph origins stop at the last glyph's own start, so the
+            // span they cover runs one advance shy of the label's ink.
+            let mid = (lo + hi) * 0.5;
+            assert!(
+                (mid - rect.center().y).abs() < 8.0,
+                "{side:?} strip label must sit at the centre of the panel \
+                 edge, not one end of it: mid={mid}, centre={}",
+                rect.center().y
+            );
+        }
+    }
+
+    #[test]
+    fn rotated_strip_valign_moves_across_the_thickness() {
+        use crate::plot::theme::VAlign;
+        // A rotated label's alignment travels with the text: `valign`
+        // stacks it across the strip's thickness, leaving its position
+        // along the panel edge — `align`'s axis — untouched.
+        let base = Theme::default()
+            .strip_text
+            .resolve(0, 0)
+            .cloned()
+            .expect("strip text");
+        let themed = |valign| Theme {
+            strip_text: Sided::new(TextElement {
+                valign: Some(valign),
+                ..base.clone()
+            }),
+            ..Theme::default()
+        };
+        let text = "Adelie";
+        let height = 420.0;
+        // Slack across the thickness, so the two valigns have somewhere
+        // to differ.
+        let slack = 40.0;
+        let centroid = |valign| {
+            let theme = themed(valign);
+            let m = measure(text, AxisSide::Right, &theme);
+            let rect = Rect::new(0.0, 0.0, m.width_at(height, DPI) + slack, height);
+            let mut scene = RecordingScene::default();
+            draw_strip(&mut scene, text, rect, AxisSide::Right, &theme, DPI);
+            let pts = glyph_points(&scene);
+            let n = pts.len() as f64;
+            (
+                pts.iter().map(|p| p.x).sum::<f64>() / n,
+                pts.iter().map(|p| p.y).sum::<f64>() / n,
+            )
+        };
+        let (top_x, top_y) = centroid(VAlign::Top);
+        let (bottom_x, bottom_y) = centroid(VAlign::Bottom);
+        assert!(
+            (top_y - bottom_y).abs() < 0.5,
+            "valign must not move a rotated label along the panel edge: \
+             top={top_y}, bottom={bottom_y}"
+        );
+        // Text rotated +90° has its local +y pointing at screen -x, so
+        // the text's own top is the strip's outer edge.
+        assert!(
+            top_x - bottom_x > slack * 0.5,
+            "valign must move a rotated label across the strip's \
+             thickness: top={top_x}, bottom={bottom_x}"
         );
     }
 

@@ -2069,14 +2069,20 @@ pub(crate) fn rotated_wrap_width(w: f64, h: f64, angle_rad: f64) -> f64 {
 #[cfg(feature = "text")]
 /// Render `text` styled by `el` inside `rect`, honoring every
 /// layout-affecting field on the [`TextElement`]: `margin` insets the
-/// rect before wrapping, `align` controls horizontal justification
-/// (parley `Alignment`), `valign` positions the wrapped block
-/// vertically (Top / Middle / Bottom; `Baseline` treated as Top),
-/// `angle` rotates the rendered block around its own centre (only
-/// `Rotation::Degrees(_)` resolves here — `Along` / `Across` need a
-/// baseline context and are deferred to per-side helpers like
-/// [`draw_axis_title`]). `lineheight` flows through the cached
-/// `TextRun` via [`text_style_from`].
+/// rect before wrapping, `align` controls justification along the
+/// text's advance direction (parley `Alignment`), `valign` positions
+/// the wrapped block across its stacked lines (Top / Middle / Bottom;
+/// `Baseline` treated as Top), `angle` rotates the rendered block
+/// around the inset's centre (only `Rotation::Degrees(_)` resolves
+/// here — `Along` / `Across` need a baseline context and are deferred
+/// to per-side helpers like [`draw_axis_title`]). `lineheight` flows
+/// through the cached `TextRun` via [`text_style_from`].
+///
+/// Both alignments live in the **text's own frame**, so a rotated
+/// block aligns against the rect's extents projected onto its advance
+/// and stacking axes rather than against screen width and height: a
+/// quarter-turned label centres along the edge it runs down, and its
+/// `valign` moves it across that edge's thickness.
 #[cfg(feature = "text")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_text_element_in_rect(
@@ -2129,12 +2135,17 @@ pub(crate) fn draw_text_element_in_rect(
         // variants in its own helper. Default to no rotation here.
         Rotation::Along | Rotation::Across => 0.0,
     };
-    let inner_w = (inset.x1 - inset.x0) as f32;
+    let inner_w = inset.x1 - inset.x0;
     let inner_h = inset.y1 - inset.y0;
-    let _ = run.set_max_width(
-        rotated_wrap_width(inner_w as f64, inner_h, angle_rad) as f32,
-        alignment,
-    );
+    // Alignment travels with the text, not with the screen box:
+    // `align` runs along the advance direction and `valign` across
+    // the stacked lines, whatever the rotation. The slot the block
+    // gets is therefore the inset projected onto those two rotated
+    // axes — `along_px` is the extent the wrap breaks against,
+    // `cross_px` its complement.
+    let along_px = rotated_wrap_width(inner_w, inner_h, angle_rad);
+    let cross_px = rotated_wrap_width(inner_h, inner_w, angle_rad);
+    let _ = run.set_max_width(along_px as f32, alignment);
     // Inked height (first-line ascender top → last-line descender
     // bottom) drives layout. `ascender_offset` is the half-leading
     // the parley layout reserves above the first line; the draw
@@ -2143,29 +2154,30 @@ pub(crate) fn draw_text_element_in_rect(
     let block_h = run.inked_height();
     let ascender_offset = run.first_line_ascender_offset();
     let valign = el.valign.or(defaults.valign).expect("valign default");
-    let y_offset = match valign {
+    let cross_offset = match valign {
         VAlign::Top | VAlign::Baseline => 0.0,
-        VAlign::Middle => ((inner_h - block_h) * 0.5).max(0.0),
-        VAlign::Bottom => (inner_h - block_h).max(0.0),
+        VAlign::Middle => ((cross_px - block_h) * 0.5).max(0.0),
+        VAlign::Bottom => (cross_px - block_h).max(0.0),
     };
     if angle_rad.abs() < 1e-9 {
-        let (tx, ty) = (inset.x0, inset.y0 + y_offset - ascender_offset);
+        let (tx, ty) = (inset.x0, inset.y0 + cross_offset - ascender_offset);
         draw_text_outline_pass(scene, outline.as_ref(), &run, tx, ty, Affine::IDENTITY);
         draw_text(scene, &run, tx, ty, &brush, Affine::IDENTITY, pick_id);
     } else {
-        let content_w = run.content_width();
-        let pivot_x = inset.x0 + (inner_w as f64) * 0.5;
-        // Pivot is the inked centre — `y_offset + block_h/2` lands
-        // on the inked centre inside the inset, not the metric-box
-        // centre.
-        let pivot_y = inset.y0 + y_offset + block_h * 0.5;
-        // The inner translate maps the layout's inked centre (at
-        // local `(content_w/2, ascender_offset + block_h/2)`) onto
-        // the pivot — i.e., translate by the negation of that.
-        let inked_centre_y = ascender_offset + block_h * 0.5;
-        let transform = Affine::translate(Vec2::new(pivot_x, pivot_y))
+        // Rotate about the inset's centre and place the layout in the
+        // text's own frame. parley has already offset each line inside
+        // a box `along_px` wide, so `align` is baked into the glyph
+        // positions and the layout origin sits half that box back from
+        // the centre. Measuring from the content width instead would
+        // apply the alignment a second time and slide the block to one
+        // end of the box.
+        let centre = Vec2::new((inset.x0 + inset.x1) * 0.5, (inset.y0 + inset.y1) * 0.5);
+        let transform = Affine::translate(centre)
             * Affine::rotate(angle_rad)
-            * Affine::translate(Vec2::new(-content_w * 0.5, -inked_centre_y));
+            * Affine::translate(Vec2::new(
+                -along_px * 0.5,
+                cross_offset - cross_px * 0.5 - ascender_offset,
+            ));
         // Both passes take the same transform and origin, so the
         // outline lands exactly under the rotated fill.
         draw_text_outline_pass(scene, outline.as_ref(), &run, 0.0, 0.0, transform);
