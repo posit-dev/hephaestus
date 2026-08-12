@@ -145,7 +145,9 @@ pub struct LegendTheme {
     pub background: Element<RectElement>,
     /// The legend's overall title — labels the legend itself.
     /// Distinct from `axis.title`, which lives on `AxisTheme` and is
-    /// ignored by legends.
+    /// ignored by legends. Falls through to the axis-title defaults,
+    /// so an unset legend title reads at the same size and color as
+    /// an axis title.
     pub title: Element<TextElement>,
     /// Outer margin around the whole legend.
     pub margin: Margin,
@@ -168,18 +170,17 @@ impl Default for LegendTheme {
     fn default() -> Self {
         Self {
             background: Element::Blank,
-            title: Element::Set(TextElement {
-                size_pt: Some(Length::Abs(11.0)),
-                ..TextElement::default()
-            }),
+            // Empty: the legend title inherits the axis-title
+            // defaults, keeping the two title kinds in step.
+            title: Element::Inherit,
             margin: Margin::ZERO,
             padding: Margin::all(Length::Abs(6.0)),
             direction: Direction::default(),
             // Sparse AxisTheme: only override the slots that legends
             // suppress (no baseline, no ticks). Everything else
             // cascades through the resolver's per-type defaults at
-            // resolve time, so legend tick labels pick up the same
-            // 10pt sizing as axis tick labels.
+            // resolve time, so legend break labels pick up the same
+            // size and color as axis break labels.
             axis: AxisTheme {
                 line: Element::Blank,
                 ticks: Element::Blank,

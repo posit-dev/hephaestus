@@ -1466,43 +1466,62 @@ struct LegendTextStyles {
     label: Option<LegendTextPaint>,
 }
 
+/// Cascade the legend's title and break-label text elements against
+/// the axis defaults, so a legend title matches an axis title and
+/// legend break labels match axis break labels. `None` means the
+/// slot is `Blank` and the call site skips both measure and draw.
+/// Shared by the measure and draw passes so the two can't drift.
+fn legend_text_elements(
+    lt: &crate::plot::theme::LegendTheme,
+) -> (
+    Option<crate::plot::theme::TextElement>,
+    Option<crate::plot::theme::TextElement>,
+) {
+    use crate::plot::theme::{axis_concrete_defaults, text_concrete_defaults, Element};
+    let text_defaults = text_concrete_defaults();
+    let axis_defaults = axis_concrete_defaults();
+    let axis_title = axis_defaults
+        .title
+        .as_set()
+        .expect("axis_concrete_defaults sets title")
+        .cascade(&text_defaults);
+    let title = match &lt.title {
+        Element::Set(child) => Some(child.cascade(&axis_title)),
+        Element::Blank => None,
+        Element::Inherit => Some(axis_title),
+    };
+    // Break labels come out of the legend's own `AxisTheme` cascade,
+    // which already merges the axis tick-label defaults underneath
+    // whatever the theme set.
+    let label = lt.axis.resolved().text.map(|el| el.cascade(&text_defaults));
+    (title, label)
+}
+
 fn legend_text_styles(
     lt: &crate::plot::theme::LegendTheme,
     palette: &crate::plot::theme::Palette,
     dpi: f64,
 ) -> LegendTextStyles {
-    use crate::plot::theme::{text_concrete_defaults, Element, TextElement, DEFAULT_TEXT_SIZE_PT};
-    let defaults = text_concrete_defaults();
+    use crate::plot::theme::DEFAULT_TEXT_SIZE_PT;
     let root_pt = DEFAULT_TEXT_SIZE_PT;
-    fn resolve(
-        el: &Element<TextElement>,
-        defaults: &TextElement,
-        palette: &crate::plot::theme::Palette,
-        root_pt: f64,
-        dpi: f64,
-    ) -> Option<LegendTextPaint> {
-        let merged = match el {
-            Element::Set(child) => child.cascade(defaults),
-            Element::Blank => return None,
-            Element::Inherit => defaults.clone(),
-        };
+    let paint = |merged: crate::plot::theme::TextElement| {
         let color = merged
             .color
             .as_ref()
             .expect("text color default")
             .resolve(palette);
-        Some(LegendTextPaint {
+        LegendTextPaint {
             style: crate::plot::plot::text_style_from(&merged, root_pt),
             brush: Brush::Solid(color),
-            // Resolve off the cascaded element so `Inherit` picks up
-            // the safety net's unset outline and `Set` picks up the
-            // child's value merged over it.
+            // Resolve off the cascaded element so the safety net's
+            // unset outline and any themed value both come through.
             outline: crate::plot::plot::text_outline_from(&merged, palette, dpi),
-        })
-    }
+        }
+    };
+    let (title, label) = legend_text_elements(lt);
     LegendTextStyles {
-        title: resolve(&lt.title, &defaults, palette, root_pt, dpi),
-        label: resolve(&lt.axis.text, &defaults, palette, root_pt, dpi),
+        title: title.map(paint),
+        label: label.map(paint),
     }
 }
 
@@ -2458,19 +2477,11 @@ impl LegendMeasure {
         // and draw size identical glyph runs. `Blank` short-circuits
         // to `None` — the corresponding cell reserves zero space
         // because the renderer won't draw it.
-        use crate::plot::theme::{text_concrete_defaults, Element, DEFAULT_TEXT_SIZE_PT};
-        let text_defaults = text_concrete_defaults();
+        use crate::plot::theme::DEFAULT_TEXT_SIZE_PT;
         let root_pt = DEFAULT_TEXT_SIZE_PT;
-        let resolve_style = |el: &Element<crate::plot::theme::TextElement>| match el {
-            Element::Set(child) => Some(crate::plot::plot::text_style_from(
-                &child.cascade(&text_defaults),
-                root_pt,
-            )),
-            Element::Blank => None,
-            Element::Inherit => Some(crate::plot::plot::text_style_from(&text_defaults, root_pt)),
-        };
-        let label_style = resolve_style(&lt.axis.text);
-        let title_style = resolve_style(&lt.title);
+        let (title_el, label_el) = legend_text_elements(lt);
+        let label_style = label_el.map(|el| crate::plot::plot::text_style_from(&el, root_pt));
+        let title_style = title_el.map(|el| crate::plot::plot::text_style_from(&el, root_pt));
         let domain = registry.get(&legend.domain_scale);
         let breaks = domain
             .map(|s| s.breaks(DEFAULT_BREAK_COUNT))
