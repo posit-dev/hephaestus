@@ -12,5 +12,9 @@
 //! See `src/text/rich/CLAUDE.md` for the full architectural note.
 
 pub mod parser;
+pub mod reduce;
+pub mod style;
 
 pub use parser::{parse, ParseError, RichEvent, Selector};
+pub use reduce::{reduce, BaselineRun, Block, BlockKind, BuiltRuns, InlineRun};
+pub use style::{css_color, RichTextStyleSheet, StyleDelta};
