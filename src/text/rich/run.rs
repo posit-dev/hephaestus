@@ -1030,6 +1030,67 @@ mod tests {
     }
 
     #[test]
+    fn heading_produces_larger_glyph_run_font_size() {
+        let sheet = RichTextStyleSheet::new();
+        let plain = RichTextRun::new(
+            "Big",
+            &base_style(),
+            Color::from_rgba8(0, 0, 0, 255),
+            &sheet,
+            &palette(),
+            96.0,
+        )
+        .unwrap();
+        let heading = RichTextRun::new(
+            "# Big",
+            &base_style(),
+            Color::from_rgba8(0, 0, 0, 255),
+            &sheet,
+            &palette(),
+            96.0,
+        )
+        .unwrap();
+        // Extract the max font_size across emitted glyph runs from
+        // each; the heading version should have a larger max because
+        // h1 pushes a Rel(2.0) size delta.
+        let mut scene_plain = RecordingScene::default();
+        draw_rich_text(
+            &mut scene_plain,
+            &plain,
+            0.0,
+            0.0,
+            RichAnchor::top_left(),
+            Affine::IDENTITY,
+            PickId::Skip,
+        );
+        let mut scene_h = RecordingScene::default();
+        draw_rich_text(
+            &mut scene_h,
+            &heading,
+            0.0,
+            0.0,
+            RichAnchor::top_left(),
+            Affine::IDENTITY,
+            PickId::Skip,
+        );
+        let max_size = |s: &RecordingScene| {
+            s.ops
+                .iter()
+                .filter_map(|op| match op {
+                    Op::DrawGlyphs(gr) => Some(gr.font_size),
+                    _ => None,
+                })
+                .fold(0.0_f32, f32::max)
+        };
+        let plain_sz = max_size(&scene_plain);
+        let h_sz = max_size(&scene_h);
+        assert!(
+            h_sz > plain_sz * 1.5,
+            "h1 font size should be > 1.5× plain (plain={plain_sz}, h={h_sz})"
+        );
+    }
+
+    #[test]
     fn size_selector_produces_larger_run_height() {
         let sheet = RichTextStyleSheet::new();
         let plain = RichTextRun::new(

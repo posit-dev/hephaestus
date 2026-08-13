@@ -349,6 +349,16 @@ impl Reducer {
             .lookup_class(class_key, sheet)
             .unwrap_or_else(StyleDelta::empty);
         let depth = self.container_depth();
+        // Push the block's delta onto the inline stack so its
+        // glyph-level fields (size / weight / family / colour) cascade
+        // into the block's content. Block-only fields (margin,
+        // padding, background, border, indent, hanging, bullet) ride
+        // along too, but `run.rs`'s `apply_delta_range` ignores them
+        // — they're consumed by the block-layout pass reading the
+        // `Block` list. This is what makes `# Big` actually render at
+        // 2× size and bold, and `` `code` `` at code_block's
+        // monospace family.
+        self.inline_stack.push(delta.clone());
         self.block_stack.push(BlockFrame {
             start,
             kind,
@@ -358,6 +368,9 @@ impl Reducer {
     }
 
     fn close_block(&mut self) {
+        // Pop inline first (LIFO). block_stack and inline_stack were
+        // pushed in the same order, so they stay balanced.
+        self.inline_stack.pop();
         if let Some(frame) = self.block_stack.pop() {
             let end = self.text.len();
             self.blocks.push(Block {
@@ -540,7 +553,19 @@ mod tests {
         assert_eq!(r.text, "hello");
         assert_eq!(r.inline.len(), 1);
         assert_eq!(r.inline[0].range, 0..5);
-        assert_eq!(r.inline[0].delta, StyleDelta::empty());
+        // Glyph-level fields must all be unset — the paragraph
+        // delta on top of the stack may carry `margin` (a block-only
+        // field), which is fine because it's ignored by parley
+        // shaping.
+        let d = &r.inline[0].delta;
+        assert!(d.weight.is_none());
+        assert!(d.italic.is_none());
+        assert!(d.family.is_none());
+        assert!(d.size.is_none());
+        assert!(d.color.is_none());
+        assert!(d.underline.is_none());
+        assert!(d.strikethrough.is_none());
+        assert!(d.baseline_em.is_none());
         assert!(r.baseline_shifts.is_empty());
     }
 
@@ -697,6 +722,73 @@ mod tests {
     }
 
     #[test]
+    fn heading_text_inherits_heading_delta() {
+        // # Big — the "Big" text run should carry weight=700 and a
+        // Rel-size delta from the h1 sheet entry.
+        let r = reduce_ok("# Big");
+        let big = r
+            .inline
+            .iter()
+            .find(|run| &r.text[run.range.clone()] == "Big")
+            .expect("run for 'Big'");
+        assert_eq!(
+            big.delta.weight,
+            Some(700),
+            "h1 weight should apply to text"
+        );
+        assert!(
+            matches!(big.delta.size, Some(Length::Rel(m)) if m > 1.5),
+            "h1 size delta should apply to text, got {:?}",
+            big.delta.size
+        );
+    }
+
+    #[test]
+    fn nested_strong_inside_heading_composes() {
+        // # **bold** heading — every run in the heading should carry
+        // h1's size delta AND weight=700 (h1 sets it; strong also sets
+        // it on the "bold" sub-range, matching value).
+        let r = reduce_ok("# **bold** heading");
+        // The heading block boundary tells us where the header text
+        // lives — everything inline that overlaps it should inherit
+        // h1's delta.
+        let heading = r
+            .blocks
+            .iter()
+            .find(|b| matches!(b.kind, BlockKind::Heading(1)))
+            .expect("h1 block");
+        for inline in &r.inline {
+            // Only inline runs that overlap the heading's range.
+            if inline.range.start >= heading.range.end || inline.range.end <= heading.range.start {
+                continue;
+            }
+            assert!(
+                matches!(inline.delta.size, Some(Length::Rel(m)) if m > 1.5),
+                "run {:?} inside h1 should inherit Rel size, got {:?}",
+                &r.text[inline.range.clone()],
+                inline.delta.size
+            );
+            assert_eq!(
+                inline.delta.weight,
+                Some(700),
+                "run {:?} inside h1 should be bold",
+                &r.text[inline.range.clone()]
+            );
+        }
+    }
+
+    #[test]
+    fn code_block_body_gets_monospace_family() {
+        let r = reduce_ok("```\nlet x = 1;\n```");
+        let body = r
+            .inline
+            .iter()
+            .find(|run| r.text[run.range.clone()].contains("let"))
+            .expect("code body run");
+        assert_eq!(body.delta.family.as_deref(), Some("monospace"));
+    }
+
+    #[test]
     fn heading_block_carries_heading_delta() {
         let r = reduce_ok("# Big\n\nSmall");
         let heading = r
@@ -734,13 +826,19 @@ mod tests {
     fn inline_runs_coalesce_across_soft_breaks() {
         // A soft break is a SoftBreak event that becomes a space in
         // the output text — the two adjacent plain-text pieces plus
-        // the space should collapse into one run at empty delta.
+        // the space should collapse into one run at the paragraph's
+        // resolved delta (all glyph-level fields still None, only
+        // the block-only `margin` set from the `paragraph` sheet
+        // entry).
         let r = reduce_ok("first\nsecond");
-        // One paragraph → one block, and text is "first second".
         assert_eq!(r.text, "first second");
-        // All at empty delta → one run.
-        assert_eq!(r.inline.len(), 1);
-        assert_eq!(r.inline[0].delta, StyleDelta::empty());
+        assert_eq!(r.inline.len(), 1, "got {:?}", r.inline);
+        let d = &r.inline[0].delta;
+        assert!(d.weight.is_none());
+        assert!(d.italic.is_none());
+        assert!(d.family.is_none());
+        assert!(d.size.is_none());
+        assert!(d.color.is_none());
     }
 
     #[test]
