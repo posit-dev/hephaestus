@@ -59,8 +59,9 @@ type B = ();
 
 /// Lazy, process-global [`FontContext`]. Constructed on first use; locked
 /// for shaping. A single mutex suffices because shaping is cheap and rare
-/// relative to per-frame work.
-fn font_context() -> &'static Mutex<FontContext> {
+/// relative to per-frame work. `pub(crate)` so [`crate::text::rich`] can
+/// share the same font pool as [`TextRun`].
+pub(crate) fn font_context() -> &'static Mutex<FontContext> {
     static FC: OnceLock<Mutex<FontContext>> = OnceLock::new();
     FC.get_or_init(|| Mutex::new(FontContext::new()))
 }
