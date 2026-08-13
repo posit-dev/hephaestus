@@ -1,18 +1,28 @@
 //! Markdown → [`RichEvent`] stream. Wraps `pulldown-cmark` and layers on
-//! a post-pass that recognises marquee-style `{selector body}` inline
-//! spans inside text nodes.
+//! two extensions:
+//!
+//! - A **block pre-pass** that recognises Pandoc / Quarto / marquee
+//!   style fenced divs (`:::class` … `:::`) and splits the source into
+//!   independent markdown chunks separated by synthetic `DivStart` /
+//!   `DivEnd` events.
+//! - An **inline post-pass** on each `Event::Text` payload that
+//!   recognises marquee-style `{selector body}` inline spans and
+//!   injects `SpanStart` / `SpanEnd` events around the body.
 //!
 //! **Enabled pulldown-cmark options**: strikethrough, superscript,
-//! subscript, math. Everything else is CommonMark. The `{…}` syntax is
-//! ours — we recognise it inside `Event::Text` payloads, split them at
-//! `{` / `}`, and inject [`RichEvent::SpanStart`] / [`RichEvent::SpanEnd`]
-//! around the body.
+//! subscript, math. Everything else is CommonMark.
 //!
 //! **Span head is one token.** Inside a `{…}` head, everything up to
 //! the first whitespace is the selector; the rest is body text. So
 //! `{.red .17 something}` is a red-classed span whose body is the
 //! literal string `.17 something`. To combine styles: nest, e.g.
 //! `{.red {.17 something}}`.
+//!
+//! **Div fences must sit on their own line.** `:::class` at the start
+//! of a line (after optional leading whitespace) opens a div;
+//! bare `:::` on its own line closes the innermost open div. A
+//! paragraph or list cannot span a div boundary — each inter-fence
+//! chunk is parsed as its own markdown block.
 //!
 //! **Literal braces.** Doubled braces escape: `{{` yields a literal
 //! `{` and `}}` yields a literal `}`. Backslash-escapes (`\{`) do
@@ -92,6 +102,17 @@ pub enum RichEvent {
     CodeBlockEnd,
     /// A horizontal rule (`---`, `***`, `___`).
     Rule,
+    /// Start of a Quarto/Pandoc-style fenced div block. Opened by a
+    /// line beginning with `:::` followed by a class name (e.g.
+    /// `:::note`); closed by a bare `:::` line at the matching nesting
+    /// level. The `class` payload is what follows the leading `:::` on
+    /// the opening line, verbatim.
+    DivStart {
+        /// The class name on the opening `:::class` line.
+        class: String,
+    },
+    /// End of a fenced div block.
+    DivEnd,
 
     // ── Inline style boundaries ──
     /// Start of `*em*` / `_em_`.
@@ -176,31 +197,168 @@ pub enum ParseError {
 
 /// Parse `source` as marquee-flavoured markdown and produce a
 /// [`RichEvent`] stream ready for layout. Errors indicate malformed
-/// `{selector body}` spans; unmatched `}` characters outside any span
-/// pass through as literal text (no error).
+/// `{selector body}` spans or `:::class` / `:::` fenced-div markers;
+/// unmatched `}` characters outside any span pass through as literal
+/// text (no error).
+///
+/// The parser runs in two passes:
+///
+/// 1. **Div pre-pass** — scan lines for `:::class` open fences and
+///    bare `:::` close fences. Split the source into a sequence of
+///    text chunks separated by synthetic `DivStart` / `DivEnd`
+///    events. Each text chunk is a self-contained markdown block; a
+///    paragraph or list cannot span a div boundary.
+/// 2. **Chunk pass** — feed each text chunk through pulldown-cmark
+///    (with strikethrough, sup, sub, and math extensions enabled) and
+///    layer on the `{selector body}` inline-span post-pass.
 pub fn parse(source: &str) -> Result<Vec<RichEvent>, ParseError> {
+    let chunks = split_divs(source)?;
+
+    let mut out: Vec<RichEvent> = Vec::new();
+    for chunk in chunks {
+        match chunk {
+            DivChunk::DivStart(class) => out.push(RichEvent::DivStart { class }),
+            DivChunk::DivEnd => out.push(RichEvent::DivEnd),
+            DivChunk::Markdown(md) => translate_chunk(&md, &mut out)?,
+        }
+    }
+    Ok(out)
+}
+
+fn translate_chunk(md: &str, out: &mut Vec<RichEvent>) -> Result<(), ParseError> {
+    if md.is_empty() {
+        return Ok(());
+    }
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_SUPERSCRIPT);
     opts.insert(Options::ENABLE_SUBSCRIPT);
     opts.insert(Options::ENABLE_MATH);
-    let parser = Parser::new_ext(source, opts);
-
-    let mut out: Vec<RichEvent> = Vec::new();
-    // The span depth tracks how many SpanStart events are open in the
-    // *emitted* output stream. A `}` inside a Text node closes the
-    // innermost span (emitting SpanEnd) when depth > 0.
+    let parser = Parser::new_ext(md, opts);
     let mut span_depth: usize = 0;
-
     for event in parser {
-        translate_event(event, &mut out, &mut span_depth)?;
+        translate_event(event, out, &mut span_depth)?;
     }
-
     if span_depth > 0 {
         return Err(ParseError::UnclosedSpan { opened_at: 0 });
     }
+    Ok(())
+}
 
+/// One piece of the source, produced by [`split_divs`].
+enum DivChunk {
+    /// Markdown to be parsed by pulldown-cmark. May be empty (skipped
+    /// downstream).
+    Markdown(String),
+    /// Opening fence — emit a synthetic `DivStart`.
+    DivStart(String),
+    /// Closing fence — emit a synthetic `DivEnd`.
+    DivEnd,
+}
+
+/// Scan `source` line-by-line for `:::class` / `:::` fenced-div
+/// markers. Returns an interleaved sequence of markdown chunks and
+/// div boundaries.
+///
+/// Recognition rules (matching Pandoc / Quarto / marquee):
+/// - A line whose first non-whitespace content is `:::` followed by a
+///   class name (`:::note`, `:::warning`) opens a div. Nested opens
+///   push onto a stack.
+/// - A line whose first non-whitespace content is exactly `:::` (no
+///   class after it) closes the innermost open div.
+/// - Any line that isn't a fence is body markdown, appended to the
+///   current chunk.
+/// - Fences must appear on their own line (no trailing content after
+///   the class name is honoured — anything after `:::class` up to the
+///   line end is captured as part of the class token verbatim, so
+///   `:::note-bold` is a class name `note-bold`).
+///
+/// Errors: an unmatched close (bare `:::` with no open on the stack)
+/// or an unclosed div at end-of-input both surface as
+/// [`ParseError::UnclosedSpan`] with a byte offset pointing at the
+/// offending fence. We reuse the span-error variant rather than
+/// growing the enum for what is effectively the same authoring
+/// mistake — an unbalanced structural marker.
+fn split_divs(source: &str) -> Result<Vec<DivChunk>, ParseError> {
+    let mut out: Vec<DivChunk> = Vec::new();
+    let mut current = String::new();
+    // Stack of byte offsets of open fences, used for the unclosed-at-
+    // end-of-input error message.
+    let mut depth: Vec<usize> = Vec::new();
+    let mut line_start: usize = 0;
+    let bytes = source.as_bytes();
+    let mut i = 0;
+    while i <= source.len() {
+        let at_eol = i == source.len() || bytes[i] == b'\n';
+        if at_eol {
+            let line = &source[line_start..i];
+            match classify_line(line) {
+                DivLine::Open(class) => {
+                    if !current.is_empty() {
+                        out.push(DivChunk::Markdown(std::mem::take(&mut current)));
+                    }
+                    out.push(DivChunk::DivStart(class));
+                    depth.push(line_start);
+                }
+                DivLine::Close => {
+                    if depth.pop().is_none() {
+                        return Err(ParseError::UnclosedSpan {
+                            opened_at: line_start,
+                        });
+                    }
+                    if !current.is_empty() {
+                        out.push(DivChunk::Markdown(std::mem::take(&mut current)));
+                    }
+                    out.push(DivChunk::DivEnd);
+                }
+                DivLine::Body => {
+                    current.push_str(line);
+                    if i < source.len() {
+                        current.push('\n');
+                    }
+                }
+            }
+            line_start = i + 1;
+        }
+        i += 1;
+    }
+    if !current.is_empty() {
+        out.push(DivChunk::Markdown(current));
+    }
+    if let Some(opened_at) = depth.pop() {
+        return Err(ParseError::UnclosedSpan { opened_at });
+    }
     Ok(out)
+}
+
+/// Classify one raw source line as a div-open, div-close, or body.
+enum DivLine {
+    /// `:::class` opening a fenced div. Payload is the class name.
+    Open(String),
+    /// Bare `:::` closing the innermost div.
+    Close,
+    /// Regular markdown line.
+    Body,
+}
+
+fn classify_line(line: &str) -> DivLine {
+    let trimmed = line.trim_start();
+    if let Some(rest) = trimmed.strip_prefix(":::") {
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return DivLine::Close;
+        }
+        // Some editors / authors write more than three colons for
+        // outer nesting (`::::note`); we treat any run of ≥3 leading
+        // colons the same as `:::`. The class name is whatever is
+        // left after all leading colons.
+        let class = rest.trim_start_matches(':').trim();
+        if class.is_empty() {
+            return DivLine::Close;
+        }
+        return DivLine::Open(class.to_string());
+    }
+    DivLine::Body
 }
 
 fn translate_event(
@@ -797,6 +955,87 @@ mod tests {
             })
             .unwrap();
         assert_eq!(lang, Some("rust".to_string()));
+    }
+
+    #[test]
+    fn div_open_and_close_emit_events() {
+        let ev = parse_ok(":::note\nbody\n:::");
+        // Expect: DivStart(note), ParagraphStart, Text("body"),
+        // ParagraphEnd, DivEnd.
+        assert_eq!(
+            ev,
+            vec![
+                RichEvent::DivStart {
+                    class: "note".to_string()
+                },
+                RichEvent::ParagraphStart,
+                RichEvent::Text("body".to_string()),
+                RichEvent::ParagraphEnd,
+                RichEvent::DivEnd,
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_divs_stack_lifo() {
+        let ev = parse_ok(":::outer\n:::inner\nhi\n:::\n:::");
+        let boundaries: Vec<&RichEvent> = ev
+            .iter()
+            .filter(|e| matches!(e, RichEvent::DivStart { .. } | RichEvent::DivEnd))
+            .collect();
+        assert_eq!(boundaries.len(), 4);
+        assert!(matches!(
+            boundaries[0],
+            RichEvent::DivStart { class } if class == "outer"
+        ));
+        assert!(matches!(
+            boundaries[1],
+            RichEvent::DivStart { class } if class == "inner"
+        ));
+        assert!(matches!(boundaries[2], RichEvent::DivEnd));
+        assert!(matches!(boundaries[3], RichEvent::DivEnd));
+    }
+
+    #[test]
+    fn div_body_is_parsed_as_markdown() {
+        let ev = parse_ok(":::note\n**bold** in a div\n:::");
+        assert!(ev.contains(&RichEvent::StrongStart));
+        assert!(ev.contains(&RichEvent::StrongEnd));
+        let div_start_idx = ev
+            .iter()
+            .position(|e| matches!(e, RichEvent::DivStart { .. }))
+            .unwrap();
+        let div_end_idx = ev.iter().position(|e| *e == RichEvent::DivEnd).unwrap();
+        let strong_idx = ev
+            .iter()
+            .position(|e| *e == RichEvent::StrongStart)
+            .unwrap();
+        assert!(
+            div_start_idx < strong_idx && strong_idx < div_end_idx,
+            "strong span must sit between DivStart and DivEnd"
+        );
+    }
+
+    #[test]
+    fn unclosed_div_errors() {
+        let err = parse(":::note\nunclosed").unwrap_err();
+        assert!(matches!(err, ParseError::UnclosedSpan { .. }));
+    }
+
+    #[test]
+    fn stray_close_div_errors() {
+        let err = parse("no open\n:::").unwrap_err();
+        assert!(matches!(err, ParseError::UnclosedSpan { .. }));
+    }
+
+    #[test]
+    fn div_with_multi_paragraph_body() {
+        let ev = parse_ok(":::note\nfirst paragraph\n\nsecond paragraph\n:::");
+        let paragraph_starts = ev
+            .iter()
+            .filter(|e| matches!(e, RichEvent::ParagraphStart))
+            .count();
+        assert_eq!(paragraph_starts, 2, "expected two paragraphs, got {ev:?}");
     }
 
     #[test]
