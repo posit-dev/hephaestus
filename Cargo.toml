@@ -14,7 +14,7 @@ vello = ["dep:vello", "dep:wgpu", "dep:pollster", "dep:futures-intrusive", "dep:
 png = ["dep:png"]
 # Parley-backed text shaping / layout. Off by default; needed by chrome
 # rendering and the text geoms. See `src/text/`.
-text = ["dep:parley"]
+text = ["dep:parley", "dep:pulldown-cmark"]
 # Auto-fetch named Google Fonts families on demand. Hits the Google Fonts
 # CSS2 API, caches downloaded font files in the platform cache dir, and
 # registers them with the running font context. Synchronous network call
@@ -56,6 +56,9 @@ futures-intrusive = { version = "0.5", optional = true }
 png = { version = "0.18", optional = true }
 bytemuck = { version = "1", optional = true }
 parley = { version = "0.9", optional = true }
+# CommonMark parser for rich text. Pulled in by `text`. `default-features
+# = false` drops the optional HTML-rendering helpers we don't use.
+pulldown-cmark = { version = "0.13", optional = true, default-features = false }
 clipper2-rust = "1.0.3"
 
 # Google Fonts auto-lookup — feature-gated; pulled in by `text-google-fonts`.

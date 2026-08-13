@@ -28,6 +28,8 @@ pub mod google_fonts;
 #[cfg(feature = "text-google-fonts")]
 pub use google_fonts::{fetch_google_font, google_font_cache_dir, GoogleFontError};
 
+pub mod rich;
+
 use std::cell::RefCell;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
