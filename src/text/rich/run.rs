@@ -14,12 +14,14 @@
 //! offsets each glyph's `y` by the shift matching its cluster's byte
 //! range.
 //!
-//! Block-level layout (indent, margin, backgrounds, bullets, hr line)
-//! is not implemented in this pass — the [`BuiltRuns::blocks`] table
-//! is carried forward untouched, ready for the block-layout pass.
+//! Block-level backgrounds and borders (code_block fills, custom
+//! `.callout` boxes, blockquote borders) are computed by
+//! [`crate::text::rich::block::compute_block_paints`] and emitted by
+//! [`draw_rich_text`] before the glyph runs so the text sits on top.
+//! See `block.rs` for what the pass does and doesn't cover — bullets,
+//! blockquote left-edge bars, and hr lines are follow-up tasks.
 //! Paragraph breaks land as `\n\n` in the source we hand to parley,
-//! so multi-paragraph markdown line-breaks correctly even without
-//! block layout.
+//! so multi-paragraph markdown line-breaks correctly.
 
 use std::cell::RefCell;
 
@@ -29,6 +31,7 @@ use parley::{
 };
 
 use super::anchor::{LayoutBounds, RichAnchor};
+use super::block::{compute_block_paints, BlockPaint};
 use super::parser::{parse, ParseError};
 use super::reduce::{reduce, BaselineRun, Block, BuiltRuns, InlineRun};
 use super::style::{RichTextStyleSheet, StyleDelta};
@@ -73,12 +76,20 @@ pub struct RichTextRun {
     /// Baseline shifts, indexed by byte range into the reduced text.
     /// Consumed at draw time by [`draw_rich_text`].
     baseline_shifts: Vec<BaselineRun>,
-    /// Block boundaries collected by the reducer. Carried forward
-    /// untouched — the block-layout pass (steps 4–8 of the plan) is
-    /// what consumes them. `pub(crate)` so downstream layout code
-    /// can iterate without re-parsing.
-    #[allow(dead_code)]
+    /// Block boundaries collected by the reducer. Consumed by the
+    /// block-layout pass at draw time (see [`Self::block_paints`]).
     pub(crate) blocks: Vec<Block>,
+    /// Base text size in pt at construction — cached so the block-
+    /// layout pass can resolve `Length::Rel` padding / border-widths
+    /// against the block's ambient em.
+    base_size_pt: f32,
+    /// Palette used for resolving [`crate::plot::theme::ThemeColor`]
+    /// values on block backgrounds / borders. Stored so callers who
+    /// only hold the run can still compute paints.
+    palette: Palette,
+    /// DPI captured at construction — used together with `base_size_pt`
+    /// to convert pt-based padding / border widths to pixels.
+    dpi: f64,
     natural_width: f32,
     natural_height: f32,
     min_width: f32,
@@ -141,6 +152,19 @@ impl RichTextRun {
     /// so bounds stay consistent after [`Self::set_max_width`] calls.
     pub fn layout_bounds(&self) -> LayoutBounds {
         Self::bounds(&self.layout.borrow())
+    }
+
+    /// Compute per-block paint instructions against the current
+    /// layout. Outer-first: containers paint underneath their content.
+    /// See [`crate::text::rich::block`] for the shape returned.
+    pub fn block_paints(&self) -> Vec<BlockPaint> {
+        compute_block_paints(
+            &self.layout.borrow(),
+            &self.blocks,
+            &self.palette,
+            self.base_size_pt,
+            self.dpi,
+        )
     }
 }
 
@@ -287,6 +311,9 @@ impl RichTextRun {
             layout: RefCell::new(layout),
             baseline_shifts: runs.baseline_shifts,
             blocks: runs.blocks,
+            base_size_pt: base_style.size_pt,
+            palette: *palette,
+            dpi,
             natural_width: widths.max,
             natural_height,
             min_width: widths.min,
@@ -519,7 +546,11 @@ fn generic_family_from_str(s: &str) -> Option<GenericFamily> {
 /// `Affine::IDENTITY` for an unrotated placement, or
 /// `Affine::rotate(angle)` to rotate the whole block around `(x, y)`.
 ///
-/// `pick_id` is applied to every emitted glyph run.
+/// `pick_id` is applied to every emitted glyph run. Block-level
+/// backgrounds and borders (`draw_rich_text` calls
+/// [`RichTextRun::block_paints`] internally) are emitted with
+/// [`PickId::Skip`] — decorative geometry beneath the text should not
+/// occlude the glyphs' hit response.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_rich_text<S: SceneBuilder + ?Sized>(
     scene: &mut S,
@@ -541,6 +572,25 @@ pub fn draw_rich_text<S: SceneBuilder + ?Sized>(
     // whole thing collapses to a simple translation and the glyphs
     // land at their expected screen positions.
     let final_transform = Affine::translate((x, y)) * transform;
+
+    // ── Block-level auxiliary primitives (backgrounds, borders). ──
+    //
+    // Emitted before the glyph runs so text draws on top. Paints come
+    // back outer-first, so simply iterating in order yields the right
+    // z-stack. Every paint's rect lives in parley-layout coordinates
+    // — we subtract the anchor offset here so the paint follows the
+    // same glyph-space transform as the glyph runs.
+    let paints = compute_block_paints(
+        &layout,
+        &run.blocks,
+        &run.palette,
+        run.base_size_pt,
+        run.dpi,
+    );
+    for paint in &paints {
+        emit_block_paint(scene, paint, offsets, final_transform);
+    }
+
     for line in layout.lines() {
         for item in line.items() {
             let PositionedLayoutItem::GlyphRun(gr) = item else {
@@ -590,6 +640,50 @@ pub fn draw_rich_text<S: SceneBuilder + ?Sized>(
             };
             scene.draw_glyphs(&glyph_run, pick_id);
         }
+    }
+}
+
+/// Emit one [`BlockPaint`] into `scene`. `offsets` and `outer` are the
+/// same anchor-offset / outer-transform pair used for glyph runs, so
+/// block boxes sit under the exact glyph coordinate space the text
+/// draws in.
+fn emit_block_paint<S: SceneBuilder + ?Sized>(
+    scene: &mut S,
+    paint: &BlockPaint,
+    offsets: super::anchor::AnchorOffsets,
+    outer: Affine,
+) {
+    let rect = kurbo::Rect::new(
+        paint.outer_rect.x0 - offsets.ref_x as f64,
+        paint.outer_rect.y0 - offsets.ref_y as f64,
+        paint.outer_rect.x1 - offsets.ref_x as f64,
+        paint.outer_rect.y1 - offsets.ref_y as f64,
+    );
+    let path = if paint.corner_radius > 0.0 {
+        crate::primitives::rounded_rect(rect, paint.corner_radius as f64)
+    } else {
+        crate::primitives::rect(rect)
+    };
+    if let Some(color) = paint.background {
+        scene.fill(
+            crate::path::FillRule::NonZero,
+            outer,
+            &Brush::Solid(color),
+            None,
+            &path,
+            PickId::Skip,
+        );
+    }
+    if let Some(border) = paint.border {
+        let stroke = crate::stroke::Stroke::new(border.width_px as f64);
+        scene.stroke(
+            &stroke,
+            outer,
+            &Brush::Solid(border.color),
+            None,
+            &path,
+            PickId::Skip,
+        );
     }
 }
 
@@ -1116,6 +1210,90 @@ mod tests {
             "36pt should be taller than base 14pt (plain={}, big={})",
             plain.natural_height(),
             big.natural_height()
+        );
+    }
+
+    #[test]
+    fn code_block_emits_fill_before_glyphs() {
+        // The `code_block` sheet default carries a background — the
+        // recording scene should show a Fill op before any DrawGlyphs.
+        let sheet = RichTextStyleSheet::new();
+        let run = RichTextRun::new(
+            "```\nlet x = 1;\n```",
+            &base_style(),
+            Color::from_rgba8(0, 0, 0, 255),
+            &sheet,
+            &palette(),
+            96.0,
+        )
+        .unwrap();
+        let mut scene = RecordingScene::default();
+        draw_rich_text(
+            &mut scene,
+            &run,
+            0.0,
+            0.0,
+            RichAnchor::top_left(),
+            Affine::IDENTITY,
+            PickId::Skip,
+        );
+        let first_fill = scene
+            .ops
+            .iter()
+            .position(|op| matches!(op, Op::Fill { .. }));
+        let first_glyphs = scene
+            .ops
+            .iter()
+            .position(|op| matches!(op, Op::DrawGlyphs(_)));
+        let (fi, gi) = (
+            first_fill.expect("expected a Fill op"),
+            first_glyphs.expect("expected a DrawGlyphs op"),
+        );
+        assert!(
+            fi < gi,
+            "code_block background (Fill at {fi}) should come before glyphs (DrawGlyphs at {gi})"
+        );
+    }
+
+    #[test]
+    fn plain_text_emits_no_block_paints() {
+        let sheet = RichTextStyleSheet::new();
+        let run = RichTextRun::new(
+            "just a plain paragraph",
+            &base_style(),
+            Color::from_rgba8(0, 0, 0, 255),
+            &sheet,
+            &palette(),
+            96.0,
+        )
+        .unwrap();
+        let mut scene = RecordingScene::default();
+        draw_rich_text(
+            &mut scene,
+            &run,
+            0.0,
+            0.0,
+            RichAnchor::top_left(),
+            Affine::IDENTITY,
+            PickId::Skip,
+        );
+        let fill_count = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count();
+        let stroke_count = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .count();
+        assert_eq!(
+            fill_count, 0,
+            "plain paragraph should not emit any Fill ops"
+        );
+        assert_eq!(
+            stroke_count, 0,
+            "plain paragraph should not emit any Stroke ops"
         );
     }
 }

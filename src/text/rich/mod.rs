@@ -30,12 +30,14 @@
 //! See `src/text/rich/CLAUDE.md` for the full architectural note.
 
 pub mod anchor;
+pub mod block;
 pub mod parser;
 pub mod reduce;
 pub mod run;
 pub mod style;
 
 pub use anchor::{AnchorOffsets, HAnchor, LayoutBounds, RichAnchor, VAnchor};
+pub use block::{compute_block_paints, BlockBorder, BlockPaint};
 pub use parser::{parse, ParseError, RichEvent, Selector};
 pub use reduce::{reduce, BaselineRun, Block, BlockKind, BuiltRuns, InlineRun};
 pub use run::{draw_rich_text, RichBrush, RichTextRun, RichTextWidth};
