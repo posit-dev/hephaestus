@@ -1296,4 +1296,56 @@ mod tests {
             "plain paragraph should not emit any Stroke ops"
         );
     }
+
+    #[test]
+    fn ordered_list_produces_more_glyphs_than_body_alone() {
+        // The reducer prepends "1. " / "2. " / "3. " to each item —
+        // shape a plain sentence and its list-wrapped counterpart and
+        // confirm the list has strictly more glyphs.
+        let sheet = RichTextStyleSheet::new();
+        let plain = RichTextRun::new(
+            "a b c",
+            &base_style(),
+            Color::from_rgba8(0, 0, 0, 255),
+            &sheet,
+            &palette(),
+            96.0,
+        )
+        .unwrap();
+        let listed = RichTextRun::new(
+            "1. a\n2. b\n3. c",
+            &base_style(),
+            Color::from_rgba8(0, 0, 0, 255),
+            &sheet,
+            &palette(),
+            96.0,
+        )
+        .unwrap();
+        let count = |run: &RichTextRun| {
+            let mut scene = RecordingScene::default();
+            draw_rich_text(
+                &mut scene,
+                run,
+                0.0,
+                0.0,
+                RichAnchor::top_left(),
+                Affine::IDENTITY,
+                PickId::Skip,
+            );
+            scene
+                .ops
+                .iter()
+                .filter_map(|op| match op {
+                    Op::DrawGlyphs(gr) => Some(gr.glyphs.len()),
+                    _ => None,
+                })
+                .sum::<usize>()
+        };
+        let plain_g = count(&plain);
+        let listed_g = count(&listed);
+        assert!(
+            listed_g > plain_g,
+            "listed content should carry marker glyphs (plain={plain_g}, listed={listed_g})"
+        );
+    }
 }

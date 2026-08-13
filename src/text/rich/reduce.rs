@@ -199,6 +199,9 @@ struct ListFrame {
     /// nested ordering is deterministic even though the ordinals are
     /// usually ignored (unordered items render bullets).
     next_ordinal: u64,
+    /// `true` for ordered lists (`1. 2. 3.` numbering) — drives
+    /// marker generation at [`Reducer::consume`]'s `ItemStart` arm.
+    ordered: bool,
 }
 
 impl Reducer {
@@ -219,6 +222,7 @@ impl Reducer {
             RichEvent::ListStart { ordered, start } => {
                 self.list_stack.push(ListFrame {
                     next_ordinal: *start,
+                    ordered: *ordered,
                 });
                 self.open_block(
                     BlockKind::List {
@@ -234,16 +238,48 @@ impl Reducer {
                 self.list_stack.pop();
             }
             RichEvent::ItemStart => {
-                let ordinal = self
+                let (ordinal, ordered) = self
                     .list_stack
                     .last_mut()
                     .map(|f| {
                         let n = f.next_ordinal;
                         f.next_ordinal += 1;
-                        n
+                        (n, f.ordered)
                     })
-                    .unwrap_or(1);
+                    .unwrap_or((1, false));
+                // 0-based nesting depth of the current list — the
+                // enclosing `ListStart` already pushed its frame, so
+                // `list_stack.len() - 1` is the depth. Used to index
+                // the marker vector for unordered lists.
+                let list_depth = self.list_stack.len().saturating_sub(1);
                 self.open_block(BlockKind::ListItem { ordinal }, sheet, "list_item");
+                // Prepend the item marker as literal text, styled the
+                // same as the item body (the `list_item` delta is on
+                // top of the inline stack at this point). Ordered
+                // lists print `n. `; unordered print the sheet's
+                // `bullet[depth % len]` + a space (defaults to `•` if
+                // the sheet has no entry or the vector is empty). An
+                // explicit empty-string entry at this depth suppresses
+                // the marker.
+                let marker = if ordered {
+                    Some(format!("{ordinal}. "))
+                } else {
+                    match sheet.get("list_item").and_then(|d| d.bullet.as_ref()) {
+                        Some(v) if v.is_empty() => None,
+                        Some(v) => {
+                            let s = &v[list_depth % v.len()];
+                            if s.is_empty() {
+                                None
+                            } else {
+                                Some(format!("{s} "))
+                            }
+                        }
+                        None => Some("• ".to_string()),
+                    }
+                };
+                if let Some(m) = marker {
+                    self.push_text(&m);
+                }
             }
             RichEvent::ItemEnd => self.close_block(),
             RichEvent::CodeBlockStart { lang } => {
@@ -820,6 +856,214 @@ mod tests {
             })
             .collect();
         assert_eq!(ords, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn unordered_item_prepends_bullet_marker() {
+        let r = reduce_ok("- alpha");
+        // The item's byte range must cover both "• " and "alpha".
+        let item = r
+            .blocks
+            .iter()
+            .find(|b| matches!(b.kind, BlockKind::ListItem { .. }))
+            .expect("list item");
+        let body = &r.text[item.range.clone()];
+        assert!(
+            body.starts_with("• "),
+            "expected bullet marker at start; body = {body:?}"
+        );
+        assert!(body.contains("alpha"));
+    }
+
+    #[test]
+    fn ordered_item_prepends_number_marker() {
+        let r = reduce_ok("1. one\n2. two");
+        let items: Vec<&Block> = r
+            .blocks
+            .iter()
+            .filter(|b| matches!(b.kind, BlockKind::ListItem { .. }))
+            .collect();
+        assert_eq!(items.len(), 2);
+        let body0 = &r.text[items[0].range.clone()];
+        let body1 = &r.text[items[1].range.clone()];
+        assert!(
+            body0.starts_with("1. "),
+            "expected '1. ' marker; body = {body0:?}"
+        );
+        assert!(
+            body1.starts_with("2. "),
+            "expected '2. ' marker; body = {body1:?}"
+        );
+    }
+
+    #[test]
+    fn custom_bullet_replaces_default() {
+        let mut sheet = RichTextStyleSheet::new();
+        sheet.set(
+            "list_item",
+            StyleDelta {
+                bullet: Some(vec!["★".to_string()]),
+                ..StyleDelta::empty()
+            },
+        );
+        let events = parse("- one").unwrap();
+        let r = reduce(&events, &sheet);
+        let item = r
+            .blocks
+            .iter()
+            .find(|b| matches!(b.kind, BlockKind::ListItem { .. }))
+            .unwrap();
+        let body = &r.text[item.range.clone()];
+        assert!(
+            body.starts_with("★ "),
+            "expected custom marker; body = {body:?}"
+        );
+    }
+
+    #[test]
+    fn empty_bullet_vec_suppresses_marker() {
+        let mut sheet = RichTextStyleSheet::new();
+        sheet.set(
+            "list_item",
+            StyleDelta {
+                bullet: Some(Vec::new()),
+                ..StyleDelta::empty()
+            },
+        );
+        let events = parse("- naked").unwrap();
+        let r = reduce(&events, &sheet);
+        let item = r
+            .blocks
+            .iter()
+            .find(|b| matches!(b.kind, BlockKind::ListItem { .. }))
+            .unwrap();
+        let body = &r.text[item.range.clone()];
+        assert!(
+            body.starts_with("naked"),
+            "empty bullet vec should suppress marker; body = {body:?}"
+        );
+    }
+
+    #[test]
+    fn empty_string_entry_suppresses_at_that_depth() {
+        // Two-entry vector, second entry is empty — the outer list
+        // gets `•`, the nested list gets no marker.
+        let mut sheet = RichTextStyleSheet::new();
+        sheet.set(
+            "list_item",
+            StyleDelta {
+                bullet: Some(vec!["•".to_string(), String::new()]),
+                ..StyleDelta::empty()
+            },
+        );
+        let events = parse("- outer\n  - inner").unwrap();
+        let r = reduce(&events, &sheet);
+        let items: Vec<&Block> = r
+            .blocks
+            .iter()
+            .filter(|b| matches!(b.kind, BlockKind::ListItem { .. }))
+            .collect();
+        assert_eq!(items.len(), 2);
+        // Blocks emit in close order — inner before outer.
+        let inner_body = &r.text[items[0].range.clone()];
+        let outer_body = &r.text[items[1].range.clone()];
+        assert!(
+            inner_body.starts_with("inner"),
+            "inner (depth-1) should have no marker; body = {inner_body:?}"
+        );
+        assert!(
+            outer_body.starts_with("• "),
+            "outer (depth-0) should keep `•`; body = {outer_body:?}"
+        );
+    }
+
+    #[test]
+    fn bullet_cycles_through_vector_by_depth() {
+        // Two-entry vector: `•` at even depths, `◦` at odd. A
+        // three-level nested list cycles: `•`, `◦`, `•`.
+        let mut sheet = RichTextStyleSheet::new();
+        sheet.set(
+            "list_item",
+            StyleDelta {
+                bullet: Some(vec!["•".to_string(), "◦".to_string()]),
+                ..StyleDelta::empty()
+            },
+        );
+        let events = parse("- a\n  - b\n    - c").unwrap();
+        let r = reduce(&events, &sheet);
+        let items: Vec<&Block> = r
+            .blocks
+            .iter()
+            .filter(|b| matches!(b.kind, BlockKind::ListItem { .. }))
+            .collect();
+        assert_eq!(items.len(), 3);
+        // Close order = deepest first — items[0] is depth 2, [1] is
+        // depth 1, [2] is depth 0.
+        assert!(&r.text[items[0].range.clone()].starts_with("• c")); // depth 2 → cycles to `•`
+        assert!(&r.text[items[1].range.clone()].starts_with("◦ b")); // depth 1 → `◦`
+        assert!(&r.text[items[2].range.clone()].starts_with("• a")); // depth 0 → `•`
+    }
+
+    #[test]
+    fn default_sheet_uses_three_marker_cycle() {
+        // The built-in `list_item` entry ships `• ◦ ▪` — verify the
+        // second-nesting bullet is `◦`, not `•`.
+        let events = parse("- outer\n  - inner").unwrap();
+        let r = reduce(&events, &RichTextStyleSheet::new());
+        let items: Vec<&Block> = r
+            .blocks
+            .iter()
+            .filter(|b| matches!(b.kind, BlockKind::ListItem { .. }))
+            .collect();
+        assert_eq!(items.len(), 2);
+        // items[0] = inner (depth 1), items[1] = outer (depth 0).
+        assert!(
+            r.text[items[0].range.clone()].starts_with("◦ "),
+            "inner should use second entry `◦`; body = {:?}",
+            &r.text[items[0].range.clone()]
+        );
+        assert!(
+            r.text[items[1].range.clone()].starts_with("• "),
+            "outer should use first entry `•`; body = {:?}",
+            &r.text[items[1].range.clone()]
+        );
+    }
+
+    #[test]
+    fn nested_ordered_lists_number_independently() {
+        // Outer list has three items; the middle item contains a
+        // nested ordered list starting from 1.
+        let r = reduce_ok("1. first\n2. second\n   1. inner1\n   2. inner2\n3. third");
+        let items: Vec<&Block> = r
+            .blocks
+            .iter()
+            .filter(|b| matches!(b.kind, BlockKind::ListItem { .. }))
+            .collect();
+        // Five items total: 3 outer + 2 inner. The nested ordinals
+        // reset at inner1 because each `ListStart` pushes a fresh
+        // frame.
+        assert_eq!(items.len(), 5);
+        let ords: Vec<u64> = items
+            .iter()
+            .map(|b| match b.kind {
+                BlockKind::ListItem { ordinal } => ordinal,
+                _ => unreachable!(),
+            })
+            .collect();
+        // Emission order is block-close order (children before parent),
+        // so inner1 and inner2 come out before the outer item that
+        // contains them closes.
+        assert!(
+            ords.contains(&1) && ords.contains(&2) && ords.contains(&3),
+            "expected outer ordinals 1..=3, got {ords:?}"
+        );
+        // Two `1`s: one for the outer's first item, one for the
+        // nested list's first item.
+        assert_eq!(
+            ords.iter().filter(|&&n| n == 1).count(),
+            2,
+            "expected two `1`s (outer + nested first), got {ords:?}"
+        );
     }
 
     #[test]

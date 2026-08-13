@@ -75,9 +75,14 @@ pub struct StyleDelta {
     pub border_width: Option<Length>,
     /// Block border corner radius (pt).
     pub border_radius: Option<Length>,
-    /// Bullet character(s) for list items. `None` inherits; empty
-    /// string suppresses the bullet.
-    pub bullet: Option<String>,
+    /// Per-nesting-depth bullet markers for list items. `None`
+    /// inherits; `Some(vec![])` suppresses the bullet at every depth;
+    /// entries index by the list's 0-based nesting depth and cycle
+    /// when the depth exceeds the vector length (so a 3-entry vector
+    /// serves any nesting). An individual empty-string entry
+    /// suppresses the marker at that specific depth. Matches
+    /// marquee's `bullets` field (`c("•", "◦", "▪")`).
+    pub bullet: Option<Vec<String>>,
 }
 
 impl StyleDelta {
@@ -273,7 +278,7 @@ impl RichTextStyleSheet {
             "list_item",
             StyleDelta {
                 hanging: Some(Length::Rel(1.5)),
-                bullet: Some("•".to_string()),
+                bullet: Some(vec!["•".to_string(), "◦".to_string(), "▪".to_string()]),
                 ..StyleDelta::empty()
             },
         );
