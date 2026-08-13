@@ -1175,6 +1175,28 @@ mod tests {
     }
 
     #[test]
+    fn draw_on_reversed_binned_scale_mirrors_the_mark() {
+        use crate::plot::scale;
+        use crate::scales::Direction;
+        let x_scale = scale::binned(0.0..=30.0, vec![0.0, 10.0, 20.0, 30.0])
+            .with_direction(Direction::Reversed);
+        let resolver = DirectScaleResolver::new().with("x", &x_scale);
+        let g = PointGeom::builder()
+            .set("x", vec![5.0_f64])
+            .set("y", vec![0.5_f64])
+            .set("fill", red_solid())
+            .build();
+        let panel = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let shapes = registry();
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &ctx(panel, &shapes, &resolver));
+        // The first bin's centre sits a sixth of the way in, measured
+        // from the far end.
+        let (px, _py) = first_fill_translation(&scene).expect("fill op");
+        assert!((px - 100.0 / 6.0 * 5.0).abs() < 1e-6, "px = {px}");
+    }
+
+    #[test]
     fn draw_x_band_no_op_on_continuous_scale() {
         use crate::plot::scale;
         let x_scale = scale::continuous(0.0..=10.0);

@@ -1910,7 +1910,9 @@ fn render_binned_stack_body(
 
     // For Right/Left the bar runs BOTTOM (low frac) to TOP (high
     // frac) — matches the cartesian y convention. For Top/Bottom
-    // it's left → right.
+    // it's left → right. The stack is in domain order whichever way
+    // the scale runs; a reversed scale flips the swatch colours,
+    // which come from each bin's midpoint through `resolve_key`.
     let equal_bins = legend.bin_spacing == BinSpacing::Equal;
     for i in 0..n_bins {
         let (lo, hi) = (breaks[i], breaks[i + 1]);
@@ -2185,7 +2187,10 @@ fn open_end_trim(majors: &[(f64, String)], open_lower: bool, open_upper: bool) -
 /// Domain-fraction (axis-frac) + label string per break, for the
 /// colorbar's tick rail. The frac is `(break - min) / (max - min)`
 /// — the position the break maps to along the bar regardless of the
-/// scale's output range.
+/// scale's output range, and regardless of its
+/// [`Direction`](crate::scales::Direction): a legend lists its domain in
+/// domain order either way, so a reversed scale shows the same labels
+/// against a mirrored ramp rather than a mirrored rail.
 fn colorbar_majors(
     domain: &crate::plot::scale::Scale,
     locale: &crate::scales::Locale,

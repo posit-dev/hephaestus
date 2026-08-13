@@ -15,6 +15,9 @@
 //!   Log10 / Log2 / Log, Sqrt, Square, Exp10 / Exp2 / Exp, Asinh, and
 //!   PseudoLog / PseudoLog2 / PseudoLog10.
 //! - [`ScaleTypeKind`] — discriminator for the six scale families.
+//! - [`Direction`] — whether the mapping runs forward across the domain
+//!   or reversed. Flips the normalised fraction / domain index, so one
+//!   flag reverses a position axis and a palette alike.
 //! - [`AxisSide`] / [`LegendSide`] — placement enums.
 //! - [`Locale`] — number / date formatting rules threaded into label
 //!   generation.
@@ -53,6 +56,7 @@
 
 pub mod breaks;
 pub mod chrome;
+pub mod direction;
 pub mod geometry;
 pub mod input;
 pub mod locale;
@@ -86,6 +90,7 @@ pub use breaks::{
     TemporalInterval, DEFAULT_BREAK_COUNT,
 };
 pub use chrome::{AxisSide, LegendSide};
+pub use direction::Direction;
 pub use geometry::{Coord, Geometry, ParseError as GeometryParseError, Polygon as GeometryPolygon};
 pub use input::InputRange;
 pub use locale::{Locale, Weekday};

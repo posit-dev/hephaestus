@@ -15,6 +15,7 @@ use super::breaks::{
     temporal_breaks_from_f64, temporal_breaks_time, temporal_minor_breaks_from_f64,
     temporal_minor_breaks_from_f64_with_interval, TemporalInterval,
 };
+use super::direction::Direction;
 use super::input::InputRange;
 use super::output::OutputRange;
 use super::transform::{Transform, TransformKind};
@@ -91,6 +92,18 @@ impl ScaleTypeKind {
     }
 }
 
+// Sort a domain's endpoints. Reversal is [`Direction`]'s job, so the
+// tick algorithms — which all require `lo < hi` and return nothing for a
+// descending pair — are handed the endpoints in order rather than as the
+// caller happened to write them.
+fn ordered(min: f64, max: f64) -> (f64, f64) {
+    if min <= max {
+        (min, max)
+    } else {
+        (max, min)
+    }
+}
+
 // ─── Continuous ──────────────────────────────────────────────────────────────
 
 /// Map a value through a continuous scale.
@@ -99,7 +112,8 @@ impl ScaleTypeKind {
 /// then interpolates through the output range (or returns the fraction
 /// directly when the output range is unset). `color_space` is the space a
 /// [`OutputRange::Colors`] ramp interpolates in and is ignored by every
-/// other output type.
+/// other output type. [`Direction::Reversed`] mirrors the normalised
+/// fraction before it reaches the output range.
 ///
 /// Returns `Value::Null` if `input` has no numeric projection or the input
 /// range is missing / not continuous.
@@ -109,6 +123,7 @@ pub fn continuous_map(
     output_range: Option<&OutputRange>,
     transform: &Transform,
     color_space: ColorSpace,
+    direction: Direction,
 ) -> Value {
     let v = match input.as_number() {
         Some(n) => n,
@@ -126,7 +141,7 @@ pub fn continuous_map(
     } else {
         (v_t - dmin_t) / (dmax_t - dmin_t)
     };
-    interpolate_range(t, output_range, color_space)
+    interpolate_range(direction.apply_fraction(t), output_range, color_space)
 }
 
 /// Tick positions for a continuous scale, in input space, projected
@@ -140,7 +155,7 @@ pub fn continuous_breaks(
     n: usize,
 ) -> Vec<Value> {
     let (min, max) = match input_range {
-        Some(InputRange::Continuous { min, max }) => (*min, *max),
+        Some(InputRange::Continuous { min, max }) => ordered(*min, *max),
         _ => return Vec::new(),
     };
     transform_breaks(min, max, n, transform.kind)
@@ -159,7 +174,7 @@ pub fn continuous_minor_breaks(
     majors: &[Value],
 ) -> Vec<Value> {
     let (min, max) = match input_range {
-        Some(InputRange::Continuous { min, max }) => (*min, *max),
+        Some(InputRange::Continuous { min, max }) => ordered(*min, *max),
         _ => return Vec::new(),
     };
     transform_minor_breaks(min, max, transform.kind, majors)
@@ -232,7 +247,7 @@ pub fn temporal_breaks(
     n: usize,
 ) -> Vec<Value> {
     let (min, max) = match input_range {
-        Some(InputRange::Continuous { min, max }) => (*min, *max),
+        Some(InputRange::Continuous { min, max }) => ordered(*min, *max),
         _ => return Vec::new(),
     };
     temporal_breaks_from_f64(min, max, unit, n)
@@ -251,7 +266,7 @@ pub fn temporal_breaks_with_interval(
     interval: TemporalInterval,
 ) -> Vec<Value> {
     let (min, max) = match input_range {
-        Some(InputRange::Continuous { min, max }) => (*min, *max),
+        Some(InputRange::Continuous { min, max }) => ordered(*min, *max),
         _ => return Vec::new(),
     };
     if !min.is_finite() || !max.is_finite() || min >= max {
@@ -292,7 +307,7 @@ pub fn temporal_minor_breaks(
     n: usize,
 ) -> Vec<Value> {
     let (min, max) = match input_range {
-        Some(InputRange::Continuous { min, max }) => (*min, *max),
+        Some(InputRange::Continuous { min, max }) => ordered(*min, *max),
         _ => return Vec::new(),
     };
     temporal_minor_breaks_from_f64(min, max, unit, n)
@@ -311,7 +326,7 @@ pub fn temporal_minor_breaks_with_interval(
     interval: TemporalInterval,
 ) -> Vec<Value> {
     let (min, max) = match input_range {
-        Some(InputRange::Continuous { min, max }) => (*min, *max),
+        Some(InputRange::Continuous { min, max }) => ordered(*min, *max),
         _ => return Vec::new(),
     };
     temporal_minor_breaks_from_f64_with_interval(min, max, unit, interval)
@@ -337,11 +352,13 @@ pub fn wrap_temporal_value(raw: f64, unit: TemporalUnit) -> Value {
 /// One-to-one lookup: returns the output-range entry at the same index as
 /// the matching domain entry. When the output range is unset, returns the
 /// band-centre fraction `(idx + 0.5) / n` (positional rendering on a
-/// discrete axis).
+/// discrete axis). [`Direction::Reversed`] mirrors the index, so the first
+/// category takes the last band and the last palette entry.
 pub fn discrete_map(
     input: &Value,
     input_range: Option<&InputRange>,
     output_range: Option<&OutputRange>,
+    direction: Direction,
 ) -> Value {
     let domain = match input_range {
         Some(InputRange::Discrete(d)) => d,
@@ -352,6 +369,7 @@ pub fn discrete_map(
         Some(i) => i,
         None => return Value::Null,
     };
+    let idx = direction.apply_index(idx, n);
     match output_range {
         None => {
             if n == 0 {
@@ -390,12 +408,14 @@ pub fn discrete_map(
 /// interpolated through the output range (or returns the band-centre
 /// fraction when the output range is unset). `color_space` is the space a
 /// [`OutputRange::Colors`] ramp interpolates in and is ignored by every
-/// other output type.
+/// other output type. [`Direction::Reversed`] mirrors the index, so the
+/// domain walks the gradient from its far end.
 pub fn ordinal_map(
     input: &Value,
     input_range: Option<&InputRange>,
     output_range: Option<&OutputRange>,
     color_space: ColorSpace,
+    direction: Direction,
 ) -> Value {
     let domain = match input_range {
         Some(InputRange::Discrete(d)) => d,
@@ -409,6 +429,7 @@ pub fn ordinal_map(
     if n == 0 {
         return Value::Null;
     }
+    let idx = direction.apply_index(idx, n);
     match output_range {
         None => Value::Number((idx as f64 + 0.5) / n as f64),
         Some(range) => {
@@ -456,12 +477,17 @@ pub fn discrete_band_width(input_range: Option<&InputRange>) -> f64 {
 /// is a one-to-one lookup, and a shorter palette interpolates across the
 /// bins. `color_space` is the space a [`OutputRange::Colors`] ramp
 /// interpolates in and is ignored by every other output type.
+///
+/// [`Direction::Reversed`] mirrors the bin: its centre lands the same
+/// distance from the far end of the panel, and its palette entry is
+/// counted from the far end of the range.
 pub fn binned_map(
     input: &Value,
     input_range: Option<&InputRange>,
     bins: Option<&[f64]>,
     output_range: Option<&OutputRange>,
     color_space: ColorSpace,
+    direction: Direction,
 ) -> Value {
     let v = match input.as_number() {
         Some(n) => n,
@@ -486,10 +512,11 @@ pub fn binned_map(
                 return Value::Number(0.0);
             }
             let centre = (edges[bin] + edges[bin + 1]) * 0.5;
-            Value::Number((centre - d_min) / span)
+            Value::Number(direction.apply_fraction((centre - d_min) / span))
         }
         Some(range) => {
             let n_bins = edges.len() - 1;
+            let bin = direction.apply_index(bin, n_bins);
             let t = if n_bins > 1 {
                 bin as f64 / (n_bins - 1) as f64
             } else {
@@ -503,8 +530,13 @@ pub fn binned_map(
 /// Position a binned scale's break on the panel: the value's own
 /// domain fraction, not the centre of the bin containing it. Chrome
 /// uses this so each bin edge is drawn at the boundary it labels;
-/// out-of-domain inputs return `Null`.
-pub fn binned_map_break(input: &Value, input_range: Option<&InputRange>) -> Value {
+/// out-of-domain inputs return `Null`. [`Direction::Reversed`] mirrors
+/// the fraction, keeping edges with the bins they bound.
+pub fn binned_map_break(
+    input: &Value,
+    input_range: Option<&InputRange>,
+    direction: Direction,
+) -> Value {
     let v = match input.as_number() {
         Some(n) => n,
         None => return Value::Null,
@@ -520,7 +552,7 @@ pub fn binned_map_break(input: &Value, input_range: Option<&InputRange>) -> Valu
     if span <= 0.0 {
         return Value::Number(0.0);
     }
-    Value::Number((v - d_min) / span)
+    Value::Number(direction.apply_fraction((v - d_min) / span))
 }
 
 /// Bin edges of a binned scale, as `Value::Number`.
@@ -569,7 +601,9 @@ pub fn binned_band_width_at(
 
 // ─── Identity ────────────────────────────────────────────────────────────────
 
-/// Pass-through map — returns the input verbatim.
+/// Pass-through map — returns the input verbatim. Takes no
+/// [`Direction`]: nothing is normalised, so there is no ordering to
+/// reverse.
 pub fn identity_map(input: &Value) -> Value {
     input.clone()
 }

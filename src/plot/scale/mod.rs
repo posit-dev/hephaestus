@@ -37,7 +37,7 @@ pub use crate::scales::{
     scale_type, sqrt_breaks, symlog_breaks, symlog_minor_breaks, temporal_breaks,
     temporal_breaks_with_interval, temporal_minor_breaks, temporal_minor_breaks_with_interval,
     transform, transform_allowed_domain, transform_forward, transform_inverse, value,
-    wrap_temporal_value, AxisSide, CalendarUnit, InputRange, LegendSide, OutputRange,
+    wrap_temporal_value, AxisSide, CalendarUnit, Direction, InputRange, LegendSide, OutputRange,
     ScaleTypeKind, TemporalInterval, TemporalUnit, Transform, TransformKind, DEFAULT_BREAK_COUNT,
 };
 
@@ -146,6 +146,11 @@ pub struct Scale {
     /// every other output type, and by discrete scales, whose palette is a
     /// one-to-one lookup with nothing to interpolate.
     color_space: ColorSpace,
+    /// Which way the mapping runs across the domain. Applied to the
+    /// normalised fraction / domain index, so it reverses a position
+    /// axis and a palette alike. Ignored by
+    /// [`ScaleTypeKind::Identity`], which normalises nothing.
+    direction: Direction,
     /// User-supplied tick-label formatter, if any. `None` ⇒ use the
     /// default per-variant formatter (see [`Scale::default_format`]).
     formatter: Option<Arc<LabelFormatter>>,
@@ -167,6 +172,7 @@ impl Scale {
             breaks_spec: None,
             minor_breaks_spec: None,
             color_space: ColorSpace::default(),
+            direction: Direction::default(),
             formatter: None,
             generation: Cell::new(0),
         }
@@ -257,6 +263,19 @@ impl Scale {
         self
     }
 
+    /// Configure which way the mapping runs across the domain.
+    ///
+    /// [`Direction::Reversed`] mirrors the normalised fraction (or the
+    /// domain index) before the output range is consulted: a position
+    /// scale's axis runs backwards, and a material scale walks its
+    /// palette from the far end. The domain itself keeps its natural
+    /// order, so [`Self::breaks`] returns the same tick values either
+    /// way — only where they land changes.
+    pub fn with_direction(mut self, direction: Direction) -> Self {
+        self.direction = direction;
+        self
+    }
+
     // ── Mutators (`&mut self`; bump generation) ──
 
     /// Replace the continuous domain in place. Bumps the generation
@@ -322,6 +341,13 @@ impl Scale {
     /// generation counter.
     pub fn set_color_space(&mut self, space: ColorSpace) {
         self.color_space = space;
+        self.bump_generation();
+    }
+
+    /// Replace the mapping direction in place. Bumps the generation
+    /// counter.
+    pub fn set_direction(&mut self, direction: Direction) {
+        self.direction = direction;
         self.bump_generation();
     }
 
@@ -521,15 +547,20 @@ impl Scale {
                 self.output_range.as_ref(),
                 &self.transform,
                 self.color_space,
+                self.direction,
             ),
-            ScaleTypeKind::Discrete => {
-                discrete_map(input, self.input_range.as_ref(), self.output_range.as_ref())
-            }
+            ScaleTypeKind::Discrete => discrete_map(
+                input,
+                self.input_range.as_ref(),
+                self.output_range.as_ref(),
+                self.direction,
+            ),
             ScaleTypeKind::Ordinal => ordinal_map(
                 input,
                 self.input_range.as_ref(),
                 self.output_range.as_ref(),
                 self.color_space,
+                self.direction,
             ),
             ScaleTypeKind::Binned => binned_map(
                 input,
@@ -537,6 +568,7 @@ impl Scale {
                 self.bins.as_deref(),
                 self.output_range.as_ref(),
                 self.color_space,
+                self.direction,
             ),
             ScaleTypeKind::Identity => identity_map(input),
         }
@@ -554,7 +586,9 @@ impl Scale {
     /// where it positions data, and delegates.
     pub fn map_break(&self, input: &Value) -> Value {
         match self.scale_type {
-            ScaleTypeKind::Binned => binned_map_break(input, self.input_range.as_ref()),
+            ScaleTypeKind::Binned => {
+                binned_map_break(input, self.input_range.as_ref(), self.direction)
+            }
             _ => self.map(input),
         }
     }
@@ -573,11 +607,20 @@ impl Scale {
     ///   offset is a no-op there.
     /// - Non-numeric `map()` outputs (e.g. Color) ignore the offset and
     ///   pass through unchanged.
+    /// - Under [`Direction::Reversed`] the offset points the other way,
+    ///   so it stays anchored to the domain rather than to the panel: a
+    ///   reversed axis mirrors within-band placement along with
+    ///   everything else drawn on it.
     pub fn map_with_offset(&self, input: &Value, band_offset: f64) -> Value {
         let base = self.map(input);
         if band_offset == 0.0 {
             return base;
         }
+        let band_offset = if self.direction.is_reversed() {
+            -band_offset
+        } else {
+            band_offset
+        };
         match base {
             Value::Number(f) => {
                 let bw = self.band_width_at(input);
@@ -879,6 +922,11 @@ impl Scale {
         self.output_range.as_ref()
     }
 
+    /// Which way this scale's mapping runs across its domain.
+    pub fn direction(&self) -> Direction {
+        self.direction
+    }
+
     /// The space this scale's colour output range interpolates through.
     pub fn color_space(&self) -> ColorSpace {
         self.color_space
@@ -935,7 +983,10 @@ impl Scale {
     /// into a single set of rows drawn with both key glyphs. Two
     /// separately configured scales that end up describing the same
     /// values compare equal, so collapse doesn't depend on the two
-    /// legends naming the same registry entry.
+    /// legends naming the same registry entry. [`Direction`] counts as
+    /// part of the output mapping for the same reason: a legend lists
+    /// its domain in domain order whichever way the scale runs, so a
+    /// reversed scale lays out the same rows.
     pub fn legend_equivalent_to(&self, other: &Scale, locale: &Locale) -> bool {
         if self.scale_type != other.scale_type
             || self.transform != other.transform
@@ -962,10 +1013,12 @@ impl Scale {
     /// and one over a magma ramp share a domain but draw different bars.
     /// Two scales carrying the same colour stops but interpolating them
     /// in different spaces draw different bars too, so the interpolation
-    /// space counts as part of the visual.
+    /// space counts as part of the visual — as does the direction the
+    /// ramp runs in.
     pub fn visual_equivalent_to(&self, other: &Scale, locale: &Locale) -> bool {
         self.output_range == other.output_range
             && self.color_space == other.color_space
+            && self.direction == other.direction
             && self.legend_equivalent_to(other, locale)
     }
 }
@@ -981,6 +1034,7 @@ impl std::fmt::Debug for Scale {
             .field("breaks_spec", &self.breaks_spec)
             .field("minor_breaks_spec", &self.minor_breaks_spec)
             .field("color_space", &self.color_space)
+            .field("direction", &self.direction)
             .field(
                 "formatter",
                 &self.formatter.as_ref().map(|_| "<fn>").unwrap_or("none"),
@@ -1813,6 +1867,282 @@ mod tests {
         let c = binned(0.0..=30.0, vec![0.0, 10.0, 20.0, 30.0])
             .range_colors([Color::new([1.0, 0.0, 0.0, 1.0])]);
         assert!(a.legend_equivalent_to(&c, &locale));
+    }
+
+    // ── Direction ──
+
+    #[test]
+    fn reversed_continuous_mirrors_the_fraction() {
+        let s = continuous(0.0..=10.0).with_direction(Direction::Reversed);
+        approx(
+            s.map(&Value::Number(0.0)).as_number().unwrap(),
+            1.0,
+            1e-12,
+            "lo",
+        );
+        approx(
+            s.map(&Value::Number(2.5)).as_number().unwrap(),
+            0.75,
+            1e-12,
+            "quarter",
+        );
+        approx(
+            s.map(&Value::Number(10.0)).as_number().unwrap(),
+            0.0,
+            1e-12,
+            "hi",
+        );
+    }
+
+    #[test]
+    fn reversed_continuous_walks_its_palette_backwards() {
+        let red = Color::new([1.0, 0.0, 0.0, 1.0]);
+        let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
+        let s = continuous(0.0..=10.0)
+            .range_colors([red, blue])
+            .with_direction(Direction::Reversed);
+        assert_eq!(s.map(&Value::Number(0.0)).as_color(), Some(blue));
+        assert_eq!(s.map(&Value::Number(10.0)).as_color(), Some(red));
+    }
+
+    #[test]
+    fn reversed_continuous_composes_with_a_transform() {
+        let s = continuous(1.0..=1000.0)
+            .with_transform(TransformKind::Log10)
+            .with_direction(Direction::Reversed);
+        approx(
+            s.map(&Value::Number(10.0)).as_number().unwrap(),
+            2.0 / 3.0,
+            1e-12,
+            "one decade up, from the far end",
+        );
+    }
+
+    #[test]
+    fn reversed_scale_keeps_its_break_values() {
+        let fwd = continuous(0.0..=10.0);
+        let rev = continuous(0.0..=10.0).with_direction(Direction::Reversed);
+        let (a, b) = (fwd.breaks(5), rev.breaks(5));
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(&b) {
+            assert!(x.key_eq(y), "break values differ: {x:?} vs {y:?}");
+        }
+        // Only where they land changes.
+        for v in &a {
+            approx(
+                rev.map_break(v).as_number().unwrap(),
+                1.0 - fwd.map_break(v).as_number().unwrap(),
+                1e-12,
+                "mirrored break position",
+            );
+        }
+    }
+
+    #[test]
+    fn reversed_discrete_mirrors_bands_and_palette() {
+        let levels = vec![Value::from("a"), Value::from("b"), Value::from("c")];
+        let s = discrete(levels.clone()).with_direction(Direction::Reversed);
+        approx(
+            s.map(&levels[0]).as_number().unwrap(),
+            5.0 / 6.0,
+            1e-12,
+            "first",
+        );
+        approx(
+            s.map(&levels[2]).as_number().unwrap(),
+            1.0 / 6.0,
+            1e-12,
+            "last",
+        );
+
+        let red = Color::new([1.0, 0.0, 0.0, 1.0]);
+        let green = Color::new([0.0, 1.0, 0.0, 1.0]);
+        let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
+        let c = discrete(levels.clone())
+            .range_colors([red, green, blue])
+            .with_direction(Direction::Reversed);
+        assert_eq!(c.map(&levels[0]).as_color(), Some(blue));
+        assert_eq!(c.map(&levels[2]).as_color(), Some(red));
+    }
+
+    #[test]
+    fn reversed_ordinal_mirrors_the_gradient() {
+        let s = ordinal(["a", "b", "c"])
+            .range_numbers([2.0, 12.0])
+            .with_direction(Direction::Reversed);
+        approx(
+            s.map(&Value::from("a")).as_number().unwrap(),
+            12.0,
+            1e-12,
+            "first",
+        );
+        approx(
+            s.map(&Value::from("b")).as_number().unwrap(),
+            7.0,
+            1e-12,
+            "middle",
+        );
+        approx(
+            s.map(&Value::from("c")).as_number().unwrap(),
+            2.0,
+            1e-12,
+            "last",
+        );
+    }
+
+    #[test]
+    fn reversed_binned_position_mirrors_bin_centres() {
+        let s = binned(0.0..=10.0, vec![0.0, 2.0, 5.0, 10.0]).with_direction(Direction::Reversed);
+        // Uneven bins keep their proportional widths, measured from the
+        // far end of the panel.
+        approx(
+            s.map(&Value::Number(1.0)).as_number().unwrap(),
+            0.9,
+            1e-12,
+            "bin 0",
+        );
+        approx(
+            s.map(&Value::Number(3.0)).as_number().unwrap(),
+            0.65,
+            1e-12,
+            "bin 1",
+        );
+        approx(
+            s.map(&Value::Number(8.0)).as_number().unwrap(),
+            0.25,
+            1e-12,
+            "bin 2",
+        );
+        approx(
+            s.band_width_at(&Value::Number(3.0)),
+            0.3,
+            1e-12,
+            "band width is unsigned",
+        );
+    }
+
+    #[test]
+    fn reversed_binned_palette_counts_from_the_far_end() {
+        let red = Color::new([1.0, 0.0, 0.0, 1.0]);
+        let green = Color::new([0.0, 1.0, 0.0, 1.0]);
+        let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
+        let s = binned(0.0..=30.0, vec![0.0, 10.0, 20.0, 30.0])
+            .range_colors([red, green, blue])
+            .with_direction(Direction::Reversed);
+        assert_eq!(s.map(&Value::Number(5.0)).as_color(), Some(blue));
+        assert_eq!(s.map(&Value::Number(15.0)).as_color(), Some(green));
+        assert_eq!(s.map(&Value::Number(25.0)).as_color(), Some(red));
+    }
+
+    #[test]
+    fn reversed_binned_breaks_stay_with_the_bins_they_bound() {
+        let s = binned(0.0..=10.0, vec![0.0, 2.0, 5.0, 10.0]).with_direction(Direction::Reversed);
+        let positions: Vec<f64> = s
+            .breaks(5)
+            .iter()
+            .map(|b| s.map_break(b).as_number().unwrap())
+            .collect();
+        assert_eq!(positions, vec![1.0, 0.8, 0.5, 0.0]);
+    }
+
+    #[test]
+    fn reversed_band_offset_points_the_other_way() {
+        // The offset stays anchored to the domain: +0.5 still reaches the
+        // edge shared with the next category / bin, which is now the
+        // lower panel fraction.
+        let d = discrete(vec![Value::from("a"), Value::from("b"), Value::from("c")])
+            .with_direction(Direction::Reversed);
+        approx(
+            d.map_with_offset(&Value::from("a"), 0.5)
+                .as_number()
+                .unwrap(),
+            2.0 / 3.0,
+            1e-12,
+            "a's upper edge",
+        );
+        let b = binned(0.0..=10.0, vec![0.0, 2.0, 5.0, 10.0]).with_direction(Direction::Reversed);
+        approx(
+            b.map_with_offset(&Value::Number(3.0), 0.5)
+                .as_number()
+                .unwrap(),
+            0.5,
+            1e-12,
+            "bin 1's upper edge",
+        );
+    }
+
+    #[test]
+    fn identity_ignores_direction() {
+        let s = identity().with_direction(Direction::Reversed);
+        assert!(s.map(&Value::Number(3.0)).key_eq(&Value::Number(3.0)));
+    }
+
+    #[test]
+    fn direction_is_part_of_a_scale_visual_but_not_its_legend_layout() {
+        let loc = Locale::default();
+        let stops = [
+            Color::new([1.0, 0.0, 0.0, 1.0]),
+            Color::new([0.0, 0.0, 1.0, 1.0]),
+        ];
+        let fwd = continuous(0.0..=10.0).range_colors(stops);
+        let rev = continuous(0.0..=10.0)
+            .range_colors(stops)
+            .with_direction(Direction::Reversed);
+        assert!(
+            fwd.legend_equivalent_to(&rev, &loc),
+            "same domain, same rows, same labels"
+        );
+        assert!(
+            !fwd.visual_equivalent_to(&rev, &loc),
+            "a mirrored ramp is a different bar"
+        );
+    }
+
+    #[test]
+    fn direction_bumps_the_generation_counter() {
+        let mut s = continuous(0.0..=1.0);
+        let before = s.generation();
+        s.set_direction(Direction::Reversed);
+        assert!(s.generation() > before);
+    }
+
+    // ── Descending domains ──
+
+    #[test]
+    fn descending_domain_still_generates_breaks() {
+        // Reversal is `Direction`'s job, but a domain written backwards
+        // must still tick — every algorithm past the linear one bails on
+        // `min >= max`, so the endpoints are ordered on the way in.
+        assert!(!continuous(100.0..=0.0).breaks(5).is_empty(), "linear");
+        assert!(
+            !continuous(1000.0..=1.0)
+                .with_transform(TransformKind::Log10)
+                .breaks(5)
+                .is_empty(),
+            "log10"
+        );
+        assert!(
+            !continuous(100.0..=0.0)
+                .with_transform(TransformKind::Sqrt)
+                .breaks(5)
+                .is_empty(),
+            "sqrt"
+        );
+        assert!(
+            !continuous(100.0..=-100.0)
+                .with_transform(TransformKind::Asinh)
+                .breaks(5)
+                .is_empty(),
+            "asinh"
+        );
+        assert!(
+            !temporal(Date(20000)..=Date(19000)).breaks(5).is_empty(),
+            "date"
+        );
+        assert!(
+            !continuous(100.0..=0.0).minor_breaks(5).is_empty(),
+            "linear minors"
+        );
     }
 
     // ── Identity ──

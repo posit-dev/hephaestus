@@ -6,7 +6,7 @@ Scales — value mappers. Map a domain `Value` to a visual output (panel fractio
 
 **Leaf-module convention.** Nothing inside `src/scales/` imports from `crate::plot::*`, `crate::scene::*`, `crate::backend::*`, `crate::primitives::*`, or `crate::text::*`. It depends only on `std`, peniko (via `crate::color`), and its own siblings. The module is structured this way so it can be lifted into its own crate (`scales`) when the API settles. The lift is a `mv src/scales crates/scales/src && cargo init --lib`-style migration — no surface changes.
 
-**No `Scale` aggregate here.** The hephaestus `Scale` struct (bundle of scale_type + transform + ranges + bin edges + break / minor-break specs + formatter + generation counter) lives in `src/plot/scale/mod.rs`, with its named constructors in `src/plot/scale/constructors.rs`. Future consumers of the scales crate roll their own bundle and call the free functions directly. The Scale struct's methods are 1-line shims that match on the enum tags and delegate.
+**No `Scale` aggregate here.** The hephaestus `Scale` struct (bundle of scale_type + transform + direction + ranges + bin edges + break / minor-break specs + formatter + generation counter) lives in `src/plot/scale/mod.rs`, with its named constructors in `src/plot/scale/constructors.rs`. Future consumers of the scales crate roll their own bundle and call the free functions directly. The Scale struct's methods are 1-line shims that match on the enum tags and delegate.
 
 Axes and legends — *rendering* of a scale's ticks / breaks against a `SceneBuilder` — live in `src/plot/chrome/` (hephaestus-internal; feature-gated on `text`). The scale layer here defines *what* to draw; chrome draws it.
 
@@ -18,13 +18,15 @@ A `Scale` combines a `ScaleType` (Continuous / Discrete / Ordinal / Binned / Ide
 
 1. Apply the transform (continuous scales only).
 2. Normalise to `[0, 1]` against the input range.
-3. Interpolate through the output range, or return the fraction directly if output is unset (position scales).
+3. Mirror the fraction (or the domain index) if the `Direction` is `Reversed`.
+4. Interpolate through the output range, or return the fraction directly if output is unset (position scales).
 
 Scales are *stateless mappers*: all config lives on `Scale` itself. The same scale instance is shared between plots and across renders.
 
 ## Core types
 
 - **`ScaleTypeKind`** (`scale_type.rs`) — enum tagging the scale family: `Continuous`, `Discrete`, `Ordinal`, `Binned`, `Identity`, `Temporal(TemporalUnit)`. Pure data; algorithms are free functions matching on this tag.
+- **`Direction`** (`direction.rs`) — `Forward` / `Reversed`. Applied to the normalised fraction (`apply_fraction`) or the domain index (`apply_index`) *before* the output range is consulted, so the one flag reverses a position axis and a palette alike. Not a transform and not a domain shape: the domain keeps its natural order, so break generation is untouched.
 - **`Transform`** (`transform.rs`) — POD struct `{ kind: TransformKind }`. Convenience methods (`forward`, `inverse`, `allowed_domain`) delegate to free functions of the same name with `_` suffix.
 - **`TransformKind`** — enum tagging the transform family. Thirteen kinds are wired: `Identity`, `Log10`, `Log2`, `Log`, `Sqrt`, `Square`, `Exp10`, `Exp2`, `Exp`, `Asinh`, `PseudoLog`, `PseudoLog2`, `PseudoLog10`. Each has a forward, inverse and allowed-domain arm; `allowed_domain` is what keeps a log scale's domain off zero.
 - **`TemporalUnit`** (`scale_type.rs`) — `Date` / `DateTime` / `Time` / `Duration`, the calendar quantity a `Temporal` scale's f64 domain stands for. Decides which calendar-alignment family generates breaks and how tick values are wrapped back into typed `Value`s.
@@ -55,7 +57,8 @@ Rendering of axis and legend chrome lives in `crate::plot::chrome::{axis, legend
 - **Temporal data projects to f64 before entering a scale.** Date → days, DateTime → microseconds, Time → microseconds since midnight, Duration → microseconds. The domain and ticks are always f64-based; axis label formatters reverse the projection.
 - **Break placement can differ from the data mapping.** Chrome positions ticks and gridlines with `Scale::map_break`, not `Scale::map`. The two agree for every family except Binned, whose `map` sends data to the centre of its bin while its breaks are the bin edges — those must land on their own domain fraction. A new scale type only needs a `map_break` arm when the same distinction applies.
 - **Colour interpolation names its space.** `continuous_map` / `ordinal_map` / `binned_map` take a `ColorSpace` argument, threaded from `Scale::color_space` (`with_color_space` / `set_color_space` configure it; the default is `Oklab`). `discrete_map` doesn't — a discrete palette is a one-to-one lookup with nothing to interpolate. Exact stops come back untouched in either space, so a palette's endpoints survive the round trip.
-- **Band width is a scale-type concept.** Discrete / ordinal / binned report `1.0 / n_bins`; continuous reports 0. Geoms use `scale.map_with_offset(value, band_offset)` to fold a `[0, 1]` within-band offset into the position output. Without a scale (no binding), the band offset is ignored — band is meaningless outside a scale.
+- **Band width is a scale-type concept.** Discrete / ordinal / binned report `1.0 / n_bins`; continuous reports 0. Geoms use `scale.map_with_offset(value, band_offset)` to fold a `[0, 1]` within-band offset into the position output. Without a scale (no binding), the band offset is ignored — band is meaningless outside a scale. Band offsets are anchored to the domain, so a `Reversed` scale negates them: flipping an axis mirrors within-band placement along with everything else drawn on it.
+- **Reversal is a `Direction`, never a backwards domain.** Reading the domain end-to-start only works for a linear continuous scale by coincidence; a binned scale rejects everything outside `min..=max` and every tick algorithm past the linear one requires `lo < hi`. So `Direction::Reversed` mirrors the mapping and the domain stays ascending. Two consequences worth knowing: `breaks()` returns the same values either way (only where they land changes), and a legend lists its domain in domain order either way — a reversed material scale shows the same rows against a mirrored palette, matching Vega-Lite's `scale.reverse`. Descending endpoints are still ordered on the way into break generation (`ordered` in `scale_type.rs`) rather than silently emitting no ticks.
 - **Generation counter is plumbed but unused in v1.** `Scale::generation` is bumped on every mutation; v1.5+ will use it to invalidate per-channel output caches without value comparison.
 - **`OutputRange::Numbers` is in pt for absolute sizes**, unitless otherwise. The geom's `resolve_*` helper applies `pt_to_px` where appropriate.
 - **Non-numeric endpoints panic.** `Scale::domain_continuous(String("a"), String("b"))` panics at the call site — no continuous ordering on strings or colours. Use `domain_discrete` for that.
@@ -63,7 +66,7 @@ Rendering of axis and legend chrome lives in `crate::plot::chrome::{axis, legend
 ## Adding a new scale type
 
 1. Extend the `ScaleTypeKind` enum with the new variant.
-2. Add a per-kind free function pair (`my_kind_map(...)`, `my_kind_breaks(...)`, optionally `my_kind_band_width(...)` / `my_kind_band_width_at(...)`).
+2. Add a per-kind free function pair (`my_kind_map(...)`, `my_kind_breaks(...)`, optionally `my_kind_band_width(...)` / `my_kind_band_width_at(...)`). The map function takes a `Direction` and applies it to whatever it normalises — a fraction via `apply_fraction`, an index via `apply_index` — unless the kind normalises nothing (`identity_map`).
 3. Add the new arm to each central `match` in `crate::plot::scale::Scale::{map, breaks, band_width, band_width_at}`. Rust's exhaustive-match check makes the missing arms compile errors — easy to find them all.
 4. Geoms don't directly interact with scale types — they call `scale.map(&value)`. No geom changes needed unless the new type implies a new `ExpectedOutput` variant.
 
