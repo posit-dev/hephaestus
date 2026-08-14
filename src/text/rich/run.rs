@@ -385,10 +385,16 @@ impl RichTextRun {
                 padding_left_px: own_left_px,
             });
         }
-        // Natural width = max of (left + shape_width + right) across blocks.
+        // Natural width = max of (left + shape_width + right) across
+        // non-Rule blocks (Rule blocks have empty text → zero shape
+        // width; they stretch to whatever surrounding content
+        // dictates, post-hoc below).
         let mut natural_width: f32 = 0.0;
         let mut min_width: f32 = 0.0;
         for bl in &layouts {
+            if matches!(bl.kind, BlockKind::Rule) {
+                continue;
+            }
             let width_at_natural = bl.left_px + bl.shape_width_px + bl.right_inset_px;
             natural_width = natural_width.max(width_at_natural);
             let per_min = bl.left_px
@@ -397,6 +403,23 @@ impl RichTextRun {
                 + bl.first_line_shift_px.max(bl.continuation_shift_px);
             min_width = min_width.max(per_min);
         }
+        // Rule blocks stretch to the run's natural width so the hr
+        // line spans the same column the surrounding text occupies.
+        // Zero natural width (e.g. a document containing nothing but
+        // an hr) falls back to a reasonable placeholder — the base
+        // text em × 20, roughly a typical column.
+        let hr_placeholder = if natural_width > 0.0 {
+            natural_width
+        } else {
+            pt_to_px(base_style.size_pt as f64 * 20.0, dpi)
+        };
+        for bl in &mut layouts {
+            if matches!(bl.kind, BlockKind::Rule) {
+                let content = (hr_placeholder - bl.left_px - bl.right_inset_px).max(1.0);
+                bl.shape_width_px = content;
+            }
+        }
+        natural_width = natural_width.max(hr_placeholder);
 
         Self {
             text: runs.text,
@@ -736,7 +759,14 @@ fn is_leaf_kind(kind: &BlockKind) -> bool {
 }
 
 /// True if another leaf-type block strictly contains `block`.
+///
+/// Zero-length blocks (decorative markers like [`BlockKind::Rule`])
+/// sit *between* text-carrying blocks and share an endpoint with
+/// their neighbours; for those we require strict containment — start
+/// < point < end — so an hr at position P isn't classified as
+/// "contained" in the paragraph ending at P.
 fn contained_in_another_leaf(block: &Block, all: &[Block]) -> bool {
+    let is_empty = block.range.start == block.range.end;
     for other in all {
         if !is_leaf_kind(&other.kind) {
             continue;
@@ -747,7 +777,11 @@ fn contained_in_another_leaf(block: &Block, all: &[Block]) -> bool {
         if other.range == block.range {
             continue;
         }
-        if other.range.start <= block.range.start && other.range.end >= block.range.end {
+        if is_empty {
+            if other.range.start < block.range.start && other.range.end > block.range.end {
+                return true;
+            }
+        } else if other.range.start <= block.range.start && other.range.end >= block.range.end {
             return true;
         }
     }
@@ -1210,6 +1244,75 @@ mod tests {
         assert!(
             quoted_x > plain_x + 10.0,
             "blockquote content should be indented (plain={plain_x}, quoted={quoted_x})"
+        );
+    }
+
+    #[test]
+    fn horizontal_rule_emits_single_top_stroke() {
+        // `---` produces a Rule block; the sheet's `hr` entry sets a
+        // top-only 1pt border, so the paint pass emits exactly one
+        // horizontal stroke.
+        let run = make("above\n\n---\n\nbelow");
+        let mut scene = RecordingScene::default();
+        draw_rich_text(
+            &mut scene,
+            &run,
+            0.0,
+            0.0,
+            RichAnchor::top_left(),
+            Affine::IDENTITY,
+            PickId::Skip,
+        );
+        let strokes: Vec<_> = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .collect();
+        assert_eq!(
+            strokes.len(),
+            1,
+            "hr should emit exactly one stroke (top edge only), got {}",
+            strokes.len()
+        );
+    }
+
+    #[test]
+    fn horizontal_rule_stretches_to_full_natural_width() {
+        // The hr's paint outer_rect should span the same width as the
+        // surrounding text — natural_width from the surrounding
+        // paragraphs.
+        let run = make("hello world hello world hello world\n\n---\n\nfollowing");
+        let paints = run.block_paints();
+        // Find the hr paint (border only, no background, small height).
+        let hr = paints
+            .iter()
+            .find(|p| p.border.is_some() && p.background.is_none())
+            .expect("expected hr paint");
+        let width = hr.outer_rect.width();
+        assert!(
+            width > 50.0,
+            "hr should span at least a paragraph's width; got {width}"
+        );
+        assert!(
+            width as f32 >= run.natural_width() as f32 - 5.0,
+            "hr should span ≥ natural width ({} vs {})",
+            width,
+            run.natural_width()
+        );
+    }
+
+    #[test]
+    fn horizontal_rule_reserves_vertical_space() {
+        // hr has 0 height but non-zero top/bottom margins from the
+        // sheet default. `above` and `below` should be separated by
+        // more space than a plain paragraph break.
+        let without_hr = make("above\n\nbelow");
+        let with_hr = make("above\n\n---\n\nbelow");
+        assert!(
+            with_hr.natural_height() > without_hr.natural_height(),
+            "hr's margins should add vertical space (without: {}, with: {})",
+            without_hr.natural_height(),
+            with_hr.natural_height()
         );
     }
 

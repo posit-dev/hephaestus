@@ -327,11 +327,18 @@ impl RichTextStyleSheet {
             "hr",
             StyleDelta {
                 border_color: Some(ThemeColor::Ink),
-                // Placeholder — task 8 replaces this with a dedicated
-                // hr line primitive. A uniform 1pt border on a zero-
-                // height block currently draws nothing (no ink rect),
-                // so this stays inert.
-                border_width: Some(Margin::all(Length::Abs(1.0))),
+                // Top-only border → a single horizontal line at the
+                // top of the (zero-height) rule block. The layout
+                // pass stretches the block's `shape_width_px` to the
+                // run's full content width post-hoc, so the line
+                // spans the full column even though the block has no
+                // shaped text.
+                border_width: Some(Margin::new(
+                    Length::Abs(1.0),
+                    Length::Abs(0.0),
+                    Length::Abs(0.0),
+                    Length::Abs(0.0),
+                )),
                 margin: Some(Margin::new(
                     Length::Rel(0.5),
                     Length::Abs(0.0),
