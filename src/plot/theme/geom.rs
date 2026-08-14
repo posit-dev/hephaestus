@@ -217,6 +217,12 @@ pub struct TextDefaults {
     /// channel is bound. Has no effect unless `text_stroke` resolves
     /// to a colour.
     pub text_linewidth_pt: f64,
+    /// Interpret each row's `"text"` value as marquee-flavoured
+    /// markdown (`**bold**`, `{.red x}`, headings, lists, blockquotes,
+    /// …) and shape as a [`RichTextRun`](crate::text::rich::RichTextRun)
+    /// when no `"markdown"` channel is bound. Off by default so
+    /// existing labels render unchanged.
+    pub markdown: bool,
 }
 
 impl Default for TextDefaults {
@@ -239,6 +245,7 @@ impl Default for TextDefaults {
             strikethrough: false,
             text_stroke: None,
             text_linewidth_pt: 1.0,
+            markdown: false,
         }
     }
 }

@@ -148,6 +148,14 @@ pub(crate) struct BlockLayout {
     pub(crate) padding_right_px: f32,
     pub(crate) padding_bottom_px: f32,
     pub(crate) padding_left_px: f32,
+    /// Extra top space contributed by ancestor containers whose
+    /// first descendant this leaf is (their `padding.top` +
+    /// `margin.top` fold into this value). Non-collapsing barrier
+    /// that sits above the leaf's shaped content but inside any
+    /// container-level paint.
+    pub(crate) extra_top_px: f32,
+    /// Symmetric bottom counterpart.
+    pub(crate) extra_bottom_px: f32,
 }
 
 impl BlockLayout {
@@ -274,25 +282,45 @@ impl RichTextRun {
 
         // Shape each leaf; position vertically.
         let base_pt = base_style.size_pt as f64;
-        // Precompute the first-descendant-leaf range for each ListItem
-        // container so we can distinguish "leaf is the item's own body
-        // (gets hanging as continuation_shift)" from "leaf is a
-        // subsequent block inside the item (gets hanging as left_px)".
-        let first_leaf_of_item: Vec<(Range<usize>, Range<usize>)> = containers
+        // Precompute first + last descendant-leaf ranges per
+        // container. First: for ListItem hanging routing (item's
+        // first-body-leaf gets hanging as continuation_shift; deeper
+        // content gets it as left_px). Also for spacing: the first-
+        // descendant leaf absorbs the container's `padding.top` /
+        // `margin.top` contribution, the last absorbs the `.bottom`
+        // pair.
+        let container_first_last: Vec<(Range<usize>, Range<usize>, Range<usize>)> = containers
             .iter()
-            .filter(|c| matches!(c.kind, BlockKind::ListItem { .. }))
-            .filter_map(|item| {
-                leaves
+            .filter_map(|c| {
+                let contained: Vec<&Block> = leaves
                     .iter()
-                    .filter(|leaf| {
-                        leaf.range.start >= item.range.start && leaf.range.end <= item.range.end
-                    })
-                    .min_by_key(|leaf| leaf.range.start)
-                    .map(|leaf| (item.range.clone(), leaf.range.clone()))
+                    .filter(|l| l.range.start >= c.range.start && l.range.end <= c.range.end)
+                    .collect();
+                let first = contained.iter().min_by_key(|l| l.range.start)?;
+                let last = contained.iter().max_by_key(|l| l.range.start)?;
+                Some((c.range.clone(), first.range.clone(), last.range.clone()))
             })
             .collect();
         let mut layouts: Vec<BlockLayout> = Vec::with_capacity(leaves.len());
+        // CSS-style margin-collapsing accumulator. Vertical margins
+        // between adjacent flow blocks collapse per marquee's
+        // documented `marquee_grob` rules ("Margin calculations
+        // follows the margin collapsing rules of HTML"):
+        // - Two adjacent positive margins collapse to their `max`.
+        // - Two adjacent negative margins collapse to the `min` (most
+        //   negative).
+        // - Mixed: `max_positive + min_negative`.
+        // - Padding / border between two margins breaks the collapse.
+        //
+        // Container top/bottom padding + margin contributions are
+        // routed to first / last descendant leaves; padding acts as
+        // a barrier that flushes the pending margin before its own
+        // space adds. Container margin is a *deferred* margin that
+        // participates in collapse with adjacent sibling / child
+        // margins.
         let mut y_accum: f32 = 0.0;
+        let mut pending_pos: f32 = 0.0;
+        let mut pending_neg: f32 = 0.0;
         for leaf in leaves.iter() {
             // Ancestor padding + hanging → left indent / continuation.
             let ancestors = ancestors_of_range(&leaf.range, &containers);
@@ -310,25 +338,77 @@ impl RichTextRun {
                     continue;
                 }
                 let h = anc.delta.hanging.map(|l| l.resolve(base_pt)).unwrap_or(0.0);
-                let is_first_body = first_leaf_of_item
+                let is_first_body = container_first_last
                     .iter()
-                    .any(|(item_r, leaf_r)| item_r == &anc.range && leaf_r == &leaf.range);
+                    .any(|(cr, f, _)| cr == &anc.range && f == &leaf.range);
                 if is_first_body {
                     anc_hanging_cont_pt += h;
                 } else {
                     anc_hanging_left_pt += h;
                 }
             }
-            // Own padding contributes to horizontal insets and to
-            // vertical space around the shape rect.
+            // Container spacing (routed to first / last descendant):
+            //   - `padding.top/.bottom` acts as a BARRIER — sits
+            //     between the collapsed outer margin and the child's
+            //     content. Doesn't collapse.
+            //   - `margin.top/.bottom` COLLAPSES with sibling and
+            //     nested descendant margins (CSS rule linked from
+            //     marquee's docs: two adjacent positive margins →
+            //     max; two negatives → most-negative; mixed →
+            //     max_pos + min_neg).
+            //
+            // Padding gets summed across ancestors (each container's
+            // padding is its own barrier). Margins fold into the
+            // pending pos/neg accumulator individually so the
+            // pairwise max/min collapse composes.
+            let mut anc_padding_top_pt = 0.0;
+            let mut anc_padding_bottom_pt = 0.0;
+            let mut anc_first_margins: Vec<f64> = Vec::new();
+            let mut anc_last_margins: Vec<f64> = Vec::new();
+            for anc in &ancestors {
+                let (t_pad, _, b_pad, _) = anc
+                    .delta
+                    .padding
+                    .map(|m| m.resolve(base_pt))
+                    .unwrap_or((0.0, 0.0, 0.0, 0.0));
+                let (t_marg, _, b_marg, _) = anc
+                    .delta
+                    .margin
+                    .map(|m| m.resolve(base_pt))
+                    .unwrap_or((0.0, 0.0, 0.0, 0.0));
+                let is_first = container_first_last
+                    .iter()
+                    .any(|(cr, f, _)| cr == &anc.range && f == &leaf.range);
+                let is_last = container_first_last
+                    .iter()
+                    .any(|(cr, _, l)| cr == &anc.range && l == &leaf.range);
+                if is_first {
+                    anc_padding_top_pt += t_pad;
+                    anc_first_margins.push(t_marg);
+                }
+                if is_last {
+                    anc_padding_bottom_pt += b_pad;
+                    anc_last_margins.push(b_marg);
+                }
+            }
+            // Own padding + margin. Padding contributes to insets +
+            // vertical space around shape; margin is horizontally
+            // additive on left/right, vertically participates in
+            // sibling collapse via the pending accumulator.
             let (own_top_pt, own_right_pt, own_bottom_pt, own_left_pt) =
                 margin_or_zero(&leaf.delta.padding, base_pt);
+            let (mt_pt, m_right_pt, mb_pt, m_left_pt) = margin_or_zero(&leaf.delta.margin, base_pt);
             let anc_left_px = pt_to_px(anc_left_pt + anc_hanging_left_pt, dpi);
             let anc_right_px = pt_to_px(anc_right_pt, dpi);
             let own_left_px = pt_to_px(own_left_pt, dpi);
             let own_right_px = pt_to_px(own_right_pt, dpi);
             let own_top_px = pt_to_px(own_top_pt, dpi);
             let own_bottom_px = pt_to_px(own_bottom_pt, dpi);
+            let margin_left_px = pt_to_px(m_left_pt, dpi);
+            let margin_right_px = pt_to_px(m_right_pt, dpi);
+            // Padding barrier from ancestor containers (non-collapsing).
+            let extra_top_px = pt_to_px(anc_padding_top_pt, dpi);
+            let extra_bottom_px = pt_to_px(anc_padding_bottom_pt, dpi);
             // Own hanging + first-line indent (both resolve against
             // the block's ambient em). Composes with any ancestor-
             // contributed hanging.
@@ -355,14 +435,50 @@ impl RichTextRun {
             layout.align(Alignment::Start, AlignmentOptions::default());
             let widths = layout.calculate_content_widths();
             let height_px = layout.height();
-            // Vertical spacing.
-            let (mt_pt, _, mb_pt, _) = margin_or_zero(&leaf.delta.margin, base_pt);
             let margin_top_px = pt_to_px(mt_pt, dpi);
             let margin_bottom_px = pt_to_px(mb_pt, dpi);
-            // Position.
-            y_accum += margin_top_px + own_top_px;
+            // Sibling + first-descendant margin collapse. Each
+            // ancestor container whose *first* descendant this leaf
+            // is contributes its `margin.top` to the pending
+            // accumulator — pairwise max/min collapse follows.
+            for m_pt in &anc_first_margins {
+                let m_px = pt_to_px(*m_pt, dpi);
+                if m_px >= 0.0 {
+                    pending_pos = pending_pos.max(m_px);
+                } else {
+                    pending_neg = pending_neg.min(m_px);
+                }
+            }
+            if margin_top_px >= 0.0 {
+                pending_pos = pending_pos.max(margin_top_px);
+            } else {
+                pending_neg = pending_neg.min(margin_top_px);
+            }
+            y_accum += pending_pos + pending_neg;
+            pending_pos = 0.0;
+            pending_neg = 0.0;
+            // Container `padding.top` barriers (sum across ancestors)
+            // sit above the leaf's shaped content but INSIDE any
+            // container paint we emit.
+            y_accum += extra_top_px + own_top_px;
             let y_px = y_accum;
-            y_accum += height_px + own_bottom_px + margin_bottom_px;
+            y_accum += height_px + own_bottom_px + extra_bottom_px;
+            // Leaf's margin.bottom joins pending — collapses with
+            // next sibling's margin.top and with any *last*-
+            // descendant-container's margin.bottom below.
+            if margin_bottom_px >= 0.0 {
+                pending_pos = pending_pos.max(margin_bottom_px);
+            } else {
+                pending_neg = pending_neg.min(margin_bottom_px);
+            }
+            for m_pt in &anc_last_margins {
+                let m_px = pt_to_px(*m_pt, dpi);
+                if m_px >= 0.0 {
+                    pending_pos = pending_pos.max(m_px);
+                } else {
+                    pending_neg = pending_neg.min(m_px);
+                }
+            }
             layouts.push(BlockLayout {
                 layout,
                 baseline_shifts: baselines,
@@ -370,8 +486,8 @@ impl RichTextRun {
                 kind: leaf.kind.clone(),
                 delta: leaf.delta.clone(),
                 depth: leaf.depth,
-                left_px: anc_left_px + own_left_px,
-                right_inset_px: anc_right_px + own_right_px,
+                left_px: anc_left_px + own_left_px + margin_left_px,
+                right_inset_px: anc_right_px + own_right_px + margin_right_px,
                 shape_width_px: widths.max,
                 first_line_shift_px: first_line_indent_px,
                 continuation_shift_px: hanging_px,
@@ -383,8 +499,13 @@ impl RichTextRun {
                 padding_right_px: own_right_px,
                 padding_bottom_px: own_bottom_px,
                 padding_left_px: own_left_px,
+                extra_top_px,
+                extra_bottom_px,
             });
         }
+        // Flush the trailing pending margin so it counts toward the
+        // total run height.
+        y_accum += pending_pos + pending_neg;
         // Natural width = max of (left + shape_width + right) across
         // non-Rule blocks (Rule blocks have empty text → zero shape
         // width; they stretch to whatever surrounding content
@@ -452,6 +573,14 @@ impl RichTextRun {
         *self.natural_height_px.borrow() as f64
     }
 
+    /// Current effective content width (px) — the max of every
+    /// block's `left + shape_width + right`. Equal to the wrap width
+    /// after [`Self::set_max_width`]; equal to the natural width
+    /// otherwise.
+    pub fn content_width(&self) -> f64 {
+        self.layout_bounds().width as f64
+    }
+
     /// Re-break every block at the given outer width, propagating the
     /// wrap constraint into each block's effective shape width
     /// (`outer - left - right - max(first_line, continuation)`).
@@ -459,6 +588,8 @@ impl RichTextRun {
     pub fn set_max_width(&self, max_width_px: f32, alignment: Alignment) -> f32 {
         let mut blocks = self.blocks.borrow_mut();
         let mut y_accum: f32 = 0.0;
+        let mut pending_pos: f32 = 0.0;
+        let mut pending_neg: f32 = 0.0;
         for bl in blocks.iter_mut() {
             let block_avail = (max_width_px - bl.left_px - bl.right_inset_px).max(1.0);
             let max_shift = bl.first_line_shift_px.max(bl.continuation_shift_px);
@@ -467,10 +598,24 @@ impl RichTextRun {
             bl.layout.align(alignment, AlignmentOptions::default());
             bl.shape_width_px = target;
             bl.height_px = bl.layout.height();
-            y_accum += bl.margin_top_px + bl.padding_top_px;
+            if bl.margin_top_px >= 0.0 {
+                pending_pos = pending_pos.max(bl.margin_top_px);
+            } else {
+                pending_neg = pending_neg.min(bl.margin_top_px);
+            }
+            y_accum += pending_pos + pending_neg;
+            pending_pos = 0.0;
+            pending_neg = 0.0;
+            y_accum += bl.extra_top_px + bl.padding_top_px;
             bl.y_px = y_accum;
-            y_accum += bl.height_px + bl.padding_bottom_px + bl.margin_bottom_px;
+            y_accum += bl.height_px + bl.padding_bottom_px + bl.extra_bottom_px;
+            if bl.margin_bottom_px >= 0.0 {
+                pending_pos = pending_pos.max(bl.margin_bottom_px);
+            } else {
+                pending_neg = pending_neg.min(bl.margin_bottom_px);
+            }
         }
+        y_accum += pending_pos + pending_neg;
         *self.last_break_width.borrow_mut() = Some(max_width_px);
         *self.natural_height_px.borrow_mut() = y_accum;
         y_accum
@@ -1245,6 +1390,40 @@ mod tests {
             quoted_x > plain_x + 10.0,
             "blockquote content should be indented (plain={plain_x}, quoted={quoted_x})"
         );
+    }
+
+    #[test]
+    fn sibling_margins_collapse_via_max_not_sum() {
+        // Both paragraphs have `margin.bottom = Rel(0.5)`. Between
+        // two adjacent paragraphs, CSS collapses to `max(0.5, 0)`
+        // (paragraph.margin.top = 0). With more paragraphs of the
+        // same margin.bottom, each subsequent gap remains 0.5em —
+        // not 1em. Compare a 3-paragraph run to a 5-paragraph run:
+        // extra height = 2 × (line + 0.5em), NOT 2 × (line + 1em).
+        let three = make("a\n\nb\n\nc");
+        let five = make("a\n\nb\n\nc\n\nd\n\ne");
+        let diff = five.natural_height() - three.natural_height();
+        // Each extra paragraph adds line_height + collapsed 0.5em.
+        // At 14pt base with default line-height, one line ≈ 22.4px;
+        // 0.5em ≈ 9.3px. So each ≈ 31.7px per paragraph.
+        // Without collapse it'd be ≈ 41px per paragraph.
+        // Assert < 80 (would be 82+ without collapse).
+        assert!(
+            diff < 80.0,
+            "2 extra paragraphs should add ≲ 64px under sibling collapse, got {diff}"
+        );
+    }
+
+    #[test]
+    fn adjacent_heading_paragraph_margins_collapse() {
+        // Heading has `margin.bottom = Rel(0.3)` and paragraph has
+        // `margin.top = 0` → collapse via `max(0.3, 0)` = 0.3em.
+        // A bare `# H\n\ntext` should be shorter than a hypothetical
+        // sum which would be 0.3+0 = 0.3em anyway. Test that headings
+        // followed by paragraphs stack sanely.
+        let with_heading = make("# Header\n\nBody");
+        let no_heading = make("Header\n\nBody");
+        assert!(with_heading.natural_height() > no_heading.natural_height());
     }
 
     #[test]

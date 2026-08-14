@@ -288,6 +288,44 @@ mod tests {
     }
 
     #[test]
+    fn container_paint_excludes_own_margin_includes_padding() {
+        // A custom container with both padding and margin — the
+        // paint rect should extend by `padding` beyond the child
+        // but the container's `margin` should sit outside the paint
+        // (CSS: bg / border paint on the border-box, not the
+        // margin-box).
+        let mut sheet = RichTextStyleSheet::empty();
+        sheet.set(
+            "block_quote",
+            StyleDelta {
+                padding: Some(Margin::all(Length::Abs(10.0))),
+                margin: Some(Margin::all(Length::Abs(20.0))),
+                background: Some(ThemeColor::Fixed(Color::from_rgba8(200, 200, 200, 255))),
+                ..StyleDelta::empty()
+            },
+        );
+        let run = shape(&sheet, "> hello world");
+        let paints = run.block_paints();
+        let bq = paints
+            .iter()
+            .find(|p| p.background.is_some())
+            .expect("expected bordered/filled blockquote paint");
+        // 10pt at 96dpi = 13.33px on every side.
+        // Paint should be inflated by ~13.33 relative to inner text,
+        // but the run's total height should include ANOTHER 20pt on
+        // each of top / bottom (margin) OUTSIDE the paint.
+        let paint_h = bq.outer_rect.height();
+        let total_h = run.natural_height();
+        // total_h - paint_h ≈ 2 * 20pt = 26.67pt at 96dpi.
+        // (Non-collapsing since blockquote has padding.top+bottom > 0.)
+        let expected_margin_gap = 2.0 * 20.0 * 96.0 / 72.0;
+        assert!(
+            (total_h - paint_h) >= expected_margin_gap * 0.9,
+            "run should be taller than paint by ~2×margin (paint={paint_h}, total={total_h}, expected gap ≈ {expected_margin_gap})",
+        );
+    }
+
+    #[test]
     fn blockquote_paint_wraps_its_content() {
         // Default block_quote entry has a border (Accent alpha) — its
         // paint should exist and its outer rect should be wider than
