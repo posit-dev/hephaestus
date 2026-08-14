@@ -71,8 +71,16 @@ pub struct StyleDelta {
     pub background: Option<ThemeColor>,
     /// Block border colour.
     pub border_color: Option<ThemeColor>,
-    /// Block border thickness (pt).
-    pub border_width: Option<Length>,
+    /// Block border thickness per side (top / right / bottom / left,
+    /// in pt). Set one side to a non-zero value and the rest to zero
+    /// for a single-edge bar (e.g. a blockquote's left rule). Setting
+    /// all four to the same value draws a uniform rectangle border,
+    /// which combines cleanly with `border_radius`. Mixed per-side
+    /// widths draw four independent segments with square corners
+    /// (mixing per-side widths with `border_radius` yields undefined
+    /// visuals — the four segments still emit but the radius is
+    /// ignored on the mixed path).
+    pub border_width: Option<Margin>,
     /// Block border corner radius (pt).
     pub border_radius: Option<Length>,
     /// Per-nesting-depth bullet markers for list items. `None`
@@ -264,7 +272,13 @@ impl RichTextStyleSheet {
                     Length::Rel(1.0),
                 )),
                 border_color: Some(ThemeColor::alpha(ThemeColor::Accent, 0.4)),
-                border_width: Some(Length::Abs(3.0)),
+                // Left-edge bar only — 3pt on the left, zero elsewhere.
+                border_width: Some(Margin::new(
+                    Length::Abs(0.0),
+                    Length::Abs(0.0),
+                    Length::Abs(0.0),
+                    Length::Abs(3.0),
+                )),
                 margin: Some(Margin::new(
                     Length::Rel(0.5),
                     Length::Abs(0.0),
@@ -313,7 +327,11 @@ impl RichTextStyleSheet {
             "hr",
             StyleDelta {
                 border_color: Some(ThemeColor::Ink),
-                border_width: Some(Length::Abs(1.0)),
+                // Placeholder — task 8 replaces this with a dedicated
+                // hr line primitive. A uniform 1pt border on a zero-
+                // height block currently draws nothing (no ink rect),
+                // so this stays inert.
+                border_width: Some(Margin::all(Length::Abs(1.0))),
                 margin: Some(Margin::new(
                     Length::Rel(0.5),
                     Length::Abs(0.0),

@@ -41,13 +41,33 @@ pub struct BlockPaint {
     pub corner_radius: f32,
 }
 
-/// Border descriptor on a [`BlockPaint`].
+/// Border descriptor on a [`BlockPaint`]. Per-side widths let a
+/// blockquote express its left-edge bar as `[0, 0, 0, 3]` rather
+/// than a full rectangular stroke.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BlockBorder {
-    /// Resolved stroke colour.
+    /// Resolved stroke colour (single colour for all sides in v1).
     pub color: Color,
-    /// Stroke width in pixels.
-    pub width_px: f32,
+    /// Per-side widths in pixels: `[top, right, bottom, left]`. A
+    /// side with width `0.0` is skipped at draw time.
+    pub widths_px: [f32; 4],
+}
+
+impl BlockBorder {
+    /// True when every side has the same width — the draw pass can
+    /// then emit a single rectangular stroke (which cooperates with
+    /// `corner_radius`) instead of four independent line segments.
+    pub fn is_uniform(&self) -> bool {
+        let w0 = self.widths_px[0];
+        self.widths_px.iter().all(|&w| (w - w0).abs() < 1e-3)
+    }
+
+    /// Max width across the four sides — the value to use for a
+    /// uniform stroke (or to gate paint emission when everything is
+    /// zero).
+    pub fn max_width(&self) -> f32 {
+        self.widths_px.iter().cloned().fold(0.0_f32, f32::max)
+    }
 }
 
 /// Walk the run's leaf layouts + non-leaf containers and produce one
@@ -174,19 +194,25 @@ fn has_paint(
 
 fn border_for(
     color: &Option<crate::plot::theme::ThemeColor>,
-    width: Option<crate::plot::theme::Length>,
+    width: Option<crate::plot::theme::Margin>,
     palette: &Palette,
     base_pt: f64,
     dpi: f64,
 ) -> Option<BlockBorder> {
     let (c, w) = (color.as_ref()?, width?);
-    let width_px = (w.resolve(base_pt) * dpi / 72.0) as f32;
-    if width_px <= 0.0 {
+    let (t, r, b, l) = w.resolve(base_pt);
+    let widths_px = [
+        (t * dpi / 72.0) as f32,
+        (r * dpi / 72.0) as f32,
+        (b * dpi / 72.0) as f32,
+        (l * dpi / 72.0) as f32,
+    ];
+    if widths_px.iter().all(|&w| w <= 0.0) {
         return None;
     }
     Some(BlockBorder {
         color: c.resolve(palette),
-        width_px,
+        widths_px,
     })
 }
 
@@ -279,7 +305,7 @@ mod tests {
             "paragraph",
             StyleDelta {
                 border_color: Some(ThemeColor::Ink),
-                border_width: Some(Length::Abs(1.0)),
+                border_width: Some(Margin::all(Length::Abs(1.0))),
                 ..StyleDelta::empty()
             },
         );
@@ -297,12 +323,45 @@ mod tests {
             "paragraph",
             StyleDelta {
                 border_color: Some(ThemeColor::Ink),
-                border_width: Some(Length::Abs(0.0)),
+                border_width: Some(Margin::all(Length::Abs(0.0))),
                 ..StyleDelta::empty()
             },
         );
         let run = shape(&sheet, "content");
         assert!(run.block_paints().is_empty());
+    }
+
+    #[test]
+    fn left_only_border_produces_left_edge_paint() {
+        // Only the left side has non-zero width — verify the paint's
+        // BlockBorder records widths_px with the left slot populated
+        // and the others at zero.
+        let mut sheet = RichTextStyleSheet::empty();
+        sheet.set(
+            "paragraph",
+            StyleDelta {
+                border_color: Some(ThemeColor::Ink),
+                border_width: Some(Margin::new(
+                    Length::Abs(0.0),
+                    Length::Abs(0.0),
+                    Length::Abs(0.0),
+                    Length::Abs(4.0),
+                )),
+                ..StyleDelta::empty()
+            },
+        );
+        let run = shape(&sheet, "content");
+        let paints = run.block_paints();
+        assert_eq!(paints.len(), 1);
+        let border = paints[0].border.expect("expected a border");
+        assert!(
+            !border.is_uniform(),
+            "border should be per-side, not uniform"
+        );
+        assert!(border.widths_px[0].abs() < 0.1, "top should be 0");
+        assert!(border.widths_px[1].abs() < 0.1, "right should be 0");
+        assert!(border.widths_px[2].abs() < 0.1, "bottom should be 0");
+        assert!(border.widths_px[3] > 3.0, "left should be ~4pt in px");
     }
 
     #[test]

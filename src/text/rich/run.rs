@@ -938,15 +938,43 @@ fn emit_block_paint<S: SceneBuilder + ?Sized>(
         );
     }
     if let Some(border) = paint.border {
-        let stroke = crate::stroke::Stroke::new(border.width_px as f64);
-        scene.stroke(
-            &stroke,
-            outer,
-            &Brush::Solid(border.color),
-            None,
-            &path,
-            PickId::Skip,
-        );
+        if border.is_uniform() {
+            let w = border.widths_px[0];
+            if w > 0.0 {
+                let stroke = crate::stroke::Stroke::new(w as f64);
+                scene.stroke(
+                    &stroke,
+                    outer,
+                    &Brush::Solid(border.color),
+                    None,
+                    &path,
+                    PickId::Skip,
+                );
+            }
+        } else {
+            // Per-side widths — emit each side as its own segment.
+            // `corner_radius` is intentionally ignored on the mixed
+            // path (square corners; documented on
+            // `StyleDelta::border_width`).
+            let brush = Brush::Solid(border.color);
+            let [wt, wr, wb, wl] = border.widths_px;
+            let (x0, y0, x1, y1) = (rect.x0, rect.y0, rect.x1, rect.y1);
+            let emit = |scene: &mut S, w: f32, a: (f64, f64), b: (f64, f64)| {
+                if w <= 0.0 {
+                    return;
+                }
+                let seg = crate::primitives::segment(
+                    kurbo::Point::new(a.0, a.1),
+                    kurbo::Point::new(b.0, b.1),
+                );
+                let stroke = crate::stroke::Stroke::new(w as f64);
+                scene.stroke(&stroke, outer, &brush, None, &seg, PickId::Skip);
+            };
+            emit(scene, wt, (x0, y0), (x1, y0));
+            emit(scene, wr, (x1, y0), (x1, y1));
+            emit(scene, wb, (x0, y1), (x1, y1));
+            emit(scene, wl, (x0, y0), (x0, y1));
+        }
     }
 }
 
@@ -1183,6 +1211,78 @@ mod tests {
             quoted_x > plain_x + 10.0,
             "blockquote content should be indented (plain={plain_x}, quoted={quoted_x})"
         );
+    }
+
+    #[test]
+    fn blockquote_emits_single_left_edge_stroke() {
+        // The default `block_quote` sheet entry sets `border_width`
+        // = Margin { left: 3pt, others: 0 }. The paint pass must
+        // emit exactly ONE stroke op (for the left edge) — not a
+        // full four-sided box.
+        let run = make("> hello world");
+        let mut scene = RecordingScene::default();
+        draw_rich_text(
+            &mut scene,
+            &run,
+            0.0,
+            0.0,
+            RichAnchor::top_left(),
+            Affine::IDENTITY,
+            PickId::Skip,
+        );
+        let strokes: Vec<_> = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .collect();
+        assert_eq!(
+            strokes.len(),
+            1,
+            "blockquote should emit exactly one stroke (left edge only), got {}",
+            strokes.len()
+        );
+    }
+
+    #[test]
+    fn uniform_border_emits_single_boxed_stroke() {
+        // A uniform four-sided border should collapse to a single
+        // rectangular stroke — no fan of segments.
+        let mut sheet = RichTextStyleSheet::empty();
+        sheet.set(
+            "paragraph",
+            crate::text::rich::style::StyleDelta {
+                border_color: Some(crate::plot::theme::ThemeColor::Ink),
+                border_width: Some(crate::plot::theme::Margin::all(
+                    crate::plot::theme::Length::Abs(1.0),
+                )),
+                ..crate::text::rich::style::StyleDelta::empty()
+            },
+        );
+        let run = RichTextRun::new(
+            "boxed",
+            &base_style(),
+            Color::from_rgba8(0, 0, 0, 255),
+            &sheet,
+            &palette(),
+            96.0,
+        )
+        .unwrap();
+        let mut scene = RecordingScene::default();
+        draw_rich_text(
+            &mut scene,
+            &run,
+            0.0,
+            0.0,
+            RichAnchor::top_left(),
+            Affine::IDENTITY,
+            PickId::Skip,
+        );
+        let strokes = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .count();
+        assert_eq!(strokes, 1, "uniform border → one rectangular stroke");
     }
 
     #[test]
