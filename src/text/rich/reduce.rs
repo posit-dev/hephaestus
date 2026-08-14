@@ -143,6 +143,8 @@ pub fn reduce(events: &[RichEvent], sheet: &RichTextStyleSheet) -> BuiltRuns {
         baseline_stack: Vec::new(),
         block_stack: Vec::new(),
         list_stack: Vec::new(),
+        pending_item_marker: None,
+        synthetic_paragraph_open: false,
     };
     for e in events {
         r.consume(e, sheet);
@@ -168,6 +170,24 @@ struct Reducer {
     /// Stack of active lists — records ordered/start plus the running
     /// item ordinal so nested lists number independently.
     list_stack: Vec<ListFrame>,
+    /// Marker text queued at `ItemStart` waiting to be pushed into
+    /// the item's body paragraph. Cleared once the body opens.
+    ///
+    /// **Tight vs loose detection.** CommonMark distinguishes tight
+    /// lists (items with no blank lines) from loose lists (any blank
+    /// line inside an item). pulldown-cmark surfaces the distinction:
+    /// loose items get an explicit `ParagraphStart` wrapping their
+    /// content; tight items get bare `Text`. We wait to see the first
+    /// content-carrying event after `ItemStart` — a `ParagraphStart`
+    /// means loose (body styled as `paragraph`, with its
+    /// `margin.bottom`), anything else means tight (body styled as
+    /// `list_item_body`, no default margin).
+    pending_item_marker: Option<String>,
+    /// True while a synthetic Paragraph body (opened for a tight
+    /// list item by [`Reducer::ensure_item_body_open`]) sits on the
+    /// block stack. Cleared when a nested container start or
+    /// `ItemEnd` closes it.
+    synthetic_paragraph_open: bool,
 }
 
 /// One frame on the block stack.
@@ -208,18 +228,34 @@ impl Reducer {
     fn consume(&mut self, event: &RichEvent, sheet: &RichTextStyleSheet) {
         match event {
             // ── Block boundaries ──
-            RichEvent::ParagraphStart => self.open_block(BlockKind::Paragraph, sheet, "paragraph"),
+            RichEvent::ParagraphStart => {
+                // If we're inside a list item that hasn't opened its
+                // body paragraph yet, pulldown-cmark just told us
+                // the item is *loose* (CommonMark: only loose items
+                // wrap their content in an explicit paragraph). Use
+                // the `paragraph` class so this paragraph picks up
+                // paragraph's default margin.bottom.
+                if let Some(marker) = self.pending_item_marker.take() {
+                    self.open_block(BlockKind::Paragraph, sheet, "paragraph");
+                    self.push_text(&marker);
+                    return;
+                }
+                self.open_block(BlockKind::Paragraph, sheet, "paragraph");
+            }
             RichEvent::ParagraphEnd => self.close_block(),
             RichEvent::HeadingStart { level } => {
+                self.commit_pending_item_body(sheet, true);
                 let key = heading_key(*level);
                 self.open_block(BlockKind::Heading(*level), sheet, key);
             }
             RichEvent::HeadingEnd { .. } => self.close_block(),
             RichEvent::BlockQuoteStart => {
-                self.open_block(BlockKind::BlockQuote, sheet, "block_quote")
+                self.commit_pending_item_body(sheet, true);
+                self.open_block(BlockKind::BlockQuote, sheet, "block_quote");
             }
             RichEvent::BlockQuoteEnd => self.close_block(),
             RichEvent::ListStart { ordered, start } => {
+                self.commit_pending_item_body(sheet, true);
                 self.list_stack.push(ListFrame {
                     next_ordinal: *start,
                     ordered: *ordered,
@@ -247,42 +283,34 @@ impl Reducer {
                         (n, f.ordered)
                     })
                     .unwrap_or((1, false));
-                // 0-based nesting depth of the current list — the
-                // enclosing `ListStart` already pushed its frame, so
-                // `list_stack.len() - 1` is the depth. Used to index
-                // the marker vector for unordered lists.
                 let list_depth = self.list_stack.len().saturating_sub(1);
+                // Open the ListItem as a *container*. Its body
+                // paragraph opens later, only once we've seen enough
+                // events to know whether the item is tight (bare
+                // Text → `list_item_body` class, empty delta) or
+                // loose (`ParagraphStart` from pulldown →
+                // `paragraph` class with margin). This matches
+                // CommonMark's tight/loose semantics without pre-
+                // committing to a style.
                 self.open_block(BlockKind::ListItem { ordinal }, sheet, "list_item");
-                // Prepend the item marker as literal text, styled the
-                // same as the item body (the `list_item` delta is on
-                // top of the inline stack at this point). Ordered
-                // lists print `n. `; unordered print the sheet's
-                // `bullet[depth % len]` + a space (defaults to `•` if
-                // the sheet has no entry or the vector is empty). An
-                // explicit empty-string entry at this depth suppresses
-                // the marker.
-                let marker = if ordered {
-                    Some(format!("{ordinal}. "))
-                } else {
-                    match sheet.get("list_item").and_then(|d| d.bullet.as_ref()) {
-                        Some(v) if v.is_empty() => None,
-                        Some(v) => {
-                            let s = &v[list_depth % v.len()];
-                            if s.is_empty() {
-                                None
-                            } else {
-                                Some(format!("{s} "))
-                            }
-                        }
-                        None => Some("• ".to_string()),
-                    }
-                };
-                if let Some(m) = marker {
-                    self.push_text(&m);
+                self.pending_item_marker = compute_marker(sheet, ordered, ordinal, list_depth);
+                // An item with no marker still needs a body paragraph
+                // to hold its (possibly empty) content — a plain
+                // empty string is stored so downstream `push_text`
+                // is a no-op but body opening still fires.
+                if self.pending_item_marker.is_none() {
+                    self.pending_item_marker = Some(String::new());
                 }
             }
-            RichEvent::ItemEnd => self.close_block(),
+            RichEvent::ItemEnd => {
+                // Empty item — no content-carrying event ever fired,
+                // so commit a synthetic body now to preserve the
+                // marker (may be empty) and give the item a leaf.
+                self.commit_pending_item_body(sheet, true);
+                self.close_block();
+            }
             RichEvent::CodeBlockStart { lang } => {
+                self.commit_pending_item_body(sheet, true);
                 self.open_block(
                     BlockKind::CodeBlock { lang: lang.clone() },
                     sheet,
@@ -291,9 +319,7 @@ impl Reducer {
             }
             RichEvent::CodeBlockEnd => self.close_block(),
             RichEvent::Rule => {
-                // A rule has no content, so open + immediately close
-                // at the same offset. The layout pass sees a zero-
-                // length block and draws the line.
+                self.commit_pending_item_body(sheet, true);
                 let start = self.text.len();
                 let delta = self
                     .lookup_class("hr", sheet)
@@ -304,12 +330,10 @@ impl Reducer {
                     depth: self.container_depth(),
                     delta,
                 });
-                // Insert a paragraph break so the surrounding text
-                // laid out by parley doesn't run its lines through
-                // the rule's vertical space.
                 self.push_paragraph_break();
             }
             RichEvent::DivStart { class } => {
+                self.commit_pending_item_body(sheet, true);
                 self.open_block(
                     BlockKind::Div {
                         class: class.clone(),
@@ -349,19 +373,68 @@ impl Reducer {
             RichEvent::SpanEnd => self.pop_inline(),
 
             // ── Leaves ──
-            RichEvent::Text(t) => self.push_text(t),
+            RichEvent::Text(t) => {
+                self.ensure_item_body_open(sheet);
+                self.push_text(t);
+            }
             RichEvent::Code(t) => {
+                self.ensure_item_body_open(sheet);
                 // Inline code = a span styled by the `code` selector.
                 self.push_inline("code", sheet);
                 self.push_text(t);
                 self.pop_inline();
             }
             RichEvent::InlineMath(t) | RichEvent::DisplayMath(t) => {
+                self.ensure_item_body_open(sheet);
                 // v1 renders math as literal text — no shaper yet.
                 self.push_text(t);
             }
-            RichEvent::SoftBreak => self.push_text(" "),
-            RichEvent::HardBreak => self.push_text("\n"),
+            RichEvent::SoftBreak => {
+                self.ensure_item_body_open(sheet);
+                self.push_text(" ");
+            }
+            RichEvent::HardBreak => {
+                self.ensure_item_body_open(sheet);
+                self.push_text("\n");
+            }
+        }
+    }
+
+    /// Open a tight-item body paragraph if we have a pending item
+    /// marker but no body has opened yet. Called by every content-
+    /// carrying leaf event — the *first* such event after an
+    /// `ItemStart` decides "this item is tight" and creates the
+    /// `list_item_body` paragraph on the fly.
+    fn ensure_item_body_open(&mut self, sheet: &RichTextStyleSheet) {
+        if let Some(marker) = self.pending_item_marker.take() {
+            self.open_block(BlockKind::Paragraph, sheet, "list_item_body");
+            self.synthetic_paragraph_open = true;
+            if !marker.is_empty() {
+                self.push_text(&marker);
+            }
+        }
+    }
+
+    /// Close whatever body-in-progress the current list item has
+    /// open. If a marker was queued but never got a chance to open
+    /// a body (the item was empty or its first content is a nested
+    /// container), synthesize a marker-only paragraph so the marker
+    /// still renders. If a synthetic body is already open, close it.
+    /// No-op when neither state applies.
+    fn commit_pending_item_body(&mut self, sheet: &RichTextStyleSheet, close_synthetic: bool) {
+        if let Some(marker) = self.pending_item_marker.take() {
+            // Marker-only paragraph — the item had no direct text
+            // before the next block boundary. Style as tight
+            // (`list_item_body`) since there's no content to justify
+            // a loose paragraph's margin.
+            self.open_block(BlockKind::Paragraph, sheet, "list_item_body");
+            if !marker.is_empty() {
+                self.push_text(&marker);
+            }
+            self.close_block();
+        } else if close_synthetic && self.synthetic_paragraph_open {
+            self.close_block();
+            self.synthetic_paragraph_open = false;
         }
     }
 
@@ -553,6 +626,33 @@ impl Reducer {
             baseline_shifts: self.baseline_shifts,
             blocks: self.blocks,
         }
+    }
+}
+
+/// Compute the marker text for a list item at the given ordinal +
+/// nesting depth. `None` when the sheet's `list_item.bullet` vector
+/// is empty (user opts out of markers) or when the depth's bullet is
+/// an empty string.
+fn compute_marker(
+    sheet: &RichTextStyleSheet,
+    ordered: bool,
+    ordinal: u64,
+    list_depth: usize,
+) -> Option<String> {
+    if ordered {
+        return Some(format!("{ordinal}. "));
+    }
+    match sheet.get("list_item").and_then(|d| d.bullet.as_ref()) {
+        Some(v) if v.is_empty() => None,
+        Some(v) => {
+            let s = &v[list_depth % v.len()];
+            if s.is_empty() {
+                None
+            } else {
+                Some(format!("{s} "))
+            }
+        }
+        None => Some("• ".to_string()),
     }
 }
 
@@ -1002,6 +1102,81 @@ mod tests {
         assert!(&r.text[items[0].range.clone()].starts_with("• c")); // depth 2 → cycles to `•`
         assert!(&r.text[items[1].range.clone()].starts_with("◦ b")); // depth 1 → `◦`
         assert!(&r.text[items[2].range.clone()].starts_with("• a")); // depth 0 → `•`
+    }
+
+    #[test]
+    fn tight_list_items_use_list_item_body_class() {
+        // A tight list — CommonMark: no blank lines between items,
+        // no explicit paragraphs in pulldown's event stream. Body
+        // paragraphs open with the `list_item_body` class (empty
+        // delta) rather than `paragraph` (which carries margin.bottom).
+        let mut sheet = RichTextStyleSheet::new();
+        // Use a distinct margin on `list_item_body` so we can detect
+        // it in the paragraph's delta.
+        sheet.set(
+            "list_item_body",
+            StyleDelta {
+                margin: Some(crate::plot::theme::Margin::new(
+                    Length::Abs(0.0),
+                    Length::Abs(0.0),
+                    Length::Abs(1.0),
+                    Length::Abs(0.0),
+                )),
+                ..StyleDelta::empty()
+            },
+        );
+        let events = parse("- a\n- b").unwrap();
+        let r = reduce(&events, &sheet);
+        // Both item bodies should carry the `list_item_body` margin,
+        // NOT the `paragraph` margin (0.5rel).
+        let bodies: Vec<&Block> = r
+            .blocks
+            .iter()
+            .filter(|b| matches!(b.kind, BlockKind::Paragraph))
+            .collect();
+        assert!(bodies.len() >= 2, "expected two body paragraphs");
+        for body in bodies {
+            let expected = crate::plot::theme::Margin::new(
+                Length::Abs(0.0),
+                Length::Abs(0.0),
+                Length::Abs(1.0),
+                Length::Abs(0.0),
+            );
+            assert_eq!(
+                body.delta.margin,
+                Some(expected),
+                "tight body should carry list_item_body margin, got {:?}",
+                body.delta.margin
+            );
+        }
+    }
+
+    #[test]
+    fn loose_list_items_use_paragraph_class() {
+        // Loose list — blank line between items. CommonMark forces
+        // pulldown to wrap the items' content in Paragraph events.
+        // Body paragraphs open with the `paragraph` class (with
+        // margin.bottom = Rel(0.5)) rather than `list_item_body`.
+        let sheet = RichTextStyleSheet::new();
+        let events = parse("- a\n\n- b").unwrap();
+        let r = reduce(&events, &sheet);
+        let bodies: Vec<&Block> = r
+            .blocks
+            .iter()
+            .filter(|b| matches!(b.kind, BlockKind::Paragraph))
+            .collect();
+        assert!(bodies.len() >= 2, "expected two body paragraphs");
+        for body in bodies {
+            // Paragraph's default margin has Rel(0.5) bottom.
+            match body.delta.margin {
+                Some(m) => assert!(
+                    matches!(m.bottom, Length::Rel(v) if v > 0.0),
+                    "loose body should have paragraph's margin.bottom, got {:?}",
+                    m.bottom
+                ),
+                None => panic!("loose body should have a margin"),
+            }
+        }
     }
 
     #[test]

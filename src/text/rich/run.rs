@@ -1,29 +1,57 @@
-//! Shape a markdown source into a parley `Layout` with per-range
-//! styles, and draw the result through `SceneBuilder`.
+//! Shape marquee-flavoured markdown into a stack of per-block parley
+//! layouts and draw them through `SceneBuilder`.
 //!
-//! [`RichTextRun::new`] runs the full pipeline: source → parser →
-//! reducer → parley shaping, applying each [`InlineRun`]'s
-//! [`StyleDelta`] via `RangedBuilder::push(prop, range)` on top of
-//! the base [`TextStyle`]. Per-range colours land in parley's
-//! `Style<B>::brush` field; [`draw_rich_text`] reads them back on the
-//! way out.
+//! **One parley layout per top-level leaf.** Paragraph, heading,
+//! list-item, and code-block blocks each shape as their own
+//! `parley::Layout<RichBrush>` at their effective content width —
+//! the outer max width minus any ancestor container `padding.left` /
+//! `padding.right` (blockquote / div) minus this block's own
+//! hanging or first-line indent. Blocks stack vertically ourselves:
+//! the layout pass accumulates y through `margin_top`, the block's
+//! own `padding.top`, its height, its `padding.bottom`, and
+//! `margin_bottom`.
 //!
-//! Baseline shifts (from `sup` / `sub` and custom baseline-em spans)
-//! are held in a parallel [`Vec<BaselineRun>`] because parley has no
-//! baseline-shift `StyleProperty`. At draw time [`draw_rich_text`]
-//! offsets each glyph's `y` by the shift matching its cluster's byte
-//! range.
+//! **Font-aware indents.** Every indent / padding / margin value
+//! lives in pt (`Length::Rel` / `Abs`), resolved against
+//! `base_style.size_pt` and converted to px through `dpi`. Nothing is
+//! implemented via whitespace injection — indents are true pixel
+//! offsets applied at position / draw time.
 //!
-//! Block-level backgrounds and borders (code_block fills, custom
-//! `.callout` boxes, blockquote borders) are computed by
-//! [`crate::text::rich::block::compute_block_paints`] and emitted by
-//! [`draw_rich_text`] before the glyph runs so the text sits on top.
-//! See `block.rs` for what the pass does and doesn't cover — bullets,
-//! blockquote left-edge bars, and hr lines are follow-up tasks.
-//! Paragraph breaks land as `\n\n` in the source we hand to parley,
-//! so multi-paragraph markdown line-breaks correctly.
+//! **Hanging.** A list item with `hanging = 1.5em` shapes at
+//! `content_width - 1.5em` and its continuation lines get shifted
+//! right by 1.5em at draw time. The first-line marker (which the
+//! reducer prepends) sits at the left, matching a classic hanging
+//! indent.
+//!
+//! **First-line indent.** A paragraph with `indent = 2em` shapes at
+//! `content_width - 2em` and its first-line glyphs shift right by
+//! 2em at draw time. The first line's effective usable width is
+//! reduced by 2em — a small compromise for parley's single
+//! shape-width limitation.
+//!
+//! **Nested containers.** A leaf inside a blockquote gets the
+//! blockquote's `padding.left` added to its own left indent. Nested
+//! blockquotes stack additively.
+//!
+//! **List items are containers.** The reducer emits every `ListItem`
+//! as a container wrapping a synthetic Paragraph leaf that holds the
+//! item's own text (bullet marker + body). Nested lists inside an
+//! item decompose into their own paragraph leaves. Each such nested
+//! leaf's ancestor chain includes the outer item, so the outer's
+//! `hanging` contributes to the nested leaf's `left_px` — the
+//! nested bullet sits at exactly the outer's continuation position.
+//! An item's own body ("first descendant leaf" of the item container)
+//! instead absorbs the item's hanging as its `continuation_shift`,
+//! giving the classic outdent effect where the bullet sits at the
+//! outdent and wrapped body lines sit under the body.
+//!
+//! **Baseline shifts** (`sup` / `sub`) live in a parallel
+//! `Vec<BaselineRun>` per block layout (parley has no baseline-shift
+//! `StyleProperty`). At draw time each parley run's shift is applied
+//! per-run based on its byte range within the block-local text.
 
 use std::cell::RefCell;
+use std::ops::Range;
 
 use parley::{
     Alignment, AlignmentOptions, FontFamily, FontFamilyName, FontStyle, FontWeight, GenericFamily,
@@ -33,184 +61,145 @@ use parley::{
 use super::anchor::{LayoutBounds, RichAnchor};
 use super::block::{compute_block_paints, BlockPaint};
 use super::parser::{parse, ParseError};
-use super::reduce::{reduce, BaselineRun, Block, BuiltRuns, InlineRun};
+use super::reduce::{reduce, BaselineRun, Block, BlockKind, BuiltRuns, InlineRun};
 use super::style::{RichTextStyleSheet, StyleDelta};
 use crate::brush::Brush;
 use crate::color::Color;
 use crate::geometry::Affine;
 use crate::layout::{Measure, WidthHint};
 use crate::pick::PickId;
-use crate::plot::theme::{Length, Palette};
+use crate::plot::theme::{Length, Margin, Palette};
 use crate::scene::{Font, Glyph, GlyphRun, SceneBuilder};
 use crate::text::{FontFamilyEntry, GenericFamilyKind, LineHeight, TextStyle};
 
 // ─── Brush newtype ──────────────────────────────────────────────────────────
 
 /// Newtype wrapping [`Color`] so it satisfies parley's `Brush` trait
-/// bounds (`Clone + PartialEq + Default + Debug`). `AlphaColor` from
-/// the `color` crate is missing `Default`.
-///
-/// [`draw_rich_text`] reads the inner colour back on emission and
-/// hands it to [`Brush::Solid`].
+/// bounds (`Clone + PartialEq + Default + Debug`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RichBrush(pub Color);
 
 impl Default for RichBrush {
-    /// Opaque black — matches the default text fill used by
-    /// [`crate::text::draw_text`] when no colour has been resolved.
+    /// Opaque black — the default text fill when no colour resolves.
     fn default() -> Self {
         RichBrush(Color::from_rgba8(0, 0, 0, 255))
     }
 }
 
-// ─── RichTextRun ────────────────────────────────────────────────────────────
-
-/// Shaped rich text — parley `Layout` plus the sidecar tables the
-/// draw pass needs (baseline shifts, block boundaries). Implements
-/// [`Measure`] so it drops into a composition slot exactly like
-/// [`crate::text::TextRun`].
-///
-/// Construct via [`RichTextRun::new`]; render via [`draw_rich_text`].
-pub struct RichTextRun {
-    layout: RefCell<parley::Layout<RichBrush>>,
-    /// Baseline shifts, indexed by byte range into the reduced text.
-    /// Consumed at draw time by [`draw_rich_text`].
-    baseline_shifts: Vec<BaselineRun>,
-    /// Block boundaries collected by the reducer. Consumed by the
-    /// block-layout pass at draw time (see [`Self::block_paints`]).
-    pub(crate) blocks: Vec<Block>,
-    /// Base text size in pt at construction — cached so the block-
-    /// layout pass can resolve `Length::Rel` padding / border-widths
-    /// against the block's ambient em.
-    base_size_pt: f32,
-    /// Palette used for resolving [`crate::plot::theme::ThemeColor`]
-    /// values on block backgrounds / borders. Stored so callers who
-    /// only hold the run can still compute paints.
-    palette: Palette,
-    /// DPI captured at construction — used together with `base_size_pt`
-    /// to convert pt-based padding / border widths to pixels.
-    dpi: f64,
-    natural_width: f32,
-    natural_height: f32,
-    min_width: f32,
-    last_break_width: RefCell<Option<f32>>,
-}
-
-impl RichTextRun {
-    /// Walk the current layout's lines and produce the bounds table
-    /// used by [`RichAnchor`] resolution. `inline_min_coord`,
-    /// `block_min_coord` etc. come from parley's per-line metrics.
-    fn bounds(layout: &parley::Layout<RichBrush>) -> LayoutBounds {
-        let width = layout.width();
-        let height = layout.height();
-        let mut ink_left = f32::INFINITY;
-        let mut ink_right = f32::NEG_INFINITY;
-        let mut ink_top = f32::INFINITY;
-        let mut ink_bottom = f32::NEG_INFINITY;
-        let mut first_baseline: Option<f32> = None;
-        let mut last_baseline: f32 = 0.0;
-        for line in layout.lines() {
-            let m = line.metrics();
-            ink_left = ink_left.min(m.inline_min_coord);
-            ink_right = ink_right.max(m.inline_max_coord);
-            ink_top = ink_top.min(m.block_min_coord);
-            ink_bottom = ink_bottom.max(m.block_max_coord);
-            if first_baseline.is_none() {
-                first_baseline = Some(m.baseline);
-            }
-            last_baseline = m.baseline;
-        }
-        // Empty layouts (no lines) — collapse everything to zero so
-        // downstream anchor math still produces finite offsets.
-        if !ink_left.is_finite() {
-            ink_left = 0.0;
-        }
-        if !ink_right.is_finite() {
-            ink_right = 0.0;
-        }
-        if !ink_top.is_finite() {
-            ink_top = 0.0;
-        }
-        if !ink_bottom.is_finite() {
-            ink_bottom = 0.0;
-        }
-        LayoutBounds {
-            width,
-            height,
-            ink_left,
-            ink_right,
-            ink_top,
-            ink_bottom,
-            first_baseline: first_baseline.unwrap_or(0.0),
-            last_baseline,
-        }
-    }
-
-    /// Current layout bounds — a snapshot used by [`draw_rich_text`]
-    /// to resolve a [`RichAnchor`] into a top-left offset. Cheap
-    /// (`O(lines)`); we recompute per draw call rather than caching
-    /// so bounds stay consistent after [`Self::set_max_width`] calls.
-    pub fn layout_bounds(&self) -> LayoutBounds {
-        Self::bounds(&self.layout.borrow())
-    }
-
-    /// Compute per-block paint instructions against the current
-    /// layout. Outer-first: containers paint underneath their content.
-    /// See [`crate::text::rich::block`] for the shape returned.
-    pub fn block_paints(&self) -> Vec<BlockPaint> {
-        compute_block_paints(
-            &self.layout.borrow(),
-            &self.blocks,
-            &self.palette,
-            self.base_size_pt,
-            self.dpi,
-        )
-    }
-}
+// ─── RichTextWidth ──────────────────────────────────────────────────────────
 
 /// Wrap-width policy for a rich-text block. Mirrors marquee's
 /// `marquee_grob(width = ...)` argument.
-///
-/// - [`RichTextWidth::Natural`] — no wrapping; the layout takes its
-///   full unbreakable width. Matches marquee's `width = NA`.
-/// - [`RichTextWidth::Fixed(px)`] — wrap at this pixel width. Matches
-///   marquee's numeric `width`.
-/// - Marquee also supports `width = NULL` ("parent container width").
-///   In hephaestus that surfaces through the composition solver:
-///   drop the run into a `Cell::measured` and it wraps at whatever
-///   width the layout provides via [`Measure::height_at`], no
-///   explicit width argument needed.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub enum RichTextWidth {
     /// Natural (no soft-wrap) width. Matches marquee's `NA`.
+    #[default]
     Natural,
     /// Wrap at this pixel width. Matches marquee's numeric argument.
     Fixed(f32),
 }
 
-impl Default for RichTextWidth {
-    /// [`RichTextWidth::Natural`] — no wrap. Matches
-    /// [`crate::text::TextRun::new`]'s implicit "shape without a
-    /// break constraint" behaviour.
-    fn default() -> Self {
-        RichTextWidth::Natural
+// ─── BlockLayout ────────────────────────────────────────────────────────────
+
+/// One top-level leaf block's shaped layout + geometry, in the
+/// [`RichTextRun`]'s local coordinate space (top-left = `(0, 0)`).
+///
+/// Vertical: `y_px` is the top of the block's shaped content.
+/// Horizontal: `left_px` is the left edge of the shaped content
+/// (already inset by ancestor and own left padding).
+pub(crate) struct BlockLayout {
+    /// The parley layout shaped for this block's text.
+    pub(crate) layout: parley::Layout<RichBrush>,
+    /// Baseline shifts, byte ranges relative to the block-local text.
+    pub(crate) baseline_shifts: Vec<BaselineRun>,
+    /// Byte range in the full reduced text this block covers.
+    pub(crate) text_range: Range<usize>,
+    /// Block kind (Paragraph / Heading / ListItem / CodeBlock).
+    #[allow(dead_code)]
+    pub(crate) kind: BlockKind,
+    /// Resolved style delta for the block.
+    pub(crate) delta: StyleDelta,
+    /// Container depth (0 = top-level).
+    #[allow(dead_code)]
+    pub(crate) depth: usize,
+    /// Left edge of the block's shaped content (px).
+    pub(crate) left_px: f32,
+    /// Right inset from the outer width (px) — the block's usable
+    /// content-width is `outer - left_px - right_inset_px`.
+    pub(crate) right_inset_px: f32,
+    /// Shape width the parley layout was broken at (px).
+    pub(crate) shape_width_px: f32,
+    /// Additional first-line-only right shift (px). Applied to line-0
+    /// glyphs at draw time.
+    pub(crate) first_line_shift_px: f32,
+    /// Additional continuation-line right shift (px). Applied to
+    /// line-1+ glyphs at draw time.
+    pub(crate) continuation_shift_px: f32,
+    /// Top y (px) of the block's shaped content.
+    pub(crate) y_px: f32,
+    /// Height (px) of the shaped layout.
+    pub(crate) height_px: f32,
+    /// Top margin (px) applied above `y_px`.
+    pub(crate) margin_top_px: f32,
+    /// Bottom margin (px) applied after `y_px + height_px`.
+    pub(crate) margin_bottom_px: f32,
+    /// Own padding (px, trbl) applied inside the block's outer rect.
+    pub(crate) padding_top_px: f32,
+    pub(crate) padding_right_px: f32,
+    pub(crate) padding_bottom_px: f32,
+    pub(crate) padding_left_px: f32,
+}
+
+impl BlockLayout {
+    /// Outer rect (including own padding) in RichTextRun local coords.
+    /// Used by the paint pass to draw backgrounds / borders.
+    pub(crate) fn outer_rect(&self) -> kurbo::Rect {
+        let x0 = self.left_px - self.padding_left_px;
+        let y0 = self.y_px - self.padding_top_px;
+        let x1 = self.left_px + self.shape_width_px + self.padding_right_px;
+        let y1 = self.y_px + self.height_px + self.padding_bottom_px;
+        kurbo::Rect::new(x0 as f64, y0 as f64, x1 as f64, y1 as f64)
     }
+}
+
+// ─── RichTextRun ────────────────────────────────────────────────────────────
+
+/// Shaped rich text — a stack of per-block parley layouts plus the
+/// container blocks and metadata the draw pass needs.
+pub struct RichTextRun {
+    /// Reduced source text. Retained for slicing on re-shape if a
+    /// caller ever inspects it.
+    #[allow(dead_code)]
+    pub(crate) text: String,
+    /// One shaped layout per top-level leaf, in document order.
+    /// `RefCell` so `set_max_width` can re-break in place.
+    pub(crate) blocks: RefCell<Vec<BlockLayout>>,
+    /// Non-leaf containers (BlockQuote / Div / List) — for the paint
+    /// pass. Stored in emission (close) order.
+    pub(crate) containers: Vec<Block>,
+    /// Base text style (captured at construction for re-shape).
+    #[allow(dead_code)]
+    pub(crate) base_style: TextStyle,
+    /// Palette used to resolve `ThemeColor` values on paints.
+    pub(crate) palette: Palette,
+    /// Convenience mirror of `base_style.size_pt`.
+    pub(crate) base_size_pt: f32,
+    /// DPI captured at construction.
+    pub(crate) dpi: f64,
+    /// Last requested wrap width; `None` = natural.
+    #[allow(dead_code)]
+    last_break_width: RefCell<Option<f32>>,
+    /// Cached natural width (px).
+    natural_width_px: f32,
+    /// Cached natural stacked height (px).
+    natural_height_px: RefCell<f32>,
+    /// Cached min-content width (px).
+    min_width_px: f32,
 }
 
 impl RichTextRun {
     /// Parse `source` as marquee-flavoured markdown, resolve every
-    /// span through `sheet` + `palette`, and shape the result on top
-    /// of `base_style`. `base_brush` is the fallback text colour for
-    /// runs that don't have a resolved colour (i.e. plain text
-    /// outside any coloured span).
-    ///
-    /// Shaped without a wrap constraint — the layout takes its
-    /// natural (unbreakable) width. To wrap at a specific width, use
-    /// [`Self::new_with_width`], or call [`Self::set_max_width`] /
-    /// let [`Measure::height_at`] break lines on demand.
-    ///
-    /// Returns an error if the parser fails; returns a shaped
-    /// [`RichTextRun`] otherwise.
+    /// span through `sheet` + `palette`, and shape at natural width.
     pub fn new(
         source: &str,
         base_style: &TextStyle,
@@ -230,10 +219,7 @@ impl RichTextRun {
         )
     }
 
-    /// Like [`Self::new`] but takes an explicit
-    /// [`RichTextWidth`] policy. Use this to mirror marquee's
-    /// `marquee_grob(width = ...)` argument: `Fixed(px)` wraps at
-    /// that width, `Natural` leaves the layout unwrapped.
+    /// Like [`Self::new`] but with an explicit wrap-width policy.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_width(
         source: &str,
@@ -248,14 +234,12 @@ impl RichTextRun {
         let runs = reduce(&events, sheet);
         let r = Self::shape(runs, base_style, base_brush, palette, dpi);
         if let RichTextWidth::Fixed(px) = width {
-            r.set_max_width(px, parley::Alignment::Start);
+            r.set_max_width(px, Alignment::Start);
         }
         Ok(r)
     }
 
-    /// Alternative constructor — takes a pre-built [`BuiltRuns`].
-    /// Useful in tests and when the caller wants to inspect / mutate
-    /// the reducer output before shaping.
+    /// Alternative constructor from a pre-built [`BuiltRuns`].
     pub fn from_built_runs(
         runs: BuiltRuns,
         base_style: &TextStyle,
@@ -273,83 +257,283 @@ impl RichTextRun {
         palette: &Palette,
         dpi: f64,
     ) -> Self {
-        let fcx_mutex = crate::text::font_context();
-        let mut fcx = fcx_mutex.lock().expect("font context poisoned");
-        let mut lcx = LayoutContext::<RichBrush>::new();
-        let mut builder = lcx.ranged_builder(&mut fcx, &runs.text, 1.0, true);
+        // Split blocks into leaves + containers. Leaves are the shape
+        // units.
+        let all_blocks = runs.blocks;
+        let mut leaves: Vec<Block> = all_blocks
+            .iter()
+            .filter(|b| is_leaf_kind(&b.kind))
+            .filter(|b| !contained_in_another_leaf(b, &all_blocks))
+            .cloned()
+            .collect();
+        leaves.sort_by_key(|b| b.range.start);
+        let containers: Vec<Block> = all_blocks
+            .into_iter()
+            .filter(|b| !is_leaf_kind(&b.kind))
+            .collect();
 
-        // ── Push defaults from the base TextStyle. ──
-        push_base_defaults(&mut builder, base_style, base_brush, dpi);
-
-        // ── Owned family name pool. parley's family entries borrow
-        // from us via Cow, so any FontFamilyName<'_> pushed through
-        // `push` must outlive the `build()` call. We buffer every
-        // family string we plan to reference so the &str lifetimes
-        // are stable across the whole builder scope. ──
-        let mut family_pool: Vec<String> = Vec::new();
-
-        // ── Apply each inline run's delta as ranged properties. ──
-        for InlineRun { range, delta } in &runs.inline {
-            apply_delta_range(
-                &mut builder,
-                range.clone(),
-                delta,
-                base_style,
-                palette,
-                dpi,
-                &mut family_pool,
-            );
+        // Shape each leaf; position vertically.
+        let base_pt = base_style.size_pt as f64;
+        // Precompute the first-descendant-leaf range for each ListItem
+        // container so we can distinguish "leaf is the item's own body
+        // (gets hanging as continuation_shift)" from "leaf is a
+        // subsequent block inside the item (gets hanging as left_px)".
+        let first_leaf_of_item: Vec<(Range<usize>, Range<usize>)> = containers
+            .iter()
+            .filter(|c| matches!(c.kind, BlockKind::ListItem { .. }))
+            .filter_map(|item| {
+                leaves
+                    .iter()
+                    .filter(|leaf| {
+                        leaf.range.start >= item.range.start && leaf.range.end <= item.range.end
+                    })
+                    .min_by_key(|leaf| leaf.range.start)
+                    .map(|leaf| (item.range.clone(), leaf.range.clone()))
+            })
+            .collect();
+        let mut layouts: Vec<BlockLayout> = Vec::with_capacity(leaves.len());
+        let mut y_accum: f32 = 0.0;
+        for leaf in leaves.iter() {
+            // Ancestor padding + hanging → left indent / continuation.
+            let ancestors = ancestors_of_range(&leaf.range, &containers);
+            let (anc_left_pt, anc_right_pt) = ancestor_side_padding_pt(&ancestors, base_pt);
+            // Walk ancestor ListItems: each one's `hanging` either
+            // contributes to *this* leaf's continuation shift (when
+            // the leaf is that item's first-descendant body) or to
+            // this leaf's left indent (when the leaf is deeper
+            // content — a nested list's body, a blockquote inside an
+            // item, a second loose paragraph, etc.).
+            let mut anc_hanging_left_pt = 0.0;
+            let mut anc_hanging_cont_pt = 0.0;
+            for anc in &ancestors {
+                if !matches!(anc.kind, BlockKind::ListItem { .. }) {
+                    continue;
+                }
+                let h = anc.delta.hanging.map(|l| l.resolve(base_pt)).unwrap_or(0.0);
+                let is_first_body = first_leaf_of_item
+                    .iter()
+                    .any(|(item_r, leaf_r)| item_r == &anc.range && leaf_r == &leaf.range);
+                if is_first_body {
+                    anc_hanging_cont_pt += h;
+                } else {
+                    anc_hanging_left_pt += h;
+                }
+            }
+            // Own padding contributes to horizontal insets and to
+            // vertical space around the shape rect.
+            let (own_top_pt, own_right_pt, own_bottom_pt, own_left_pt) =
+                margin_or_zero(&leaf.delta.padding, base_pt);
+            let anc_left_px = pt_to_px(anc_left_pt + anc_hanging_left_pt, dpi);
+            let anc_right_px = pt_to_px(anc_right_pt, dpi);
+            let own_left_px = pt_to_px(own_left_pt, dpi);
+            let own_right_px = pt_to_px(own_right_pt, dpi);
+            let own_top_px = pt_to_px(own_top_pt, dpi);
+            let own_bottom_px = pt_to_px(own_bottom_pt, dpi);
+            // Own hanging + first-line indent (both resolve against
+            // the block's ambient em). Composes with any ancestor-
+            // contributed hanging.
+            let own_hanging_pt = leaf
+                .delta
+                .hanging
+                .map(|l| l.resolve(base_pt))
+                .unwrap_or(0.0);
+            let hanging_px = pt_to_px((own_hanging_pt + anc_hanging_cont_pt).max(0.0), dpi);
+            let first_line_indent_px = leaf
+                .delta
+                .indent
+                .map(|l| pt_to_px(l.resolve(base_pt).max(0.0), dpi))
+                .unwrap_or(0.0);
+            // Slice text + inlines + baseline shifts to just this
+            // block's byte range; rebase ranges to block-local coords.
+            let (block_text, inlines, baselines) =
+                slice_block(&runs.text, &runs.inline, &runs.baseline_shifts, &leaf.range);
+            // Shape as its own parley layout. Natural break to start
+            // — caller may re-break via `set_max_width`.
+            let mut layout =
+                shape_block_layout(&block_text, &inlines, base_style, base_brush, palette, dpi);
+            layout.break_all_lines(None);
+            layout.align(Alignment::Start, AlignmentOptions::default());
+            let widths = layout.calculate_content_widths();
+            let height_px = layout.height();
+            // Vertical spacing.
+            let (mt_pt, _, mb_pt, _) = margin_or_zero(&leaf.delta.margin, base_pt);
+            let margin_top_px = pt_to_px(mt_pt, dpi);
+            let margin_bottom_px = pt_to_px(mb_pt, dpi);
+            // Position.
+            y_accum += margin_top_px + own_top_px;
+            let y_px = y_accum;
+            y_accum += height_px + own_bottom_px + margin_bottom_px;
+            layouts.push(BlockLayout {
+                layout,
+                baseline_shifts: baselines,
+                text_range: leaf.range.clone(),
+                kind: leaf.kind.clone(),
+                delta: leaf.delta.clone(),
+                depth: leaf.depth,
+                left_px: anc_left_px + own_left_px,
+                right_inset_px: anc_right_px + own_right_px,
+                shape_width_px: widths.max,
+                first_line_shift_px: first_line_indent_px,
+                continuation_shift_px: hanging_px,
+                y_px,
+                height_px,
+                margin_top_px,
+                margin_bottom_px,
+                padding_top_px: own_top_px,
+                padding_right_px: own_right_px,
+                padding_bottom_px: own_bottom_px,
+                padding_left_px: own_left_px,
+            });
         }
-
-        let mut layout: parley::Layout<RichBrush> = builder.build(&runs.text);
-        layout.break_all_lines(None);
-        layout.align(Alignment::Start, AlignmentOptions::default());
-        let widths = layout.calculate_content_widths();
-        let natural_height = layout.height();
+        // Natural width = max of (left + shape_width + right) across blocks.
+        let mut natural_width: f32 = 0.0;
+        let mut min_width: f32 = 0.0;
+        for bl in &layouts {
+            let width_at_natural = bl.left_px + bl.shape_width_px + bl.right_inset_px;
+            natural_width = natural_width.max(width_at_natural);
+            let per_min = bl.left_px
+                + bl.layout.calculate_content_widths().min
+                + bl.right_inset_px
+                + bl.first_line_shift_px.max(bl.continuation_shift_px);
+            min_width = min_width.max(per_min);
+        }
 
         Self {
-            layout: RefCell::new(layout),
-            baseline_shifts: runs.baseline_shifts,
-            blocks: runs.blocks,
-            base_size_pt: base_style.size_pt,
+            text: runs.text,
+            blocks: RefCell::new(layouts),
+            containers,
+            base_style: base_style.clone(),
             palette: *palette,
+            base_size_pt: base_style.size_pt,
             dpi,
-            natural_width: widths.max,
-            natural_height,
-            min_width: widths.min,
             last_break_width: RefCell::new(None),
+            natural_width_px: natural_width,
+            natural_height_px: RefCell::new(y_accum),
+            min_width_px: min_width,
         }
     }
 
-    /// Natural (unwrapped) content width in pixels.
+    /// Natural (unwrapped) width in pixels.
     pub fn natural_width(&self) -> f64 {
-        self.natural_width as f64
+        self.natural_width_px as f64
     }
 
-    /// Natural (unwrapped) content height in pixels.
+    /// Natural (unwrapped) total stacked height in pixels.
     pub fn natural_height(&self) -> f64 {
-        self.natural_height as f64
+        *self.natural_height_px.borrow() as f64
     }
 
-    /// Current laid-out height in pixels — reflects the most recent
-    /// [`Self::set_max_width`] / [`Measure::height_at`] call.
+    /// Current laid-out total height (px) — includes any margins on
+    /// the last block below its content.
     pub fn current_height(&self) -> f64 {
-        self.layout.borrow().height() as f64
+        *self.natural_height_px.borrow() as f64
     }
 
-    /// Re-break lines at `max_width_px`. Returns the new height.
+    /// Re-break every block at the given outer width, propagating the
+    /// wrap constraint into each block's effective shape width
+    /// (`outer - left - right - max(first_line, continuation)`).
+    /// Returns the new stacked total height.
     pub fn set_max_width(&self, max_width_px: f32, alignment: Alignment) -> f32 {
-        let mut layout = self.layout.borrow_mut();
-        layout.break_all_lines(Some(max_width_px));
-        layout.align(alignment, AlignmentOptions::default());
+        let mut blocks = self.blocks.borrow_mut();
+        let mut y_accum: f32 = 0.0;
+        for bl in blocks.iter_mut() {
+            let block_avail = (max_width_px - bl.left_px - bl.right_inset_px).max(1.0);
+            let max_shift = bl.first_line_shift_px.max(bl.continuation_shift_px);
+            let target = (block_avail - max_shift).max(1.0);
+            bl.layout.break_all_lines(Some(target));
+            bl.layout.align(alignment, AlignmentOptions::default());
+            bl.shape_width_px = target;
+            bl.height_px = bl.layout.height();
+            y_accum += bl.margin_top_px + bl.padding_top_px;
+            bl.y_px = y_accum;
+            y_accum += bl.height_px + bl.padding_bottom_px + bl.margin_bottom_px;
+        }
         *self.last_break_width.borrow_mut() = Some(max_width_px);
-        layout.height()
+        *self.natural_height_px.borrow_mut() = y_accum;
+        y_accum
+    }
+
+    /// Compute per-block paint instructions (backgrounds + borders on
+    /// both leaves and containers).
+    pub fn block_paints(&self) -> Vec<BlockPaint> {
+        compute_block_paints(self)
+    }
+
+    /// Aggregate bounds across every block layout. Used by
+    /// [`RichAnchor`] resolution.
+    pub fn layout_bounds(&self) -> LayoutBounds {
+        let blocks = self.blocks.borrow();
+        if blocks.is_empty() {
+            return LayoutBounds {
+                width: 0.0,
+                height: 0.0,
+                ink_left: 0.0,
+                ink_right: 0.0,
+                ink_top: 0.0,
+                ink_bottom: 0.0,
+                first_baseline: 0.0,
+                last_baseline: 0.0,
+            };
+        }
+        let mut ink_left = f32::INFINITY;
+        let mut ink_right = f32::NEG_INFINITY;
+        let mut ink_top = f32::INFINITY;
+        let mut ink_bottom = f32::NEG_INFINITY;
+        let mut first_baseline: Option<f32> = None;
+        let mut last_baseline: f32 = 0.0;
+        let mut total_width: f32 = 0.0;
+        let mut total_height: f32 = 0.0;
+        for bl in blocks.iter() {
+            total_width = total_width.max(bl.left_px + bl.shape_width_px + bl.right_inset_px);
+            total_height = total_height
+                .max(bl.y_px + bl.height_px + bl.padding_bottom_px + bl.margin_bottom_px);
+            for (line_index, line) in bl.layout.lines().enumerate() {
+                let m = line.metrics();
+                let shift = if line_index == 0 {
+                    bl.first_line_shift_px
+                } else {
+                    bl.continuation_shift_px
+                };
+                let x_off = bl.left_px + shift;
+                let y_off = bl.y_px;
+                ink_left = ink_left.min(m.inline_min_coord + x_off);
+                ink_right = ink_right.max(m.inline_max_coord + x_off);
+                ink_top = ink_top.min(m.block_min_coord + y_off);
+                ink_bottom = ink_bottom.max(m.block_max_coord + y_off);
+                if first_baseline.is_none() {
+                    first_baseline = Some(m.baseline + y_off);
+                }
+                last_baseline = m.baseline + y_off;
+            }
+        }
+        if !ink_left.is_finite() {
+            ink_left = 0.0;
+        }
+        if !ink_right.is_finite() {
+            ink_right = 0.0;
+        }
+        if !ink_top.is_finite() {
+            ink_top = 0.0;
+        }
+        if !ink_bottom.is_finite() {
+            ink_bottom = 0.0;
+        }
+        LayoutBounds {
+            width: total_width,
+            height: total_height,
+            ink_left,
+            ink_right,
+            ink_top,
+            ink_bottom,
+            first_baseline: first_baseline.unwrap_or(0.0),
+            last_baseline,
+        }
     }
 }
 
 impl Measure for RichTextRun {
     fn width_hint(&self, _dpi: f64) -> WidthHint {
-        WidthHint::Min(self.min_width as f64)
+        WidthHint::Min(self.min_width_px as f64)
     }
 
     fn height_at(&self, width: f64, _dpi: f64) -> f64 {
@@ -357,7 +541,35 @@ impl Measure for RichTextRun {
     }
 }
 
-// ─── Default / per-range property pushes ────────────────────────────────────
+// ─── Per-block shaping ──────────────────────────────────────────────────────
+
+fn shape_block_layout(
+    text: &str,
+    inlines: &[InlineRun],
+    base_style: &TextStyle,
+    base_brush: Color,
+    palette: &Palette,
+    dpi: f64,
+) -> parley::Layout<RichBrush> {
+    let fcx_mutex = crate::text::font_context();
+    let mut fcx = fcx_mutex.lock().expect("font context poisoned");
+    let mut lcx = LayoutContext::<RichBrush>::new();
+    let mut builder = lcx.ranged_builder(&mut fcx, text, 1.0, true);
+    push_base_defaults(&mut builder, base_style, base_brush, dpi);
+    let mut family_pool: Vec<String> = Vec::new();
+    for InlineRun { range, delta } in inlines {
+        apply_delta_range(
+            &mut builder,
+            range.clone(),
+            delta,
+            base_style,
+            palette,
+            dpi,
+            &mut family_pool,
+        );
+    }
+    builder.build(text)
+}
 
 fn push_base_defaults(
     builder: &mut parley::RangedBuilder<'_, RichBrush>,
@@ -400,9 +612,6 @@ fn push_base_defaults(
             FontFamilyName::Generic(GenericFamily::SansSerif),
         )));
     } else {
-        // As with TextRun, resolve the family chain once. Names live
-        // in `style.families` which outlives the builder, so we can
-        // reference the &str directly.
         let names: Vec<FontFamilyName<'_>> = style
             .families
             .iter()
@@ -423,15 +632,13 @@ fn push_base_defaults(
 
 fn apply_delta_range(
     builder: &mut parley::RangedBuilder<'_, RichBrush>,
-    range: std::ops::Range<usize>,
+    range: Range<usize>,
     delta: &StyleDelta,
     base: &TextStyle,
     palette: &Palette,
     dpi: f64,
     family_pool: &mut Vec<String>,
 ) {
-    // Size — resolves against the base size for both Abs and Rel to
-    // match marquee's "relative to base" semantics.
     if let Some(size) = delta.size {
         let pt = match size {
             Length::Abs(v) => v,
@@ -477,7 +684,6 @@ fn apply_delta_range(
         builder.push(StyleProperty::Strikethrough(s), range.clone());
     }
     if let Some(family) = &delta.family {
-        // Buffer the string so its lifetime survives `build()`.
         family_pool.push(family.clone());
         let name = family_pool.last().expect("just pushed");
         let entry = if let Some(generic) = generic_family_from_str(name) {
@@ -487,11 +693,6 @@ fn apply_delta_range(
         };
         builder.push(StyleProperty::FontFamily(entry), range.clone());
     }
-    // Note: `baseline_em` is not pushed to parley — it's held on the
-    // side and applied at draw time. See `draw_rich_text`.
-    // Block-level fields (margin, padding, background, border, indent,
-    // hanging, bullet) are not pushed here — they're consumed by the
-    // block-layout pass (steps 4–8 of the plan).
 }
 
 fn generic_family_to_parley(kind: GenericFamilyKind) -> GenericFamily {
@@ -505,10 +706,6 @@ fn generic_family_to_parley(kind: GenericFamilyKind) -> GenericFamily {
     }
 }
 
-/// Recognise the common CSS generic family names on a `family` string
-/// so `sheet.set("code", { family: "monospace", ... })` resolves to
-/// the generic monospace face rather than a face literally named
-/// `"monospace"` (which usually doesn't exist).
 fn generic_family_from_str(s: &str) -> Option<GenericFamily> {
     match s.to_ascii_lowercase().as_str() {
         "serif" => Some(GenericFamily::Serif),
@@ -521,36 +718,128 @@ fn generic_family_from_str(s: &str) -> Option<GenericFamily> {
     }
 }
 
+// ─── Helpers: leaves, ancestors, slicing ────────────────────────────────────
+
+fn is_leaf_kind(kind: &BlockKind) -> bool {
+    // `ListItem` is a *container* — the reducer opens a Paragraph
+    // leaf inside each item so nested lists decompose into their
+    // own paragraph shape units. Hanging indent comes from the
+    // enclosing ListItem via the ancestor chain, not the leaf's own
+    // delta.
+    matches!(
+        kind,
+        BlockKind::Paragraph
+            | BlockKind::Heading(_)
+            | BlockKind::CodeBlock { .. }
+            | BlockKind::Rule
+    )
+}
+
+/// True if another leaf-type block strictly contains `block`.
+fn contained_in_another_leaf(block: &Block, all: &[Block]) -> bool {
+    for other in all {
+        if !is_leaf_kind(&other.kind) {
+            continue;
+        }
+        if std::ptr::eq(other, block) {
+            continue;
+        }
+        if other.range == block.range {
+            continue;
+        }
+        if other.range.start <= block.range.start && other.range.end >= block.range.end {
+            return true;
+        }
+    }
+    false
+}
+
+/// Container blocks whose range contains `range`. Outermost first.
+pub(crate) fn ancestors_of_range(range: &Range<usize>, containers: &[Block]) -> Vec<Block> {
+    let mut out: Vec<Block> = containers
+        .iter()
+        .filter(|c| c.range.start <= range.start && c.range.end >= range.end)
+        .cloned()
+        .collect();
+    out.sort_by(|a, b| {
+        let a_size = a.range.end - a.range.start;
+        let b_size = b.range.end - b.range.start;
+        b_size.cmp(&a_size)
+    });
+    out
+}
+
+fn ancestor_side_padding_pt(ancestors: &[Block], base_pt: f64) -> (f64, f64) {
+    let mut left = 0.0;
+    let mut right = 0.0;
+    for a in ancestors {
+        if let Some(pad) = a.delta.padding {
+            let (_, r, _, l) = pad.resolve(base_pt);
+            left += l;
+            right += r;
+        }
+    }
+    (left, right)
+}
+
+fn margin_or_zero(m: &Option<Margin>, base_pt: f64) -> (f64, f64, f64, f64) {
+    match m {
+        Some(m) => m.resolve(base_pt),
+        None => (0.0, 0.0, 0.0, 0.0),
+    }
+}
+
+fn pt_to_px(pt: f64, dpi: f64) -> f32 {
+    (pt * dpi / 72.0) as f32
+}
+
+/// Slice text + inline runs + baseline shifts to the block's byte
+/// range, rebasing ranges to block-local coordinates.
+fn slice_block(
+    text: &str,
+    inlines: &[InlineRun],
+    baselines: &[BaselineRun],
+    block_range: &Range<usize>,
+) -> (String, Vec<InlineRun>, Vec<BaselineRun>) {
+    let block_text = text[block_range.clone()].to_string();
+    let s = block_range.start;
+    let e = block_range.end;
+    let mut out_inlines = Vec::new();
+    for r in inlines {
+        let start = r.range.start.max(s);
+        let end = r.range.end.min(e);
+        if start >= end {
+            continue;
+        }
+        out_inlines.push(InlineRun {
+            range: (start - s)..(end - s),
+            delta: r.delta.clone(),
+        });
+    }
+    let mut out_baselines = Vec::new();
+    for b in baselines {
+        let start = b.range.start.max(s);
+        let end = b.range.end.min(e);
+        if start >= end {
+            continue;
+        }
+        out_baselines.push(BaselineRun {
+            range: (start - s)..(end - s),
+            shift_em: b.shift_em,
+        });
+    }
+    (block_text, out_inlines, out_baselines)
+}
+
 // ─── Draw ───────────────────────────────────────────────────────────────────
 
-/// Emit the shaped [`RichTextRun`] into `scene` at `(x, y)`. The
-/// `anchor` controls what point *on the laid-out text* coincides
-/// with `(x, y)`: `RichAnchor::top_left()` (the default via
-/// `RichAnchor::default()`) matches [`crate::text::draw_text`]'s
-/// implicit top-left placement; `RichAnchor::center_ink()` centres
-/// on the visible glyph column; `RichAnchor::first_line_baseline()`
-/// aligns the caller's `y` to the first line's baseline. See the
-/// [`crate::text::rich::anchor`] module for the full vocabulary,
-/// which mirrors marquee's `hjust` / `vjust`.
+/// Emit the shaped [`RichTextRun`] into `scene` at `(x, y)`.
 ///
-/// Per-range brushes come from parley's `Style::brush`; baseline
-/// shifts are applied per-run based on each parley run's byte range
-/// (parley splits runs at every style boundary we push, including
-/// the `FontSize` change that our `sup` / `sub` deltas always carry).
+/// `anchor` picks the point on the laid-out run that coincides with
+/// `(x, y)`. `transform` composes around that anchor.
 ///
-/// `transform` composes **around the anchor point**: rotating,
-/// scaling, or skewing the transform pivots around `(x, y)` rather
-/// than around the screen origin. Concretely, glyphs are laid out
-/// with the anchor at glyph-space `(0, 0)` and then transformed by
-/// `Affine::translate((x, y)) * transform` — pass
-/// `Affine::IDENTITY` for an unrotated placement, or
-/// `Affine::rotate(angle)` to rotate the whole block around `(x, y)`.
-///
-/// `pick_id` is applied to every emitted glyph run. Block-level
-/// backgrounds and borders (`draw_rich_text` calls
-/// [`RichTextRun::block_paints`] internally) are emitted with
-/// [`PickId::Skip`] — decorative geometry beneath the text should not
-/// occlude the glyphs' hit response.
+/// Block-level paints (backgrounds, borders) emit first with
+/// [`PickId::Skip`]; glyph runs emit second with `pick_id`.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_rich_text<S: SceneBuilder + ?Sized>(
     scene: &mut S,
@@ -561,92 +850,66 @@ pub fn draw_rich_text<S: SceneBuilder + ?Sized>(
     transform: Affine,
     pick_id: PickId,
 ) {
-    let layout = run.layout.borrow();
-    let bounds = RichTextRun::bounds(&layout);
+    let bounds = run.layout_bounds();
     let offsets = bounds.resolve(anchor);
-    // Compose the anchor + transform so rotating `transform`
-    // implicitly rotates around `(x, y)`: place glyphs in
-    // glyph-space with the anchor at `(0, 0)` — `g.x - ref_x`,
-    // `g.y - ref_y` — and hand parley a `translate(x, y) *
-    // transform` outer transform. If `transform = IDENTITY`, the
-    // whole thing collapses to a simple translation and the glyphs
-    // land at their expected screen positions.
     let final_transform = Affine::translate((x, y)) * transform;
 
-    // ── Block-level auxiliary primitives (backgrounds, borders). ──
-    //
-    // Emitted before the glyph runs so text draws on top. Paints come
-    // back outer-first, so simply iterating in order yields the right
-    // z-stack. Every paint's rect lives in parley-layout coordinates
-    // — we subtract the anchor offset here so the paint follows the
-    // same glyph-space transform as the glyph runs.
-    let paints = compute_block_paints(
-        &layout,
-        &run.blocks,
-        &run.palette,
-        run.base_size_pt,
-        run.dpi,
-    );
-    for paint in &paints {
+    // Backgrounds + borders first.
+    for paint in &run.block_paints() {
         emit_block_paint(scene, paint, offsets, final_transform);
     }
 
-    for line in layout.lines() {
-        for item in line.items() {
-            let PositionedLayoutItem::GlyphRun(gr) = item else {
-                continue;
+    // Glyphs.
+    let blocks = run.blocks.borrow();
+    for bl in blocks.iter() {
+        let block_x = bl.left_px;
+        let block_y = bl.y_px;
+        for (line_index, line) in bl.layout.lines().enumerate() {
+            let per_line_shift = if line_index == 0 {
+                bl.first_line_shift_px
+            } else {
+                bl.continuation_shift_px
             };
-            let prun = gr.run();
-            let font = Font(prun.font().clone());
-            let brush_color = gr.style().brush.0;
-            let brush = Brush::Solid(brush_color);
-            let run_range = prun.text_range();
-            let font_size = prun.font_size();
-
-            // Baseline shift for the whole run. parley splits runs at
-            // every style boundary that changes a `StyleProperty` we
-            // push, which includes the `FontSize` change that our
-            // `sup` / `sub` deltas always carry — so each parley run
-            // sits inside at most one baseline entry. A custom class
-            // that sets `baseline_em` without also changing size
-            // wouldn't force a split; that edge case falls back to
-            // no shift for v1.
-            //
-            // Positive `shift_em` means "up" — in screen coordinates
-            // (y down) that's a subtraction.
-            let shift_em = baseline_shift_for_range(&run.baseline_shifts, &run_range);
-            let dy_px = shift_em * font_size;
-            let glyphs: Vec<Glyph> = gr
-                .positioned_glyphs()
-                .map(|g| Glyph {
-                    id: g.id,
-                    x: g.x - offsets.ref_x,
-                    y: g.y - offsets.ref_y - dy_px,
-                })
-                .collect();
-            if glyphs.is_empty() {
-                continue;
+            for item in line.items() {
+                let PositionedLayoutItem::GlyphRun(gr) = item else {
+                    continue;
+                };
+                let prun = gr.run();
+                let font = Font(prun.font().clone());
+                let brush_color = gr.style().brush.0;
+                let brush = Brush::Solid(brush_color);
+                let run_range = prun.text_range();
+                let font_size = prun.font_size();
+                let shift_em = baseline_shift_for_range(&bl.baseline_shifts, &run_range);
+                let dy_px = shift_em * font_size;
+                let glyphs: Vec<Glyph> = gr
+                    .positioned_glyphs()
+                    .map(|g| Glyph {
+                        id: g.id,
+                        x: g.x + block_x + per_line_shift - offsets.ref_x,
+                        y: g.y + block_y - offsets.ref_y - dy_px,
+                    })
+                    .collect();
+                if glyphs.is_empty() {
+                    continue;
+                }
+                let glyph_run = GlyphRun {
+                    font: &font,
+                    font_size,
+                    transform: final_transform,
+                    glyph_transform: None,
+                    brush: &brush,
+                    brush_alpha: 1.0,
+                    hint: false,
+                    glyphs: &glyphs,
+                    style: None,
+                };
+                scene.draw_glyphs(&glyph_run, pick_id);
             }
-            let glyph_run = GlyphRun {
-                font: &font,
-                font_size,
-                transform: final_transform,
-                glyph_transform: None,
-                brush: &brush,
-                brush_alpha: 1.0,
-                hint: false,
-                glyphs: &glyphs,
-                style: None,
-            };
-            scene.draw_glyphs(&glyph_run, pick_id);
         }
     }
 }
 
-/// Emit one [`BlockPaint`] into `scene`. `offsets` and `outer` are the
-/// same anchor-offset / outer-transform pair used for glyph runs, so
-/// block boxes sit under the exact glyph coordinate space the text
-/// draws in.
 fn emit_block_paint<S: SceneBuilder + ?Sized>(
     scene: &mut S,
     paint: &BlockPaint,
@@ -687,13 +950,8 @@ fn emit_block_paint<S: SceneBuilder + ?Sized>(
     }
 }
 
-/// Find the baseline shift whose byte range overlaps `run_range`.
-/// Returns `0.0` when no shift applies. Callers rely on parley
-/// having already split runs at size boundaries, so every parley run
-/// sits inside a single shift entry (or none).
-fn baseline_shift_for_range(shifts: &[BaselineRun], run_range: &std::ops::Range<usize>) -> f32 {
+fn baseline_shift_for_range(shifts: &[BaselineRun], run_range: &Range<usize>) -> f32 {
     for bs in shifts {
-        // Overlap on both ends: run.start < shift.end && shift.start < run.end.
         if run_range.start < bs.range.end && bs.range.start < run_range.end {
             return bs.shift_em;
         }
@@ -721,82 +979,68 @@ mod tests {
         TextStyle::new(14.0)
     }
 
-    #[test]
-    fn plain_text_shapes_and_measures() {
+    fn make(src: &str) -> RichTextRun {
         let sheet = RichTextStyleSheet::new();
-        let run = RichTextRun::new(
-            "hello world",
+        RichTextRun::new(
+            src,
             &base_style(),
             Color::from_rgba8(0, 0, 0, 255),
             &sheet,
             &palette(),
             96.0,
         )
-        .unwrap();
-        assert!(run.natural_width() > 0.0);
-        assert!(run.natural_height() > 0.0);
+        .unwrap()
     }
 
-    #[test]
-    fn bold_widens_natural_width_vs_plain() {
-        // Two runs at the same size, but the bold version has
-        // 700-weight glyphs → wider natural width. Sanity-check
-        // that per-range weight is actually reaching parley.
-        let sheet = RichTextStyleSheet::new();
-        let plain = RichTextRun::new(
-            "hello world",
-            &base_style(),
-            Color::from_rgba8(0, 0, 0, 255),
-            &sheet,
-            &palette(),
-            96.0,
-        )
-        .unwrap();
-        let bold = RichTextRun::new(
-            "**hello world**",
-            &base_style(),
-            Color::from_rgba8(0, 0, 0, 255),
-            &sheet,
-            &palette(),
-            96.0,
-        )
-        .unwrap();
-        // Bold glyphs are always at least as wide as regular in every
-        // reasonable font; we allow equal because some system fonts
-        // synthesise bold via a small horizontal offset that widens
-        // by less than 1px at 14pt.
-        assert!(
-            bold.natural_width() >= plain.natural_width(),
-            "bold width {} < plain width {}",
-            bold.natural_width(),
-            plain.natural_width()
-        );
-    }
-
-    #[test]
-    fn draw_emits_glyph_runs_with_per_range_brushes() {
-        // Red span in the middle: expect at least two glyph runs
-        // and at least one that uses a red brush.
-        let sheet = RichTextStyleSheet::new();
-        let run = RichTextRun::new(
-            "a {.red word} b",
-            &base_style(),
-            Color::from_rgba8(0, 0, 0, 255),
-            &sheet,
-            &palette(),
-            96.0,
-        )
-        .unwrap();
+    fn draw(run: &RichTextRun) -> RecordingScene {
         let mut scene = RecordingScene::default();
         draw_rich_text(
             &mut scene,
-            &run,
+            run,
             0.0,
             0.0,
             RichAnchor::top_left(),
             Affine::IDENTITY,
             PickId::Skip,
         );
+        scene
+    }
+
+    fn glyph_x_at_line(scene: &RecordingScene, line_ordinal: usize) -> Option<f32> {
+        // Return the leftmost x of the `line_ordinal`-th DrawGlyphs op
+        // (approximation: parley emits one op per line for simple
+        // text; heavier styling may split further).
+        let mut ops = scene.ops.iter().filter_map(|op| match op {
+            Op::DrawGlyphs(gr) => Some(gr),
+            _ => None,
+        });
+        let gr = ops.nth(line_ordinal)?;
+        gr.glyphs.iter().map(|g| g.x).fold(None::<f32>, |acc, x| {
+            Some(match acc {
+                None => x,
+                Some(a) => a.min(x),
+            })
+        })
+    }
+
+    #[test]
+    fn plain_text_shapes_and_measures() {
+        let run = make("hello world");
+        assert!(run.natural_width() > 0.0);
+        assert!(run.natural_height() > 0.0);
+    }
+
+    #[test]
+    fn bold_widens_natural_width_vs_plain() {
+        let plain = make("hello world");
+        let bold = make("**hello world**");
+        assert!(bold.natural_width() >= plain.natural_width());
+    }
+
+    #[test]
+    fn draw_emits_glyph_runs_with_per_range_brushes() {
+        let run = make("a {.red word} b");
+        let scene = draw(&run);
         let glyph_runs: Vec<_> = scene
             .ops
             .iter()
@@ -813,33 +1057,13 @@ mod tests {
             }
             _ => false,
         });
-        assert!(has_red, "expected at least one red glyph run");
+        assert!(has_red);
     }
 
     #[test]
     fn sup_offsets_glyphs_upward() {
-        // The superscript "2" should be emitted with a smaller y
-        // (higher on screen) than a baseline glyph.
-        let sheet = RichTextStyleSheet::new();
-        let run = RichTextRun::new(
-            "a ^2^ b",
-            &base_style(),
-            Color::from_rgba8(0, 0, 0, 255),
-            &sheet,
-            &palette(),
-            96.0,
-        )
-        .unwrap();
-        let mut scene = RecordingScene::default();
-        draw_rich_text(
-            &mut scene,
-            &run,
-            0.0,
-            100.0,
-            RichAnchor::top_left(),
-            Affine::IDENTITY,
-            PickId::Skip,
-        );
+        let run = make("a ^2^ b");
+        let scene = draw(&run);
         let mut ys: Vec<f32> = Vec::new();
         for op in &scene.ops {
             if let Op::DrawGlyphs(gr) = op {
@@ -851,24 +1075,12 @@ mod tests {
         assert!(!ys.is_empty());
         let min_y = ys.iter().cloned().fold(f32::INFINITY, f32::min);
         let max_y = ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        assert!(
-            max_y - min_y > 1.0,
-            "expected sup to raise its glyphs; span was {min_y}..{max_y}"
-        );
+        assert!(max_y - min_y > 1.0);
     }
 
     #[test]
     fn measure_impl_reports_positive_height() {
-        let sheet = RichTextStyleSheet::new();
-        let run = RichTextRun::new(
-            "hello **bold** world",
-            &base_style(),
-            Color::from_rgba8(0, 0, 0, 255),
-            &sheet,
-            &palette(),
-            96.0,
-        )
-        .unwrap();
+        let run = make("hello **bold** world");
         let h = run.height_at(200.0, 96.0);
         assert!(h > 0.0);
     }
@@ -886,16 +1098,7 @@ mod tests {
             96.0,
         )
         .unwrap();
-        let mut scene = RecordingScene::default();
-        draw_rich_text(
-            &mut scene,
-            &run,
-            0.0,
-            0.0,
-            RichAnchor::top_left(),
-            Affine::IDENTITY,
-            PickId::Skip,
-        );
+        let scene = draw(&run);
         let first = scene
             .ops
             .iter()
@@ -916,185 +1119,32 @@ mod tests {
     }
 
     #[test]
-    fn center_anchor_shifts_glyph_positions_by_half_width() {
-        // Drawn with `RichAnchor::center()` at (100, 100), the glyphs
-        // should straddle 100 in x — the leftmost glyph sits at ~
-        // (100 - width/2), the rightmost at ~ (100 + width/2).
-        let sheet = RichTextStyleSheet::new();
-        let run = RichTextRun::new(
-            "abcdef",
-            &base_style(),
-            Color::from_rgba8(0, 0, 0, 255),
-            &sheet,
-            &palette(),
-            96.0,
-        )
-        .unwrap();
-        let width = run.natural_width() as f32;
-        let mut scene_center = RecordingScene::default();
-        draw_rich_text(
-            &mut scene_center,
-            &run,
-            100.0,
-            100.0,
-            RichAnchor::center(),
-            Affine::IDENTITY,
-            PickId::Skip,
-        );
-        // Take absolute glyph x's after the identity outer transform:
-        // Affine::translate(100, 100) applied to (g.x - width/2).
-        // We inspect the first glyph — should sit at ~100 - width/2.
-        let first_op = scene_center
-            .ops
-            .iter()
-            .find_map(|op| match op {
-                Op::DrawGlyphs(gr) => Some(gr),
-                _ => None,
-            })
-            .unwrap();
-        // Because the transform was baked at the SceneBuilder level
-        // (not into glyph coords), we look at the transform + first
-        // glyph position combined.
-        let first_g = first_op.glyphs.first().unwrap();
-        let transformed_x = first_op.transform.as_coeffs()[4] as f32 + first_g.x;
-        assert!(
-            (transformed_x - (100.0 - width * 0.5)).abs() < 2.0,
-            "first glyph should sit near (x - width/2), got {transformed_x} (expected ~{})",
-            100.0 - width * 0.5
-        );
-    }
-
-    fn last_glyph_abs_xy(scene: &RecordingScene) -> Option<(f32, f32)> {
-        for op in scene.ops.iter().rev() {
-            if let Op::DrawGlyphs(gr) = op {
-                if let Some(g) = gr.glyphs.last() {
-                    let coeffs = gr.transform.as_coeffs();
-                    let a = coeffs[0] as f32;
-                    let b = coeffs[1] as f32;
-                    let c = coeffs[2] as f32;
-                    let d = coeffs[3] as f32;
-                    let tx = coeffs[4] as f32;
-                    let ty = coeffs[5] as f32;
-                    return Some((a * g.x + c * g.y + tx, b * g.x + d * g.y + ty));
-                }
-            }
-        }
-        None
+    fn heading_produces_larger_glyph_run_font_size() {
+        let plain = make("Big");
+        let heading = make("# Big");
+        let max_size = |run: &RichTextRun| {
+            let scene = draw(run);
+            scene
+                .ops
+                .iter()
+                .filter_map(|op| match op {
+                    Op::DrawGlyphs(gr) => Some(gr.font_size),
+                    _ => None,
+                })
+                .fold(0.0_f32, f32::max)
+        };
+        assert!(max_size(&heading) > max_size(&plain) * 1.5);
     }
 
     #[test]
-    fn rotation_pivots_around_anchor() {
-        // A 180° rotation with `top_left` anchor at (100, 100) should
-        // put the LAST glyph — which normally sits to the right of the
-        // anchor — to the LEFT of the anchor after the flip.
-        let sheet = RichTextStyleSheet::new();
-        let run = RichTextRun::new(
-            "abcdefghij",
-            &base_style(),
-            Color::from_rgba8(0, 0, 0, 255),
-            &sheet,
-            &palette(),
-            96.0,
-        )
-        .unwrap();
-        let mut scene_up = RecordingScene::default();
-        draw_rich_text(
-            &mut scene_up,
-            &run,
-            100.0,
-            100.0,
-            RichAnchor::top_left(),
-            Affine::IDENTITY,
-            PickId::Skip,
-        );
-        let mut scene_flipped = RecordingScene::default();
-        draw_rich_text(
-            &mut scene_flipped,
-            &run,
-            100.0,
-            100.0,
-            RichAnchor::top_left(),
-            Affine::rotate(std::f64::consts::PI),
-            PickId::Skip,
-        );
-        let (up_x, _) = last_glyph_abs_xy(&scene_up).expect("upright glyph");
-        let (flipped_x, _) = last_glyph_abs_xy(&scene_flipped).expect("flipped glyph");
-        assert!(
-            up_x > 105.0,
-            "upright last glyph should sit clearly right of the anchor, got {up_x}"
-        );
-        assert!(
-            flipped_x < 95.0,
-            "180°-rotated last glyph should sit clearly left of the anchor, got {flipped_x}"
-        );
-        // Symmetry: |up_x - 100| ≈ |100 - flipped_x|.
-        let up_offset = up_x - 100.0;
-        let flipped_offset = 100.0 - flipped_x;
-        assert!(
-            (up_offset - flipped_offset).abs() < 1.5,
-            "rotation should be symmetric around anchor; up_offset={up_offset}, flipped_offset={flipped_offset}"
-        );
-    }
-
-    #[test]
-    fn first_line_anchor_places_baseline_on_y() {
-        // A `first_line_baseline` anchor at (0, 100) places the first
-        // line's baseline at screen y = 100. parley emits glyphs with
-        // y = layout-baseline on the baseline itself, so the emitted
-        // glyph struct's y should collapse to 0 in glyph space after
-        // we subtract the first-line baseline.
-        let sheet = RichTextStyleSheet::new();
-        let run = RichTextRun::new(
-            "hi",
-            &base_style(),
-            Color::from_rgba8(0, 0, 0, 255),
-            &sheet,
-            &palette(),
-            96.0,
-        )
-        .unwrap();
-        let mut scene = RecordingScene::default();
-        draw_rich_text(
-            &mut scene,
-            &run,
-            0.0,
-            100.0,
-            RichAnchor::first_line_baseline(),
-            Affine::IDENTITY,
-            PickId::Skip,
-        );
-        let first = scene
-            .ops
-            .iter()
-            .find_map(|op| match op {
-                Op::DrawGlyphs(gr) => Some(gr),
-                _ => None,
-            })
-            .unwrap();
-        let coeffs = first.transform.as_coeffs();
-        assert!(
-            (coeffs[4]).abs() < 1e-3,
-            "expected tx = 0, got {}",
-            coeffs[4]
-        );
-        assert!(
-            (coeffs[5] - 100.0).abs() < 1e-3,
-            "expected ty = 100, got {}",
-            coeffs[5]
-        );
-        // Screen y for a baseline glyph = ty + g.y. With
-        // first-line-baseline anchoring, that must equal exactly y.
-        let g = first.glyphs.first().unwrap();
-        let screen_y = coeffs[5] as f32 + g.y;
-        assert!(
-            (screen_y - 100.0).abs() < 0.5,
-            "first baseline should land at y = 100; got screen y = {screen_y}"
-        );
+    fn size_selector_produces_larger_run_height() {
+        let plain = make("x");
+        let big = make("{.36 x}");
+        assert!(big.natural_height() > plain.natural_height());
     }
 
     #[test]
     fn new_with_width_wraps_at_fixed_pixels() {
-        // Long enough that natural width is way past 60 px.
         let sheet = RichTextStyleSheet::new();
         let unwrapped = RichTextRun::new(
             "one two three four five six seven eight",
@@ -1115,128 +1165,124 @@ mod tests {
             RichTextWidth::Fixed(60.0),
         )
         .unwrap();
+        assert!(wrapped.current_height() > unwrapped.current_height());
+    }
+
+    #[test]
+    fn blockquote_indents_its_paragraph() {
+        // A blockquote's default padding.left = Rel(1.0) so its
+        // paragraph child should sit ~1em (14pt) to the right of a
+        // plain paragraph. In screen px: 14pt at 96dpi ≈ 18.67px.
+        let plain = make("hello world");
+        let quoted = make("> hello world");
+        // The paragraph inside the blockquote should be at ~1em from
+        // the left; the plain paragraph's leftmost glyph sits at ~0.
+        let plain_x = glyph_x_at_line(&draw(&plain), 0).unwrap_or(0.0);
+        let quoted_x = glyph_x_at_line(&draw(&quoted), 0).unwrap_or(0.0);
         assert!(
-            wrapped.current_height() > unwrapped.current_height(),
-            "wrapped height {} should exceed unwrapped {} because wrapping produces more lines",
-            wrapped.current_height(),
-            unwrapped.current_height()
+            quoted_x > plain_x + 10.0,
+            "blockquote content should be indented (plain={plain_x}, quoted={quoted_x})"
         );
     }
 
     #[test]
-    fn heading_produces_larger_glyph_run_font_size() {
-        let sheet = RichTextStyleSheet::new();
-        let plain = RichTextRun::new(
-            "Big",
-            &base_style(),
-            Color::from_rgba8(0, 0, 0, 255),
-            &sheet,
-            &palette(),
-            96.0,
-        )
-        .unwrap();
-        let heading = RichTextRun::new(
-            "# Big",
-            &base_style(),
-            Color::from_rgba8(0, 0, 0, 255),
-            &sheet,
-            &palette(),
-            96.0,
-        )
-        .unwrap();
-        // Extract the max font_size across emitted glyph runs from
-        // each; the heading version should have a larger max because
-        // h1 pushes a Rel(2.0) size delta.
-        let mut scene_plain = RecordingScene::default();
-        draw_rich_text(
-            &mut scene_plain,
-            &plain,
-            0.0,
-            0.0,
-            RichAnchor::top_left(),
-            Affine::IDENTITY,
-            PickId::Skip,
-        );
-        let mut scene_h = RecordingScene::default();
-        draw_rich_text(
-            &mut scene_h,
-            &heading,
-            0.0,
-            0.0,
-            RichAnchor::top_left(),
-            Affine::IDENTITY,
-            PickId::Skip,
-        );
-        let max_size = |s: &RecordingScene| {
-            s.ops
-                .iter()
-                .filter_map(|op| match op {
-                    Op::DrawGlyphs(gr) => Some(gr.font_size),
-                    _ => None,
-                })
-                .fold(0.0_f32, f32::max)
-        };
-        let plain_sz = max_size(&scene_plain);
-        let h_sz = max_size(&scene_h);
+    fn loose_list_stacks_taller_than_tight_list() {
+        // Same items, one written tight and one written loose. The
+        // loose version should be strictly taller because each
+        // paragraph body carries margin.bottom.
+        let tight = make("- alpha\n- beta\n- gamma");
+        let loose = make("- alpha\n\n- beta\n\n- gamma");
         assert!(
-            h_sz > plain_sz * 1.5,
-            "h1 font size should be > 1.5× plain (plain={plain_sz}, h={h_sz})"
+            loose.natural_height() > tight.natural_height() + 5.0,
+            "loose ({}) should stack taller than tight ({})",
+            loose.natural_height(),
+            tight.natural_height()
         );
     }
 
     #[test]
-    fn size_selector_produces_larger_run_height() {
-        let sheet = RichTextStyleSheet::new();
-        let plain = RichTextRun::new(
-            "x",
-            &base_style(),
-            Color::from_rgba8(0, 0, 0, 255),
-            &sheet,
-            &palette(),
-            96.0,
-        )
-        .unwrap();
-        let big = RichTextRun::new(
-            "{.36 x}",
-            &base_style(),
-            Color::from_rgba8(0, 0, 0, 255),
-            &sheet,
-            &palette(),
-            96.0,
-        )
-        .unwrap();
+    fn nested_list_item_sits_further_right_than_outer() {
+        // A nested list should render its bullet indented under the
+        // outer item's continuation position, i.e. outer's hanging
+        // (~1.5em) to the right of the outer marker.
+        let run = make("- outer\n  - inner");
+        let scene = draw(&run);
+        // Extract leftmost glyph x per line (approximate via y-bucket).
+        let mut by_line: std::collections::BTreeMap<i32, f32> = std::collections::BTreeMap::new();
+        for op in &scene.ops {
+            if let Op::DrawGlyphs(gr) = op {
+                if let Some(min_x) = gr.glyphs.iter().map(|g| g.x).fold(None::<f32>, |acc, x| {
+                    Some(match acc {
+                        None => x,
+                        Some(a) => a.min(x),
+                    })
+                }) {
+                    let y_key = gr.glyphs[0].y as i32;
+                    by_line
+                        .entry(y_key)
+                        .and_modify(|v| *v = v.min(min_x))
+                        .or_insert(min_x);
+                }
+            }
+        }
+        let xs: Vec<f32> = by_line.into_values().collect();
+        assert!(xs.len() >= 2, "expected at least 2 lines, got {xs:?}");
+        // First line = outer's bullet at x≈0; second = inner's bullet
+        // at x≈1.5em (=1.5*14pt≈21pt→28px at 96dpi).
         assert!(
-            big.natural_height() > plain.natural_height(),
-            "36pt should be taller than base 14pt (plain={}, big={})",
-            plain.natural_height(),
-            big.natural_height()
+            xs[1] > xs[0] + 10.0,
+            "nested item should be indented past outer (xs={xs:?})"
+        );
+    }
+
+    #[test]
+    fn list_item_hanging_shifts_continuation_lines() {
+        // Force the list item to wrap so a continuation line appears,
+        // then verify its leftmost glyph is right of the first line's.
+        let src = "- one two three four five six seven eight nine";
+        let sheet = RichTextStyleSheet::new();
+        let run = RichTextRun::new_with_width(
+            src,
+            &base_style(),
+            Color::from_rgba8(0, 0, 0, 255),
+            &sheet,
+            &palette(),
+            96.0,
+            RichTextWidth::Fixed(100.0),
+        )
+        .unwrap();
+        let scene = draw(&run);
+        // Extract all glyph runs and their minimum x + y. Group by y
+        // to distinguish lines.
+        let mut by_line: std::collections::BTreeMap<i32, f32> = std::collections::BTreeMap::new();
+        for op in &scene.ops {
+            if let Op::DrawGlyphs(gr) = op {
+                if let Some(min_x) = gr.glyphs.iter().map(|g| g.x).fold(None::<f32>, |acc, x| {
+                    Some(match acc {
+                        None => x,
+                        Some(a) => a.min(x),
+                    })
+                }) {
+                    let y_key = gr.glyphs[0].y as i32;
+                    by_line
+                        .entry(y_key)
+                        .and_modify(|v| *v = v.min(min_x))
+                        .or_insert(min_x);
+                }
+            }
+        }
+        let xs: Vec<f32> = by_line.into_values().collect();
+        assert!(xs.len() >= 2, "expected at least 2 lines, got {xs:?}");
+        assert!(
+            xs[1] > xs[0] + 5.0,
+            "continuation line should be right of first (xs={xs:?})"
         );
     }
 
     #[test]
     fn code_block_emits_fill_before_glyphs() {
-        // The `code_block` sheet default carries a background — the
-        // recording scene should show a Fill op before any DrawGlyphs.
-        let sheet = RichTextStyleSheet::new();
-        let run = RichTextRun::new(
-            "```\nlet x = 1;\n```",
-            &base_style(),
-            Color::from_rgba8(0, 0, 0, 255),
-            &sheet,
-            &palette(),
-            96.0,
-        )
-        .unwrap();
-        let mut scene = RecordingScene::default();
-        draw_rich_text(
-            &mut scene,
-            &run,
-            0.0,
-            0.0,
-            RichAnchor::top_left(),
-            Affine::IDENTITY,
-            PickId::Skip,
-        );
+        let run = make("```\nlet x = 1;\n```");
+        let scene = draw(&run);
         let first_fill = scene
             .ops
             .iter()
@@ -1245,107 +1291,86 @@ mod tests {
             .ops
             .iter()
             .position(|op| matches!(op, Op::DrawGlyphs(_)));
-        let (fi, gi) = (
-            first_fill.expect("expected a Fill op"),
-            first_glyphs.expect("expected a DrawGlyphs op"),
-        );
-        assert!(
-            fi < gi,
-            "code_block background (Fill at {fi}) should come before glyphs (DrawGlyphs at {gi})"
-        );
+        let (fi, gi) = (first_fill.expect("fill"), first_glyphs.expect("glyphs"));
+        assert!(fi < gi, "Fill at {fi} should precede DrawGlyphs at {gi}");
     }
 
     #[test]
     fn plain_text_emits_no_block_paints() {
-        let sheet = RichTextStyleSheet::new();
-        let run = RichTextRun::new(
-            "just a plain paragraph",
-            &base_style(),
-            Color::from_rgba8(0, 0, 0, 255),
-            &sheet,
-            &palette(),
-            96.0,
-        )
-        .unwrap();
+        let run = make("just plain");
+        let scene = draw(&run);
+        let fills = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count();
+        let strokes = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .count();
+        assert_eq!(fills, 0);
+        assert_eq!(strokes, 0);
+    }
+
+    #[test]
+    fn center_anchor_shifts_glyph_positions_by_half_width() {
+        let run = make("abcdef");
+        let width = run.natural_width() as f32;
+        let mut scene = RecordingScene::default();
+        draw_rich_text(
+            &mut scene,
+            &run,
+            100.0,
+            100.0,
+            RichAnchor::center(),
+            Affine::IDENTITY,
+            PickId::Skip,
+        );
+        let first_op = scene
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::DrawGlyphs(gr) => Some(gr),
+                _ => None,
+            })
+            .unwrap();
+        let first_g = first_op.glyphs.first().unwrap();
+        let transformed_x = first_op.transform.as_coeffs()[4] as f32 + first_g.x;
+        assert!(
+            (transformed_x - (100.0 - width * 0.5)).abs() < 2.0,
+            "first glyph should sit near (x - width/2), got {transformed_x} (expected ~{})",
+            100.0 - width * 0.5
+        );
+    }
+
+    #[test]
+    fn first_line_anchor_places_baseline_on_y() {
+        let run = make("hi");
         let mut scene = RecordingScene::default();
         draw_rich_text(
             &mut scene,
             &run,
             0.0,
-            0.0,
-            RichAnchor::top_left(),
+            100.0,
+            RichAnchor::first_line_baseline(),
             Affine::IDENTITY,
             PickId::Skip,
         );
-        let fill_count = scene
+        let first = scene
             .ops
             .iter()
-            .filter(|op| matches!(op, Op::Fill { .. }))
-            .count();
-        let stroke_count = scene
-            .ops
-            .iter()
-            .filter(|op| matches!(op, Op::Stroke { .. }))
-            .count();
-        assert_eq!(
-            fill_count, 0,
-            "plain paragraph should not emit any Fill ops"
-        );
-        assert_eq!(
-            stroke_count, 0,
-            "plain paragraph should not emit any Stroke ops"
-        );
-    }
-
-    #[test]
-    fn ordered_list_produces_more_glyphs_than_body_alone() {
-        // The reducer prepends "1. " / "2. " / "3. " to each item —
-        // shape a plain sentence and its list-wrapped counterpart and
-        // confirm the list has strictly more glyphs.
-        let sheet = RichTextStyleSheet::new();
-        let plain = RichTextRun::new(
-            "a b c",
-            &base_style(),
-            Color::from_rgba8(0, 0, 0, 255),
-            &sheet,
-            &palette(),
-            96.0,
-        )
-        .unwrap();
-        let listed = RichTextRun::new(
-            "1. a\n2. b\n3. c",
-            &base_style(),
-            Color::from_rgba8(0, 0, 0, 255),
-            &sheet,
-            &palette(),
-            96.0,
-        )
-        .unwrap();
-        let count = |run: &RichTextRun| {
-            let mut scene = RecordingScene::default();
-            draw_rich_text(
-                &mut scene,
-                run,
-                0.0,
-                0.0,
-                RichAnchor::top_left(),
-                Affine::IDENTITY,
-                PickId::Skip,
-            );
-            scene
-                .ops
-                .iter()
-                .filter_map(|op| match op {
-                    Op::DrawGlyphs(gr) => Some(gr.glyphs.len()),
-                    _ => None,
-                })
-                .sum::<usize>()
-        };
-        let plain_g = count(&plain);
-        let listed_g = count(&listed);
+            .find_map(|op| match op {
+                Op::DrawGlyphs(gr) => Some(gr),
+                _ => None,
+            })
+            .unwrap();
+        let coeffs = first.transform.as_coeffs();
+        let g = first.glyphs.first().unwrap();
+        let screen_y = coeffs[5] as f32 + g.y;
         assert!(
-            listed_g > plain_g,
-            "listed content should carry marker glyphs (plain={plain_g}, listed={listed_g})"
+            (screen_y - 100.0).abs() < 0.5,
+            "first baseline should land at y = 100; got screen y = {screen_y}"
         );
     }
 }

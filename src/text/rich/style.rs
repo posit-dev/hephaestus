@@ -282,6 +282,13 @@ impl RichTextStyleSheet {
                 ..StyleDelta::empty()
             },
         );
+        // `list_item_body` styles the paragraph a tight-list item's
+        // body opens in. Empty by default — tight items stack with
+        // no extra vertical margin. Loose items instead style their
+        // body as `paragraph` (which carries `margin.bottom = Rel(0.5)`).
+        // Users can populate this to add tight-list-specific styling
+        // (e.g. small `margin.bottom` for slight breathing room).
+        s.set("list_item_body", StyleDelta::empty());
         s.set(
             "code_block",
             StyleDelta {
