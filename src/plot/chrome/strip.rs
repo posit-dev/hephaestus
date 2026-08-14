@@ -332,6 +332,7 @@ pub fn draw_strip(
         root_pt,
         dpi,
         PickId::Skip,
+        Some(&theme.rich_text),
     );
     if clipping.is_some() {
         scene.pop_layer();

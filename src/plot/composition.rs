@@ -577,6 +577,7 @@ impl CompositionChrome {
                 root_pt,
                 dpi,
                 crate::pick::PickId::Skip,
+                Some(&theme.rich_text),
             );
         }
 

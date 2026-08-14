@@ -68,7 +68,7 @@ use crate::color::Color;
 use crate::geometry::Affine;
 use crate::layout::{Measure, WidthHint};
 use crate::pick::PickId;
-use crate::plot::theme::{Length, Margin, Palette};
+use crate::plot::theme::{HAlign, Length, Margin, Palette};
 use crate::scene::{Font, Glyph, GlyphRun, SceneBuilder};
 use crate::text::{FontFamilyEntry, GenericFamilyKind, LineHeight, TextStyle};
 
@@ -156,6 +156,51 @@ pub(crate) struct BlockLayout {
     pub(crate) extra_top_px: f32,
     /// Symmetric bottom counterpart.
     pub(crate) extra_bottom_px: f32,
+    /// Block-level horizontal alignment resolved from own +
+    /// ancestor `align`. `None` = fall back to the caller-supplied
+    /// alignment at re-break time (matches the outer's opinion).
+    pub(crate) alignment_override: Option<Alignment>,
+    /// Asymmetric-shift companion layout. `Some` when
+    /// `first_line_shift_px != continuation_shift_px` and the block
+    /// has more than one line's worth of content:
+    ///   - `layout` above shapes the WHOLE content at the first
+    ///     line's usable width (`block - first_line_shift`). Only
+    ///     its first line is drawn.
+    ///   - `continuation_layout` shapes the remainder (after the
+    ///     first line's byte range) at the continuation's usable
+    ///     width (`block - continuation_shift`). All its lines are
+    ///     drawn.
+    ///
+    /// This lets first-line and continuation lines each reach the
+    /// block's right edge, matching CSS hanging / text-indent
+    /// semantics that a single-width parley layout can't achieve.
+    pub(crate) continuation_layout: Option<parley::Layout<RichBrush>>,
+    /// Baseline shifts for `continuation_layout` — byte ranges
+    /// rebased to that layout's local text.
+    pub(crate) continuation_baseline_shifts: Vec<BaselineRun>,
+    /// Inline runs for `continuation_layout` — ranges rebased to
+    /// that layout's local text. Needed at draw time so span
+    /// backgrounds / borders / outlines apply on continuation
+    /// lines too.
+    pub(crate) continuation_inlines: Vec<InlineRun>,
+    /// Height (px) of the first line only. Used to y-position the
+    /// continuation layout when `continuation_layout` is Some.
+    pub(crate) first_line_height_px: f32,
+    /// Cached block-local source, used to re-shape when
+    /// `set_max_width` produces an asymmetric-shift split. Empty
+    /// text / vecs when the block never needs re-shape (e.g. hr
+    /// blocks).
+    pub(crate) source_text: String,
+    pub(crate) source_inlines: Vec<InlineRun>,
+    pub(crate) source_baselines: Vec<BaselineRun>,
+    /// Ancestor-container margin.top contributions (px) that this
+    /// leaf absorbs as first-descendant. Fold into the pending
+    /// margin accumulator during layout to collapse with siblings
+    /// per CSS rules.
+    pub(crate) anc_top_margins_px: Vec<f32>,
+    /// Ancestor-container margin.bottom contributions (px) that
+    /// this leaf absorbs as last-descendant.
+    pub(crate) anc_bottom_margins_px: Vec<f32>,
 }
 
 impl BlockLayout {
@@ -190,6 +235,9 @@ pub struct RichTextRun {
     pub(crate) base_style: TextStyle,
     /// Palette used to resolve `ThemeColor` values on paints.
     pub(crate) palette: Palette,
+    /// Base brush colour captured at construction — used when re-
+    /// shaping asymmetric blocks in [`Self::set_max_width`].
+    pub(crate) base_brush: Color,
     /// Convenience mirror of `base_style.size_pt`.
     pub(crate) base_size_pt: f32,
     /// DPI captured at construction.
@@ -325,26 +373,50 @@ impl RichTextRun {
             // Ancestor padding + hanging → left indent / continuation.
             let ancestors = ancestors_of_range(&leaf.range, &containers);
             let (anc_left_pt, anc_right_pt) = ancestor_side_padding_pt(&ancestors, base_pt);
-            // Walk ancestor ListItems: each one's `hanging` either
-            // contributes to *this* leaf's continuation shift (when
-            // the leaf is that item's first-descendant body) or to
-            // this leaf's left indent (when the leaf is deeper
-            // content — a nested list's body, a blockquote inside an
-            // item, a second loose paragraph, etc.).
+            // Walk ancestor containers for indent / hanging routing:
+            //
+            //   - `ListItem` uses the classic outdent-vs-nested split.
+            //     Its `hanging` becomes `continuation_shift` on the
+            //     item's own body (first-descendant leaf) and
+            //     `left_px` on any deeper content (nested lists,
+            //     subsequent loose paragraphs) — so nested items sit
+            //     under the outer item's body-continuation column.
+            //
+            //   - `Div` / `BlockQuote` are the "block styling"
+            //     containers. Their `indent` and `hanging` apply to
+            //     EVERY descendant paragraph uniformly: the div's
+            //     styling cascades onto each paragraph as if it were
+            //     the paragraph's own value. That mirrors how CSS
+            //     `text-indent` / hanging on a container cascades to
+            //     descendant blocks.
             let mut anc_hanging_left_pt = 0.0;
             let mut anc_hanging_cont_pt = 0.0;
+            let mut anc_first_line_pt = 0.0;
             for anc in &ancestors {
-                if !matches!(anc.kind, BlockKind::ListItem { .. }) {
-                    continue;
-                }
                 let h = anc.delta.hanging.map(|l| l.resolve(base_pt)).unwrap_or(0.0);
-                let is_first_body = container_first_last
-                    .iter()
-                    .any(|(cr, f, _)| cr == &anc.range && f == &leaf.range);
-                if is_first_body {
-                    anc_hanging_cont_pt += h;
-                } else {
-                    anc_hanging_left_pt += h;
+                let i = anc.delta.indent.map(|l| l.resolve(base_pt)).unwrap_or(0.0);
+                match anc.kind {
+                    BlockKind::ListItem { .. } => {
+                        let is_first_body = container_first_last
+                            .iter()
+                            .any(|(cr, f, _)| cr == &anc.range && f == &leaf.range);
+                        if is_first_body {
+                            anc_hanging_cont_pt += h;
+                        } else {
+                            anc_hanging_left_pt += h;
+                        }
+                        // ListItem doesn't currently participate in
+                        // `indent` — matches marquee's `hanging`-only
+                        // semantics for list items.
+                    }
+                    _ => {
+                        // Div / BlockQuote / List / anything else:
+                        // container hanging → every descendant's
+                        // continuation shift; container indent →
+                        // every descendant's first-line shift.
+                        anc_hanging_cont_pt += h;
+                        anc_first_line_pt += i;
+                    }
                 }
             }
             // Container spacing (routed to first / last descendant):
@@ -418,23 +490,43 @@ impl RichTextRun {
                 .map(|l| l.resolve(base_pt))
                 .unwrap_or(0.0);
             let hanging_px = pt_to_px((own_hanging_pt + anc_hanging_cont_pt).max(0.0), dpi);
-            let first_line_indent_px = leaf
-                .delta
-                .indent
-                .map(|l| pt_to_px(l.resolve(base_pt).max(0.0), dpi))
-                .unwrap_or(0.0);
+            let own_first_line_pt = leaf.delta.indent.map(|l| l.resolve(base_pt)).unwrap_or(0.0);
+            let first_line_indent_px =
+                pt_to_px((own_first_line_pt + anc_first_line_pt).max(0.0), dpi);
+            // Alignment: own overrides ancestor overrides caller.
+            let mut resolved_align: Option<HAlign> = leaf.delta.align;
+            if resolved_align.is_none() {
+                for anc in &ancestors {
+                    if let Some(a) = anc.delta.align {
+                        resolved_align = Some(a);
+                        break;
+                    }
+                }
+            }
+            let alignment_override = resolved_align.map(hal_to_alignment);
             // Slice text + inlines + baseline shifts to just this
             // block's byte range; rebase ranges to block-local coords.
-            let (block_text, inlines, baselines) =
+            let (block_text_owned, inlines, baselines) =
                 slice_block(&runs.text, &runs.inline, &runs.baseline_shifts, &leaf.range);
-            // Shape as its own parley layout. Natural break to start
-            // — caller may re-break via `set_max_width`.
+            let block_text = block_text_owned;
+            // Shape at natural width first (no wrap constraint). The
+            // asymmetric-shift split is applied only when
+            // `set_max_width` is called with a finite constraint —
+            // at natural width there's no wrap and thus no "gap on
+            // right" issue.
             let mut layout =
                 shape_block_layout(&block_text, &inlines, base_style, base_brush, palette, dpi);
             layout.break_all_lines(None);
-            layout.align(Alignment::Start, AlignmentOptions::default());
+            layout.align(
+                alignment_override.unwrap_or(Alignment::Start),
+                AlignmentOptions::default(),
+            );
             let widths = layout.calculate_content_widths();
             let height_px = layout.height();
+            let continuation_layout: Option<parley::Layout<RichBrush>> = None;
+            let continuation_baseline_shifts: Vec<BaselineRun> = Vec::new();
+            let continuation_inlines: Vec<InlineRun> = Vec::new();
+            let first_line_height_px: f32 = 0.0;
             let margin_top_px = pt_to_px(mt_pt, dpi);
             let margin_bottom_px = pt_to_px(mb_pt, dpi);
             // Sibling + first-descendant margin collapse. Each
@@ -481,7 +573,7 @@ impl RichTextRun {
             }
             layouts.push(BlockLayout {
                 layout,
-                baseline_shifts: baselines,
+                baseline_shifts: baselines.clone(),
                 text_range: leaf.range.clone(),
                 kind: leaf.kind.clone(),
                 delta: leaf.delta.clone(),
@@ -501,6 +593,22 @@ impl RichTextRun {
                 padding_left_px: own_left_px,
                 extra_top_px,
                 extra_bottom_px,
+                alignment_override,
+                continuation_layout,
+                continuation_baseline_shifts,
+                first_line_height_px,
+                continuation_inlines,
+                source_text: block_text,
+                source_inlines: inlines,
+                source_baselines: baselines,
+                anc_top_margins_px: anc_first_margins
+                    .iter()
+                    .map(|pt| pt_to_px(*pt, dpi))
+                    .collect(),
+                anc_bottom_margins_px: anc_last_margins
+                    .iter()
+                    .map(|pt| pt_to_px(*pt, dpi))
+                    .collect(),
             });
         }
         // Flush the trailing pending margin so it counts toward the
@@ -548,6 +656,7 @@ impl RichTextRun {
             containers,
             base_style: base_style.clone(),
             palette: *palette,
+            base_brush,
             base_size_pt: base_style.size_pt,
             dpi,
             last_break_width: RefCell::new(None),
@@ -592,12 +701,124 @@ impl RichTextRun {
         let mut pending_neg: f32 = 0.0;
         for bl in blocks.iter_mut() {
             let block_avail = (max_width_px - bl.left_px - bl.right_inset_px).max(1.0);
-            let max_shift = bl.first_line_shift_px.max(bl.continuation_shift_px);
-            let target = (block_avail - max_shift).max(1.0);
-            bl.layout.break_all_lines(Some(target));
-            bl.layout.align(alignment, AlignmentOptions::default());
-            bl.shape_width_px = target;
-            bl.height_px = bl.layout.height();
+            let effective_align = bl.alignment_override.unwrap_or(alignment);
+            if bl.first_line_shift_px == bl.continuation_shift_px {
+                // Symmetric — single layout at (block - shift).
+                let target = (block_avail - bl.first_line_shift_px).max(1.0);
+                bl.layout.break_all_lines(Some(target));
+                bl.layout
+                    .align(effective_align, AlignmentOptions::default());
+                bl.shape_width_px = target;
+                bl.height_px = bl.layout.height();
+                bl.continuation_layout = None;
+                bl.continuation_baseline_shifts.clear();
+                bl.continuation_inlines.clear();
+                bl.first_line_height_px = 0.0;
+            } else {
+                // Asymmetric — two-layout dance so both first-line
+                // and continuation lines reach the right edge.
+                let usable_first = (block_avail - bl.first_line_shift_px).max(1.0);
+                let usable_cont = (block_avail - bl.continuation_shift_px).max(1.0);
+                // Re-shape from cached source at first-line's usable
+                // width. Parley may have wrapped natural single-line
+                // shape; re-shaping produces a fresh line-break.
+                let mut first_layout = shape_block_layout(
+                    &bl.source_text,
+                    &bl.source_inlines,
+                    &self.base_style,
+                    self.base_brush,
+                    &self.palette,
+                    self.dpi,
+                );
+                first_layout.break_all_lines(Some(usable_first));
+                first_layout.align(effective_align, AlignmentOptions::default());
+                // Find first line's byte end. If content fits on the
+                // first line, no continuation needed.
+                let first_line_end = first_layout
+                    .lines()
+                    .next()
+                    .map(|l| l.text_range().end)
+                    .unwrap_or(bl.source_text.len());
+                let first_line_height = first_layout
+                    .lines()
+                    .next()
+                    .map(|l| l.metrics().line_height)
+                    .unwrap_or(0.0);
+                if first_line_end >= bl.source_text.len() {
+                    // Single line — no continuation.
+                    bl.layout = first_layout;
+                    bl.shape_width_px = usable_first;
+                    bl.height_px = bl.layout.height();
+                    bl.continuation_layout = None;
+                    bl.continuation_baseline_shifts.clear();
+                    bl.continuation_inlines.clear();
+                    bl.first_line_height_px = 0.0;
+                } else {
+                    // Slice remaining text + rebase inline/baseline
+                    // ranges to (start = 0 at first_line_end).
+                    let rest_text = bl.source_text[first_line_end..].to_string();
+                    let rest_inlines: Vec<InlineRun> = bl
+                        .source_inlines
+                        .iter()
+                        .filter_map(|r| {
+                            let start = r.range.start.max(first_line_end);
+                            let end = r.range.end.min(bl.source_text.len());
+                            if start >= end {
+                                return None;
+                            }
+                            Some(InlineRun {
+                                range: (start - first_line_end)..(end - first_line_end),
+                                delta: r.delta.clone(),
+                            })
+                        })
+                        .collect();
+                    let rest_baselines: Vec<BaselineRun> = bl
+                        .source_baselines
+                        .iter()
+                        .filter_map(|b| {
+                            let start = b.range.start.max(first_line_end);
+                            let end = b.range.end.min(bl.source_text.len());
+                            if start >= end {
+                                return None;
+                            }
+                            Some(BaselineRun {
+                                range: (start - first_line_end)..(end - first_line_end),
+                                shift_em: b.shift_em,
+                            })
+                        })
+                        .collect();
+                    let mut cont_layout = shape_block_layout(
+                        &rest_text,
+                        &rest_inlines,
+                        &self.base_style,
+                        self.base_brush,
+                        &self.palette,
+                        self.dpi,
+                    );
+                    cont_layout.break_all_lines(Some(usable_cont));
+                    cont_layout.align(effective_align, AlignmentOptions::default());
+                    let cont_height = cont_layout.height();
+                    bl.layout = first_layout;
+                    bl.continuation_layout = Some(cont_layout);
+                    bl.continuation_baseline_shifts = rest_baselines;
+                    bl.continuation_inlines = rest_inlines;
+                    bl.first_line_height_px = first_line_height;
+                    // Shape width for paint: use the wider of the
+                    // two so the outer_rect matches the CONTINUATION
+                    // (which fills the block's right edge).
+                    bl.shape_width_px = usable_cont;
+                    bl.height_px = first_line_height + cont_height;
+                }
+            }
+            // Ancestor container margin.top contributions fold in
+            // as first-descendant (same as shape()'s natural path).
+            for &m_px in &bl.anc_top_margins_px {
+                if m_px >= 0.0 {
+                    pending_pos = pending_pos.max(m_px);
+                } else {
+                    pending_neg = pending_neg.min(m_px);
+                }
+            }
             if bl.margin_top_px >= 0.0 {
                 pending_pos = pending_pos.max(bl.margin_top_px);
             } else {
@@ -613,6 +834,13 @@ impl RichTextRun {
                 pending_pos = pending_pos.max(bl.margin_bottom_px);
             } else {
                 pending_neg = pending_neg.min(bl.margin_bottom_px);
+            }
+            for &m_px in &bl.anc_bottom_margins_px {
+                if m_px >= 0.0 {
+                    pending_pos = pending_pos.max(m_px);
+                } else {
+                    pending_neg = pending_neg.min(m_px);
+                }
             }
         }
         y_accum += pending_pos + pending_neg;
@@ -735,6 +963,38 @@ fn shape_block_layout(
             dpi,
             &mut family_pool,
         );
+    }
+    // Inline span padding reserves shape space by inserting
+    // zero-height in-flow `InlineBox` placeholders at each span's
+    // start/end byte offsets. Parley shifts subsequent glyphs by
+    // the box's width during shaping, so the visible chip has room
+    // to sit around the span's glyphs instead of overlapping them.
+    // IDs encode (inline_index * 2) + edge: 0 = left, 1 = right —
+    // used at draw time to bracket the span's line-fragment rect.
+    let base_pt = base_style.size_pt as f64;
+    for (i, InlineRun { range, delta }) in inlines.iter().enumerate() {
+        let Some(pad) = delta.padding else { continue };
+        let (_, right_pt, _, left_pt) = pad.resolve(base_pt);
+        let left_px = (left_pt * dpi / 72.0) as f32;
+        let right_px = (right_pt * dpi / 72.0) as f32;
+        if left_px > 0.0 {
+            builder.push_inline_box(parley::InlineBox {
+                id: (i as u64) * 2,
+                kind: parley::InlineBoxKind::InFlow,
+                index: range.start,
+                width: left_px,
+                height: 0.0,
+            });
+        }
+        if right_px > 0.0 {
+            builder.push_inline_box(parley::InlineBox {
+                id: (i as u64) * 2 + 1,
+                kind: parley::InlineBoxKind::InFlow,
+                index: range.end,
+                width: right_px,
+                height: 0.0,
+            });
+        }
     }
     builder.build(text)
 }
@@ -972,6 +1232,15 @@ fn pt_to_px(pt: f64, dpi: f64) -> f32 {
     (pt * dpi / 72.0) as f32
 }
 
+fn hal_to_alignment(a: HAlign) -> Alignment {
+    match a {
+        HAlign::Start => Alignment::Start,
+        HAlign::Center => Alignment::Center,
+        HAlign::End => Alignment::End,
+        HAlign::Justify => Alignment::Justify,
+    }
+}
+
 /// Slice text + inline runs + baseline shifts to the block's byte
 /// range, rebasing ranges to block-local coordinates.
 fn slice_block(
@@ -1017,8 +1286,18 @@ fn slice_block(
 /// `anchor` picks the point on the laid-out run that coincides with
 /// `(x, y)`. `transform` composes around that anchor.
 ///
-/// Block-level paints (backgrounds, borders) emit first with
-/// [`PickId::Skip`]; glyph runs emit second with `pick_id`.
+/// Draw order per glyph run: span background/border (from any
+/// overlapping [`StyleDelta`] with `background` / `border_*`) →
+/// per-span outline stroke (from [`StyleDelta::text_stroke`] +
+/// `text_stroke_width`) → fill glyphs → text decorations
+/// (underline / strikethrough). A caller who wants an outline on
+/// every glyph regardless of source styles should set `text_stroke`
+/// on the sheet class that governs the block (e.g. `paragraph`, a
+/// custom container class).
+///
+/// Block-level paints (backgrounds, borders on paragraphs /
+/// containers) are emitted before any of the above via
+/// [`RichTextRun::block_paints`].
 #[allow(clippy::too_many_arguments)]
 pub fn draw_rich_text<S: SceneBuilder + ?Sized>(
     scene: &mut S,
@@ -1033,60 +1312,398 @@ pub fn draw_rich_text<S: SceneBuilder + ?Sized>(
     let offsets = bounds.resolve(anchor);
     let final_transform = Affine::translate((x, y)) * transform;
 
-    // Backgrounds + borders first.
+    // Block backgrounds + borders first.
     for paint in &run.block_paints() {
         emit_block_paint(scene, paint, offsets, final_transform);
     }
 
+    let base_pt = run.base_size_pt as f64;
+    let dpi = run.dpi;
+    let palette = &run.palette;
     // Glyphs.
     let blocks = run.blocks.borrow();
     for bl in blocks.iter() {
         let block_x = bl.left_px;
         let block_y = bl.y_px;
-        for (line_index, line) in bl.layout.lines().enumerate() {
-            let per_line_shift = if line_index == 0 {
-                bl.first_line_shift_px
-            } else {
-                bl.continuation_shift_px
-            };
-            for item in line.items() {
-                let PositionedLayoutItem::GlyphRun(gr) = item else {
-                    continue;
+        if let Some(cont_layout) = &bl.continuation_layout {
+            if let Some(first_line) = bl.layout.lines().next() {
+                emit_line_glyphs(
+                    scene,
+                    first_line,
+                    block_x,
+                    block_y,
+                    bl.first_line_shift_px,
+                    &bl.baseline_shifts,
+                    &bl.source_inlines,
+                    palette,
+                    run.base_brush,
+                    base_pt,
+                    dpi,
+                    offsets,
+                    final_transform,
+                    pick_id,
+                );
+            }
+            let cont_y = block_y + bl.first_line_height_px;
+            for line in cont_layout.lines() {
+                emit_line_glyphs(
+                    scene,
+                    line,
+                    block_x,
+                    cont_y,
+                    bl.continuation_shift_px,
+                    &bl.continuation_baseline_shifts,
+                    &bl.continuation_inlines,
+                    palette,
+                    run.base_brush,
+                    base_pt,
+                    dpi,
+                    offsets,
+                    final_transform,
+                    pick_id,
+                );
+            }
+        } else {
+            for (line_index, line) in bl.layout.lines().enumerate() {
+                let per_line_shift = if line_index == 0 {
+                    bl.first_line_shift_px
+                } else {
+                    bl.continuation_shift_px
                 };
-                let prun = gr.run();
-                let font = Font(prun.font().clone());
-                let brush_color = gr.style().brush.0;
-                let brush = Brush::Solid(brush_color);
-                let run_range = prun.text_range();
-                let font_size = prun.font_size();
-                let shift_em = baseline_shift_for_range(&bl.baseline_shifts, &run_range);
-                let dy_px = shift_em * font_size;
-                let glyphs: Vec<Glyph> = gr
-                    .positioned_glyphs()
-                    .map(|g| Glyph {
-                        id: g.id,
-                        x: g.x + block_x + per_line_shift - offsets.ref_x,
-                        y: g.y + block_y - offsets.ref_y - dy_px,
-                    })
-                    .collect();
-                if glyphs.is_empty() {
-                    continue;
-                }
-                let glyph_run = GlyphRun {
-                    font: &font,
-                    font_size,
-                    transform: final_transform,
-                    glyph_transform: None,
-                    brush: &brush,
-                    brush_alpha: 1.0,
-                    hint: false,
-                    glyphs: &glyphs,
-                    style: None,
-                };
-                scene.draw_glyphs(&glyph_run, pick_id);
+                emit_line_glyphs(
+                    scene,
+                    line,
+                    block_x,
+                    block_y,
+                    per_line_shift,
+                    &bl.baseline_shifts,
+                    &bl.source_inlines,
+                    palette,
+                    run.base_brush,
+                    base_pt,
+                    dpi,
+                    offsets,
+                    final_transform,
+                    pick_id,
+                );
             }
         }
     }
+}
+
+/// Emit one parley line's glyph runs (with span backgrounds,
+/// per-span or outer outlines, and decorations) into `scene`.
+/// Extracted so [`draw_rich_text`] can call it twice for the
+/// asymmetric-shift case (first line + continuation lines).
+#[allow(clippy::too_many_arguments)]
+fn emit_line_glyphs<S: SceneBuilder + ?Sized>(
+    scene: &mut S,
+    line: parley::layout::Line<'_, RichBrush>,
+    block_x: f32,
+    block_y: f32,
+    shift_px: f32,
+    baseline_shifts: &[BaselineRun],
+    inlines: &[InlineRun],
+    palette: &Palette,
+    base_brush: Color,
+    base_pt: f64,
+    dpi: f64,
+    offsets: super::anchor::AnchorOffsets,
+    final_transform: Affine,
+    pick_id: PickId,
+) {
+    // First pass — record positions of any InlineBoxes on this line
+    // so we can bracket span paint rects with the reserved padding
+    // space. Keyed by id (assigned at shape time: 2*i = left,
+    // 2*i + 1 = right).
+    let mut inline_box_x: std::collections::HashMap<u64, (f32, f32)> =
+        std::collections::HashMap::new();
+    for item in line.items() {
+        if let PositionedLayoutItem::InlineBox(ib) = item {
+            inline_box_x.insert(ib.id, (ib.x, ib.x + ib.width));
+        }
+    }
+    for item in line.items() {
+        let PositionedLayoutItem::GlyphRun(gr) = item else {
+            continue;
+        };
+        let prun = gr.run();
+        let font = Font(prun.font().clone());
+        let brush_color = gr.style().brush.0;
+        let brush = Brush::Solid(brush_color);
+        let run_range = prun.text_range();
+        let font_size = prun.font_size();
+        let shift_em = baseline_shift_for_range(baseline_shifts, &run_range);
+        let dy_px = shift_em * font_size;
+        let metrics = prun.metrics();
+        let baseline = gr.baseline();
+        let run_x_base = block_x + shift_px - offsets.ref_x;
+        let glyph_x0 = run_x_base + gr.offset();
+        let glyph_x1 = glyph_x0 + gr.advance();
+        let y_base = block_y + baseline - offsets.ref_y - dy_px;
+
+        // ── Match GlyphRun to InlineRun. Parley's `Run::text_range`
+        //    reports the **parent** run's byte range (which spans
+        //    every GlyphRun in the line, since a style-driven split
+        //    subdivides one Run into multiple GlyphRuns without
+        //    changing its logical extent). To identify which
+        //    InlineRun owns this specific GlyphRun we match on the
+        //    resolved brush colour: parley splits GlyphRuns on
+        //    `Brush` changes, and each InlineRun's `delta.color`
+        //    (or the block's `base_brush` fallback) determines that
+        //    brush. When two InlineRuns resolve to the same colour
+        //    (a background-only or text_stroke-only span with no
+        //    `color`) parley cannot distinguish them at all — the
+        //    span's decorations are not observable and, correctly,
+        //    the outline pass doesn't fire. Callers wanting an
+        //    outlined span therefore set `color` alongside
+        //    `text_stroke` (or fold both into a sheet entry).
+        let gr_brush = gr.style().brush.0;
+        // Prefer a decorated InlineRun (has bg / border / text_stroke)
+        // whose resolved colour matches this GlyphRun's brush — those
+        // are the InlineRuns whose decorations we can actually emit.
+        // Falls back to any overlapping InlineRun with matching brush
+        // so plain (colour-only) spans still resolve for the fill pass.
+        let brush_matches = |r: &&InlineRun| -> bool {
+            let overlaps = r.range.start < run_range.end && r.range.end > run_range.start;
+            if !overlaps {
+                return false;
+            }
+            let effective = r
+                .delta
+                .color
+                .as_ref()
+                .map(|c| c.resolve(palette))
+                .unwrap_or(base_brush);
+            effective == gr_brush
+        };
+        let has_decoration = |r: &&InlineRun| -> bool {
+            r.delta.background.is_some()
+                || (r.delta.border_color.is_some() && r.delta.border_width.is_some())
+                || (r.delta.text_stroke.is_some() && r.delta.text_stroke_width.is_some())
+        };
+        let matched: Option<&InlineRun> = inlines
+            .iter()
+            .find(|r| brush_matches(r) && has_decoration(r))
+            .or_else(|| inlines.iter().find(brush_matches));
+
+        // ── Span background + border, per line-fragment. Bracketed
+        //    by any InlineBox padding placeholders on this line.
+        if let Some(inl) = matched {
+            let d = &inl.delta;
+            let has_bg = d.background.is_some();
+            let has_border = d.border_color.is_some() && d.border_width.is_some();
+            if has_bg || has_border {
+                let idx = inlines.iter().position(|r| std::ptr::eq(r, inl));
+                let left_box_x =
+                    idx.and_then(|i| inline_box_x.get(&((i as u64) * 2)).map(|(x0, _)| *x0));
+                let right_box_x1 =
+                    idx.and_then(|i| inline_box_x.get(&((i as u64) * 2 + 1)).map(|(_, x1)| *x1));
+                let starts_here = inl.range.start >= run_range.start;
+                let ends_here = inl.range.end <= run_range.end;
+                // Rect x: extend to include the InlineBox padding
+                // space when it's on this line-fragment.
+                // InlineBox positions come from parley in the same
+                // layout frame as `gr.offset()` / `gr.advance()`, so
+                // to get screen coords we apply the same translation
+                // (`block_x + shift_px - offsets.ref_x`) as the glyph
+                // positions.
+                let x0_paint = if starts_here {
+                    left_box_x
+                        .map(|x| x + block_x + shift_px - offsets.ref_x)
+                        .unwrap_or(glyph_x0)
+                } else {
+                    glyph_x0
+                };
+                let x1_paint = if ends_here {
+                    right_box_x1
+                        .map(|x| x + block_x + shift_px - offsets.ref_x)
+                        .unwrap_or(glyph_x1)
+                } else {
+                    glyph_x1
+                };
+                // Vertical: inflate by padding.top / .bottom. Font
+                // ascent / descent give the natural line extent.
+                let (t_pad_pt, _, b_pad_pt, _) = d
+                    .padding
+                    .map(|m| m.resolve(base_pt))
+                    .unwrap_or((0.0, 0.0, 0.0, 0.0));
+                let t_pad = (t_pad_pt * dpi / 72.0) as f32;
+                let b_pad = (b_pad_pt * dpi / 72.0) as f32;
+                let y0_paint = y_base - metrics.ascent - t_pad;
+                let y1_paint = y_base + metrics.descent + b_pad;
+                if x1_paint > x0_paint && y1_paint > y0_paint {
+                    let rect = kurbo::Rect::new(
+                        x0_paint as f64,
+                        y0_paint as f64,
+                        x1_paint as f64,
+                        y1_paint as f64,
+                    );
+                    let corner_radius = d
+                        .border_radius
+                        .map(|l| (l.resolve(base_pt) * dpi / 72.0) as f32)
+                        .unwrap_or(0.0);
+                    let path = if corner_radius > 0.0 {
+                        crate::primitives::rounded_rect(rect, corner_radius as f64)
+                    } else {
+                        crate::primitives::rect(rect)
+                    };
+                    if let Some(bg) = &d.background {
+                        let c = bg.resolve(palette);
+                        scene.fill(
+                            crate::path::FillRule::NonZero,
+                            final_transform,
+                            &Brush::Solid(c),
+                            None,
+                            &path,
+                            PickId::Skip,
+                        );
+                    }
+                    if let (Some(bc), Some(bw)) = (&d.border_color, d.border_width) {
+                        let (t, r, b, l) = bw.resolve(base_pt);
+                        let uniform =
+                            ((t - r).abs() < 1e-3 && (r - b).abs() < 1e-3 && (b - l).abs() < 1e-3)
+                                .then_some(t);
+                        // Only handle uniform-width borders on inline
+                        // spans; per-side is a rare case for inline.
+                        if let Some(w_pt) = uniform {
+                            let w_px = (w_pt * dpi / 72.0) as f32;
+                            if w_px > 0.0 {
+                                let c = bc.resolve(palette);
+                                let stroke = crate::stroke::Stroke::new(w_px as f64)
+                                    .with_caps(crate::stroke::Cap::Butt)
+                                    .with_join(crate::stroke::Join::Miter);
+                                scene.stroke(
+                                    &stroke,
+                                    final_transform,
+                                    &Brush::Solid(c),
+                                    None,
+                                    &path,
+                                    PickId::Skip,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let glyphs: Vec<Glyph> = gr
+            .positioned_glyphs()
+            .map(|g| Glyph {
+                id: g.id,
+                x: g.x + block_x + shift_px - offsets.ref_x,
+                y: g.y + block_y - offsets.ref_y - dy_px,
+            })
+            .collect();
+        if glyphs.is_empty() {
+            continue;
+        }
+
+        // ── Outline pass (behind fill). Sourced from
+        //    `StyleDelta::text_stroke` on any matching InlineRun —
+        //    typically set on a specific span class (e.g. a
+        //    `.haloed` custom class) so a caller who wants a
+        //    document-wide outline just sets the field on the
+        //    sheet's root `paragraph` / `heading` classes.
+        let span_outline_owned: Option<(Brush, crate::stroke::Stroke)> = matched.and_then(|inl| {
+            let color = inl.delta.text_stroke.as_ref()?;
+            let width = inl.delta.text_stroke_width?;
+            let w_px = (width.resolve(base_pt) * dpi / 72.0) as f32;
+            if w_px <= 0.0 {
+                return None;
+            }
+            Some((
+                Brush::Solid(color.resolve(palette)),
+                crate::stroke::Stroke::new(w_px as f64),
+            ))
+        });
+        if let Some((ob, os)) = span_outline_owned.as_ref() {
+            let outline_run = GlyphRun {
+                font: &font,
+                font_size,
+                transform: final_transform,
+                glyph_transform: None,
+                brush: ob,
+                brush_alpha: 1.0,
+                hint: false,
+                glyphs: &glyphs,
+                style: Some(os),
+            };
+            scene.draw_glyphs(&outline_run, PickId::Skip);
+        }
+
+        // Fill pass.
+        let glyph_run = GlyphRun {
+            font: &font,
+            font_size,
+            transform: final_transform,
+            glyph_transform: None,
+            brush: &brush,
+            brush_alpha: 1.0,
+            hint: false,
+            glyphs: &glyphs,
+            style: None,
+        };
+        scene.draw_glyphs(&glyph_run, pick_id);
+
+        // Decorations (over glyphs).
+        let style = gr.style();
+        if style.underline.is_some() || style.strikethrough.is_some() {
+            if let Some(deco) = &style.underline {
+                emit_decoration_rect(
+                    scene,
+                    glyph_x0,
+                    glyph_x1,
+                    y_base - deco.offset.unwrap_or(metrics.underline_offset),
+                    deco.size.unwrap_or(metrics.underline_size).max(0.0),
+                    &brush,
+                    final_transform,
+                    pick_id,
+                );
+            }
+            if let Some(deco) = &style.strikethrough {
+                emit_decoration_rect(
+                    scene,
+                    glyph_x0,
+                    glyph_x1,
+                    y_base - deco.offset.unwrap_or(metrics.strikethrough_offset),
+                    deco.size.unwrap_or(metrics.strikethrough_size).max(0.0),
+                    &brush,
+                    final_transform,
+                    pick_id,
+                );
+            }
+        }
+    }
+}
+
+/// Emit an underline / strikethrough rectangle in the layout's frame.
+/// Skipped for zero-or-negative thickness or zero-width runs.
+#[allow(clippy::too_many_arguments)]
+fn emit_decoration_rect<S: SceneBuilder + ?Sized>(
+    scene: &mut S,
+    x0: f32,
+    x1: f32,
+    top: f32,
+    thickness: f32,
+    brush: &Brush,
+    transform: Affine,
+    pick_id: PickId,
+) {
+    if !thickness.is_finite() || thickness <= 0.0 || x1 <= x0 {
+        return;
+    }
+    let rect = kurbo::Rect::new(x0 as f64, top as f64, x1 as f64, (top + thickness) as f64);
+    let path = crate::primitives::rect(rect);
+    scene.fill(
+        crate::path::FillRule::NonZero,
+        transform,
+        brush,
+        None,
+        &path,
+        pick_id,
+    );
 }
 
 fn emit_block_paint<S: SceneBuilder + ?Sized>(
@@ -1117,12 +1734,20 @@ fn emit_block_paint<S: SceneBuilder + ?Sized>(
         );
     }
     if let Some(border) = paint.border {
+        // Borders use Butt caps and Miter joins — square ends, sharp
+        // corners. This matches typographic convention: block bars
+        // (blockquote left rule, hr top rule) shouldn't have visible
+        // rounded end-caps peeking out past the block edge.
+        let border_stroke = |w: f32| {
+            crate::stroke::Stroke::new(w as f64)
+                .with_caps(crate::stroke::Cap::Butt)
+                .with_join(crate::stroke::Join::Miter)
+        };
         if border.is_uniform() {
             let w = border.widths_px[0];
             if w > 0.0 {
-                let stroke = crate::stroke::Stroke::new(w as f64);
                 scene.stroke(
-                    &stroke,
+                    &border_stroke(w),
                     outer,
                     &Brush::Solid(border.color),
                     None,
@@ -1146,8 +1771,7 @@ fn emit_block_paint<S: SceneBuilder + ?Sized>(
                     kurbo::Point::new(a.0, a.1),
                     kurbo::Point::new(b.0, b.1),
                 );
-                let stroke = crate::stroke::Stroke::new(w as f64);
-                scene.stroke(&stroke, outer, &brush, None, &seg, PickId::Skip);
+                scene.stroke(&border_stroke(w), outer, &brush, None, &seg, PickId::Skip);
             };
             emit(scene, wt, (x0, y0), (x1, y0));
             emit(scene, wr, (x1, y0), (x1, y1));
@@ -1228,6 +1852,229 @@ mod tests {
                 Some(a) => a.min(x),
             })
         })
+    }
+
+    #[test]
+    fn inline_code_span_emits_background_chip() {
+        // The default sheet's `code` selector sets background +
+        // padding + border-radius. An `` `x` `` inline span should
+        // therefore emit at least one Fill op (the chip rect)
+        // BEFORE the glyph run for its content.
+        let run = make("plain `x` more");
+        let scene = draw(&run);
+        let mut saw_fill = false;
+        let mut saw_glyphs_after_fill = false;
+        for op in &scene.ops {
+            match op {
+                Op::Fill { .. } => saw_fill = true,
+                Op::DrawGlyphs(_) if saw_fill => saw_glyphs_after_fill = true,
+                _ => {}
+            }
+        }
+        assert!(saw_fill, "expected a Fill op for the code chip");
+        assert!(saw_glyphs_after_fill, "glyphs should follow the chip fill");
+    }
+
+    #[test]
+    fn per_span_text_stroke_emits_outline_pass() {
+        // A custom class with `text_stroke` produces a stroke-only
+        // glyph pass behind the fill. To reliably split the parley
+        // run at the span's boundary we also set a distinct
+        // `color`; parley splits on brush change, isolating the
+        // outline to the span.
+        let mut sheet = RichTextStyleSheet::new();
+        sheet.set(
+            "haloed",
+            crate::text::rich::style::StyleDelta {
+                color: Some(crate::plot::theme::ThemeColor::Fixed(Color::from_rgba8(
+                    220, 30, 30, 255,
+                ))),
+                text_stroke: Some(crate::plot::theme::ThemeColor::Fixed(Color::from_rgba8(
+                    255, 255, 255, 255,
+                ))),
+                text_stroke_width: Some(crate::plot::theme::Length::Abs(2.0)),
+                ..crate::text::rich::style::StyleDelta::empty()
+            },
+        );
+        let run = RichTextRun::new(
+            "before {.haloed word} after",
+            &base_style(),
+            Color::from_rgba8(0, 0, 0, 255),
+            &sheet,
+            &palette(),
+            96.0,
+        )
+        .unwrap();
+        let mut scene = RecordingScene::default();
+        draw_rich_text(
+            &mut scene,
+            &run,
+            0.0,
+            0.0,
+            RichAnchor::top_left(),
+            Affine::IDENTITY,
+            PickId::Skip,
+        );
+        let has_stroked_pass = scene
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::DrawGlyphs(gr) if gr.style.is_some()));
+        assert!(
+            has_stroked_pass,
+            "expected a stroke-only glyph pass for the `haloed` span"
+        );
+    }
+
+    #[test]
+    fn block_level_border_does_not_double_render_as_inline() {
+        // A block-level `border` set via the sheet's `paragraph`
+        // selector should paint ONCE (in the block paint pass), not
+        // again as an inline border on the block's text runs.
+        let mut sheet = RichTextStyleSheet::empty();
+        sheet.set(
+            "paragraph",
+            crate::text::rich::style::StyleDelta {
+                border_color: Some(crate::plot::theme::ThemeColor::Ink),
+                border_width: Some(crate::plot::theme::Margin::all(
+                    crate::plot::theme::Length::Abs(1.0),
+                )),
+                ..crate::text::rich::style::StyleDelta::empty()
+            },
+        );
+        let run = RichTextRun::new(
+            "some text",
+            &base_style(),
+            Color::from_rgba8(0, 0, 0, 255),
+            &sheet,
+            &palette(),
+            96.0,
+        )
+        .unwrap();
+        let mut scene = RecordingScene::default();
+        draw_rich_text(
+            &mut scene,
+            &run,
+            0.0,
+            0.0,
+            RichAnchor::top_left(),
+            Affine::IDENTITY,
+            PickId::Skip,
+        );
+        let strokes = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .count();
+        assert_eq!(
+            strokes, 1,
+            "expected exactly one border stroke (block-level)"
+        );
+    }
+
+    #[test]
+    fn list_container_margin_creates_visible_gap_after_wrap() {
+        // Regression: `set_max_width` must apply ancestor container
+        // margins (routed to first / last descendant at shape time)
+        // so a list has a distinct gap to a following paragraph.
+        let with_list = make("- alpha\n- beta\n\nfollowing paragraph");
+        let just_paragraphs = make("alpha\n\nbeta\n\nfollowing paragraph");
+        // The list version has one extra shape unit (marker prefix
+        // on each item) AND container margin around the list. It
+        // should be measurably taller than the plain-paragraph
+        // version.
+        let delta = with_list.natural_height() - just_paragraphs.natural_height();
+        assert!(
+            delta > 10.0,
+            "list container should add >10px vs equivalent plain paragraphs (delta={delta})"
+        );
+    }
+
+    #[test]
+    fn strikethrough_sits_above_baseline() {
+        let sheet = RichTextStyleSheet::new();
+        let run = RichTextRun::new(
+            "a ~~strike~~ b",
+            &base_style(),
+            Color::from_rgba8(0, 0, 0, 255),
+            &sheet,
+            &palette(),
+            96.0,
+        )
+        .unwrap();
+        let mut scene = RecordingScene::default();
+        draw_rich_text(
+            &mut scene,
+            &run,
+            0.0,
+            0.0,
+            RichAnchor::top_left(),
+            Affine::IDENTITY,
+            PickId::Skip,
+        );
+        let baseline_y = scene
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::DrawGlyphs(gr) => gr.glyphs.first().map(|g| g.y),
+                _ => None,
+            })
+            .expect("baseline");
+        let fill_y0 = scene
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Fill { path, .. } => Some(kurbo::Shape::bounding_box(path).y0 as f32),
+                _ => None,
+            })
+            .expect("strikethrough fill");
+        assert!(
+            fill_y0 < baseline_y,
+            "strikethrough rect (y0={fill_y0}) should sit ABOVE the baseline (y={baseline_y})"
+        );
+    }
+
+    #[test]
+    fn underline_sits_below_baseline() {
+        let sheet = RichTextStyleSheet::new();
+        let run = RichTextRun::new(
+            "a [link](x) b",
+            &base_style(),
+            Color::from_rgba8(0, 0, 0, 255),
+            &sheet,
+            &palette(),
+            96.0,
+        )
+        .unwrap();
+        let mut scene = RecordingScene::default();
+        draw_rich_text(
+            &mut scene,
+            &run,
+            0.0,
+            0.0,
+            RichAnchor::top_left(),
+            Affine::IDENTITY,
+            PickId::Skip,
+        );
+        let baseline_y = scene
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::DrawGlyphs(gr) => gr.glyphs.first().map(|g| g.y),
+                _ => None,
+            })
+            .expect("baseline");
+        let fill_y0 = scene
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Fill { path, .. } => Some(kurbo::Shape::bounding_box(path).y0 as f32),
+                _ => None,
+            })
+            .expect("underline fill");
+        assert!(
+            fill_y0 > baseline_y,
+            "underline rect (y0={fill_y0}) should sit BELOW the baseline (y={baseline_y})"
+        );
     }
 
     #[test]

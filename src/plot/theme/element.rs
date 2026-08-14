@@ -242,6 +242,22 @@ pub struct TextElement {
     /// text's measured box, matching the text geoms — a deliberately
     /// heavy outline needs clearance from `margin`, which is measured.
     pub text_linewidth_pt: Option<Length>,
+    /// Interpret the slot's string as marquee-flavoured markdown and
+    /// shape it through the rich-text pipeline
+    /// ([`crate::text::rich::RichTextRun`]). Off by default so every
+    /// existing chrome label renders unchanged.
+    ///
+    /// When on, the slot's [`crate::plot::theme::Theme::rich_text`]
+    /// style sheet drives the markdown styling; the `TextElement`'s
+    /// resolved font / colour / size / letter-spacing feed into the
+    /// rich run's base style so plain-text fragments still inherit
+    /// the slot's ambient look.
+    ///
+    /// Text-outline (`text_stroke` / `text_linewidth_pt`) is not
+    /// applied on markdown slots — the rich pipeline doesn't expose
+    /// a glyph-outline surface. Chrome renderers fall back to plain
+    /// text when an outline is needed on the same slot.
+    pub markdown: Option<bool>,
 }
 
 impl TextElement {
@@ -267,6 +283,7 @@ impl TextElement {
                 .clone()
                 .or_else(|| parent.text_stroke.clone()),
             text_linewidth_pt: self.text_linewidth_pt.or(parent.text_linewidth_pt),
+            markdown: self.markdown.or(parent.markdown),
         }
     }
 }
@@ -304,6 +321,7 @@ pub fn text_concrete_defaults() -> TextElement {
         margin: Some(Margin::ZERO),
         text_stroke: None,
         text_linewidth_pt: Some(Length::Abs(DEFAULT_LINEWIDTH_PT)),
+        markdown: Some(false),
     }
 }
 

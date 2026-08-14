@@ -895,13 +895,19 @@ pub fn draw_text<S: SceneBuilder + ?Sized>(
             let baseline = gr.baseline();
             let run_x0 = x as f32 + gr.offset();
             let run_x1 = run_x0 + gr.advance();
+            // Skrifa exposes decoration offsets in font-typography
+            // convention (Y-UP, relative to baseline): underline
+            // offset typically negative (below baseline in
+            // typography), strikeout offset typically positive
+            // (above baseline in typography). In our screen Y-DOWN
+            // frame we SUBTRACT to flip.
             if let Some(deco) = &style.underline {
                 emit_decoration_rect(
                     scene,
                     DecorationRect {
                         x0: run_x0,
                         x1: run_x1,
-                        top: y as f32 + baseline + deco.offset.unwrap_or(metrics.underline_offset),
+                        top: y as f32 + baseline - deco.offset.unwrap_or(metrics.underline_offset),
                         thickness: deco.size.unwrap_or(metrics.underline_size).max(0.0),
                     },
                     brush,
@@ -915,9 +921,8 @@ pub fn draw_text<S: SceneBuilder + ?Sized>(
                     DecorationRect {
                         x0: run_x0,
                         x1: run_x1,
-                        top: y as f32
-                            + baseline
-                            + deco.offset.unwrap_or(metrics.strikethrough_offset),
+                        top: y as f32 + baseline
+                            - deco.offset.unwrap_or(metrics.strikethrough_offset),
                         thickness: deco.size.unwrap_or(metrics.strikethrough_size).max(0.0),
                     },
                     brush,

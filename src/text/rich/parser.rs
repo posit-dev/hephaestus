@@ -236,8 +236,9 @@ fn translate_chunk(md: &str, out: &mut Vec<RichEvent>) -> Result<(), ParseError>
     opts.insert(Options::ENABLE_MATH);
     let parser = Parser::new_ext(md, opts);
     let mut span_depth: usize = 0;
+    let mut code_block_depth: usize = 0;
     for event in parser {
-        translate_event(event, out, &mut span_depth)?;
+        translate_event(event, out, &mut span_depth, &mut code_block_depth)?;
     }
     if span_depth > 0 {
         return Err(ParseError::UnclosedSpan { opened_at: 0 });
@@ -365,17 +366,32 @@ fn translate_event(
     event: Event<'_>,
     out: &mut Vec<RichEvent>,
     span_depth: &mut usize,
+    code_block_depth: &mut usize,
 ) -> Result<(), ParseError> {
     match event {
         Event::Start(tag) => {
+            if matches!(tag, Tag::CodeBlock(_)) {
+                *code_block_depth += 1;
+            }
             translate_start_tag(tag, out);
             Ok(())
         }
         Event::End(tag) => {
+            if matches!(tag, TagEnd::CodeBlock) {
+                *code_block_depth = code_block_depth.saturating_sub(1);
+            }
             translate_end_tag(tag, out);
             Ok(())
         }
-        Event::Text(s) => scan_text_for_spans(&s, out, span_depth),
+        Event::Text(s) => {
+            if *code_block_depth > 0 {
+                // Inside a code block: `{`, `~`, `^`, etc. are all
+                // literal — no inline-span pre-pass.
+                out.push(RichEvent::Text(s.into_string()));
+                return Ok(());
+            }
+            scan_text_for_spans(&s, out, span_depth)
+        }
         Event::Code(s) => {
             out.push(RichEvent::Code(s.into_string()));
             Ok(())

@@ -306,6 +306,18 @@ name = "text_outline"
 required-features = ["vello", "png", "text"]
 
 [[example]]
+name = "rich_text_inline"
+required-features = ["vello", "png", "text"]
+
+[[example]]
+name = "rich_text_chrome"
+required-features = ["vello", "png", "text"]
+
+[[example]]
+name = "rich_text_marquee_parity"
+required-features = ["vello", "png", "text"]
+
+[[example]]
 name = "font_registration"
 required-features = ["vello", "png", "text"]
 

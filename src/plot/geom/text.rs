@@ -550,6 +550,12 @@ impl Geom for TextGeom {
                 // Emit rich text at (draw_x, draw_y) using top-left
                 // anchor — the anchor_x/anchor_y math above already
                 // positioned the top-left of the label there.
+                //
+                // v1 limitation: the geom's `text_stroke` /
+                // `text_linewidth` channels aren't applied on
+                // markdown rows. Use per-span `text_stroke` on the
+                // rich-text sheet if a haloed markdown label is
+                // needed.
                 draw_rich_text(
                     scene,
                     &rich,

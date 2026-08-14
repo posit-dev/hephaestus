@@ -53,6 +53,14 @@ pub struct StyleDelta {
     /// as a per-glyph-run y-offset at draw time — parley doesn't model
     /// this natively.
     pub baseline_em: Option<f32>,
+    /// Per-glyph outline colour applied to this span. Emitted as a
+    /// stroke-only glyph pass BEHIND the fill pass, mirroring the
+    /// `text_stroke` field on chrome
+    /// [`crate::plot::theme::TextElement`]s.
+    pub text_stroke: Option<ThemeColor>,
+    /// Outline stroke width for [`Self::text_stroke`], in pt. No
+    /// effect unless `text_stroke` resolves to a colour.
+    pub text_stroke_width: Option<Length>,
 
     // ── Block-level ──
     /// Line height. `Rel(m)` = `m × parent size`; `Abs(pt)` = absolute.
@@ -100,6 +108,42 @@ impl StyleDelta {
         Self::default()
     }
 
+    /// Return a copy with only glyph-level fields kept — block-only
+    /// fields (`background`, `border_*`, `padding`, `margin`,
+    /// `indent`, `hanging`, `bullet`, `align`, `lineheight`) are
+    /// cleared. Used when a block's delta is pushed onto the
+    /// inline-cascade stack so block-level styling doesn't
+    /// accidentally reappear as inline chip / border on the block's
+    /// own descendant text.
+    pub fn glyph_only(&self) -> StyleDelta {
+        StyleDelta {
+            family: self.family.clone(),
+            weight: self.weight,
+            italic: self.italic,
+            width: self.width,
+            size: self.size,
+            color: self.color.clone(),
+            tracking_pt: self.tracking_pt,
+            underline: self.underline,
+            strikethrough: self.strikethrough,
+            baseline_em: self.baseline_em,
+            text_stroke: self.text_stroke.clone(),
+            text_stroke_width: self.text_stroke_width,
+            // Block-only — cleared:
+            lineheight: None,
+            align: None,
+            indent: None,
+            hanging: None,
+            margin: None,
+            padding: None,
+            background: None,
+            border_color: None,
+            border_width: None,
+            border_radius: None,
+            bullet: None,
+        }
+    }
+
     /// Overlay `over` on `self`. `over`'s `Some` fields win; `None`
     /// falls through to `self`.
     pub fn overlay(&self, over: &StyleDelta) -> StyleDelta {
@@ -114,6 +158,11 @@ impl StyleDelta {
             underline: over.underline.or(self.underline),
             strikethrough: over.strikethrough.or(self.strikethrough),
             baseline_em: over.baseline_em.or(self.baseline_em),
+            text_stroke: over
+                .text_stroke
+                .clone()
+                .or_else(|| self.text_stroke.clone()),
+            text_stroke_width: over.text_stroke_width.or(self.text_stroke_width),
             lineheight: over.lineheight.or(self.lineheight),
             align: over.align.or(self.align),
             indent: over.indent.or(self.indent),
@@ -198,6 +247,17 @@ impl RichTextStyleSheet {
             StyleDelta {
                 family: Some("monospace".to_string()),
                 background: Some(ThemeColor::alpha(ThemeColor::Accent, 0.12)),
+                // Small chip: horizontal padding reserves shape space
+                // (parley pushes glyphs over via `InlineBox`), vertical
+                // padding inflates the visible rect without changing
+                // line height.
+                padding: Some(Margin::new(
+                    Length::Rel(0.15),
+                    Length::Rel(0.25),
+                    Length::Rel(0.15),
+                    Length::Rel(0.25),
+                )),
+                border_radius: Some(Length::Rel(0.2)),
                 ..StyleDelta::empty()
             },
         );
@@ -296,6 +356,23 @@ impl RichTextStyleSheet {
                 ..StyleDelta::empty()
             },
         );
+        // `list` / `list_ordered` containers get a full-line
+        // margin on top and bottom so lists are clearly separated
+        // from adjacent paragraphs (matches HTML `<ul>` / `<ol>`
+        // defaults, which are wider than an inter-paragraph gap).
+        // Applied to the first / last descendant leaves via the
+        // container-margin routing in `run.rs`.
+        let list_container = StyleDelta {
+            margin: Some(Margin::new(
+                Length::Rel(1.0),
+                Length::Abs(0.0),
+                Length::Rel(1.0),
+                Length::Abs(0.0),
+            )),
+            ..StyleDelta::empty()
+        };
+        s.set("list", list_container.clone());
+        s.set("list_ordered", list_container);
         // `list_item_body` styles the paragraph a tight-list item's
         // body opens in. Empty by default — tight items stack with
         // no extra vertical margin. Loose items instead style their

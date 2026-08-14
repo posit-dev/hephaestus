@@ -1639,6 +1639,7 @@ impl Plot {
                 root_pt,
                 dpi,
                 crate::pick::PickId::Skip,
+                Some(&theme.rich_text),
             );
         }
 
@@ -1677,12 +1678,37 @@ impl Plot {
                 .margin
                 .or(text_defaults.margin)
                 .expect("text_concrete_defaults sets margin");
+            let markdown = matches!(el.markdown, Some(true));
             let run = TextRun::new(title, &style, dpi);
             match resolved.title_location {
                 TitleLocation::Outside => {
                     let slot = cartesian_axis_title_slot(side);
                     if let Some(rect) = layout.get(&self.patch_id, slot) {
-                        draw_axis_title(scene, &run, rect, side, &brush, outline.as_ref(), angle);
+                        if markdown {
+                            let fill_col = color.resolve(&theme.palette);
+                            draw_axis_title_markdown(
+                                scene,
+                                title,
+                                &style,
+                                fill_col,
+                                &theme.palette,
+                                &theme.rich_text,
+                                dpi,
+                                rect,
+                                side,
+                                angle,
+                            );
+                        } else {
+                            draw_axis_title(
+                                scene,
+                                &run,
+                                rect,
+                                side,
+                                &brush,
+                                outline.as_ref(),
+                                angle,
+                            );
+                        }
                     }
                 }
                 TitleLocation::Inside => {
@@ -1747,6 +1773,7 @@ impl Plot {
                         root_pt,
                         dpi,
                         crate::pick::PickId::Skip,
+                        Some(&theme.rich_text),
                     );
                 }
             }
@@ -2094,10 +2121,18 @@ pub(crate) fn draw_text_element_in_rect(
     parent_pt: f64,
     dpi: f64,
     pick_id: crate::pick::PickId,
+    // `Some` routes through [`crate::text::rich::draw_rich_text`]
+    // when `el.markdown == Some(true)` — the sheet drives markdown
+    // resolution, and the resolved `TextElement` feeds the base
+    // style. `None` disables the rich path unconditionally (used at
+    // callsites that don't want markdown, or feature gates that
+    // prefer to opt out).
+    sheet: Option<&std::sync::Arc<crate::text::rich::RichTextStyleSheet>>,
 ) {
     use crate::brush::Brush;
     use crate::geometry::{Affine, Vec2};
     use crate::plot::theme::{text_concrete_defaults, HAlign, Rotation, VAlign};
+    use crate::text::rich::{draw_rich_text, HAnchor, RichAnchor, RichTextRun, VAnchor};
     use crate::text::{draw_text, Alignment, TextRun};
 
     let defaults = text_concrete_defaults();
@@ -2119,6 +2154,92 @@ pub(crate) fn draw_text_element_in_rect(
         .expect("color default");
     let brush = Brush::Solid(color.resolve(palette));
     let outline = text_outline_from(el, palette, dpi);
+
+    // ── Markdown branch. ──
+    //
+    // When the slot opts into markdown *and* a style sheet is
+    // available, shape the rich pipeline instead of plain text. The
+    // resolved `TextElement` feeds `RichTextRun`'s base style so
+    // font / size / colour still cascade the same way. Alignment
+    // (align / valign / angle) uses the same anchor arithmetic as
+    // the plain path — anchor_x/anchor_y derived from HAlign/VAlign,
+    // wrap via the same rotated-projection width.
+    let use_markdown = matches!(el.markdown, Some(true)) && sheet.is_some();
+    if use_markdown {
+        let sheet = sheet.expect("sheet checked above");
+        let align_h = el.align.or(defaults.align).expect("align default");
+        let align_v = el.valign.or(defaults.valign).expect("valign default");
+        let angle = el.angle.or(defaults.angle).expect("angle default");
+        let angle_rad = match angle {
+            Rotation::Degrees(d) => (d as f64).to_radians(),
+            Rotation::Along | Rotation::Across => 0.0,
+        };
+        let inner_w = inset.x1 - inset.x0;
+        let inner_h = inset.y1 - inset.y0;
+        let along_px = rotated_wrap_width(inner_w, inner_h, angle_rad);
+        let cross_px = rotated_wrap_width(inner_h, inner_w, angle_rad);
+        let base_brush_col = color.resolve(palette);
+        let Ok(rich) = RichTextRun::new(text, &style, base_brush_col, sheet, palette, dpi) else {
+            return; // parse error — skip
+        };
+        rich.set_max_width(along_px as f32, Alignment::Start);
+        let block_w = rich.content_width();
+        let block_h = rich.current_height();
+        let hf = match align_h {
+            HAlign::Start => 0.0,
+            HAlign::Center | HAlign::Justify => 0.5,
+            HAlign::End => 1.0,
+        };
+        let vf = match align_v {
+            VAlign::Top | VAlign::Baseline => 0.0,
+            VAlign::Middle => 0.5,
+            VAlign::Bottom => 1.0,
+        };
+        // v1 limitation: `TextElement.text_stroke` is not applied
+        // on markdown-shaped slots. Callers who want a haloed
+        // markdown chrome slot should instead set `text_stroke`
+        // on the sheet's paragraph / heading class so per-span
+        // cascade picks it up.
+        let _ = outline;
+        if angle_rad.abs() < 1e-9 {
+            let tx = inset.x0 + (along_px - block_w) * hf;
+            let ty = inset.y0 + (cross_px - block_h) * vf;
+            draw_rich_text(
+                scene,
+                &rich,
+                tx,
+                ty,
+                RichAnchor {
+                    h: HAnchor::Left,
+                    v: VAnchor::Top,
+                },
+                Affine::IDENTITY,
+                pick_id,
+            );
+        } else {
+            let centre = Vec2::new((inset.x0 + inset.x1) * 0.5, (inset.y0 + inset.y1) * 0.5);
+            let transform = Affine::translate(centre)
+                * Affine::rotate(angle_rad)
+                * Affine::translate(Vec2::new(
+                    -along_px * 0.5 + (along_px - block_w) * hf,
+                    -cross_px * 0.5 + (cross_px - block_h) * vf,
+                ));
+            draw_rich_text(
+                scene,
+                &rich,
+                0.0,
+                0.0,
+                RichAnchor {
+                    h: HAnchor::Left,
+                    v: VAnchor::Top,
+                },
+                transform,
+                pick_id,
+            );
+        }
+        return;
+    }
+
     let run = TextRun::new(text, &style, dpi);
     let align = el.align.or(defaults.align).expect("align default");
     let alignment = match align {
@@ -2232,6 +2353,78 @@ pub(crate) fn draw_axis_title(
             * Affine::translate(Vec2::new(-w * 0.5, -h * 0.5));
         draw_text_outline_pass(scene, outline, run, 0.0, 0.0, transform);
         draw_text(scene, run, 0.0, 0.0, brush, transform, pid);
+    }
+}
+
+/// Draw an axis title as marquee-flavoured markdown. Mirrors
+/// [`draw_axis_title`] but shapes the string via [`RichTextRun`] and
+/// draws with [`draw_rich_text`]. `text_stroke` on the axis title's
+/// `TextElement` is not applied here — set `text_stroke` on the
+/// sheet's `paragraph` class if a haloed markdown axis title is
+/// needed.
+#[cfg(feature = "text")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_axis_title_markdown(
+    scene: &mut dyn SceneBuilder,
+    text: &str,
+    style: &crate::text::TextStyle,
+    fill: crate::color::Color,
+    palette: &crate::plot::theme::Palette,
+    sheet: &std::sync::Arc<crate::text::rich::RichTextStyleSheet>,
+    dpi: f64,
+    rect: Rect,
+    side: AxisSide,
+    angle: crate::plot::theme::Rotation,
+) {
+    use crate::geometry::{Affine, Vec2};
+    use crate::text::rich::{draw_rich_text, HAnchor, RichAnchor, RichTextRun, VAnchor};
+    use crate::text::Alignment;
+    let cx = (rect.x0 + rect.x1) * 0.5;
+    let cy = (rect.y0 + rect.y1) * 0.5;
+    let pid = crate::pick::PickId::Skip;
+    let baseline_deg: f32 = match side {
+        AxisSide::Top | AxisSide::Bottom => 0.0,
+        AxisSide::Left => -90.0,
+        AxisSide::Right => 90.0,
+    };
+    let resolved_deg = angle.resolve(baseline_deg);
+    let theta = (resolved_deg as f64).to_radians();
+    let Ok(run) = RichTextRun::new(text, style, fill, sheet, palette, dpi) else {
+        return;
+    };
+    if theta.abs() < 1e-9 {
+        let w = (rect.x1 - rect.x0) as f32;
+        run.set_max_width(w, Alignment::Center);
+        draw_rich_text(
+            scene,
+            &run,
+            rect.x0,
+            rect.y0,
+            RichAnchor {
+                h: HAnchor::Left,
+                v: VAnchor::Top,
+            },
+            Affine::IDENTITY,
+            pid,
+        );
+    } else {
+        let w = run.natural_width();
+        let h = run.natural_height();
+        let transform = Affine::translate(Vec2::new(cx, cy))
+            * Affine::rotate(theta)
+            * Affine::translate(Vec2::new(-w * 0.5, -h * 0.5));
+        draw_rich_text(
+            scene,
+            &run,
+            0.0,
+            0.0,
+            RichAnchor {
+                h: HAnchor::Left,
+                v: VAnchor::Top,
+            },
+            transform,
+            pid,
+        );
     }
 }
 
@@ -2565,6 +2758,7 @@ mod tests {
             11.0,
             96.0,
             crate::pick::PickId::Id(7),
+            None,
         );
         scene
     }
@@ -2612,6 +2806,85 @@ mod tests {
             "unset text_stroke must not halo chrome text"
         );
         assert!(!filled.is_empty(), "expected a filled pass");
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn chrome_text_markdown_bold_produces_extra_glyph_weight_variance() {
+        // A chrome slot with `markdown = Some(true)` and a `**bold**`
+        // fragment should shape via the rich pipeline — parley splits
+        // the run at the weight boundary, producing more than one
+        // glyph run (each with its own font size). Plain path would
+        // render `**bold**` as literal glyphs in one run.
+        use crate::plot::theme::TextElement;
+        let el = TextElement {
+            markdown: Some(true),
+            ..TextElement::default()
+        };
+        let sheet = std::sync::Arc::new(crate::text::rich::RichTextStyleSheet::new());
+        let mut scene = crate::scene::recording::RecordingScene::default();
+        draw_text_element_in_rect(
+            &mut scene,
+            "plain **bold** back",
+            &el,
+            Rect::new(0.0, 0.0, 400.0, 40.0),
+            &crate::plot::theme::Palette::default(),
+            11.0,
+            96.0,
+            crate::pick::PickId::Skip,
+            Some(&sheet),
+        );
+        use crate::scene::recording::Op;
+        let runs: Vec<_> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::DrawGlyphs(gr) => Some(gr),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            runs.len() >= 2,
+            "markdown chrome should split at the strong boundary; got {} runs",
+            runs.len()
+        );
+    }
+
+    #[cfg(feature = "text")]
+    #[test]
+    fn chrome_text_markdown_false_uses_plain_path() {
+        // When `markdown = Some(false)`, `**` markers are rendered as
+        // literal characters (plain path). A single glyph run typical
+        // of plain text.
+        use crate::plot::theme::TextElement;
+        let el = TextElement {
+            markdown: Some(false),
+            ..TextElement::default()
+        };
+        let sheet = std::sync::Arc::new(crate::text::rich::RichTextStyleSheet::new());
+        let mut scene = crate::scene::recording::RecordingScene::default();
+        draw_text_element_in_rect(
+            &mut scene,
+            "**not markdown**",
+            &el,
+            Rect::new(0.0, 0.0, 400.0, 40.0),
+            &crate::plot::theme::Palette::default(),
+            11.0,
+            96.0,
+            crate::pick::PickId::Skip,
+            Some(&sheet),
+        );
+        use crate::scene::recording::Op;
+        // Every glyph run has the same font_size on the plain path.
+        let sizes: std::collections::HashSet<u32> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::DrawGlyphs(gr) => Some(gr.font_size.to_bits()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sizes.len(), 1, "plain path should use one font size");
     }
 
     #[cfg(feature = "text")]

@@ -128,6 +128,19 @@ pub struct Theme {
     /// labels render in the configured locale without per-scale
     /// configuration.
     pub locale: Locale,
+
+    // ── Rich-text ─────────────────────────────────────────────────
+    /// Default style sheet used when a chrome slot or text geom
+    /// resolves `markdown == Some(true)` without a per-site override.
+    /// Shared across the plot's chrome, so every markdown-shaped
+    /// slot uses the same defaults for `strong` / `em` / headings /
+    /// list items / etc.
+    ///
+    /// Gated on the `text` feature (which gates
+    /// [`crate::text::rich::RichTextStyleSheet`] and every callsite
+    /// that consumes it).
+    #[cfg(feature = "text")]
+    pub rich_text: std::sync::Arc<crate::text::rich::RichTextStyleSheet>,
 }
 
 impl Default for Theme {
@@ -287,6 +300,8 @@ impl Default for Theme {
             strip_padding: Margin::all(Length::Abs(HALF_LINE_PT)),
             geom: GeomTheme::default(),
             locale: Locale::default(),
+            #[cfg(feature = "text")]
+            rich_text: std::sync::Arc::new(crate::text::rich::RichTextStyleSheet::new()),
         }
     }
 }

@@ -256,6 +256,7 @@ impl Reducer {
             RichEvent::BlockQuoteEnd => self.close_block(),
             RichEvent::ListStart { ordered, start } => {
                 self.commit_pending_item_body(sheet, true);
+                let nested = !self.list_stack.is_empty();
                 self.list_stack.push(ListFrame {
                     next_ordinal: *start,
                     ordered: *ordered,
@@ -268,6 +269,25 @@ impl Reducer {
                     sheet,
                     if *ordered { "list_ordered" } else { "list" },
                 );
+                // Nested lists sit inside a ListItem's content flow, so
+                // the outer `list` / `list_ordered` top/bottom margin
+                // (which separates lists from surrounding prose) would
+                // introduce a spurious gap. Zero those two edges on the
+                // just-opened frame; horizontal padding / indent still
+                // apply.
+                if nested {
+                    if let Some(frame) = self.block_stack.last_mut() {
+                        let base = frame
+                            .delta
+                            .margin
+                            .unwrap_or(crate::plot::theme::Margin::ZERO);
+                        frame.delta.margin = Some(crate::plot::theme::Margin {
+                            top: crate::plot::theme::Length::Abs(0.0),
+                            bottom: crate::plot::theme::Length::Abs(0.0),
+                            ..base
+                        });
+                    }
+                }
             }
             RichEvent::ListEnd => {
                 self.close_block();
@@ -317,7 +337,34 @@ impl Reducer {
                     "code_block",
                 );
             }
-            RichEvent::CodeBlockEnd => self.close_block(),
+            RichEvent::CodeBlockEnd => {
+                // pulldown-cmark emits the code-block content
+                // verbatim including the trailing newline before the
+                // closing fence. That trailing `\n` pushes parley to
+                // shape an empty last line inside the block, which
+                // reads visually as an extra blank line. Strip a
+                // single trailing '\n' from the current block's
+                // content — only if the block hasn't been made empty
+                // by other logic.
+                if let Some(frame) = self.block_stack.last() {
+                    if self.text.len() > frame.start && self.text.ends_with('\n') {
+                        self.text.pop();
+                        // Trim any InlineRun that ended at the popped
+                        // byte so parley doesn't see a range past the
+                        // new text end.
+                        let new_len = self.text.len();
+                        if let Some(last) = self.inline.last_mut() {
+                            if last.range.end > new_len {
+                                last.range.end = new_len;
+                                if last.range.is_empty() {
+                                    self.inline.pop();
+                                }
+                            }
+                        }
+                    }
+                }
+                self.close_block();
+            }
             RichEvent::Rule => {
                 self.commit_pending_item_body(sheet, true);
                 let start = self.text.len();
@@ -467,7 +514,11 @@ impl Reducer {
         // `Block` list. This is what makes `# Big` actually render at
         // 2× size and bold, and `` `code` `` at code_block's
         // monospace family.
-        self.inline_stack.push(delta.clone());
+        // Push only the glyph-level fields onto the inline cascade —
+        // block-only fields (background, border_*, padding, margin,
+        // indent, hanging, bullet, align, lineheight) must not
+        // reappear as inline chip/border on the block's own text.
+        self.inline_stack.push(delta.glyph_only());
         self.block_stack.push(BlockFrame {
             start,
             kind,
