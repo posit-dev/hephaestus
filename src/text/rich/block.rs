@@ -44,13 +44,20 @@ pub struct BlockPaint {
 /// Border descriptor on a [`BlockPaint`]. Per-side widths let a
 /// blockquote express its left-edge bar as `[0, 0, 0, 3]` rather
 /// than a full rectangular stroke.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BlockBorder {
     /// Resolved stroke colour (single colour for all sides in v1).
     pub color: Color,
     /// Per-side widths in pixels: `[top, right, bottom, left]`. A
     /// side with width `0.0` is skipped at draw time.
     pub widths_px: [f32; 4],
+    /// Optional dash / marker pattern from
+    /// [`crate::text::rich::StyleDelta::border_type`], carried in pt
+    /// (raw form). The draw pass routes marker-free patterns through
+    /// kurbo's `with_dashes` fast path and marker-bearing patterns
+    /// through [`crate::plot::geom::resolve::draw_linetype_with_markers`]
+    /// (per-polyline chain). `None` = solid stroke.
+    pub linetype_pt: Option<std::sync::Arc<[crate::scales::value::LinetypeStep]>>,
 }
 
 impl BlockBorder {
@@ -132,6 +139,7 @@ pub fn compute_block_paints(run: &RichTextRun) -> Vec<BlockPaint> {
         let border = border_for(
             &container.delta.border_color,
             container.delta.border_width,
+            container.delta.border_type.as_deref(),
             palette,
             base_pt,
             dpi,
@@ -162,7 +170,14 @@ pub fn compute_block_paints(run: &RichTextRun) -> Vec<BlockPaint> {
         }
         let outer_rect = bl.outer_rect();
         let bg = d.background.as_ref().map(|c| c.resolve(palette));
-        let border = border_for(&d.border_color, d.border_width, palette, base_pt, dpi);
+        let border = border_for(
+            &d.border_color,
+            d.border_width,
+            d.border_type.as_deref(),
+            palette,
+            base_pt,
+            dpi,
+        );
         let corner_radius = d
             .border_radius
             .map(|l| (l.resolve(base_pt) * dpi / 72.0) as f32)
@@ -195,6 +210,7 @@ fn has_paint(
 fn border_for(
     color: &Option<crate::plot::theme::ThemeColor>,
     width: Option<crate::plot::theme::Margin>,
+    dash_pattern: Option<&[crate::scales::value::LinetypeStep]>,
     palette: &Palette,
     base_pt: f64,
     dpi: f64,
@@ -210,9 +226,11 @@ fn border_for(
     if widths_px.iter().all(|&w| w <= 0.0) {
         return None;
     }
+    let linetype_pt = dash_pattern.map(|steps| std::sync::Arc::from(steps.to_vec()));
     Some(BlockBorder {
         color: c.resolve(palette),
         widths_px,
+        linetype_pt,
     })
 }
 
@@ -391,7 +409,7 @@ mod tests {
         let run = shape(&sheet, "content");
         let paints = run.block_paints();
         assert_eq!(paints.len(), 1);
-        let border = paints[0].border.expect("expected a border");
+        let border = paints[0].border.as_ref().expect("expected a border");
         assert!(
             !border.is_uniform(),
             "border should be per-side, not uniform"

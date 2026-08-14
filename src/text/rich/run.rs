@@ -1311,8 +1311,8 @@ fn slice_block(
 /// containers) are emitted before any of the above via
 /// [`RichTextRun::block_paints`].
 #[allow(clippy::too_many_arguments)]
-pub fn draw_rich_text<S: SceneBuilder + ?Sized>(
-    scene: &mut S,
+pub fn draw_rich_text(
+    scene: &mut dyn SceneBuilder,
     run: &RichTextRun,
     x: f64,
     y: f64,
@@ -1325,12 +1325,11 @@ pub fn draw_rich_text<S: SceneBuilder + ?Sized>(
     let final_transform = Affine::translate((x, y)) * transform;
 
     // Block backgrounds + borders first.
-    for paint in &run.block_paints() {
-        emit_block_paint(scene, paint, offsets, final_transform);
-    }
-
     let base_pt = run.base_size_pt as f64;
     let dpi = run.dpi;
+    for paint in &run.block_paints() {
+        emit_block_paint(scene, paint, offsets, final_transform, dpi);
+    }
     let palette = &run.palette;
     // Glyphs.
     let blocks = run.blocks.borrow();
@@ -1408,8 +1407,8 @@ pub fn draw_rich_text<S: SceneBuilder + ?Sized>(
 /// Extracted so [`draw_rich_text`] can call it twice for the
 /// asymmetric-shift case (first line + continuation lines).
 #[allow(clippy::too_many_arguments)]
-fn emit_line_glyphs<S: SceneBuilder + ?Sized>(
-    scene: &mut S,
+fn emit_line_glyphs(
+    scene: &mut dyn SceneBuilder,
     line: parley::layout::Line<'_, RichBrush>,
     block_x: f32,
     block_y: f32,
@@ -1718,11 +1717,12 @@ fn emit_decoration_rect<S: SceneBuilder + ?Sized>(
     );
 }
 
-fn emit_block_paint<S: SceneBuilder + ?Sized>(
-    scene: &mut S,
+fn emit_block_paint(
+    scene: &mut dyn SceneBuilder,
     paint: &BlockPaint,
     offsets: super::anchor::AnchorOffsets,
     outer: Affine,
+    dpi: f64,
 ) {
     let rect = kurbo::Rect::new(
         paint.outer_rect.x0 - offsets.ref_x as f64,
@@ -1745,52 +1745,275 @@ fn emit_block_paint<S: SceneBuilder + ?Sized>(
             PickId::Skip,
         );
     }
-    if let Some(border) = paint.border {
+    if let Some(border) = paint.border.as_ref() {
         // Borders use Butt caps and Miter joins — square ends, sharp
         // corners. This matches typographic convention: block bars
         // (blockquote left rule, hr top rule) shouldn't have visible
         // rounded end-caps peeking out past the block edge.
-        let border_stroke = |w: f32| {
-            crate::stroke::Stroke::new(w as f64)
+        //
+        // Marker-free patterns take kurbo's `with_dashes` fast path
+        // (one stroke call per polyline chain). Marker-bearing
+        // patterns route through the crate-wide
+        // `draw_linetype_with_markers`, which walks the polyline in
+        // arc length and stamps shape markers along it — the same
+        // primitive `LineGeom` uses.
+        let has_markers = border
+            .linetype_pt
+            .as_ref()
+            .map(|p| !crate::plot::geom::linetype::is_marker_free(p))
+            .unwrap_or(false);
+        // Kurbo's `with_dashes` fast path only accepts flat pt-length
+        // slices — no `Marker` steps. Compute the flat slice only for
+        // marker-free patterns; markered patterns route through the
+        // shared `draw_linetype_with_markers` primitive below.
+        let dashes_px: Option<Vec<f64>> =
+            border
+                .linetype_pt
+                .as_ref()
+                .filter(|_| !has_markers)
+                .map(|pattern| {
+                    crate::plot::geom::linetype::to_kurbo_dashes(pattern)
+                        .into_iter()
+                        .map(|pt| pt * dpi / 72.0)
+                        .collect()
+                });
+        let border_stroke = |w_px: f32| {
+            let s = crate::stroke::Stroke::new(w_px as f64)
                 .with_caps(crate::stroke::Cap::Butt)
-                .with_join(crate::stroke::Join::Miter)
+                .with_join(crate::stroke::Join::Miter);
+            if let (Some(pattern_px), false) = (dashes_px.as_ref(), has_markers) {
+                s.with_dashes(0.0_f64, pattern_px.clone())
+            } else {
+                s
+            }
         };
         if border.is_uniform() {
             let w = border.widths_px[0];
             if w > 0.0 {
+                if has_markers {
+                    stroke_markered_perimeter(
+                        scene,
+                        &rect,
+                        w,
+                        border.color,
+                        border
+                            .linetype_pt
+                            .as_ref()
+                            .expect("has_markers implies Some"),
+                        outer,
+                        dpi,
+                    );
+                } else {
+                    scene.stroke(
+                        &border_stroke(w),
+                        outer,
+                        &Brush::Solid(border.color),
+                        None,
+                        &path,
+                        PickId::Skip,
+                    );
+                }
+            }
+        } else {
+            // Per-side widths — collapse contiguous same-width sides
+            // (in CW cyclic order T → R → B → L) into single
+            // polylines so a corner where two present sides meet is
+            // stroked as one continuous path (mitred at the join)
+            // rather than two independent segments (which would show
+            // a visible seam at the corner). Sides with mismatched
+            // widths still emit as separate polylines. `corner_radius`
+            // is intentionally ignored on the mixed path (square
+            // corners; documented on `StyleDelta::border_width`).
+            let brush = Brush::Solid(border.color);
+            let widths = border.widths_px;
+            let (x0, y0, x1, y1) = (rect.x0, rect.y0, rect.x1, rect.y1);
+            let corners = [
+                kurbo::Point::new(x0, y0),
+                kurbo::Point::new(x1, y0),
+                kurbo::Point::new(x1, y1),
+                kurbo::Point::new(x0, y1),
+            ];
+            for chain in group_border_sides_cw(widths, corners) {
+                if has_markers {
+                    let sampler = crate::primitives::PolylineSampler::from_polyline(&chain.points);
+                    let color = border.color;
+                    let solid = crate::stroke::Stroke::new(chain.width as f64)
+                        .with_caps(crate::stroke::Cap::Butt)
+                        .with_join(crate::stroke::Join::Miter);
+                    let shapes = crate::shape::ShapeRegistry::with_builtins();
+                    crate::plot::geom::resolve::draw_linetype_with_markers(
+                        scene,
+                        std::slice::from_ref(&sampler),
+                        border
+                            .linetype_pt
+                            .as_ref()
+                            .expect("has_markers implies Some"),
+                        0.0,
+                        chain.width as f64,
+                        color,
+                        color,
+                        0.0,
+                        &solid,
+                        outer,
+                        &shapes,
+                        dpi,
+                        PickId::Skip,
+                        false,
+                    );
+                    continue;
+                }
+                let mut path = kurbo::BezPath::new();
+                let mut pts = chain.points.iter();
+                if let Some(&p) = pts.next() {
+                    path.move_to(p);
+                    for &p in pts {
+                        path.line_to(p);
+                    }
+                }
                 scene.stroke(
-                    &border_stroke(w),
+                    &border_stroke(chain.width),
                     outer,
-                    &Brush::Solid(border.color),
+                    &brush,
                     None,
                     &path,
                     PickId::Skip,
                 );
             }
-        } else {
-            // Per-side widths — emit each side as its own segment.
-            // `corner_radius` is intentionally ignored on the mixed
-            // path (square corners; documented on
-            // `StyleDelta::border_width`).
-            let brush = Brush::Solid(border.color);
-            let [wt, wr, wb, wl] = border.widths_px;
-            let (x0, y0, x1, y1) = (rect.x0, rect.y0, rect.x1, rect.y1);
-            let emit = |scene: &mut S, w: f32, a: (f64, f64), b: (f64, f64)| {
-                if w <= 0.0 {
-                    return;
-                }
-                let seg = crate::primitives::segment(
-                    kurbo::Point::new(a.0, a.1),
-                    kurbo::Point::new(b.0, b.1),
-                );
-                scene.stroke(&border_stroke(w), outer, &brush, None, &seg, PickId::Skip);
-            };
-            emit(scene, wt, (x0, y0), (x1, y0));
-            emit(scene, wr, (x1, y0), (x1, y1));
-            emit(scene, wb, (x0, y1), (x1, y1));
-            emit(scene, wl, (x0, y0), (x0, y1));
         }
     }
+}
+
+/// Stamp a marker-bearing linetype around the full perimeter of a
+/// uniform-width block border. Used when [`BlockBorder::linetype_pt`]
+/// contains at least one [`crate::scales::value::LinetypeStep::Marker`]
+/// step. Builds one closed [`crate::primitives::PolylineSampler`] over
+/// the four corners (wrapping the seam back to the top-left) and
+/// delegates to the crate-wide dash+marker primitive.
+fn stroke_markered_perimeter(
+    scene: &mut dyn SceneBuilder,
+    rect: &kurbo::Rect,
+    width_px: f32,
+    color: Color,
+    pattern_pt: &[crate::scales::value::LinetypeStep],
+    outer: Affine,
+    dpi: f64,
+) {
+    let corners = [
+        kurbo::Point::new(rect.x0, rect.y0),
+        kurbo::Point::new(rect.x1, rect.y0),
+        kurbo::Point::new(rect.x1, rect.y1),
+        kurbo::Point::new(rect.x0, rect.y1),
+        kurbo::Point::new(rect.x0, rect.y0),
+    ];
+    let sampler = crate::primitives::PolylineSampler::from_polyline(&corners);
+    let solid = crate::stroke::Stroke::new(width_px as f64)
+        .with_caps(crate::stroke::Cap::Butt)
+        .with_join(crate::stroke::Join::Miter);
+    let shapes = crate::shape::ShapeRegistry::with_builtins();
+    crate::plot::geom::resolve::draw_linetype_with_markers(
+        scene,
+        std::slice::from_ref(&sampler),
+        pattern_pt,
+        0.0,
+        width_px as f64,
+        color,
+        color,
+        0.0,
+        &solid,
+        outer,
+        &shapes,
+        dpi,
+        PickId::Skip,
+        false,
+    );
+}
+
+/// One polyline chunk of a block's mixed-width border. Contiguous
+/// same-width sides (in CW cyclic order T → R → B → L) share one
+/// chain, so their shared corner is a single join rather than two
+/// abutting endpoints.
+struct BorderChain {
+    /// Chain vertices in traversal order. `len >= 2`.
+    points: Vec<kurbo::Point>,
+    /// Uniform stroke width for the chain (px).
+    width: f32,
+}
+
+/// Group non-zero sides (in CW cyclic order T → R → B → L, indices
+/// 0..4) into polyline chains: contiguous same-width sides join into
+/// one chain sharing their meeting corner; a zero-width or
+/// mismatched-width side breaks the chain. Cyclic — a chain may wrap
+/// around from L to T when both are present with the same width.
+///
+/// Returns each chain's ordered vertex list plus its shared width.
+/// The uniform-width path in `emit_block_paint` handles the
+/// all-four-sides-same case; this helper is only reached when at
+/// least one side is zero or widths differ across sides.
+fn group_border_sides_cw(widths: [f32; 4], corners: [kurbo::Point; 4]) -> Vec<BorderChain> {
+    // Sides in cyclic CW order:
+    //   0=T: corner[0] → corner[1]
+    //   1=R: corner[1] → corner[2]
+    //   2=B: corner[2] → corner[3]
+    //   3=L: corner[3] → corner[0]
+    let side = |i: usize| -> (kurbo::Point, kurbo::Point) { (corners[i], corners[(i + 1) % 4]) };
+    let present = |i: usize| widths[i] > 0.0;
+    let same_width = |i: usize, j: usize| (widths[i] - widths[j]).abs() < 1e-3;
+    // Pick a start index whose predecessor either isn't present or
+    // has a different width — that's a chain boundary. If no such
+    // break exists (all four present, all same width), the caller
+    // is in the uniform-stroke branch and never enters this helper.
+    let start = (0..4).find(|&i| {
+        let prev = (i + 3) % 4;
+        present(i) && !(present(prev) && same_width(prev, i))
+    });
+    let Some(start) = start else {
+        // All four present with same width. Emit as a closed loop.
+        let mut points: Vec<kurbo::Point> = corners.to_vec();
+        points.push(corners[0]);
+        return vec![BorderChain {
+            points,
+            width: widths[0],
+        }];
+    };
+    let mut chains: Vec<BorderChain> = Vec::new();
+    let mut cur: Vec<kurbo::Point> = Vec::new();
+    let mut cur_w = 0.0f32;
+    for step in 0..4 {
+        let idx = (start + step) % 4;
+        let w = widths[idx];
+        let (a, b) = side(idx);
+        if w <= 0.0 {
+            if !cur.is_empty() {
+                chains.push(BorderChain {
+                    points: std::mem::take(&mut cur),
+                    width: cur_w,
+                });
+            }
+            continue;
+        }
+        if cur.is_empty() {
+            cur.push(a);
+            cur.push(b);
+            cur_w = w;
+        } else if (w - cur_w).abs() < 1e-3 {
+            cur.push(b);
+        } else {
+            chains.push(BorderChain {
+                points: std::mem::take(&mut cur),
+                width: cur_w,
+            });
+            cur.push(a);
+            cur.push(b);
+            cur_w = w;
+        }
+    }
+    if !cur.is_empty() {
+        chains.push(BorderChain {
+            points: cur,
+            width: cur_w,
+        });
+    }
+    chains
 }
 
 fn baseline_shift_for_range(shifts: &[BaselineRun], run_range: &Range<usize>) -> f32 {
@@ -2424,6 +2647,143 @@ mod tests {
             .filter(|op| matches!(op, Op::Stroke { .. }))
             .count();
         assert_eq!(strokes, 1, "uniform border → one rectangular stroke");
+    }
+
+    #[test]
+    fn adjacent_partial_borders_collapse_into_one_polyline() {
+        // Top + left borders both present with the same width should
+        // stroke as ONE polyline sharing the top-left corner, not
+        // two independent segments meeting there. Distinct widths on
+        // T and L, in contrast, must stay separate.
+        let mut sheet = RichTextStyleSheet::empty();
+        sheet.set(
+            "paragraph",
+            crate::text::rich::style::StyleDelta {
+                border_color: Some(crate::plot::theme::ThemeColor::Ink),
+                border_width: Some(crate::plot::theme::Margin {
+                    top: crate::plot::theme::Length::Abs(2.0),
+                    right: crate::plot::theme::Length::Abs(0.0),
+                    bottom: crate::plot::theme::Length::Abs(0.0),
+                    left: crate::plot::theme::Length::Abs(2.0),
+                }),
+                ..crate::text::rich::style::StyleDelta::empty()
+            },
+        );
+        let run = RichTextRun::new(
+            "l shape",
+            &base_style(),
+            Color::from_rgba8(0, 0, 0, 255),
+            &sheet,
+            &palette(),
+            96.0,
+        )
+        .unwrap();
+        let mut scene = RecordingScene::default();
+        draw_rich_text(
+            &mut scene,
+            &run,
+            0.0,
+            0.0,
+            RichAnchor::top_left(),
+            Affine::IDENTITY,
+            PickId::Skip,
+        );
+        let strokes = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .count();
+        assert_eq!(
+            strokes, 1,
+            "top + left same-width partial borders should collapse into one polyline"
+        );
+    }
+
+    #[test]
+    fn partial_borders_with_mismatched_widths_stay_separate() {
+        let mut sheet = RichTextStyleSheet::empty();
+        sheet.set(
+            "paragraph",
+            crate::text::rich::style::StyleDelta {
+                border_color: Some(crate::plot::theme::ThemeColor::Ink),
+                border_width: Some(crate::plot::theme::Margin {
+                    top: crate::plot::theme::Length::Abs(1.0),
+                    right: crate::plot::theme::Length::Abs(0.0),
+                    bottom: crate::plot::theme::Length::Abs(0.0),
+                    left: crate::plot::theme::Length::Abs(4.0),
+                }),
+                ..crate::text::rich::style::StyleDelta::empty()
+            },
+        );
+        let run = RichTextRun::new(
+            "mixed",
+            &base_style(),
+            Color::from_rgba8(0, 0, 0, 255),
+            &sheet,
+            &palette(),
+            96.0,
+        )
+        .unwrap();
+        let mut scene = RecordingScene::default();
+        draw_rich_text(
+            &mut scene,
+            &run,
+            0.0,
+            0.0,
+            RichAnchor::top_left(),
+            Affine::IDENTITY,
+            PickId::Skip,
+        );
+        let strokes = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .count();
+        assert_eq!(strokes, 2, "different widths keep sides separate");
+    }
+
+    #[test]
+    fn dashed_border_carries_dash_pattern_through() {
+        use crate::scales::value::LinetypeStep;
+        use std::sync::Arc;
+        let mut sheet = RichTextStyleSheet::empty();
+        sheet.set(
+            "paragraph",
+            crate::text::rich::style::StyleDelta {
+                border_color: Some(crate::plot::theme::ThemeColor::Ink),
+                border_width: Some(crate::plot::theme::Margin::all(
+                    crate::plot::theme::Length::Abs(1.0),
+                )),
+                border_type: Some(Arc::from(vec![
+                    LinetypeStep::Dash(4.0),
+                    LinetypeStep::Gap(2.0),
+                ])),
+                ..crate::text::rich::style::StyleDelta::empty()
+            },
+        );
+        let run = RichTextRun::new(
+            "dashy",
+            &base_style(),
+            Color::from_rgba8(0, 0, 0, 255),
+            &sheet,
+            &palette(),
+            96.0,
+        )
+        .unwrap();
+        let paints = run.block_paints();
+        let border = paints
+            .iter()
+            .find_map(|p| p.border.as_ref())
+            .expect("expected a border on the paragraph");
+        let pattern = border
+            .linetype_pt
+            .as_ref()
+            .expect("border_type should produce a linetype pattern");
+        // Two entries (dash + gap), both positive.
+        assert_eq!(pattern.len(), 2);
+        use crate::scales::value::LinetypeStep::{Dash, Gap};
+        assert!(matches!(pattern[0], Dash(d) if d > 0.0));
+        assert!(matches!(pattern[1], Gap(g) if g > 0.0));
     }
 
     #[test]

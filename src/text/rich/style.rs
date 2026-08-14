@@ -98,6 +98,14 @@ pub struct StyleDelta {
     pub border_width: Option<Margin>,
     /// Block border corner radius (pt).
     pub border_radius: Option<Length>,
+    /// Block border dash pattern. `None` inherits (which resolves to
+    /// a solid stroke). Uses the crate-wide
+    /// [`crate::scales::value::LinetypeStep`] representation — dash /
+    /// gap lengths in pt. Marker steps aren't drawn on block borders
+    /// (they're stripped to `Gap`); use them only when your linetype
+    /// is shared with a line-geom channel and needs to survive both
+    /// contexts.
+    pub border_type: Option<std::sync::Arc<[crate::scales::value::LinetypeStep]>>,
     /// Per-nesting-depth bullet markers for list items. `None`
     /// inherits; `Some(vec![])` suppresses the bullet at every depth;
     /// entries index by the list's 0-based nesting depth and cycle
@@ -148,6 +156,7 @@ impl StyleDelta {
             border_color: None,
             border_width: None,
             border_radius: None,
+            border_type: None,
             bullet: None,
         }
     }
@@ -185,6 +194,10 @@ impl StyleDelta {
                 .or_else(|| self.border_color.clone()),
             border_width: over.border_width.or(self.border_width),
             border_radius: over.border_radius.or(self.border_radius),
+            border_type: over
+                .border_type
+                .clone()
+                .or_else(|| self.border_type.clone()),
             bullet: over.bullet.clone().or_else(|| self.bullet.clone()),
         }
     }

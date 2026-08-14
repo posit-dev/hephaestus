@@ -14,14 +14,16 @@ use hephaestus::color::{rgb8, Color};
 use hephaestus::geometry::{Affine, Rect};
 use hephaestus::path::FillRule;
 use hephaestus::pick::PickId;
-use hephaestus::plot::theme::{HAlign, Length, Palette, ThemeColor};
+use hephaestus::plot::theme::{HAlign, Length, Margin, Palette, ThemeColor};
 use hephaestus::primitives::rect as rect_path;
+use hephaestus::scales::value::LinetypeStep;
 use hephaestus::stroke::Stroke;
 use hephaestus::text::rich::{
     draw_rich_text, RichAnchor, RichTextRun, RichTextStyleSheet, RichTextWidth, StyleDelta,
 };
-use hephaestus::text::TextStyle;
+use hephaestus::text::{FontFeatureSetting, TextStyle};
 use hephaestus::{Renderer, SceneBuilder};
+use std::sync::Arc;
 
 const SOURCE: &str = "# Rich text at a glance
 
@@ -40,6 +42,10 @@ Per-glyph outlines paint through the sheet's `text_stroke` field. A
 {.haloed HALOED} span sets a coloured outline behind its fill; combine it
 with a distinct `color` on the same class so parley splits the run at the
 span boundary (the outline scope is defined by the resulting glyph run).
+
+OpenType features are per-span too: {.smcp small caps here} route through
+the `smcp` feature via a sheet class; {.tnum 0123456789} pushes `tnum` for
+tabular numerals so digits share a fixed advance.
 
 ## Lists
 
@@ -94,6 +100,25 @@ Sheet-defined class `.justified` sets `align: HAlign::Justify` — parley
 distributes trailing whitespace across each line so both the left and
 the right edge align. Effect is most visible on paragraphs that wrap
 across multiple lines with mixed word lengths.
+:::
+
+:::dashed-note
+`border_type` sets a dash pattern on any block border — this div has
+a dashed rectangle around it. Adjacent same-width sides share one
+polyline stroke so the corner is a single mitred join, not two abutting
+segments meeting at the same point.
+:::
+
+:::l-shape
+`.l-shape` sets top + left borders only. They collapse into one
+polyline through the top-left corner rather than rendering as two
+independent segments.
+:::
+
+:::stamped-note
+`border_type` also accepts `LinetypeStep::Marker` — small shape stamps
+spaced along the border. This div's pattern alternates dashes with
+`circle` marker stamps, walked by the same primitive `LineGeom` uses.
 :::";
 
 fn main() {
@@ -133,6 +158,89 @@ fn main() {
             color: Some(ThemeColor::Fixed(rgb8(230, 60, 60))),
             text_stroke: Some(ThemeColor::Fixed(rgb8(255, 235, 205))),
             text_stroke_width: Some(Length::Abs(2.0)),
+            ..StyleDelta::empty()
+        },
+    );
+    sheet.set(
+        "smcp",
+        StyleDelta {
+            features: Some(vec![FontFeatureSetting {
+                tag: *b"smcp",
+                value: 1,
+            }]),
+            ..StyleDelta::empty()
+        },
+    );
+    sheet.set(
+        "tnum",
+        StyleDelta {
+            features: Some(vec![FontFeatureSetting {
+                tag: *b"tnum",
+                value: 1,
+            }]),
+            ..StyleDelta::empty()
+        },
+    );
+    sheet.set(
+        "dashed-note",
+        StyleDelta {
+            border_color: Some(ThemeColor::Fixed(rgb8(160, 90, 40))),
+            border_width: Some(Margin::all(Length::Abs(1.5))),
+            border_type: Some(Arc::from(vec![
+                LinetypeStep::Dash(6.0),
+                LinetypeStep::Gap(3.0),
+            ])),
+            border_radius: Some(Length::Abs(4.0)),
+            padding: Some(Margin::all(Length::Abs(8.0))),
+            margin: Some(Margin {
+                top: Length::Abs(6.0),
+                right: Length::Abs(0.0),
+                bottom: Length::Abs(6.0),
+                left: Length::Abs(0.0),
+            }),
+            ..StyleDelta::empty()
+        },
+    );
+    sheet.set(
+        "stamped-note",
+        StyleDelta {
+            border_color: Some(ThemeColor::Fixed(rgb8(80, 130, 90))),
+            border_width: Some(Margin::all(Length::Abs(1.0))),
+            border_type: Some(Arc::from(vec![
+                LinetypeStep::Dash(6.0),
+                LinetypeStep::Gap(3.0),
+                LinetypeStep::Marker(Arc::from("circle")),
+                LinetypeStep::Gap(3.0),
+            ])),
+            padding: Some(Margin::all(Length::Abs(8.0))),
+            margin: Some(Margin {
+                top: Length::Abs(6.0),
+                right: Length::Abs(0.0),
+                bottom: Length::Abs(6.0),
+                left: Length::Abs(0.0),
+            }),
+            ..StyleDelta::empty()
+        },
+    );
+    sheet.set(
+        "l-shape",
+        StyleDelta {
+            border_color: Some(ThemeColor::Fixed(rgb8(60, 100, 160))),
+            // Top + left only. Same width on both so they collapse
+            // into one polyline through the top-left corner.
+            border_width: Some(Margin {
+                top: Length::Abs(2.0),
+                right: Length::Abs(0.0),
+                bottom: Length::Abs(0.0),
+                left: Length::Abs(2.0),
+            }),
+            padding: Some(Margin::all(Length::Abs(8.0))),
+            margin: Some(Margin {
+                top: Length::Abs(6.0),
+                right: Length::Abs(0.0),
+                bottom: Length::Abs(6.0),
+                left: Length::Abs(0.0),
+            }),
             ..StyleDelta::empty()
         },
     );
