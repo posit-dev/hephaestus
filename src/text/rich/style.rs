@@ -61,6 +61,13 @@ pub struct StyleDelta {
     /// Outline stroke width for [`Self::text_stroke`], in pt. No
     /// effect unless `text_stroke` resolves to a colour.
     pub text_stroke_width: Option<Length>,
+    /// OpenType feature settings applied to this span (e.g. small
+    /// caps, tabular numerals, stylistic sets). `None` inherits from
+    /// the parent; `Some(vec)` merges tag-by-tag onto the parent (a
+    /// child entry with the same tag replaces the parent's, others
+    /// carry through). An empty `Some(vec![])` explicitly clears the
+    /// parent's features.
+    pub features: Option<Vec<crate::text::FontFeatureSetting>>,
 
     // ── Block-level ──
     /// Line height. `Rel(m)` = `m × parent size`; `Abs(pt)` = absolute.
@@ -129,6 +136,7 @@ impl StyleDelta {
             baseline_em: self.baseline_em,
             text_stroke: self.text_stroke.clone(),
             text_stroke_width: self.text_stroke_width,
+            features: self.features.clone(),
             // Block-only — cleared:
             lineheight: None,
             align: None,
@@ -163,6 +171,7 @@ impl StyleDelta {
                 .clone()
                 .or_else(|| self.text_stroke.clone()),
             text_stroke_width: over.text_stroke_width.or(self.text_stroke_width),
+            features: merge_features(self.features.as_deref(), over.features.as_deref()),
             lineheight: over.lineheight.or(self.lineheight),
             align: over.align.or(self.align),
             indent: over.indent.or(self.indent),
@@ -177,6 +186,31 @@ impl StyleDelta {
             border_width: over.border_width.or(self.border_width),
             border_radius: over.border_radius.or(self.border_radius),
             bullet: over.bullet.clone().or_else(|| self.bullet.clone()),
+        }
+    }
+}
+
+/// Overlay `over` onto `parent` with tag-level merge semantics: the
+/// child replaces same-tag entries from the parent and appends new
+/// tags; `None` on either side falls through / passes the other. An
+/// explicit empty `Some(vec![])` on the child clears the parent's
+/// features.
+fn merge_features(
+    parent: Option<&[crate::text::FontFeatureSetting]>,
+    over: Option<&[crate::text::FontFeatureSetting]>,
+) -> Option<Vec<crate::text::FontFeatureSetting>> {
+    match (parent, over) {
+        (None, None) => None,
+        (Some(p), None) => Some(p.to_vec()),
+        (None, Some(o)) => Some(o.to_vec()),
+        (Some(p), Some(o)) => {
+            let mut out: Vec<crate::text::FontFeatureSetting> = p
+                .iter()
+                .filter(|f| !o.iter().any(|c| c.tag == f.tag))
+                .copied()
+                .collect();
+            out.extend_from_slice(o);
+            Some(out)
         }
     }
 }
@@ -546,6 +580,53 @@ mod tests {
         let merged = parent.overlay(&child);
         assert_eq!(merged.weight, Some(700), "child weight wins");
         assert_eq!(merged.italic, Some(false), "parent italic falls through");
+    }
+
+    #[test]
+    fn overlay_merges_features_by_tag() {
+        use crate::text::FontFeatureSetting;
+        let parent = StyleDelta {
+            features: Some(vec![
+                FontFeatureSetting {
+                    tag: *b"liga",
+                    value: 1,
+                },
+                FontFeatureSetting {
+                    tag: *b"kern",
+                    value: 1,
+                },
+            ]),
+            ..StyleDelta::empty()
+        };
+        let child = StyleDelta {
+            features: Some(vec![
+                FontFeatureSetting {
+                    tag: *b"liga",
+                    value: 0,
+                },
+                FontFeatureSetting {
+                    tag: *b"smcp",
+                    value: 1,
+                },
+            ]),
+            ..StyleDelta::empty()
+        };
+        let merged = parent.overlay(&child).features.unwrap();
+        // kern from parent (child didn't touch), liga replaced by
+        // child (0), smcp added by child.
+        assert!(merged.contains(&FontFeatureSetting {
+            tag: *b"kern",
+            value: 1
+        }));
+        assert!(merged.contains(&FontFeatureSetting {
+            tag: *b"liga",
+            value: 0
+        }));
+        assert!(merged.contains(&FontFeatureSetting {
+            tag: *b"smcp",
+            value: 1
+        }));
+        assert_eq!(merged.len(), 3);
     }
 
     #[test]

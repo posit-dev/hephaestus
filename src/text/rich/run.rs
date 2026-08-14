@@ -1121,6 +1121,18 @@ fn apply_delta_range(
         };
         builder.push(StyleProperty::FontFamily(entry), range.clone());
     }
+    if let Some(features) = &delta.features {
+        let parley_features: Vec<parley::FontFeature> = features
+            .iter()
+            .map(|f| parley::FontFeature::new(parley::setting::Tag::from_bytes(f.tag), f.value))
+            .collect();
+        builder.push(
+            StyleProperty::FontFeatures(parley::FontFeatures::List(std::borrow::Cow::Owned(
+                parley_features,
+            ))),
+            range,
+        );
+    }
 }
 
 fn generic_family_to_parley(kind: GenericFamilyKind) -> GenericFamily {
