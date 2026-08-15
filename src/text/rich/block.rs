@@ -24,7 +24,6 @@ use kurbo::Rect;
 use super::run::{ancestors_of_range, BlockLayout, RichTextRun};
 use crate::color::Color;
 use crate::plot::theme::Palette;
-use resolve_helpers::StyleDeltaResolveHelpersImpl as StyleDeltaResolveHelpers;
 
 /// A drawing instruction for one block-level box. Emitted by
 /// [`compute_block_paints`] in outer-first order.
@@ -123,8 +122,19 @@ pub fn compute_block_paints(run: &RichTextRun) -> Vec<BlockPaint> {
             x1 = x1.max(r.x1 as f32);
             y1 = y1.max(r.y1 as f32);
         }
+        // Effective block-axis direction for the container: inherit
+        // from the first descendant leaf, whose `is_rtl` already
+        // applied the same overlay cascade that included this
+        // container. Under Rtl, the container's `.left` / `.right`
+        // padding + border_width are interpreted as start / end sides
+        // (swapped to physical via `resolve_for_direction`).
+        let is_rtl = leaves.first().map(|bl| bl.is_rtl).unwrap_or(false);
         // Inflate outward by the container's own padding.
-        let (t_pt, r_pt, b_pt, l_pt) = container.delta.padding.resolve_or_zero(base_pt);
+        let (t_pt, r_pt, b_pt, l_pt) = container
+            .delta
+            .padding
+            .map(|m| m.resolve_for_direction(base_pt, is_rtl))
+            .unwrap_or((0.0, 0.0, 0.0, 0.0));
         let px = |pt: f64| (pt * dpi / 72.0) as f32;
         x0 -= px(l_pt);
         x1 += px(r_pt);
@@ -143,6 +153,7 @@ pub fn compute_block_paints(run: &RichTextRun) -> Vec<BlockPaint> {
             palette,
             base_pt,
             dpi,
+            is_rtl,
         );
         let corner_radius = container
             .delta
@@ -177,6 +188,7 @@ pub fn compute_block_paints(run: &RichTextRun) -> Vec<BlockPaint> {
             palette,
             base_pt,
             dpi,
+            bl.is_rtl,
         );
         let corner_radius = d
             .border_radius
@@ -214,9 +226,14 @@ fn border_for(
     palette: &Palette,
     base_pt: f64,
     dpi: f64,
+    is_rtl: bool,
 ) -> Option<BlockBorder> {
     let (c, w) = (color.as_ref()?, width?);
-    let (t, r, b, l) = w.resolve(base_pt);
+    // Swap l/r under Rtl so a class that sets `border_width.left = 3`
+    // — semantically the start-side bar — paints on the physical
+    // right instead. Mirrors the padding / margin l/r swap in
+    // `run.rs`'s block-layout math.
+    let (t, r, b, l) = w.resolve_for_direction(base_pt, is_rtl);
     let widths_px = [
         (t * dpi / 72.0) as f32,
         (r * dpi / 72.0) as f32,
@@ -232,25 +249,6 @@ fn border_for(
         widths_px,
         linetype_pt,
     })
-}
-
-// ─── Small resolve helpers for StyleDelta / Margin ──────────────────────────
-
-pub(crate) mod resolve_helpers {
-    use crate::plot::theme::Margin;
-
-    pub trait StyleDeltaResolveHelpersImpl {
-        fn resolve_or_zero(&self, base_pt: f64) -> (f64, f64, f64, f64);
-    }
-
-    impl StyleDeltaResolveHelpersImpl for Option<Margin> {
-        fn resolve_or_zero(&self, base_pt: f64) -> (f64, f64, f64, f64) {
-            match self {
-                Some(m) => m.resolve(base_pt),
-                None => (0.0, 0.0, 0.0, 0.0),
-            }
-        }
-    }
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

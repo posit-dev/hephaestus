@@ -99,6 +99,7 @@ use std::sync::Arc;
 use crate::brush::Brush;
 use crate::geometry::{Affine, Point, Rect};
 use crate::path::FillRule;
+use crate::plot::theme::HAlign;
 use crate::plot::value::Value;
 use crate::primitives::{rect as rect_path, rounded_rect};
 use crate::scene::SceneBuilder;
@@ -445,7 +446,7 @@ impl Geom for TextGeom {
                     resolve_number_channel_or(width_band_ch, width_band_scale, i, 0.0);
                 let wrap_width_px = pt_to_px(width_pt, ctx.dpi) + width_band_frac * x_band_width_px;
                 let (text_w, text_h) = if wrap_width_px > 0.0 && wrap_width_px.is_finite() {
-                    rich.set_max_width(wrap_width_px as f32, Alignment::Start);
+                    rich.set_max_width(wrap_width_px as f32, HAlign::Start);
                     (rich.content_width(), rich.current_height())
                 } else {
                     (rich.natural_width(), rich.natural_height())

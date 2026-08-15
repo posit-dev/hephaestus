@@ -112,6 +112,30 @@ impl Margin {
         )
     }
 
+    /// Resolve against `parent_pt`, then swap the `left` and `right`
+    /// components when `is_rtl` is true.
+    ///
+    /// Used at the callsites that treat a class-supplied `.left` /
+    /// `.right` as **logical** start / end sides (block-level
+    /// `padding`, `margin`, `border_width` on paragraphs, headings,
+    /// blockquotes, list containers). A blockquote class that sets
+    /// `border_width.left = 3` semantically means "start-side bar";
+    /// under Rtl that bar has to paint on the physical right, so this
+    /// helper swaps the two before downstream code reads the tuple.
+    ///
+    /// Directional swap is opt-in per callsite — physical primitives
+    /// (`Element::Inherit`, chrome axes, geom rects) still use
+    /// [`Self::resolve`].
+    #[inline]
+    pub fn resolve_for_direction(&self, parent_pt: f64, is_rtl: bool) -> (f64, f64, f64, f64) {
+        let (t, r, b, l) = self.resolve(parent_pt);
+        if is_rtl {
+            (t, l, b, r)
+        } else {
+            (t, r, b, l)
+        }
+    }
+
     /// A zero-length margin on every side.
     pub const ZERO: Margin = Margin::all(Length::Abs(0.0));
 }

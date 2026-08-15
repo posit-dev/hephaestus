@@ -160,6 +160,16 @@ pub(crate) struct BlockLayout {
     /// ancestor `align`. `None` = fall back to the caller-supplied
     /// alignment at re-break time (matches the outer's opinion).
     pub(crate) alignment_override: Option<Alignment>,
+    /// Resolved block-axis direction: `true` = Rtl, `false` = Ltr.
+    /// Sourced from the first non-`None` `text_direction` in the
+    /// ancestor chain (child wins via overlay); for `Direction::Auto`
+    /// or an unset field, this reads back
+    /// [`parley::Layout::is_rtl()`] after shaping. Under Rtl the
+    /// physical-side interpretation of block-level `padding` /
+    /// `margin` / `border_width` is flipped, `HAlign::Start` /
+    /// `End` map to physical Right / Left, and first-line / hanging
+    /// indent apply from the right edge instead of the left.
+    pub(crate) is_rtl: bool,
     /// Asymmetric-shift companion layout. `Some` when
     /// `first_line_shift_px != continuation_shift_px` and the block
     /// has more than one line's worth of content:
@@ -290,7 +300,7 @@ impl RichTextRun {
         let runs = reduce(&events, sheet);
         let r = Self::shape(runs, base_style, base_brush, palette, dpi);
         if let RichTextWidth::Fixed(px) = width {
-            r.set_max_width(px, Alignment::Start);
+            r.set_max_width(px, HAlign::Start);
         }
         Ok(r)
     }
@@ -503,7 +513,18 @@ impl RichTextRun {
                     }
                 }
             }
-            let alignment_override = resolved_align.map(hal_to_alignment);
+            // Direction: same "child wins, walk ancestors" resolution
+            // as alignment. An unset field or `Direction::Auto` reads
+            // back parley's own is_rtl() after shaping (below).
+            let mut resolved_direction: Option<super::style::Direction> = leaf.delta.text_direction;
+            if resolved_direction.is_none() {
+                for anc in &ancestors {
+                    if let Some(d) = anc.delta.text_direction {
+                        resolved_direction = Some(d);
+                        break;
+                    }
+                }
+            }
             // Slice text + inlines + baseline shifts to just this
             // block's byte range; rebase ranges to block-local coords.
             let (block_text_owned, inlines, baselines) =
@@ -517,8 +538,18 @@ impl RichTextRun {
             let mut layout =
                 shape_block_layout(&block_text, &inlines, base_style, base_brush, palette, dpi);
             layout.break_all_lines(None);
+            // Resolve `Auto` (or an unset field) against parley's own
+            // UBA output on this block's text — that's the standard
+            // paragraph-direction algorithm and the marquee-parity
+            // choice per the plan. Explicit Ltr / Rtl bypass parley.
+            let is_rtl = match resolved_direction {
+                Some(super::style::Direction::Ltr) => false,
+                Some(super::style::Direction::Rtl) => true,
+                None | Some(super::style::Direction::Auto) => layout.is_rtl(),
+            };
+            let alignment_override = resolved_align.map(|a| hal_to_alignment(a, is_rtl));
             layout.align(
-                alignment_override.unwrap_or(Alignment::Start),
+                alignment_override.unwrap_or_else(|| hal_to_alignment(HAlign::Start, is_rtl)),
                 AlignmentOptions::default(),
             );
             let widths = layout.calculate_content_widths();
@@ -571,6 +602,30 @@ impl RichTextRun {
                     pending_neg = pending_neg.min(m_px);
                 }
             }
+            // Under Rtl, the class-supplied `.left` / `.right` on
+            // padding, margin, and (in block.rs) border_width are
+            // treated as logical start / end sides — so the physical
+            // "left" inset in the block layout is the sum of the
+            // right-side pt values (start-side under Rtl), and vice
+            // versa. `indent` / `hanging` stay logical by field name
+            // (first-line vs continuation) and are applied physically
+            // by `emit_line_glyphs` based on `is_rtl`.
+            let (phys_left_px, phys_right_inset_px) = if is_rtl {
+                (
+                    anc_right_px + own_right_px + margin_right_px,
+                    anc_left_px + own_left_px + margin_left_px,
+                )
+            } else {
+                (
+                    anc_left_px + own_left_px + margin_left_px,
+                    anc_right_px + own_right_px + margin_right_px,
+                )
+            };
+            let (phys_pad_left_px, phys_pad_right_px) = if is_rtl {
+                (own_right_px, own_left_px)
+            } else {
+                (own_left_px, own_right_px)
+            };
             layouts.push(BlockLayout {
                 layout,
                 baseline_shifts: baselines.clone(),
@@ -578,8 +633,8 @@ impl RichTextRun {
                 kind: leaf.kind.clone(),
                 delta: leaf.delta.clone(),
                 depth: leaf.depth,
-                left_px: anc_left_px + own_left_px + margin_left_px,
-                right_inset_px: anc_right_px + own_right_px + margin_right_px,
+                left_px: phys_left_px,
+                right_inset_px: phys_right_inset_px,
                 shape_width_px: widths.max,
                 first_line_shift_px: first_line_indent_px,
                 continuation_shift_px: hanging_px,
@@ -588,12 +643,13 @@ impl RichTextRun {
                 margin_top_px,
                 margin_bottom_px,
                 padding_top_px: own_top_px,
-                padding_right_px: own_right_px,
+                padding_right_px: phys_pad_right_px,
                 padding_bottom_px: own_bottom_px,
-                padding_left_px: own_left_px,
+                padding_left_px: phys_pad_left_px,
                 extra_top_px,
                 extra_bottom_px,
                 alignment_override,
+                is_rtl,
                 continuation_layout,
                 continuation_baseline_shifts,
                 first_line_height_px,
@@ -694,14 +750,20 @@ impl RichTextRun {
     /// wrap constraint into each block's effective shape width
     /// (`outer - left - right - max(first_line, continuation)`).
     /// Returns the new stacked total height.
-    pub fn set_max_width(&self, max_width_px: f32, alignment: Alignment) -> f32 {
+    pub fn set_max_width(&self, max_width_px: f32, alignment: HAlign) -> f32 {
         let mut blocks = self.blocks.borrow_mut();
         let mut y_accum: f32 = 0.0;
         let mut pending_pos: f32 = 0.0;
         let mut pending_neg: f32 = 0.0;
         for bl in blocks.iter_mut() {
             let block_avail = (max_width_px - bl.left_px - bl.right_inset_px).max(1.0);
-            let effective_align = bl.alignment_override.unwrap_or(alignment);
+            // Fallback for blocks without an `align` override uses
+            // the caller-supplied HAlign resolved against THIS block's
+            // resolved direction — so an Rtl block sees Start map to
+            // physical Right even when the caller passed HAlign::Start.
+            let effective_align = bl
+                .alignment_override
+                .unwrap_or_else(|| hal_to_alignment(alignment, bl.is_rtl));
             if bl.first_line_shift_px == bl.continuation_shift_px {
                 // Symmetric — single layout at (block - shift).
                 let target = (block_avail - bl.first_line_shift_px).max(1.0);
@@ -933,7 +995,7 @@ impl Measure for RichTextRun {
     }
 
     fn height_at(&self, width: f64, _dpi: f64) -> f64 {
-        self.set_max_width(width as f32, Alignment::Start) as f64
+        self.set_max_width(width as f32, HAlign::Start) as f64
     }
 }
 
@@ -1244,12 +1306,19 @@ fn pt_to_px(pt: f64, dpi: f64) -> f32 {
     (pt * dpi / 72.0) as f32
 }
 
-fn hal_to_alignment(a: HAlign) -> Alignment {
-    match a {
-        HAlign::Start => Alignment::Start,
-        HAlign::Center => Alignment::Center,
-        HAlign::End => Alignment::End,
-        HAlign::Justify => Alignment::Justify,
+/// Map hephaestus's [`HAlign`] to parley's [`Alignment`] using our
+/// own resolved block-axis direction. Uses parley's **physical**
+/// `Left` / `Right` variants (never the direction-aware `Start` /
+/// `End`) so an explicit
+/// [`super::style::Direction::Ltr`] / [`super::style::Direction::Rtl`]
+/// on a block wins even when parley's UBA infers the opposite from
+/// the source text.
+fn hal_to_alignment(a: HAlign, is_rtl: bool) -> Alignment {
+    match (a, is_rtl) {
+        (HAlign::Start, false) | (HAlign::End, true) => Alignment::Left,
+        (HAlign::End, false) | (HAlign::Start, true) => Alignment::Right,
+        (HAlign::Center, _) => Alignment::Center,
+        (HAlign::Justify, _) => Alignment::Justify,
     }
 }
 
@@ -1344,6 +1413,7 @@ pub fn draw_rich_text(
                     block_x,
                     block_y,
                     bl.first_line_shift_px,
+                    bl.is_rtl,
                     &bl.baseline_shifts,
                     &bl.source_inlines,
                     palette,
@@ -1363,6 +1433,7 @@ pub fn draw_rich_text(
                     block_x,
                     cont_y,
                     bl.continuation_shift_px,
+                    bl.is_rtl,
                     &bl.continuation_baseline_shifts,
                     &bl.continuation_inlines,
                     palette,
@@ -1387,6 +1458,7 @@ pub fn draw_rich_text(
                     block_x,
                     block_y,
                     per_line_shift,
+                    bl.is_rtl,
                     &bl.baseline_shifts,
                     &bl.source_inlines,
                     palette,
@@ -1406,6 +1478,12 @@ pub fn draw_rich_text(
 /// per-span or outer outlines, and decorations) into `scene`.
 /// Extracted so [`draw_rich_text`] can call it twice for the
 /// asymmetric-shift case (first line + continuation lines).
+///
+/// `is_rtl` controls how `shift_px` is applied: under Ltr it pushes
+/// the glyph run rightward from the block's left edge (indent gutter
+/// on the left); under Rtl the shift is not added — the block's
+/// narrower shape width plus parley's right-alignment already leaves
+/// the indent gutter on the right side of the block.
 #[allow(clippy::too_many_arguments)]
 fn emit_line_glyphs(
     scene: &mut dyn SceneBuilder,
@@ -1413,6 +1491,7 @@ fn emit_line_glyphs(
     block_x: f32,
     block_y: f32,
     shift_px: f32,
+    is_rtl: bool,
     baseline_shifts: &[BaselineRun],
     inlines: &[InlineRun],
     palette: &Palette,
@@ -1448,7 +1527,11 @@ fn emit_line_glyphs(
         let dy_px = shift_em * font_size;
         let metrics = prun.metrics();
         let baseline = gr.baseline();
-        let run_x_base = block_x + shift_px - offsets.ref_x;
+        // Under Rtl the shape width was narrowed by `shift_px` and
+        // parley right-aligns into it, so the indent gutter already
+        // sits on the right of the block — no positional shift needed.
+        let effective_shift = if is_rtl { 0.0 } else { shift_px };
+        let run_x_base = block_x + effective_shift - offsets.ref_x;
         let glyph_x0 = run_x_base + gr.offset();
         let glyph_x1 = glyph_x0 + gr.advance();
         let y_base = block_y + baseline - offsets.ref_y - dy_px;
@@ -1520,16 +1603,12 @@ fn emit_line_glyphs(
                 // (`block_x + shift_px - offsets.ref_x`) as the glyph
                 // positions.
                 let x0_paint = if starts_here {
-                    left_box_x
-                        .map(|x| x + block_x + shift_px - offsets.ref_x)
-                        .unwrap_or(glyph_x0)
+                    left_box_x.map(|x| x + run_x_base).unwrap_or(glyph_x0)
                 } else {
                     glyph_x0
                 };
                 let x1_paint = if ends_here {
-                    right_box_x1
-                        .map(|x| x + block_x + shift_px - offsets.ref_x)
-                        .unwrap_or(glyph_x1)
+                    right_box_x1.map(|x| x + run_x_base).unwrap_or(glyph_x1)
                 } else {
                     glyph_x1
                 };
@@ -1603,7 +1682,7 @@ fn emit_line_glyphs(
             .positioned_glyphs()
             .map(|g| Glyph {
                 id: g.id,
-                x: g.x + block_x + shift_px - offsets.ref_x,
+                x: g.x + run_x_base,
                 y: g.y + block_y - offsets.ref_y - dy_px,
             })
             .collect();
@@ -2604,6 +2683,154 @@ mod tests {
             1,
             "blockquote should emit exactly one stroke (left edge only), got {}",
             strokes.len()
+        );
+    }
+
+    #[test]
+    fn halign_start_maps_to_right_under_rtl() {
+        assert_eq!(hal_to_alignment(HAlign::Start, false), Alignment::Left);
+        assert_eq!(hal_to_alignment(HAlign::Start, true), Alignment::Right);
+        assert_eq!(hal_to_alignment(HAlign::End, false), Alignment::Right);
+        assert_eq!(hal_to_alignment(HAlign::End, true), Alignment::Left);
+        assert_eq!(hal_to_alignment(HAlign::Center, false), Alignment::Center);
+        assert_eq!(hal_to_alignment(HAlign::Center, true), Alignment::Center);
+        assert_eq!(hal_to_alignment(HAlign::Justify, true), Alignment::Justify);
+    }
+
+    #[test]
+    fn auto_direction_reads_parley_is_rtl_for_arabic() {
+        // Auto (unset text_direction) should reflect parley's UBA
+        // determination on the block's text. Arabic script drives
+        // base_level to Rtl.
+        let sheet = RichTextStyleSheet::empty();
+        let run = RichTextRun::new(
+            "مرحبا",
+            &base_style(),
+            Color::from_rgba8(0, 0, 0, 255),
+            &sheet,
+            &palette(),
+            96.0,
+        )
+        .unwrap();
+        let blocks = run.blocks.borrow();
+        assert!(
+            blocks.first().map(|bl| bl.is_rtl).unwrap_or(false),
+            "an Arabic-only paragraph should resolve to Rtl via parley::Layout::is_rtl"
+        );
+    }
+
+    #[test]
+    fn explicit_ltr_overrides_arabic_content_direction() {
+        // A block with explicit `Direction::Ltr` in its class stays
+        // Ltr even when parley infers Rtl from Arabic content.
+        let mut sheet = RichTextStyleSheet::empty();
+        sheet.set(
+            "paragraph",
+            crate::text::rich::style::StyleDelta {
+                text_direction: Some(crate::text::rich::style::Direction::Ltr),
+                ..crate::text::rich::style::StyleDelta::empty()
+            },
+        );
+        let run = RichTextRun::new(
+            "مرحبا",
+            &base_style(),
+            Color::from_rgba8(0, 0, 0, 255),
+            &sheet,
+            &palette(),
+            96.0,
+        )
+        .unwrap();
+        let blocks = run.blocks.borrow();
+        assert!(
+            !blocks.first().map(|bl| bl.is_rtl).unwrap_or(true),
+            "explicit Direction::Ltr must override parley's Rtl inference"
+        );
+    }
+
+    #[test]
+    fn rtl_blockquote_paints_right_edge_bar() {
+        // A block_quote class sets `border_width` as `[0, 0, 0, 3]` —
+        // start-side bar. Under Rtl the l/r swap in `border_for`
+        // routes it onto the physical right edge, so `widths_px[1]`
+        // (right) becomes non-zero and `widths_px[3]` (left) stays 0.
+        let mut sheet = RichTextStyleSheet::empty();
+        sheet.set(
+            "block_quote",
+            crate::text::rich::style::StyleDelta {
+                text_direction: Some(crate::text::rich::style::Direction::Rtl),
+                border_color: Some(crate::plot::theme::ThemeColor::Ink),
+                border_width: Some(crate::plot::theme::Margin::new(
+                    crate::plot::theme::Length::Abs(0.0),
+                    crate::plot::theme::Length::Abs(0.0),
+                    crate::plot::theme::Length::Abs(0.0),
+                    crate::plot::theme::Length::Abs(3.0),
+                )),
+                ..crate::text::rich::style::StyleDelta::empty()
+            },
+        );
+        let run = RichTextRun::new(
+            "> quoted content",
+            &base_style(),
+            Color::from_rgba8(0, 0, 0, 255),
+            &sheet,
+            &palette(),
+            96.0,
+        )
+        .unwrap();
+        let paints = run.block_paints();
+        let border = paints
+            .iter()
+            .find_map(|p| p.border.as_ref())
+            .expect("blockquote should have a border");
+        assert!(
+            border.widths_px[1] > 0.0,
+            "under Rtl the start-side bar should paint on the physical right (widths_px[1])"
+        );
+        assert!(
+            border.widths_px[3].abs() < 1e-3,
+            "physical left (widths_px[3]) should be zero"
+        );
+    }
+
+    #[test]
+    fn ltr_blockquote_still_paints_left_edge_bar() {
+        // Baseline sanity: no direction set → default Ltr behavior
+        // stays intact. `[0, 0, 0, 3]` still lands on the left edge.
+        let mut sheet = RichTextStyleSheet::empty();
+        sheet.set(
+            "block_quote",
+            crate::text::rich::style::StyleDelta {
+                border_color: Some(crate::plot::theme::ThemeColor::Ink),
+                border_width: Some(crate::plot::theme::Margin::new(
+                    crate::plot::theme::Length::Abs(0.0),
+                    crate::plot::theme::Length::Abs(0.0),
+                    crate::plot::theme::Length::Abs(0.0),
+                    crate::plot::theme::Length::Abs(3.0),
+                )),
+                ..crate::text::rich::style::StyleDelta::empty()
+            },
+        );
+        let run = RichTextRun::new(
+            "> quoted content",
+            &base_style(),
+            Color::from_rgba8(0, 0, 0, 255),
+            &sheet,
+            &palette(),
+            96.0,
+        )
+        .unwrap();
+        let paints = run.block_paints();
+        let border = paints
+            .iter()
+            .find_map(|p| p.border.as_ref())
+            .expect("blockquote should have a border");
+        assert!(
+            border.widths_px[3] > 0.0,
+            "under Ltr the start-side bar should paint on the physical left (widths_px[3])"
+        );
+        assert!(
+            border.widths_px[1].abs() < 1e-3,
+            "physical right (widths_px[1]) should be zero"
         );
     }
 

@@ -19,7 +19,8 @@ use hephaestus::primitives::rect as rect_path;
 use hephaestus::scales::value::LinetypeStep;
 use hephaestus::stroke::Stroke;
 use hephaestus::text::rich::{
-    draw_rich_text, RichAnchor, RichTextRun, RichTextStyleSheet, RichTextWidth, StyleDelta,
+    draw_rich_text, Direction, RichAnchor, RichTextRun, RichTextStyleSheet, RichTextWidth,
+    StyleDelta,
 };
 use hephaestus::text::{FontFeatureSetting, TextStyle};
 use hephaestus::{Renderer, SceneBuilder};
@@ -119,6 +120,13 @@ independent segments.
 `border_type` also accepts `LinetypeStep::Marker` — small shape stamps
 spaced along the border. This div's pattern alternates dashes with
 `circle` marker stamps, walked by the same primitive `LineGeom` uses.
+:::
+
+:::rtl-quote
+> نص عربي مع اقتباس — the blockquote bar flips to the right edge under
+> `Direction::Rtl`, first-line indent applies from the right, and
+> `HAlign::Start` right-aligns text. Latin words inside still shape
+> left-to-right (parley's UBA is untouched).
 :::";
 
 fn main() {
@@ -213,6 +221,20 @@ fn main() {
                 LinetypeStep::Gap(3.0),
             ])),
             padding: Some(Margin::all(Length::Abs(8.0))),
+            margin: Some(Margin {
+                top: Length::Abs(6.0),
+                right: Length::Abs(0.0),
+                bottom: Length::Abs(6.0),
+                left: Length::Abs(0.0),
+            }),
+            ..StyleDelta::empty()
+        },
+    );
+    sheet.set(
+        "rtl-quote",
+        StyleDelta {
+            text_direction: Some(Direction::Rtl),
+            padding: Some(Margin::all(Length::Abs(6.0))),
             margin: Some(Margin {
                 top: Length::Abs(6.0),
                 right: Length::Abs(0.0),

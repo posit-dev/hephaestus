@@ -2182,7 +2182,7 @@ pub(crate) fn draw_text_element_in_rect(
         let Ok(rich) = RichTextRun::new(text, &style, base_brush_col, sheet, palette, dpi) else {
             return; // parse error — skip
         };
-        rich.set_max_width(along_px as f32, Alignment::Start);
+        rich.set_max_width(along_px as f32, HAlign::Start);
         let block_w = rich.content_width();
         let block_h = rich.current_height();
         let hf = match align_h {
@@ -2377,8 +2377,8 @@ pub(crate) fn draw_axis_title_markdown(
     angle: crate::plot::theme::Rotation,
 ) {
     use crate::geometry::{Affine, Vec2};
+    use crate::plot::theme::HAlign;
     use crate::text::rich::{draw_rich_text, HAnchor, RichAnchor, RichTextRun, VAnchor};
-    use crate::text::Alignment;
     let cx = (rect.x0 + rect.x1) * 0.5;
     let cy = (rect.y0 + rect.y1) * 0.5;
     let pid = crate::pick::PickId::Skip;
@@ -2394,7 +2394,7 @@ pub(crate) fn draw_axis_title_markdown(
     };
     if theta.abs() < 1e-9 {
         let w = (rect.x1 - rect.x0) as f32;
-        run.set_max_width(w, Alignment::Center);
+        run.set_max_width(w, HAlign::Center);
         draw_rich_text(
             scene,
             &run,

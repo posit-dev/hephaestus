@@ -41,4 +41,4 @@ pub use block::{compute_block_paints, BlockBorder, BlockPaint};
 pub use parser::{parse, ParseError, RichEvent, Selector};
 pub use reduce::{reduce, BaselineRun, Block, BlockKind, BuiltRuns, InlineRun};
 pub use run::{draw_rich_text, RichBrush, RichTextRun, RichTextWidth};
-pub use style::{css_color, RichTextStyleSheet, StyleDelta};
+pub use style::{css_color, Direction, RichTextStyleSheet, StyleDelta};

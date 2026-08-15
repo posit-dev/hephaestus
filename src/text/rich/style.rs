@@ -15,6 +15,35 @@ use std::collections::HashMap;
 
 use crate::plot::theme::{HAlign, Length, Margin, ThemeColor};
 
+// ─── Direction ──────────────────────────────────────────────────────────────
+
+/// Block-axis writing direction.
+///
+/// `text_direction` is a **block-axis** property: it flips which
+/// physical side counts as "start" for our own block-level primitives
+/// (bullet placement, indent / hanging application, `HAlign::Start` /
+/// `End` resolution, blockquote's start-side bar, and the l / r swap
+/// on any block-level [`Margin`]). It does **not** touch parley's
+/// shaping — glyph order within a line is determined entirely by the
+/// text's actual script content via parley's UBA.
+///
+/// `Auto` (the default when the field is `None`) reads the direction
+/// back from parley's own resolution (`parley::Layout::is_rtl`) after
+/// shaping — for a block containing Arabic that resolves to `Rtl`, for
+/// Latin to `Ltr`. Explicit `Ltr` / `Rtl` override our block-axis
+/// interpretation even when parley infers the opposite; the source
+/// text still shapes exactly as it would under `Auto`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// Read the direction from parley's own UBA output on the block's
+    /// text. Default.
+    Auto,
+    /// Left-to-right block-axis. Physical left = start.
+    Ltr,
+    /// Right-to-left block-axis. Physical right = start.
+    Rtl,
+}
+
 // ─── StyleDelta ──────────────────────────────────────────────────────────────
 
 /// Sparse overlay on a base style. Every field is `Option<>` and
@@ -74,6 +103,10 @@ pub struct StyleDelta {
     pub lineheight: Option<Length>,
     /// Horizontal alignment within the block's width.
     pub align: Option<HAlign>,
+    /// Block-axis writing direction. `None` inherits (falling through
+    /// to the ancestor chain, then to [`Direction::Auto`] at the root
+    /// — parley's UBA-inferred direction).
+    pub text_direction: Option<Direction>,
     /// First-line indent (pt).
     pub indent: Option<Length>,
     /// Continuation-line indent (pt) — hanging indent for lists.
@@ -148,6 +181,7 @@ impl StyleDelta {
             // Block-only — cleared:
             lineheight: None,
             align: None,
+            text_direction: None,
             indent: None,
             hanging: None,
             margin: None,
@@ -183,6 +217,7 @@ impl StyleDelta {
             features: merge_features(self.features.as_deref(), over.features.as_deref()),
             lineheight: over.lineheight.or(self.lineheight),
             align: over.align.or(self.align),
+            text_direction: over.text_direction.or(self.text_direction),
             indent: over.indent.or(self.indent),
             hanging: over.hanging.or(self.hanging),
             margin: over.margin.or(self.margin),
@@ -593,6 +628,41 @@ mod tests {
         let merged = parent.overlay(&child);
         assert_eq!(merged.weight, Some(700), "child weight wins");
         assert_eq!(merged.italic, Some(false), "parent italic falls through");
+    }
+
+    #[test]
+    fn overlay_prefers_child_text_direction_over_parent() {
+        let parent = StyleDelta {
+            text_direction: Some(Direction::Ltr),
+            ..StyleDelta::empty()
+        };
+        let child = StyleDelta {
+            text_direction: Some(Direction::Rtl),
+            ..StyleDelta::empty()
+        };
+        assert_eq!(
+            parent.overlay(&child).text_direction,
+            Some(Direction::Rtl),
+            "child text_direction wins"
+        );
+        let child_unset = StyleDelta::empty();
+        assert_eq!(
+            parent.overlay(&child_unset).text_direction,
+            Some(Direction::Ltr),
+            "None on child falls through to parent"
+        );
+    }
+
+    #[test]
+    fn glyph_only_clears_text_direction() {
+        let delta = StyleDelta {
+            text_direction: Some(Direction::Rtl),
+            ..StyleDelta::empty()
+        };
+        assert!(
+            delta.glyph_only().text_direction.is_none(),
+            "text_direction is block-only and must not carry onto the inline cascade"
+        );
     }
 
     #[test]
