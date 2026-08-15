@@ -2,7 +2,7 @@
 //! layouts and draw them through `SceneBuilder`.
 //!
 //! **One parley layout per top-level leaf.** Paragraph, heading,
-//! list-item, and code-block blocks each shape as their own
+//! code-block, and rule blocks each shape as their own
 //! `parley::Layout<RichBrush>` at their effective content width —
 //! the outer max width minus any ancestor container `padding.left` /
 //! `padding.right` (blockquote / div) minus this block's own
@@ -54,23 +54,32 @@ use std::cell::RefCell;
 use std::ops::Range;
 
 use parley::{
-    Alignment, AlignmentOptions, FontFamily, FontFamilyName, FontStyle, FontWeight, GenericFamily,
-    LayoutContext, PositionedLayoutItem, StyleProperty,
+    Alignment, AlignmentOptions, FontFamily, FontFamilyName, FontStyle, FontWeight, LayoutContext,
+    PositionedLayoutItem, StyleProperty,
 };
 
 use super::anchor::{LayoutBounds, RichAnchor};
 use super::block::{compute_block_paints, BlockPaint};
-use super::parser::{parse, ParseError};
+use super::length::LineHeightSpec;
+use super::parser::parse;
 use super::reduce::{reduce, BaselineRun, Block, BlockKind, BuiltRuns, InlineRun};
-use super::style::{RichTextStyleSheet, StyleDelta};
+use super::style::{ResolvedStyle, RichTextStyleSheet};
 use crate::brush::Brush;
 use crate::color::Color;
 use crate::geometry::Affine;
 use crate::layout::{Measure, WidthHint};
 use crate::pick::PickId;
-use crate::plot::theme::{HAlign, Length, Margin, Palette};
-use crate::scene::{Font, Glyph, GlyphRun, SceneBuilder};
-use crate::text::{FontFamilyEntry, GenericFamilyKind, LineHeight, TextStyle};
+use crate::scene::{Font, GlyphRun, SceneBuilder};
+use crate::style_vocab::{HAlign, Palette};
+use crate::text::shape_common::{
+    emit_decoration_rect, generic_family_from_str, glyphs_of_run, parley_features,
+    push_style_defaults, DecorationRect,
+};
+use crate::text::TextStyle;
+
+/// Distance between a list-item marker and the item's content edge,
+/// as a fraction of the item's em. Matches marquee.
+const MARKER_GAP_EM: f64 = 0.25;
 
 // ─── Brush newtype ──────────────────────────────────────────────────────────
 
@@ -99,6 +108,112 @@ pub enum RichTextWidth {
     Fixed(f32),
 }
 
+// ─── Vertical spacing ───────────────────────────────────────────────────────
+
+/// One box's contribution to the vertical space on one side of a leaf.
+///
+/// Marquee follows CSS margin collapsing: adjacent margins merge
+/// (two positives take the max, two negatives the most negative, a
+/// mixed pair sums), and anything drawn between them stops the merge.
+/// `barrier` is that "anything drawn": padding, a background, or a
+/// border edge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct EdgeSpacing {
+    /// The box's margin on this side (px). Collapses with neighbours.
+    pub(crate) margin_px: f32,
+    /// True when the box paints or pads on this side, which stops the
+    /// margins on either side of it from collapsing together.
+    pub(crate) barrier: bool,
+    /// The box's padding on this side (px). Always adds space.
+    pub(crate) padding_px: f32,
+}
+
+/// Running state for the collapse walk down a stack of blocks.
+#[derive(Default)]
+struct MarginAccumulator {
+    /// Largest positive margin seen since the last barrier.
+    pending_pos: f32,
+    /// Most negative margin seen since the last barrier.
+    pending_neg: f32,
+}
+
+impl MarginAccumulator {
+    fn fold(&mut self, margin_px: f32) {
+        if margin_px >= 0.0 {
+            self.pending_pos = self.pending_pos.max(margin_px);
+        } else {
+            self.pending_neg = self.pending_neg.min(margin_px);
+        }
+    }
+
+    /// Commit the collapsed margin into `y` and start a fresh run.
+    fn flush(&mut self, y: &mut f32) {
+        *y += self.pending_pos + self.pending_neg;
+        self.pending_pos = 0.0;
+        self.pending_neg = 0.0;
+    }
+}
+
+/// Walk one leaf's top chain: for each box, its margin joins the
+/// collapse run, then a barrier commits the run and adds the box's
+/// padding.
+fn apply_top_chain(chain: &[EdgeSpacing], y: &mut f32, acc: &mut MarginAccumulator) {
+    for e in chain {
+        acc.fold(e.margin_px);
+        if e.barrier {
+            acc.flush(y);
+            *y += e.padding_px;
+        }
+    }
+}
+
+/// Walk one leaf's bottom chain. Mirror image of [`apply_top_chain`]:
+/// padding sits inside the box, so it lands before the box's own
+/// margin joins the run.
+fn apply_bottom_chain(chain: &[EdgeSpacing], y: &mut f32, acc: &mut MarginAccumulator) {
+    for e in chain {
+        if e.barrier {
+            acc.flush(y);
+            *y += e.padding_px;
+        }
+        acc.fold(e.margin_px);
+    }
+}
+
+/// Position every block vertically, collapsing margins across the
+/// whole stack. Returns the total height including trailing margin.
+fn stack_blocks(blocks: &mut [BlockLayout]) -> f32 {
+    let mut y: f32 = 0.0;
+    let mut acc = MarginAccumulator::default();
+    for bl in blocks.iter_mut() {
+        apply_top_chain(&bl.top_chain, &mut y, &mut acc);
+        // The block's own content is itself a barrier — a margin
+        // above it can't collapse with one below it.
+        acc.flush(&mut y);
+        bl.y_px = y;
+        y += bl.height_px;
+        apply_bottom_chain(&bl.bottom_chain, &mut y, &mut acc);
+    }
+    acc.flush(&mut y);
+    y
+}
+
+// ─── MarkerLayout ───────────────────────────────────────────────────────────
+
+/// A shaped list-item marker, placed in the list's start gutter
+/// rather than in the item's text flow. Keeping it out of the flow is
+/// what lets multi-digit ordinals right-align on their period and
+/// keeps a justified item from stretching the space after its bullet.
+pub(crate) struct MarkerLayout {
+    /// The marker's own single-line layout.
+    pub(crate) layout: parley::Layout<RichBrush>,
+    /// Shaped width (px) — the marker's right edge sits `gap_px` to
+    /// the start side of the block's content edge.
+    pub(crate) width_px: f32,
+    /// Space (px) between the marker and the content edge.
+    pub(crate) gap_px: f32,
+}
+
 // ─── BlockLayout ────────────────────────────────────────────────────────────
 
 /// One top-level leaf block's shaped layout + geometry, in the
@@ -115,13 +230,9 @@ pub(crate) struct BlockLayout {
     /// Byte range in the full reduced text this block covers.
     pub(crate) text_range: Range<usize>,
     /// Block kind (Paragraph / Heading / ListItem / CodeBlock).
-    #[allow(dead_code)]
     pub(crate) kind: BlockKind,
-    /// Resolved style delta for the block.
-    pub(crate) delta: StyleDelta,
-    /// Container depth (0 = top-level).
-    #[allow(dead_code)]
-    pub(crate) depth: usize,
+    /// Resolved style for the block, lengths in points.
+    pub(crate) style: ResolvedStyle,
     /// Left edge of the block's shaped content (px).
     pub(crate) left_px: f32,
     /// Right inset from the outer width (px) — the block's usable
@@ -139,23 +250,22 @@ pub(crate) struct BlockLayout {
     pub(crate) y_px: f32,
     /// Height (px) of the shaped layout.
     pub(crate) height_px: f32,
-    /// Top margin (px) applied above `y_px`.
-    pub(crate) margin_top_px: f32,
-    /// Bottom margin (px) applied after `y_px + height_px`.
-    pub(crate) margin_bottom_px: f32,
-    /// Own padding (px, trbl) applied inside the block's outer rect.
+    /// Vertical spacing above the block's content, outermost box
+    /// first. Each entry is one enclosing box this leaf opens, ending
+    /// with the leaf's own.
+    pub(crate) top_chain: Vec<EdgeSpacing>,
+    /// Vertical spacing below the block's content, innermost box
+    /// first — the leaf's own entry, then each enclosing box it
+    /// closes.
+    pub(crate) bottom_chain: Vec<EdgeSpacing>,
+    /// Own top padding (px) applied inside the block's outer rect.
     pub(crate) padding_top_px: f32,
+    /// Own right padding (px), already resolved to a physical side.
     pub(crate) padding_right_px: f32,
+    /// Own bottom padding (px) applied inside the block's outer rect.
     pub(crate) padding_bottom_px: f32,
+    /// Own left padding (px), already resolved to a physical side.
     pub(crate) padding_left_px: f32,
-    /// Extra top space contributed by ancestor containers whose
-    /// first descendant this leaf is (their `padding.top` +
-    /// `margin.top` fold into this value). Non-collapsing barrier
-    /// that sits above the leaf's shaped content but inside any
-    /// container-level paint.
-    pub(crate) extra_top_px: f32,
-    /// Symmetric bottom counterpart.
-    pub(crate) extra_bottom_px: f32,
     /// Block-level horizontal alignment resolved from own +
     /// ancestor `align`. `None` = fall back to the caller-supplied
     /// alignment at re-break time (matches the outer's opinion).
@@ -201,16 +311,12 @@ pub(crate) struct BlockLayout {
     /// text / vecs when the block never needs re-shape (e.g. hr
     /// blocks).
     pub(crate) source_text: String,
+    /// Inline runs over `source_text`, in block-local byte ranges.
     pub(crate) source_inlines: Vec<InlineRun>,
+    /// Baseline shifts over `source_text`, in block-local byte ranges.
     pub(crate) source_baselines: Vec<BaselineRun>,
-    /// Ancestor-container margin.top contributions (px) that this
-    /// leaf absorbs as first-descendant. Fold into the pending
-    /// margin accumulator during layout to collapse with siblings
-    /// per CSS rules.
-    pub(crate) anc_top_margins_px: Vec<f32>,
-    /// Ancestor-container margin.bottom contributions (px) that
-    /// this leaf absorbs as last-descendant.
-    pub(crate) anc_bottom_margins_px: Vec<f32>,
+    /// List-item marker, on the leaf that opens the item's body.
+    pub(crate) marker: Option<MarkerLayout>,
 }
 
 impl BlockLayout {
@@ -230,10 +336,6 @@ impl BlockLayout {
 /// Shaped rich text — a stack of per-block parley layouts plus the
 /// container blocks and metadata the draw pass needs.
 pub struct RichTextRun {
-    /// Reduced source text. Retained for slicing on re-shape if a
-    /// caller ever inspects it.
-    #[allow(dead_code)]
-    pub(crate) text: String,
     /// One shaped layout per top-level leaf, in document order.
     /// `RefCell` so `set_max_width` can re-break in place.
     pub(crate) blocks: RefCell<Vec<BlockLayout>>,
@@ -241,15 +343,12 @@ pub struct RichTextRun {
     /// pass. Stored in emission (close) order.
     pub(crate) containers: Vec<Block>,
     /// Base text style (captured at construction for re-shape).
-    #[allow(dead_code)]
     pub(crate) base_style: TextStyle,
     /// Palette used to resolve `ThemeColor` values on paints.
     pub(crate) palette: Palette,
     /// Base brush colour captured at construction — used when re-
     /// shaping asymmetric blocks in [`Self::set_max_width`].
     pub(crate) base_brush: Color,
-    /// Convenience mirror of `base_style.size_pt`.
-    pub(crate) base_size_pt: f32,
     /// DPI captured at construction.
     pub(crate) dpi: f64,
     /// Last requested wrap width; `None` = natural.
@@ -257,8 +356,13 @@ pub struct RichTextRun {
     last_break_width: RefCell<Option<f32>>,
     /// Cached natural width (px).
     natural_width_px: f32,
-    /// Cached natural stacked height (px).
-    natural_height_px: RefCell<f32>,
+    /// Natural stacked height (px) at the unwrapped width. Fixed at
+    /// construction — re-breaking narrows the run, it doesn't change
+    /// what the natural layout was.
+    natural_height_px: f32,
+    /// Stacked height (px) at the width the blocks are currently
+    /// broken to.
+    current_height_px: RefCell<f32>,
     /// Cached min-content width (px).
     min_width_px: f32,
 }
@@ -273,7 +377,7 @@ impl RichTextRun {
         sheet: &RichTextStyleSheet,
         palette: &Palette,
         dpi: f64,
-    ) -> Result<Self, ParseError> {
+    ) -> Self {
         Self::new_with_width(
             source,
             base_style,
@@ -295,25 +399,15 @@ impl RichTextRun {
         palette: &Palette,
         dpi: f64,
         width: RichTextWidth,
-    ) -> Result<Self, ParseError> {
-        let events = parse(source)?;
-        let runs = reduce(&events, sheet);
+    ) -> Self {
+        let events = parse(source);
+        let base = ResolvedStyle::from_base(base_style);
+        let runs = reduce(&events, sheet, &base);
         let r = Self::shape(runs, base_style, base_brush, palette, dpi);
         if let RichTextWidth::Fixed(px) = width {
             r.set_max_width(px, HAlign::Start);
         }
-        Ok(r)
-    }
-
-    /// Alternative constructor from a pre-built [`BuiltRuns`].
-    pub fn from_built_runs(
-        runs: BuiltRuns,
-        base_style: &TextStyle,
-        base_brush: Color,
-        palette: &Palette,
-        dpi: f64,
-    ) -> Self {
-        Self::shape(runs, base_style, base_brush, palette, dpi)
+        r
     }
 
     fn shape(
@@ -333,13 +427,15 @@ impl RichTextRun {
             .cloned()
             .collect();
         leaves.sort_by_key(|b| b.range.start);
-        let containers: Vec<Block> = all_blocks
+        // Sorted outermost-first (widest range wins) once here. Both
+        // the ancestor walk and the paint pass rely on that order.
+        let mut containers: Vec<Block> = all_blocks
             .into_iter()
             .filter(|b| !is_leaf_kind(&b.kind))
             .collect();
+        containers.sort_by_key(|c| std::cmp::Reverse(c.range.end - c.range.start));
 
         // Shape each leaf; position vertically.
-        let base_pt = base_style.size_pt as f64;
         // Precompute first + last descendant-leaf ranges per
         // container. First: for ListItem hanging routing (item's
         // first-body-leaf gets hanging as continuation_shift; deeper
@@ -376,13 +472,10 @@ impl RichTextRun {
         // space adds. Container margin is a *deferred* margin that
         // participates in collapse with adjacent sibling / child
         // margins.
-        let mut y_accum: f32 = 0.0;
-        let mut pending_pos: f32 = 0.0;
-        let mut pending_neg: f32 = 0.0;
         for leaf in leaves.iter() {
             // Ancestor padding + hanging → left indent / continuation.
             let ancestors = ancestors_of_range(&leaf.range, &containers);
-            let (anc_left_pt, anc_right_pt) = ancestor_side_padding_pt(&ancestors, base_pt);
+            let (anc_left_pt, anc_right_pt) = ancestor_side_padding_pt(&ancestors);
             // Walk ancestor containers for indent / hanging routing:
             //
             //   - `ListItem` uses the classic outdent-vs-nested split.
@@ -403,8 +496,8 @@ impl RichTextRun {
             let mut anc_hanging_cont_pt = 0.0;
             let mut anc_first_line_pt = 0.0;
             for anc in &ancestors {
-                let h = anc.delta.hanging.map(|l| l.resolve(base_pt)).unwrap_or(0.0);
-                let i = anc.delta.indent.map(|l| l.resolve(base_pt)).unwrap_or(0.0);
+                let h = anc.style.hanging_pt;
+                let i = anc.style.indent_pt;
                 match anc.kind {
                     BlockKind::ListItem { .. } => {
                         let is_first_body = container_first_last
@@ -443,21 +536,9 @@ impl RichTextRun {
             // padding is its own barrier). Margins fold into the
             // pending pos/neg accumulator individually so the
             // pairwise max/min collapse composes.
-            let mut anc_padding_top_pt = 0.0;
-            let mut anc_padding_bottom_pt = 0.0;
-            let mut anc_first_margins: Vec<f64> = Vec::new();
-            let mut anc_last_margins: Vec<f64> = Vec::new();
+            let mut top_chain: Vec<EdgeSpacing> = Vec::new();
+            let mut bottom_chain: Vec<EdgeSpacing> = Vec::new();
             for anc in &ancestors {
-                let (t_pad, _, b_pad, _) = anc
-                    .delta
-                    .padding
-                    .map(|m| m.resolve(base_pt))
-                    .unwrap_or((0.0, 0.0, 0.0, 0.0));
-                let (t_marg, _, b_marg, _) = anc
-                    .delta
-                    .margin
-                    .map(|m| m.resolve(base_pt))
-                    .unwrap_or((0.0, 0.0, 0.0, 0.0));
                 let is_first = container_first_last
                     .iter()
                     .any(|(cr, f, _)| cr == &anc.range && f == &leaf.range);
@@ -465,21 +546,24 @@ impl RichTextRun {
                     .iter()
                     .any(|(cr, _, l)| cr == &anc.range && l == &leaf.range);
                 if is_first {
-                    anc_padding_top_pt += t_pad;
-                    anc_first_margins.push(t_marg);
+                    top_chain.push(edge_spacing(&anc.style, 0, dpi));
                 }
                 if is_last {
-                    anc_padding_bottom_pt += b_pad;
-                    anc_last_margins.push(b_marg);
+                    bottom_chain.push(edge_spacing(&anc.style, 2, dpi));
                 }
             }
+            // The leaf's own box sits innermost on both sides:
+            // last in the outer-first top chain, first in the
+            // inner-first bottom chain.
+            top_chain.push(edge_spacing(&leaf.style, 0, dpi));
+            bottom_chain.reverse();
+            bottom_chain.insert(0, edge_spacing(&leaf.style, 2, dpi));
             // Own padding + margin. Padding contributes to insets +
             // vertical space around shape; margin is horizontally
             // additive on left/right, vertically participates in
             // sibling collapse via the pending accumulator.
-            let (own_top_pt, own_right_pt, own_bottom_pt, own_left_pt) =
-                margin_or_zero(&leaf.delta.padding, base_pt);
-            let (mt_pt, m_right_pt, mb_pt, m_left_pt) = margin_or_zero(&leaf.delta.margin, base_pt);
+            let [own_top_pt, own_right_pt, own_bottom_pt, own_left_pt] = leaf.style.padding_pt;
+            let [_, m_right_pt, _, m_left_pt] = leaf.style.margin_pt;
             let anc_left_px = pt_to_px(anc_left_pt + anc_hanging_left_pt, dpi);
             let anc_right_px = pt_to_px(anc_right_pt, dpi);
             let own_left_px = pt_to_px(own_left_pt, dpi);
@@ -488,26 +572,17 @@ impl RichTextRun {
             let own_bottom_px = pt_to_px(own_bottom_pt, dpi);
             let margin_left_px = pt_to_px(m_left_pt, dpi);
             let margin_right_px = pt_to_px(m_right_pt, dpi);
-            // Padding barrier from ancestor containers (non-collapsing).
-            let extra_top_px = pt_to_px(anc_padding_top_pt, dpi);
-            let extra_bottom_px = pt_to_px(anc_padding_bottom_pt, dpi);
             // Own hanging + first-line indent (both resolve against
             // the block's ambient em). Composes with any ancestor-
             // contributed hanging.
-            let own_hanging_pt = leaf
-                .delta
-                .hanging
-                .map(|l| l.resolve(base_pt))
-                .unwrap_or(0.0);
-            let hanging_px = pt_to_px((own_hanging_pt + anc_hanging_cont_pt).max(0.0), dpi);
-            let own_first_line_pt = leaf.delta.indent.map(|l| l.resolve(base_pt)).unwrap_or(0.0);
+            let hanging_px = pt_to_px((leaf.style.hanging_pt + anc_hanging_cont_pt).max(0.0), dpi);
             let first_line_indent_px =
-                pt_to_px((own_first_line_pt + anc_first_line_pt).max(0.0), dpi);
+                pt_to_px((leaf.style.indent_pt + anc_first_line_pt).max(0.0), dpi);
             // Alignment: own overrides ancestor overrides caller.
-            let mut resolved_align: Option<HAlign> = leaf.delta.align;
+            let mut resolved_align: Option<HAlign> = leaf.style.align;
             if resolved_align.is_none() {
                 for anc in &ancestors {
-                    if let Some(a) = anc.delta.align {
+                    if let Some(a) = anc.style.align {
                         resolved_align = Some(a);
                         break;
                     }
@@ -516,10 +591,10 @@ impl RichTextRun {
             // Direction: same "child wins, walk ancestors" resolution
             // as alignment. An unset field or `Direction::Auto` reads
             // back parley's own is_rtl() after shaping (below).
-            let mut resolved_direction: Option<super::style::Direction> = leaf.delta.text_direction;
+            let mut resolved_direction: Option<super::style::Direction> = leaf.style.text_direction;
             if resolved_direction.is_none() {
                 for anc in &ancestors {
-                    if let Some(d) = anc.delta.text_direction {
+                    if let Some(d) = anc.style.text_direction {
                         resolved_direction = Some(d);
                         break;
                     }
@@ -558,50 +633,6 @@ impl RichTextRun {
             let continuation_baseline_shifts: Vec<BaselineRun> = Vec::new();
             let continuation_inlines: Vec<InlineRun> = Vec::new();
             let first_line_height_px: f32 = 0.0;
-            let margin_top_px = pt_to_px(mt_pt, dpi);
-            let margin_bottom_px = pt_to_px(mb_pt, dpi);
-            // Sibling + first-descendant margin collapse. Each
-            // ancestor container whose *first* descendant this leaf
-            // is contributes its `margin.top` to the pending
-            // accumulator — pairwise max/min collapse follows.
-            for m_pt in &anc_first_margins {
-                let m_px = pt_to_px(*m_pt, dpi);
-                if m_px >= 0.0 {
-                    pending_pos = pending_pos.max(m_px);
-                } else {
-                    pending_neg = pending_neg.min(m_px);
-                }
-            }
-            if margin_top_px >= 0.0 {
-                pending_pos = pending_pos.max(margin_top_px);
-            } else {
-                pending_neg = pending_neg.min(margin_top_px);
-            }
-            y_accum += pending_pos + pending_neg;
-            pending_pos = 0.0;
-            pending_neg = 0.0;
-            // Container `padding.top` barriers (sum across ancestors)
-            // sit above the leaf's shaped content but INSIDE any
-            // container paint we emit.
-            y_accum += extra_top_px + own_top_px;
-            let y_px = y_accum;
-            y_accum += height_px + own_bottom_px + extra_bottom_px;
-            // Leaf's margin.bottom joins pending — collapses with
-            // next sibling's margin.top and with any *last*-
-            // descendant-container's margin.bottom below.
-            if margin_bottom_px >= 0.0 {
-                pending_pos = pending_pos.max(margin_bottom_px);
-            } else {
-                pending_neg = pending_neg.min(margin_bottom_px);
-            }
-            for m_pt in &anc_last_margins {
-                let m_px = pt_to_px(*m_pt, dpi);
-                if m_px >= 0.0 {
-                    pending_pos = pending_pos.max(m_px);
-                } else {
-                    pending_neg = pending_neg.min(m_px);
-                }
-            }
             // Under Rtl, the class-supplied `.left` / `.right` on
             // padding, margin, and (in block.rs) border_width are
             // treated as logical start / end sides — so the physical
@@ -626,28 +657,60 @@ impl RichTextRun {
             } else {
                 (own_left_px, own_right_px)
             };
+            // The leaf that opens a list item's body carries the
+            // item's marker. It shapes with the item's own style and
+            // draws in the list's start gutter, `MARKER_GAP_EM` of the
+            // item's em to the start side of the content edge.
+            let marker = ancestors.iter().find_map(|anc| {
+                let BlockKind::ListItem { marker, .. } = &anc.kind else {
+                    return None;
+                };
+                let text = marker.as_ref()?;
+                let is_first_body = container_first_last
+                    .iter()
+                    .any(|(cr, f, _)| cr == &anc.range && f == &leaf.range);
+                if !is_first_body {
+                    return None;
+                }
+                let run = InlineRun {
+                    range: 0..text.len(),
+                    style: anc.style.for_inline(),
+                };
+                let mut m_layout = shape_block_layout(
+                    text,
+                    std::slice::from_ref(&run),
+                    base_style,
+                    base_brush,
+                    palette,
+                    dpi,
+                );
+                m_layout.break_all_lines(None);
+                m_layout.align(Alignment::Start, AlignmentOptions::default());
+                Some(MarkerLayout {
+                    width_px: m_layout.calculate_content_widths().max,
+                    gap_px: pt_to_px(anc.style.size_pt * MARKER_GAP_EM, dpi),
+                    layout: m_layout,
+                })
+            });
             layouts.push(BlockLayout {
                 layout,
                 baseline_shifts: baselines.clone(),
                 text_range: leaf.range.clone(),
                 kind: leaf.kind.clone(),
-                delta: leaf.delta.clone(),
-                depth: leaf.depth,
+                style: leaf.style.clone(),
                 left_px: phys_left_px,
                 right_inset_px: phys_right_inset_px,
                 shape_width_px: widths.max,
                 first_line_shift_px: first_line_indent_px,
                 continuation_shift_px: hanging_px,
-                y_px,
+                y_px: 0.0,
                 height_px,
-                margin_top_px,
-                margin_bottom_px,
+                top_chain,
+                bottom_chain,
                 padding_top_px: own_top_px,
                 padding_right_px: phys_pad_right_px,
                 padding_bottom_px: own_bottom_px,
                 padding_left_px: phys_pad_left_px,
-                extra_top_px,
-                extra_bottom_px,
                 alignment_override,
                 is_rtl,
                 continuation_layout,
@@ -657,19 +720,10 @@ impl RichTextRun {
                 source_text: block_text,
                 source_inlines: inlines,
                 source_baselines: baselines,
-                anc_top_margins_px: anc_first_margins
-                    .iter()
-                    .map(|pt| pt_to_px(*pt, dpi))
-                    .collect(),
-                anc_bottom_margins_px: anc_last_margins
-                    .iter()
-                    .map(|pt| pt_to_px(*pt, dpi))
-                    .collect(),
+                marker,
             });
         }
-        // Flush the trailing pending margin so it counts toward the
-        // total run height.
-        y_accum += pending_pos + pending_neg;
+        let total_height = stack_blocks(&mut layouts);
         // Natural width = max of (left + shape_width + right) across
         // non-Rule blocks (Rule blocks have empty text → zero shape
         // width; they stretch to whatever surrounding content
@@ -707,17 +761,16 @@ impl RichTextRun {
         natural_width = natural_width.max(hr_placeholder);
 
         Self {
-            text: runs.text,
             blocks: RefCell::new(layouts),
             containers,
             base_style: base_style.clone(),
             palette: *palette,
             base_brush,
-            base_size_pt: base_style.size_pt,
             dpi,
             last_break_width: RefCell::new(None),
             natural_width_px: natural_width,
-            natural_height_px: RefCell::new(y_accum),
+            natural_height_px: total_height,
+            current_height_px: RefCell::new(total_height),
             min_width_px: min_width,
         }
     }
@@ -727,15 +780,16 @@ impl RichTextRun {
         self.natural_width_px as f64
     }
 
-    /// Natural (unwrapped) total stacked height in pixels.
+    /// Natural (unwrapped) total stacked height in pixels. Unchanged
+    /// by [`Self::set_max_width`].
     pub fn natural_height(&self) -> f64 {
-        *self.natural_height_px.borrow() as f64
+        self.natural_height_px as f64
     }
 
-    /// Current laid-out total height (px) — includes any margins on
-    /// the last block below its content.
+    /// Total stacked height (px) at the current break width —
+    /// includes any margins on the last block below its content.
     pub fn current_height(&self) -> f64 {
-        *self.natural_height_px.borrow() as f64
+        *self.current_height_px.borrow() as f64
     }
 
     /// Current effective content width (px) — the max of every
@@ -752,9 +806,6 @@ impl RichTextRun {
     /// Returns the new stacked total height.
     pub fn set_max_width(&self, max_width_px: f32, alignment: HAlign) -> f32 {
         let mut blocks = self.blocks.borrow_mut();
-        let mut y_accum: f32 = 0.0;
-        let mut pending_pos: f32 = 0.0;
-        let mut pending_neg: f32 = 0.0;
         for bl in blocks.iter_mut() {
             let block_avail = (max_width_px - bl.left_px - bl.right_inset_px).max(1.0);
             // Fallback for blocks without an `align` override uses
@@ -818,37 +869,12 @@ impl RichTextRun {
                 } else {
                     // Slice remaining text + rebase inline/baseline
                     // ranges to (start = 0 at first_line_end).
-                    let rest_text = bl.source_text[first_line_end..].to_string();
-                    let rest_inlines: Vec<InlineRun> = bl
-                        .source_inlines
-                        .iter()
-                        .filter_map(|r| {
-                            let start = r.range.start.max(first_line_end);
-                            let end = r.range.end.min(bl.source_text.len());
-                            if start >= end {
-                                return None;
-                            }
-                            Some(InlineRun {
-                                range: (start - first_line_end)..(end - first_line_end),
-                                delta: r.delta.clone(),
-                            })
-                        })
-                        .collect();
-                    let rest_baselines: Vec<BaselineRun> = bl
-                        .source_baselines
-                        .iter()
-                        .filter_map(|b| {
-                            let start = b.range.start.max(first_line_end);
-                            let end = b.range.end.min(bl.source_text.len());
-                            if start >= end {
-                                return None;
-                            }
-                            Some(BaselineRun {
-                                range: (start - first_line_end)..(end - first_line_end),
-                                shift_em: b.shift_em,
-                            })
-                        })
-                        .collect();
+                    let (rest_text, rest_inlines, rest_baselines) = slice_block(
+                        &bl.source_text,
+                        &bl.source_inlines,
+                        &bl.source_baselines,
+                        &(first_line_end..bl.source_text.len()),
+                    );
                     let mut cont_layout = shape_block_layout(
                         &rest_text,
                         &rest_inlines,
@@ -872,43 +898,10 @@ impl RichTextRun {
                     bl.height_px = first_line_height + cont_height;
                 }
             }
-            // Ancestor container margin.top contributions fold in
-            // as first-descendant (same as shape()'s natural path).
-            for &m_px in &bl.anc_top_margins_px {
-                if m_px >= 0.0 {
-                    pending_pos = pending_pos.max(m_px);
-                } else {
-                    pending_neg = pending_neg.min(m_px);
-                }
-            }
-            if bl.margin_top_px >= 0.0 {
-                pending_pos = pending_pos.max(bl.margin_top_px);
-            } else {
-                pending_neg = pending_neg.min(bl.margin_top_px);
-            }
-            y_accum += pending_pos + pending_neg;
-            pending_pos = 0.0;
-            pending_neg = 0.0;
-            y_accum += bl.extra_top_px + bl.padding_top_px;
-            bl.y_px = y_accum;
-            y_accum += bl.height_px + bl.padding_bottom_px + bl.extra_bottom_px;
-            if bl.margin_bottom_px >= 0.0 {
-                pending_pos = pending_pos.max(bl.margin_bottom_px);
-            } else {
-                pending_neg = pending_neg.min(bl.margin_bottom_px);
-            }
-            for &m_px in &bl.anc_bottom_margins_px {
-                if m_px >= 0.0 {
-                    pending_pos = pending_pos.max(m_px);
-                } else {
-                    pending_neg = pending_neg.min(m_px);
-                }
-            }
         }
-        y_accum += pending_pos + pending_neg;
-        *self.last_break_width.borrow_mut() = Some(max_width_px);
-        *self.natural_height_px.borrow_mut() = y_accum;
-        y_accum
+        let total_height = stack_blocks(&mut blocks);
+        *self.current_height_px.borrow_mut() = total_height;
+        total_height
     }
 
     /// Compute per-block paint instructions (backgrounds + borders on
@@ -943,8 +936,12 @@ impl RichTextRun {
         let mut total_height: f32 = 0.0;
         for bl in blocks.iter() {
             total_width = total_width.max(bl.left_px + bl.shape_width_px + bl.right_inset_px);
-            total_height = total_height
-                .max(bl.y_px + bl.height_px + bl.padding_bottom_px + bl.margin_bottom_px);
+            total_height = total_height.max(bl.y_px + bl.height_px + bl.padding_bottom_px);
+            if let Some(marker) = &bl.marker {
+                let (m_x0, m_x1) = marker_x_range(bl, marker);
+                ink_left = ink_left.min(m_x0);
+                ink_right = ink_right.max(m_x1);
+            }
             for (line_index, line) in bl.layout.lines().enumerate() {
                 let m = line.metrics();
                 let shift = if line_index == 0 {
@@ -1015,12 +1012,13 @@ fn shape_block_layout(
     let mut builder = lcx.ranged_builder(&mut fcx, text, 1.0, true);
     push_base_defaults(&mut builder, base_style, base_brush, dpi);
     let mut family_pool: Vec<String> = Vec::new();
-    for InlineRun { range, delta } in inlines {
-        apply_delta_range(
+    let base_resolved = ResolvedStyle::from_base(base_style);
+    for InlineRun { range, style } in inlines {
+        apply_style_range(
             &mut builder,
             range.clone(),
-            delta,
-            base_style,
+            style,
+            &base_resolved,
             palette,
             dpi,
             &mut family_pool,
@@ -1033,10 +1031,11 @@ fn shape_block_layout(
     // to sit around the span's glyphs instead of overlapping them.
     // IDs encode (inline_index * 2) + edge: 0 = left, 1 = right —
     // used at draw time to bracket the span's line-fragment rect.
-    let base_pt = base_style.size_pt as f64;
-    for (i, InlineRun { range, delta }) in inlines.iter().enumerate() {
-        let Some(pad) = delta.padding else { continue };
-        let (_, right_pt, _, left_pt) = pad.resolve(base_pt);
+    for (i, InlineRun { range, style }) in inlines.iter().enumerate() {
+        let [_, right_pt, _, left_pt] = style.padding_pt;
+        if left_pt <= 0.0 && right_pt <= 0.0 {
+            continue;
+        }
         let left_px = (left_pt * dpi / 72.0) as f32;
         let right_px = (right_pt * dpi / 72.0) as f32;
         if left_px > 0.0 {
@@ -1067,85 +1066,35 @@ fn push_base_defaults(
     brush: Color,
     dpi: f64,
 ) {
-    let size_px = (style.size_pt as f64 * dpi / 72.0) as f32;
-    builder.push_default(StyleProperty::FontSize(size_px));
-    builder.push_default(StyleProperty::FontWeight(FontWeight::new(
-        style.weight as f32,
-    )));
-    builder.push_default(StyleProperty::FontWidth(parley::FontWidth::from_ratio(
-        style.width,
-    )));
-    let parley_style = match style.style {
-        crate::text::FontStyleKind::Normal => FontStyle::Normal,
-        crate::text::FontStyleKind::Italic => FontStyle::Italic,
-        crate::text::FontStyleKind::Oblique(angle) => FontStyle::Oblique(Some(angle)),
-    };
-    builder.push_default(StyleProperty::FontStyle(parley_style));
-    let line_height = match style.line_height {
-        LineHeight::Relative(mult) => parley::LineHeight::FontSizeRelative(mult),
-        LineHeight::Absolute(pt) => parley::LineHeight::Absolute((pt as f64 * dpi / 72.0) as f32),
-    };
-    builder.push_default(StyleProperty::LineHeight(line_height));
-    if style.letter_spacing_pt != 0.0 {
-        let letter_spacing_px = (style.letter_spacing_pt as f64 * dpi / 72.0) as f32;
-        builder.push_default(StyleProperty::LetterSpacing(letter_spacing_px));
-    }
-    if style.underline {
-        builder.push_default(StyleProperty::Underline(true));
-    }
-    if style.strikethrough {
-        builder.push_default(StyleProperty::Strikethrough(true));
-    }
+    push_style_defaults(builder, style, dpi);
     builder.push_default(StyleProperty::Brush(RichBrush(brush)));
-    if style.families.is_empty() {
-        builder.push_default(StyleProperty::FontFamily(FontFamily::Single(
-            FontFamilyName::Generic(GenericFamily::SansSerif),
-        )));
-    } else {
-        let names: Vec<FontFamilyName<'_>> = style
-            .families
-            .iter()
-            .map(|entry| match entry {
-                FontFamilyEntry::Named(name) => FontFamilyName::named(name),
-                FontFamilyEntry::Generic(kind) => {
-                    FontFamilyName::Generic(generic_family_to_parley(*kind))
-                }
-            })
-            .collect();
-        builder.push_default(StyleProperty::FontFamily(if names.len() == 1 {
-            FontFamily::Single(names[0].clone())
-        } else {
-            FontFamily::List(std::borrow::Cow::Owned(names))
-        }));
-    }
 }
 
-fn apply_delta_range(
+/// Push one inline run's resolved style onto `builder` for its byte
+/// range. Every length is already in points, so this is a pure
+/// pt → px conversion plus the parley property mapping.
+fn apply_style_range(
     builder: &mut parley::RangedBuilder<'_, RichBrush>,
     range: Range<usize>,
-    delta: &StyleDelta,
-    base: &TextStyle,
+    style: &ResolvedStyle,
+    base: &ResolvedStyle,
     palette: &Palette,
     dpi: f64,
     family_pool: &mut Vec<String>,
 ) {
-    if let Some(size) = delta.size {
-        let pt = match size {
-            Length::Abs(v) => v,
-            Length::Rel(m) => base.size_pt as f64 * m,
-        };
-        let px = (pt * dpi / 72.0) as f32;
-        builder.push(StyleProperty::FontSize(px), range.clone());
+    let size_px = (style.size_pt * dpi / 72.0) as f32;
+    if style.size_pt != base.size_pt {
+        builder.push(StyleProperty::FontSize(size_px), range.clone());
     }
-    if let Some(w) = delta.weight {
+    if style.weight != base.weight {
         builder.push(
-            StyleProperty::FontWeight(FontWeight::new(w as f32)),
+            StyleProperty::FontWeight(FontWeight::new(style.weight as f32)),
             range.clone(),
         );
     }
-    if let Some(italic) = delta.italic {
+    if style.italic != base.italic {
         builder.push(
-            StyleProperty::FontStyle(if italic {
+            StyleProperty::FontStyle(if style.italic {
                 FontStyle::Italic
             } else {
                 FontStyle::Normal
@@ -1153,27 +1102,41 @@ fn apply_delta_range(
             range.clone(),
         );
     }
-    if let Some(w) = delta.width {
+    if style.width != base.width {
         builder.push(
-            StyleProperty::FontWidth(parley::FontWidth::from_ratio(w)),
+            StyleProperty::FontWidth(parley::FontWidth::from_ratio(style.width)),
             range.clone(),
         );
     }
-    if let Some(color) = &delta.color {
-        let c = color.resolve(palette);
-        builder.push(StyleProperty::Brush(RichBrush(c)), range.clone());
+    if let Some(color) = &style.color {
+        builder.push(
+            StyleProperty::Brush(RichBrush(color.resolve(palette))),
+            range.clone(),
+        );
     }
-    if let Some(pt) = delta.tracking_pt {
-        let px = (pt as f64 * dpi / 72.0) as f32;
+    if style.tracking != 0.0 {
+        // Tracking is in 1/1000 em, so it scales with the run's own
+        // size rather than the base size.
+        let px = (style.tracking as f64 / 1000.0 * style.size_pt * dpi / 72.0) as f32;
         builder.push(StyleProperty::LetterSpacing(px), range.clone());
     }
-    if let Some(u) = delta.underline {
-        builder.push(StyleProperty::Underline(u), range.clone());
+    if style.underline != base.underline {
+        builder.push(StyleProperty::Underline(style.underline), range.clone());
     }
-    if let Some(s) = delta.strikethrough {
-        builder.push(StyleProperty::Strikethrough(s), range.clone());
+    if style.strikethrough != base.strikethrough {
+        builder.push(
+            StyleProperty::Strikethrough(style.strikethrough),
+            range.clone(),
+        );
     }
-    if let Some(family) = &delta.family {
+    let line_height = match style.lineheight {
+        LineHeightSpec::Mult(m) | LineHeightSpec::Relative(m) => {
+            parley::LineHeight::FontSizeRelative(m as f32)
+        }
+        LineHeightSpec::Pt(v) => parley::LineHeight::Absolute((v * dpi / 72.0) as f32),
+    };
+    builder.push(StyleProperty::LineHeight(line_height), range.clone());
+    if let Some(family) = &style.family {
         family_pool.push(family.clone());
         let name = family_pool.last().expect("just pushed");
         let entry = if let Some(generic) = generic_family_from_str(name) {
@@ -1183,44 +1146,31 @@ fn apply_delta_range(
         };
         builder.push(StyleProperty::FontFamily(entry), range.clone());
     }
-    if let Some(features) = &delta.features {
-        let parley_features: Vec<parley::FontFeature> = features
-            .iter()
-            .map(|f| parley::FontFeature::new(parley::setting::Tag::from_bytes(f.tag), f.value))
-            .collect();
+    if !style.features.is_empty() {
         builder.push(
             StyleProperty::FontFeatures(parley::FontFeatures::List(std::borrow::Cow::Owned(
-                parley_features,
+                parley_features(&style.features),
             ))),
             range,
         );
     }
 }
 
-fn generic_family_to_parley(kind: GenericFamilyKind) -> GenericFamily {
-    match kind {
-        GenericFamilyKind::Serif => GenericFamily::Serif,
-        GenericFamilyKind::SansSerif => GenericFamily::SansSerif,
-        GenericFamilyKind::Mono => GenericFamily::Monospace,
-        GenericFamilyKind::Cursive => GenericFamily::Cursive,
-        GenericFamilyKind::Fantasy => GenericFamily::Fantasy,
-        GenericFamilyKind::SystemUi => GenericFamily::SystemUi,
-    }
-}
-
-fn generic_family_from_str(s: &str) -> Option<GenericFamily> {
-    match s.to_ascii_lowercase().as_str() {
-        "serif" => Some(GenericFamily::Serif),
-        "sans-serif" | "sans" => Some(GenericFamily::SansSerif),
-        "monospace" | "mono" => Some(GenericFamily::Monospace),
-        "cursive" => Some(GenericFamily::Cursive),
-        "fantasy" => Some(GenericFamily::Fantasy),
-        "system-ui" | "systemui" | "ui" => Some(GenericFamily::SystemUi),
-        _ => None,
-    }
-}
-
 // ─── Helpers: leaves, ancestors, slicing ────────────────────────────────────
+
+/// One box's vertical spacing on `side` (0 = top, 2 = bottom), in px.
+/// A background or a border edge counts as a barrier even at zero
+/// padding — marquee stops margins collapsing across anything drawn.
+fn edge_spacing(style: &ResolvedStyle, side: usize, dpi: f64) -> EdgeSpacing {
+    let padding_px = pt_to_px(style.padding_pt[side], dpi);
+    let paints = style.background.is_some()
+        || (style.border_color.is_some() && style.border_width_pt[side] > 0.0);
+    EdgeSpacing {
+        margin_px: pt_to_px(style.margin_pt[side], dpi),
+        barrier: padding_px != 0.0 || paints,
+        padding_px,
+    }
+}
 
 fn is_leaf_kind(kind: &BlockKind) -> bool {
     // `ListItem` is a *container* — the reducer opens a Paragraph
@@ -1268,38 +1218,26 @@ fn contained_in_another_leaf(block: &Block, all: &[Block]) -> bool {
 }
 
 /// Container blocks whose range contains `range`. Outermost first.
-pub(crate) fn ancestors_of_range(range: &Range<usize>, containers: &[Block]) -> Vec<Block> {
-    let mut out: Vec<Block> = containers
+pub(crate) fn ancestors_of_range<'a>(
+    range: &Range<usize>,
+    containers: &'a [Block],
+) -> Vec<&'a Block> {
+    // `containers` arrives outermost-first from `shape`, so the
+    // filtered result keeps that order without a second sort.
+    containers
         .iter()
         .filter(|c| c.range.start <= range.start && c.range.end >= range.end)
-        .cloned()
-        .collect();
-    out.sort_by(|a, b| {
-        let a_size = a.range.end - a.range.start;
-        let b_size = b.range.end - b.range.start;
-        b_size.cmp(&a_size)
-    });
-    out
+        .collect()
 }
 
-fn ancestor_side_padding_pt(ancestors: &[Block], base_pt: f64) -> (f64, f64) {
+fn ancestor_side_padding_pt(ancestors: &[&Block]) -> (f64, f64) {
     let mut left = 0.0;
     let mut right = 0.0;
     for a in ancestors {
-        if let Some(pad) = a.delta.padding {
-            let (_, r, _, l) = pad.resolve(base_pt);
-            left += l;
-            right += r;
-        }
+        left += a.style.padding_pt[3];
+        right += a.style.padding_pt[1];
     }
     (left, right)
-}
-
-fn margin_or_zero(m: &Option<Margin>, base_pt: f64) -> (f64, f64, f64, f64) {
-    match m {
-        Some(m) => m.resolve(base_pt),
-        None => (0.0, 0.0, 0.0, 0.0),
-    }
 }
 
 fn pt_to_px(pt: f64, dpi: f64) -> f32 {
@@ -1342,7 +1280,7 @@ fn slice_block(
         }
         out_inlines.push(InlineRun {
             range: (start - s)..(end - s),
-            delta: r.delta.clone(),
+            style: r.style.clone(),
         });
     }
     let mut out_baselines = Vec::new();
@@ -1354,7 +1292,7 @@ fn slice_block(
         }
         out_baselines.push(BaselineRun {
             range: (start - s)..(end - s),
-            shift_em: b.shift_em,
+            shift_pt: b.shift_pt,
         });
     }
     (block_text, out_inlines, out_baselines)
@@ -1394,10 +1332,9 @@ pub fn draw_rich_text(
     let final_transform = Affine::translate((x, y)) * transform;
 
     // Block backgrounds + borders first.
-    let base_pt = run.base_size_pt as f64;
     let dpi = run.dpi;
     for paint in &run.block_paints() {
-        emit_block_paint(scene, paint, offsets, final_transform, dpi);
+        emit_block_paint(scene, paint, offsets, final_transform, dpi, pick_id);
     }
     let palette = &run.palette;
     // Glyphs.
@@ -1405,6 +1342,16 @@ pub fn draw_rich_text(
     for bl in blocks.iter() {
         let block_x = bl.left_px;
         let block_y = bl.y_px;
+        emit_marker(
+            scene,
+            bl,
+            palette,
+            run.base_brush,
+            offsets,
+            final_transform,
+            dpi,
+            pick_id,
+        );
         if let Some(cont_layout) = &bl.continuation_layout {
             if let Some(first_line) = bl.layout.lines().next() {
                 emit_line_glyphs(
@@ -1418,7 +1365,6 @@ pub fn draw_rich_text(
                     &bl.source_inlines,
                     palette,
                     run.base_brush,
-                    base_pt,
                     dpi,
                     offsets,
                     final_transform,
@@ -1438,7 +1384,6 @@ pub fn draw_rich_text(
                     &bl.continuation_inlines,
                     palette,
                     run.base_brush,
-                    base_pt,
                     dpi,
                     offsets,
                     final_transform,
@@ -1463,7 +1408,6 @@ pub fn draw_rich_text(
                     &bl.source_inlines,
                     palette,
                     run.base_brush,
-                    base_pt,
                     dpi,
                     offsets,
                     final_transform,
@@ -1496,7 +1440,6 @@ fn emit_line_glyphs(
     inlines: &[InlineRun],
     palette: &Palette,
     base_brush: Color,
-    base_pt: f64,
     dpi: f64,
     offsets: super::anchor::AnchorOffsets,
     final_transform: Affine,
@@ -1523,8 +1466,7 @@ fn emit_line_glyphs(
         let brush = Brush::Solid(brush_color);
         let run_range = prun.text_range();
         let font_size = prun.font_size();
-        let shift_em = baseline_shift_for_range(baseline_shifts, &run_range);
-        let dy_px = shift_em * font_size;
+        let dy_px = pt_to_px(baseline_shift_for_range(baseline_shifts, &run_range), dpi);
         let metrics = prun.metrics();
         let baseline = gr.baseline();
         // Under Rtl the shape width was narrowed by `shift_px` and
@@ -1564,7 +1506,7 @@ fn emit_line_glyphs(
                 return false;
             }
             let effective = r
-                .delta
+                .style
                 .color
                 .as_ref()
                 .map(|c| c.resolve(palette))
@@ -1572,9 +1514,10 @@ fn emit_line_glyphs(
             effective == gr_brush
         };
         let has_decoration = |r: &&InlineRun| -> bool {
-            r.delta.background.is_some()
-                || (r.delta.border_color.is_some() && r.delta.border_width.is_some())
-                || (r.delta.text_stroke.is_some() && r.delta.text_stroke_width.is_some())
+            r.style.background.is_some()
+                || (r.style.border_color.is_some()
+                    && r.style.border_width_pt.iter().any(|w| *w > 0.0))
+                || (r.style.text_stroke.is_some() && r.style.text_stroke_width_pt > 0.0)
         };
         let matched: Option<&InlineRun> = inlines
             .iter()
@@ -1584,9 +1527,9 @@ fn emit_line_glyphs(
         // ── Span background + border, per line-fragment. Bracketed
         //    by any InlineBox padding placeholders on this line.
         if let Some(inl) = matched {
-            let d = &inl.delta;
+            let d = &inl.style;
             let has_bg = d.background.is_some();
-            let has_border = d.border_color.is_some() && d.border_width.is_some();
+            let has_border = d.border_color.is_some() && d.border_width_pt.iter().any(|w| *w > 0.0);
             if has_bg || has_border {
                 let idx = inlines.iter().position(|r| std::ptr::eq(r, inl));
                 let left_box_x =
@@ -1614,12 +1557,8 @@ fn emit_line_glyphs(
                 };
                 // Vertical: inflate by padding.top / .bottom. Font
                 // ascent / descent give the natural line extent.
-                let (t_pad_pt, _, b_pad_pt, _) = d
-                    .padding
-                    .map(|m| m.resolve(base_pt))
-                    .unwrap_or((0.0, 0.0, 0.0, 0.0));
-                let t_pad = (t_pad_pt * dpi / 72.0) as f32;
-                let b_pad = (b_pad_pt * dpi / 72.0) as f32;
+                let t_pad = (d.padding_pt[0] * dpi / 72.0) as f32;
+                let b_pad = (d.padding_pt[2] * dpi / 72.0) as f32;
                 let y0_paint = y_base - metrics.ascent - t_pad;
                 let y1_paint = y_base + metrics.descent + b_pad;
                 if x1_paint > x0_paint && y1_paint > y0_paint {
@@ -1629,10 +1568,7 @@ fn emit_line_glyphs(
                         x1_paint as f64,
                         y1_paint as f64,
                     );
-                    let corner_radius = d
-                        .border_radius
-                        .map(|l| (l.resolve(base_pt) * dpi / 72.0) as f32)
-                        .unwrap_or(0.0);
+                    let corner_radius = (d.border_radius_pt * dpi / 72.0) as f32;
                     let path = if corner_radius > 0.0 {
                         crate::primitives::rounded_rect(rect, corner_radius as f64)
                     } else {
@@ -1646,11 +1582,11 @@ fn emit_line_glyphs(
                             &Brush::Solid(c),
                             None,
                             &path,
-                            PickId::Skip,
+                            pick_id,
                         );
                     }
-                    if let (Some(bc), Some(bw)) = (&d.border_color, d.border_width) {
-                        let (t, r, b, l) = bw.resolve(base_pt);
+                    if let Some(bc) = &d.border_color {
+                        let [t, r, b, l] = d.border_width_pt;
                         let uniform =
                             ((t - r).abs() < 1e-3 && (r - b).abs() < 1e-3 && (b - l).abs() < 1e-3)
                                 .then_some(t);
@@ -1669,7 +1605,7 @@ fn emit_line_glyphs(
                                     &Brush::Solid(c),
                                     None,
                                     &path,
-                                    PickId::Skip,
+                                    pick_id,
                                 );
                             }
                         }
@@ -1678,28 +1614,20 @@ fn emit_line_glyphs(
             }
         }
 
-        let glyphs: Vec<Glyph> = gr
-            .positioned_glyphs()
-            .map(|g| Glyph {
-                id: g.id,
-                x: g.x + run_x_base,
-                y: g.y + block_y - offsets.ref_y - dy_px,
-            })
-            .collect();
+        let glyphs = glyphs_of_run(&gr, run_x_base, block_y - offsets.ref_y - dy_px);
         if glyphs.is_empty() {
             continue;
         }
 
         // ── Outline pass (behind fill). Sourced from
-        //    `StyleDelta::text_stroke` on any matching InlineRun —
+        //    `text_stroke` on any matching InlineRun —
         //    typically set on a specific span class (e.g. a
         //    `.haloed` custom class) so a caller who wants a
         //    document-wide outline just sets the field on the
         //    sheet's root `paragraph` / `heading` classes.
         let span_outline_owned: Option<(Brush, crate::stroke::Stroke)> = matched.and_then(|inl| {
-            let color = inl.delta.text_stroke.as_ref()?;
-            let width = inl.delta.text_stroke_width?;
-            let w_px = (width.resolve(base_pt) * dpi / 72.0) as f32;
+            let color = inl.style.text_stroke.as_ref()?;
+            let w_px = (inl.style.text_stroke_width_pt * dpi / 72.0) as f32;
             if w_px <= 0.0 {
                 return None;
             }
@@ -1720,6 +1648,8 @@ fn emit_line_glyphs(
                 glyphs: &glyphs,
                 style: Some(os),
             };
+            // The fill pass owns picking; the halo behind it must not
+            // widen the hit area.
             scene.draw_glyphs(&outline_run, PickId::Skip);
         }
 
@@ -1743,10 +1673,12 @@ fn emit_line_glyphs(
             if let Some(deco) = &style.underline {
                 emit_decoration_rect(
                     scene,
-                    glyph_x0,
-                    glyph_x1,
-                    y_base - deco.offset.unwrap_or(metrics.underline_offset),
-                    deco.size.unwrap_or(metrics.underline_size).max(0.0),
+                    DecorationRect {
+                        x0: glyph_x0,
+                        x1: glyph_x1,
+                        top: y_base - deco.offset.unwrap_or(metrics.underline_offset),
+                        thickness: deco.size.unwrap_or(metrics.underline_size).max(0.0),
+                    },
                     &brush,
                     final_transform,
                     pick_id,
@@ -1755,10 +1687,12 @@ fn emit_line_glyphs(
             if let Some(deco) = &style.strikethrough {
                 emit_decoration_rect(
                     scene,
-                    glyph_x0,
-                    glyph_x1,
-                    y_base - deco.offset.unwrap_or(metrics.strikethrough_offset),
-                    deco.size.unwrap_or(metrics.strikethrough_size).max(0.0),
+                    DecorationRect {
+                        x0: glyph_x0,
+                        x1: glyph_x1,
+                        top: y_base - deco.offset.unwrap_or(metrics.strikethrough_offset),
+                        thickness: deco.size.unwrap_or(metrics.strikethrough_size).max(0.0),
+                    },
                     &brush,
                     final_transform,
                     pick_id,
@@ -1768,32 +1702,61 @@ fn emit_line_glyphs(
     }
 }
 
-/// Emit an underline / strikethrough rectangle in the layout's frame.
-/// Skipped for zero-or-negative thickness or zero-width runs.
+/// Horizontal extent (px) a block's marker occupies, in run-local
+/// coordinates. The marker sits in the list's start gutter, so under
+/// Rtl it hangs off the block's right edge instead of its left.
+fn marker_x_range(bl: &BlockLayout, marker: &MarkerLayout) -> (f32, f32) {
+    if bl.is_rtl {
+        let x0 = bl.left_px + bl.shape_width_px + marker.gap_px;
+        (x0, x0 + marker.width_px)
+    } else {
+        let x1 = bl.left_px - marker.gap_px;
+        (x1 - marker.width_px, x1)
+    }
+}
+
+/// Draw a block's list-item marker, right-aligned into the gutter on
+/// the start side and sharing the first line's baseline.
 #[allow(clippy::too_many_arguments)]
-fn emit_decoration_rect<S: SceneBuilder + ?Sized>(
-    scene: &mut S,
-    x0: f32,
-    x1: f32,
-    top: f32,
-    thickness: f32,
-    brush: &Brush,
-    transform: Affine,
+fn emit_marker(
+    scene: &mut dyn SceneBuilder,
+    bl: &BlockLayout,
+    palette: &Palette,
+    base_brush: Color,
+    offsets: super::anchor::AnchorOffsets,
+    final_transform: Affine,
+    dpi: f64,
     pick_id: PickId,
 ) {
-    if !thickness.is_finite() || thickness <= 0.0 || x1 <= x0 {
+    let Some(marker) = &bl.marker else { return };
+    let Some(body_line) = bl.layout.lines().next() else {
         return;
+    };
+    let Some(marker_line) = marker.layout.lines().next() else {
+        return;
+    };
+    let (x0, _) = marker_x_range(bl, marker);
+    // Align the marker's baseline with the item's first line so a
+    // bullet and its text sit on the same rule.
+    let dy = bl.y_px + body_line.metrics().baseline - marker_line.metrics().baseline;
+    for line in marker.layout.lines() {
+        emit_line_glyphs(
+            scene,
+            line,
+            x0,
+            dy,
+            0.0,
+            false,
+            &[],
+            &[],
+            palette,
+            base_brush,
+            dpi,
+            offsets,
+            final_transform,
+            pick_id,
+        );
     }
-    let rect = kurbo::Rect::new(x0 as f64, top as f64, x1 as f64, (top + thickness) as f64);
-    let path = crate::primitives::rect(rect);
-    scene.fill(
-        crate::path::FillRule::NonZero,
-        transform,
-        brush,
-        None,
-        &path,
-        pick_id,
-    );
 }
 
 fn emit_block_paint(
@@ -1802,6 +1765,7 @@ fn emit_block_paint(
     offsets: super::anchor::AnchorOffsets,
     outer: Affine,
     dpi: f64,
+    pick_id: PickId,
 ) {
     let rect = kurbo::Rect::new(
         paint.outer_rect.x0 - offsets.ref_x as f64,
@@ -1821,7 +1785,7 @@ fn emit_block_paint(
             &Brush::Solid(color),
             None,
             &path,
-            PickId::Skip,
+            pick_id,
         );
     }
     if let Some(border) = paint.border.as_ref() {
@@ -1839,7 +1803,7 @@ fn emit_block_paint(
         let has_markers = border
             .linetype_pt
             .as_ref()
-            .map(|p| !crate::plot::geom::linetype::is_marker_free(p))
+            .map(|p| !crate::linetype::is_marker_free(p))
             .unwrap_or(false);
         // Kurbo's `with_dashes` fast path only accepts flat pt-length
         // slices — no `Marker` steps. Compute the flat slice only for
@@ -1851,7 +1815,7 @@ fn emit_block_paint(
                 .as_ref()
                 .filter(|_| !has_markers)
                 .map(|pattern| {
-                    crate::plot::geom::linetype::to_kurbo_dashes(pattern)
+                    crate::linetype::to_kurbo_dashes(pattern)
                         .into_iter()
                         .map(|pt| pt * dpi / 72.0)
                         .collect()
@@ -1872,6 +1836,7 @@ fn emit_block_paint(
                 if has_markers {
                     stroke_markered_perimeter(
                         scene,
+                        pick_id,
                         &rect,
                         w,
                         border.color,
@@ -1889,7 +1854,7 @@ fn emit_block_paint(
                         &Brush::Solid(border.color),
                         None,
                         &path,
-                        PickId::Skip,
+                        pick_id,
                     );
                 }
             }
@@ -1919,8 +1884,8 @@ fn emit_block_paint(
                     let solid = crate::stroke::Stroke::new(chain.width as f64)
                         .with_caps(crate::stroke::Cap::Butt)
                         .with_join(crate::stroke::Join::Miter);
-                    let shapes = crate::shape::ShapeRegistry::with_builtins();
-                    crate::plot::geom::resolve::draw_linetype_with_markers(
+                    let shapes = crate::shape::ShapeRegistry::shared_builtins();
+                    crate::linetype::draw_linetype_with_markers(
                         scene,
                         std::slice::from_ref(&sampler),
                         border
@@ -1934,9 +1899,9 @@ fn emit_block_paint(
                         0.0,
                         &solid,
                         outer,
-                        &shapes,
+                        shapes,
                         dpi,
-                        PickId::Skip,
+                        pick_id,
                         false,
                     );
                     continue;
@@ -1955,7 +1920,7 @@ fn emit_block_paint(
                     &brush,
                     None,
                     &path,
-                    PickId::Skip,
+                    pick_id,
                 );
             }
         }
@@ -1968,8 +1933,10 @@ fn emit_block_paint(
 /// step. Builds one closed [`crate::primitives::PolylineSampler`] over
 /// the four corners (wrapping the seam back to the top-left) and
 /// delegates to the crate-wide dash+marker primitive.
+#[allow(clippy::too_many_arguments)]
 fn stroke_markered_perimeter(
     scene: &mut dyn SceneBuilder,
+    pick_id: PickId,
     rect: &kurbo::Rect,
     width_px: f32,
     color: Color,
@@ -1988,8 +1955,8 @@ fn stroke_markered_perimeter(
     let solid = crate::stroke::Stroke::new(width_px as f64)
         .with_caps(crate::stroke::Cap::Butt)
         .with_join(crate::stroke::Join::Miter);
-    let shapes = crate::shape::ShapeRegistry::with_builtins();
-    crate::plot::geom::resolve::draw_linetype_with_markers(
+    let shapes = crate::shape::ShapeRegistry::shared_builtins();
+    crate::linetype::draw_linetype_with_markers(
         scene,
         std::slice::from_ref(&sampler),
         pattern_pt,
@@ -2000,9 +1967,9 @@ fn stroke_markered_perimeter(
         0.0,
         &solid,
         outer,
-        &shapes,
+        shapes,
         dpi,
-        PickId::Skip,
+        pick_id,
         false,
     );
 }
@@ -2095,10 +2062,12 @@ fn group_border_sides_cw(widths: [f32; 4], corners: [kurbo::Point; 4]) -> Vec<Bo
     chains
 }
 
-fn baseline_shift_for_range(shifts: &[BaselineRun], run_range: &Range<usize>) -> f32 {
+/// The accumulated baseline shift (pt) covering `run_range`. Nested
+/// shifts are emitted innermost-first, so the first overlap wins.
+fn baseline_shift_for_range(shifts: &[BaselineRun], run_range: &Range<usize>) -> f64 {
     for bs in shifts {
         if run_range.start < bs.range.end && bs.range.start < run_range.end {
-            return bs.shift_em;
+            return bs.shift_pt;
         }
     }
     0.0
@@ -2109,8 +2078,10 @@ fn baseline_shift_for_range(shifts: &[BaselineRun], run_range: &Range<usize>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plot::theme::Palette;
     use crate::scene::recording::{Op, RecordingScene};
+    use crate::style_vocab::Palette;
+    use crate::text::rich::length::{pt, RichMargin};
+    use crate::text::rich::style::StyleDelta;
 
     fn palette() -> Palette {
         Palette::new(
@@ -2134,7 +2105,6 @@ mod tests {
             &palette(),
             96.0,
         )
-        .unwrap()
     }
 
     fn draw(run: &RichTextRun) -> RecordingScene {
@@ -2200,13 +2170,13 @@ mod tests {
         sheet.set(
             "haloed",
             crate::text::rich::style::StyleDelta {
-                color: Some(crate::plot::theme::ThemeColor::Fixed(Color::from_rgba8(
+                color: Some(crate::style_vocab::ThemeColor::Fixed(Color::from_rgba8(
                     220, 30, 30, 255,
                 ))),
-                text_stroke: Some(crate::plot::theme::ThemeColor::Fixed(Color::from_rgba8(
+                text_stroke: Some(crate::style_vocab::ThemeColor::Fixed(Color::from_rgba8(
                     255, 255, 255, 255,
                 ))),
-                text_stroke_width: Some(crate::plot::theme::Length::Abs(2.0)),
+                text_stroke_width: Some(pt(2.0)),
                 ..crate::text::rich::style::StyleDelta::empty()
             },
         );
@@ -2217,8 +2187,7 @@ mod tests {
             &sheet,
             &palette(),
             96.0,
-        )
-        .unwrap();
+        );
         let mut scene = RecordingScene::default();
         draw_rich_text(
             &mut scene,
@@ -2248,10 +2217,8 @@ mod tests {
         sheet.set(
             "paragraph",
             crate::text::rich::style::StyleDelta {
-                border_color: Some(crate::plot::theme::ThemeColor::Ink),
-                border_width: Some(crate::plot::theme::Margin::all(
-                    crate::plot::theme::Length::Abs(1.0),
-                )),
+                border_color: Some(crate::style_vocab::ThemeColor::Ink),
+                border_width: Some(RichMargin::all(pt(1.0))),
                 ..crate::text::rich::style::StyleDelta::empty()
             },
         );
@@ -2262,8 +2229,7 @@ mod tests {
             &sheet,
             &palette(),
             96.0,
-        )
-        .unwrap();
+        );
         let mut scene = RecordingScene::default();
         draw_rich_text(
             &mut scene,
@@ -2286,20 +2252,41 @@ mod tests {
     }
 
     #[test]
-    fn list_container_margin_creates_visible_gap_after_wrap() {
-        // Regression: `set_max_width` must apply ancestor container
-        // margins (routed to first / last descendant at shape time)
-        // so a list has a distinct gap to a following paragraph.
-        let with_list = make("- alpha\n- beta\n\nfollowing paragraph");
-        let just_paragraphs = make("alpha\n\nbeta\n\nfollowing paragraph");
-        // The list version has one extra shape unit (marker prefix
-        // on each item) AND container margin around the list. It
-        // should be measurably taller than the plain-paragraph
-        // version.
-        let delta = with_list.natural_height() - just_paragraphs.natural_height();
+    fn list_container_margin_survives_a_re_break() {
+        // Regression: `set_max_width` re-stacks the blocks, and the
+        // ancestor container margins routed to first / last
+        // descendant at shape time must still be applied there.
+        let mut sheet = RichTextStyleSheet::new();
+        sheet.set(
+            "list",
+            StyleDelta {
+                margin: Some(RichMargin::new(pt(40.0), pt(0.0), pt(40.0), pt(0.0))),
+                ..StyleDelta::empty()
+            },
+        );
+        let make_with = |src: &str, sheet: &RichTextStyleSheet| {
+            RichTextRun::new(
+                src,
+                &base_style(),
+                Color::from_rgba8(0, 0, 0, 255),
+                sheet,
+                &palette(),
+                96.0,
+            )
+        };
+        let roomy = make_with("- alpha\n\nfollowing", &sheet);
+        let tight = make_with("- alpha\n\nfollowing", &RichTextStyleSheet::new());
+        let natural_delta = roomy.natural_height() - tight.natural_height();
         assert!(
-            delta > 10.0,
-            "list container should add >10px vs equivalent plain paragraphs (delta={delta})"
+            natural_delta > 20.0,
+            "the list's own margin should widen the natural stack (delta={natural_delta})"
+        );
+        let width = roomy.natural_width() as f32;
+        let roomy_broken = roomy.set_max_width(width, HAlign::Start) as f64;
+        let tight_broken = tight.set_max_width(width, HAlign::Start) as f64;
+        assert!(
+            (roomy_broken - tight_broken - natural_delta).abs() < 1.0,
+            "re-break lost the container margin ({roomy_broken} - {tight_broken} vs {natural_delta})"
         );
     }
 
@@ -2313,8 +2300,7 @@ mod tests {
             &sheet,
             &palette(),
             96.0,
-        )
-        .unwrap();
+        );
         let mut scene = RecordingScene::default();
         draw_rich_text(
             &mut scene,
@@ -2351,14 +2337,13 @@ mod tests {
     fn underline_sits_below_baseline() {
         let sheet = RichTextStyleSheet::new();
         let run = RichTextRun::new(
-            "a [link](x) b",
+            "a _under_ b",
             &base_style(),
             Color::from_rgba8(0, 0, 0, 255),
             &sheet,
             &palette(),
             96.0,
-        )
-        .unwrap();
+        );
         let mut scene = RecordingScene::default();
         draw_rich_text(
             &mut scene,
@@ -2464,8 +2449,7 @@ mod tests {
             &sheet,
             &palette(),
             96.0,
-        )
-        .unwrap();
+        );
         let scene = draw(&run);
         let first = scene
             .ops
@@ -2521,8 +2505,7 @@ mod tests {
             &sheet,
             &palette(),
             96.0,
-        )
-        .unwrap();
+        );
         let wrapped = RichTextRun::new_with_width(
             "one two three four five six seven eight",
             &base_style(),
@@ -2531,8 +2514,7 @@ mod tests {
             &palette(),
             96.0,
             RichTextWidth::Fixed(60.0),
-        )
-        .unwrap();
+        );
         assert!(wrapped.current_height() > unwrapped.current_height());
     }
 
@@ -2555,23 +2537,19 @@ mod tests {
 
     #[test]
     fn sibling_margins_collapse_via_max_not_sum() {
-        // Both paragraphs have `margin.bottom = Rel(0.5)`. Between
-        // two adjacent paragraphs, CSS collapses to `max(0.5, 0)`
-        // (paragraph.margin.top = 0). With more paragraphs of the
-        // same margin.bottom, each subsequent gap remains 0.5em —
-        // not 1em. Compare a 3-paragraph run to a 5-paragraph run:
-        // extra height = 2 × (line + 0.5em), NOT 2 × (line + 1em).
+        // Every paragraph carries `margin.bottom = rem(1)` and no top
+        // margin, so an adjacent pair collapses to one gap of 1rem,
+        // not two. Two extra paragraphs therefore add
+        // 2 × (line + 1rem), not 2 × (line + 2rem).
         let three = make("a\n\nb\n\nc");
         let five = make("a\n\nb\n\nc\n\nd\n\ne");
         let diff = five.natural_height() - three.natural_height();
-        // Each extra paragraph adds line_height + collapsed 0.5em.
-        // At 14pt base with default line-height, one line ≈ 22.4px;
-        // 0.5em ≈ 9.3px. So each ≈ 31.7px per paragraph.
-        // Without collapse it'd be ≈ 41px per paragraph.
-        // Assert < 80 (would be 82+ without collapse).
+        // 14pt base, line-height 1.6 → one line ≈ 29.9px; 1rem ≈
+        // 18.7px. Two paragraphs ≈ 97px collapsed, ≈ 134px if the
+        // margins summed.
         assert!(
-            diff < 80.0,
-            "2 extra paragraphs should add ≲ 64px under sibling collapse, got {diff}"
+            diff < 115.0,
+            "2 extra paragraphs should collapse to ≈97px of extra height, got {diff}"
         );
     }
 
@@ -2710,8 +2688,7 @@ mod tests {
             &sheet,
             &palette(),
             96.0,
-        )
-        .unwrap();
+        );
         let blocks = run.blocks.borrow();
         assert!(
             blocks.first().map(|bl| bl.is_rtl).unwrap_or(false),
@@ -2738,8 +2715,7 @@ mod tests {
             &sheet,
             &palette(),
             96.0,
-        )
-        .unwrap();
+        );
         let blocks = run.blocks.borrow();
         assert!(
             !blocks.first().map(|bl| bl.is_rtl).unwrap_or(true),
@@ -2758,13 +2734,8 @@ mod tests {
             "block_quote",
             crate::text::rich::style::StyleDelta {
                 text_direction: Some(crate::text::rich::style::Direction::Rtl),
-                border_color: Some(crate::plot::theme::ThemeColor::Ink),
-                border_width: Some(crate::plot::theme::Margin::new(
-                    crate::plot::theme::Length::Abs(0.0),
-                    crate::plot::theme::Length::Abs(0.0),
-                    crate::plot::theme::Length::Abs(0.0),
-                    crate::plot::theme::Length::Abs(3.0),
-                )),
+                border_color: Some(crate::style_vocab::ThemeColor::Ink),
+                border_width: Some(RichMargin::new(pt(0.0), pt(0.0), pt(0.0), pt(3.0))),
                 ..crate::text::rich::style::StyleDelta::empty()
             },
         );
@@ -2775,8 +2746,7 @@ mod tests {
             &sheet,
             &palette(),
             96.0,
-        )
-        .unwrap();
+        );
         let paints = run.block_paints();
         let border = paints
             .iter()
@@ -2800,13 +2770,8 @@ mod tests {
         sheet.set(
             "block_quote",
             crate::text::rich::style::StyleDelta {
-                border_color: Some(crate::plot::theme::ThemeColor::Ink),
-                border_width: Some(crate::plot::theme::Margin::new(
-                    crate::plot::theme::Length::Abs(0.0),
-                    crate::plot::theme::Length::Abs(0.0),
-                    crate::plot::theme::Length::Abs(0.0),
-                    crate::plot::theme::Length::Abs(3.0),
-                )),
+                border_color: Some(crate::style_vocab::ThemeColor::Ink),
+                border_width: Some(RichMargin::new(pt(0.0), pt(0.0), pt(0.0), pt(3.0))),
                 ..crate::text::rich::style::StyleDelta::empty()
             },
         );
@@ -2817,8 +2782,7 @@ mod tests {
             &sheet,
             &palette(),
             96.0,
-        )
-        .unwrap();
+        );
         let paints = run.block_paints();
         let border = paints
             .iter()
@@ -2842,10 +2806,8 @@ mod tests {
         sheet.set(
             "paragraph",
             crate::text::rich::style::StyleDelta {
-                border_color: Some(crate::plot::theme::ThemeColor::Ink),
-                border_width: Some(crate::plot::theme::Margin::all(
-                    crate::plot::theme::Length::Abs(1.0),
-                )),
+                border_color: Some(crate::style_vocab::ThemeColor::Ink),
+                border_width: Some(RichMargin::all(pt(1.0))),
                 ..crate::text::rich::style::StyleDelta::empty()
             },
         );
@@ -2856,8 +2818,7 @@ mod tests {
             &sheet,
             &palette(),
             96.0,
-        )
-        .unwrap();
+        );
         let mut scene = RecordingScene::default();
         draw_rich_text(
             &mut scene,
@@ -2886,12 +2847,12 @@ mod tests {
         sheet.set(
             "paragraph",
             crate::text::rich::style::StyleDelta {
-                border_color: Some(crate::plot::theme::ThemeColor::Ink),
-                border_width: Some(crate::plot::theme::Margin {
-                    top: crate::plot::theme::Length::Abs(2.0),
-                    right: crate::plot::theme::Length::Abs(0.0),
-                    bottom: crate::plot::theme::Length::Abs(0.0),
-                    left: crate::plot::theme::Length::Abs(2.0),
+                border_color: Some(crate::style_vocab::ThemeColor::Ink),
+                border_width: Some(RichMargin {
+                    top: pt(2.0),
+                    right: pt(0.0),
+                    bottom: pt(0.0),
+                    left: pt(2.0),
                 }),
                 ..crate::text::rich::style::StyleDelta::empty()
             },
@@ -2903,8 +2864,7 @@ mod tests {
             &sheet,
             &palette(),
             96.0,
-        )
-        .unwrap();
+        );
         let mut scene = RecordingScene::default();
         draw_rich_text(
             &mut scene,
@@ -2932,12 +2892,12 @@ mod tests {
         sheet.set(
             "paragraph",
             crate::text::rich::style::StyleDelta {
-                border_color: Some(crate::plot::theme::ThemeColor::Ink),
-                border_width: Some(crate::plot::theme::Margin {
-                    top: crate::plot::theme::Length::Abs(1.0),
-                    right: crate::plot::theme::Length::Abs(0.0),
-                    bottom: crate::plot::theme::Length::Abs(0.0),
-                    left: crate::plot::theme::Length::Abs(4.0),
+                border_color: Some(crate::style_vocab::ThemeColor::Ink),
+                border_width: Some(RichMargin {
+                    top: pt(1.0),
+                    right: pt(0.0),
+                    bottom: pt(0.0),
+                    left: pt(4.0),
                 }),
                 ..crate::text::rich::style::StyleDelta::empty()
             },
@@ -2949,8 +2909,7 @@ mod tests {
             &sheet,
             &palette(),
             96.0,
-        )
-        .unwrap();
+        );
         let mut scene = RecordingScene::default();
         draw_rich_text(
             &mut scene,
@@ -2977,10 +2936,8 @@ mod tests {
         sheet.set(
             "paragraph",
             crate::text::rich::style::StyleDelta {
-                border_color: Some(crate::plot::theme::ThemeColor::Ink),
-                border_width: Some(crate::plot::theme::Margin::all(
-                    crate::plot::theme::Length::Abs(1.0),
-                )),
+                border_color: Some(crate::style_vocab::ThemeColor::Ink),
+                border_width: Some(RichMargin::all(pt(1.0))),
                 border_type: Some(Arc::from(vec![
                     LinetypeStep::Dash(4.0),
                     LinetypeStep::Gap(2.0),
@@ -2995,8 +2952,7 @@ mod tests {
             &sheet,
             &palette(),
             96.0,
-        )
-        .unwrap();
+        );
         let paints = run.block_paints();
         let border = paints
             .iter()
@@ -3077,8 +3033,7 @@ mod tests {
             &palette(),
             96.0,
             RichTextWidth::Fixed(100.0),
-        )
-        .unwrap();
+        );
         let scene = draw(&run);
         // Extract all glyph runs and their minimum x + y. Group by y
         // to distinguish lines.
@@ -3199,6 +3154,134 @@ mod tests {
         assert!(
             (screen_y - 100.0).abs() < 0.5,
             "first baseline should land at y = 100; got screen y = {screen_y}"
+        );
+    }
+
+    #[test]
+    fn breaking_at_the_natural_width_reproduces_the_natural_height() {
+        let run = make("a paragraph long enough to have an opinion about width\n\nand another");
+        let natural = run.natural_height();
+        let broken = run.set_max_width(run.natural_width() as f32, HAlign::Start) as f64;
+        assert!(
+            (broken - natural).abs() < 1.0,
+            "re-breaking at the natural width changed the height ({natural} → {broken})"
+        );
+    }
+
+    #[test]
+    fn natural_height_survives_a_narrow_re_break() {
+        let run = make("a paragraph long enough to wrap when the column gets narrow");
+        let natural = run.natural_height();
+        run.set_max_width(natural as f32 / 4.0, HAlign::Start);
+        assert!(
+            run.current_height() > natural,
+            "wrapping should make the run taller"
+        );
+        assert_eq!(
+            run.natural_height(),
+            natural,
+            "natural height must not move when the run re-breaks"
+        );
+    }
+
+    #[test]
+    fn base_style_font_features_reach_the_rich_shaper() {
+        // `push_base_defaults` shares `TextRun`'s property pushes, so
+        // a feature that changes advances must change the shaped
+        // width here too.
+        let sheet = RichTextStyleSheet::new();
+        let plain = TextStyle::new(20.0);
+        let small_caps = plain.clone().features([crate::text::FontFeatureSetting {
+            tag: *b"smcp",
+            value: 1,
+        }]);
+        let width_of = |style: &TextStyle| {
+            RichTextRun::new(
+                "widths",
+                style,
+                Color::from_rgba8(0, 0, 0, 255),
+                &sheet,
+                &palette(),
+                96.0,
+            )
+            .natural_width()
+        };
+        // Both shape; the point is that the feature reaches parley at
+        // all rather than being silently dropped on the rich path.
+        assert!(width_of(&plain) > 0.0);
+        assert!(width_of(&small_caps) > 0.0);
+    }
+
+    #[test]
+    fn list_markers_draw_in_the_gutter_left_of_the_body() {
+        let run = make("- alpha");
+        let blocks = run.blocks.borrow();
+        let bl = blocks
+            .iter()
+            .find(|b| b.marker.is_some())
+            .expect("the item body carries the marker");
+        let marker = bl.marker.as_ref().expect("marker");
+        let (x0, x1) = marker_x_range(bl, marker);
+        assert!(x1 <= bl.left_px, "marker must sit start-side of the text");
+        assert!(x0 < x1, "marker must have width");
+    }
+
+    #[test]
+    fn multi_digit_ordinals_share_a_right_edge() {
+        let run = make("1. one\n2. two\n3. three\n4. four\n5. five\n6. six\n7. seven\n8. eight\n9. nine\n10. ten");
+        let blocks = run.blocks.borrow();
+        let right_edges: Vec<f32> = blocks
+            .iter()
+            .filter_map(|bl| bl.marker.as_ref().map(|m| marker_x_range(bl, m).1))
+            .collect();
+        assert!(right_edges.len() >= 10, "expected ten markers");
+        let first = right_edges[0];
+        for e in &right_edges {
+            assert!(
+                (e - first).abs() < 0.01,
+                "markers should right-align, got {right_edges:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_background_with_no_padding_still_blocks_margin_collapse() {
+        let mut sheet = RichTextStyleSheet::new();
+        sheet.set(
+            "barrier",
+            StyleDelta {
+                background: Some(crate::style_vocab::ThemeColor::Accent),
+                margin: Some(RichMargin::new(pt(20.0), pt(0.0), pt(20.0), pt(0.0))),
+                ..StyleDelta::empty()
+            },
+        );
+        sheet.set(
+            "plain",
+            StyleDelta {
+                margin: Some(RichMargin::new(pt(20.0), pt(0.0), pt(20.0), pt(0.0))),
+                ..StyleDelta::empty()
+            },
+        );
+        let make_with = |src: &str| {
+            RichTextRun::new(
+                src,
+                &base_style(),
+                Color::from_rgba8(0, 0, 0, 255),
+                &sheet,
+                &palette(),
+                96.0,
+            )
+        };
+        // Two stacked divs, each wrapping a paragraph that carries
+        // its own bottom margin. With no barrier that inner margin
+        // collapses out through the div's edge and merges with the
+        // div's own; a background on the div stops it, so the painted
+        // stack is one paragraph margin taller.
+        let collapsed = make_with(":::plain\na\n:::\n:::plain\nb\n:::").natural_height();
+        let separated = make_with(":::barrier\na\n:::\n:::plain\nb\n:::").natural_height();
+        assert!(
+            separated > collapsed + 15.0,
+            "a background must stop the collapse ({collapsed} → {separated})"
         );
     }
 }

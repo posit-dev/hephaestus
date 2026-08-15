@@ -21,9 +21,10 @@
 
 use kurbo::Rect;
 
-use super::run::{ancestors_of_range, BlockLayout, RichTextRun};
+use super::length::swap_lr;
+use super::run::{BlockLayout, RichTextRun};
 use crate::color::Color;
-use crate::plot::theme::Palette;
+use crate::style_vocab::{Palette, ThemeColor};
 
 /// A drawing instruction for one block-level box. Emitted by
 /// [`compute_block_paints`] in outer-first order.
@@ -54,7 +55,7 @@ pub struct BlockBorder {
     /// [`crate::text::rich::StyleDelta::border_type`], carried in pt
     /// (raw form). The draw pass routes marker-free patterns through
     /// kurbo's `with_dashes` fast path and marker-bearing patterns
-    /// through [`crate::plot::geom::resolve::draw_linetype_with_markers`]
+    /// through [`crate::linetype::draw_linetype_with_markers`]
     /// (per-polyline chain). `None` = solid stroke.
     pub linetype_pt: Option<std::sync::Arc<[crate::scales::value::LinetypeStep]>>,
 }
@@ -67,36 +68,23 @@ impl BlockBorder {
         let w0 = self.widths_px[0];
         self.widths_px.iter().all(|&w| (w - w0).abs() < 1e-3)
     }
-
-    /// Max width across the four sides — the value to use for a
-    /// uniform stroke (or to gate paint emission when everything is
-    /// zero).
-    pub fn max_width(&self) -> f32 {
-        self.widths_px.iter().cloned().fold(0.0_f32, f32::max)
-    }
 }
 
 /// Walk the run's leaf layouts + non-leaf containers and produce one
 /// [`BlockPaint`] per block that carries a background or border.
 /// Outer-first ordering: containers come before any leaf they wrap.
-pub fn compute_block_paints(run: &RichTextRun) -> Vec<BlockPaint> {
+pub(crate) fn compute_block_paints(run: &RichTextRun) -> Vec<BlockPaint> {
     let blocks = run.blocks.borrow();
     let mut paints: Vec<BlockPaint> = Vec::new();
     let palette = &run.palette;
-    let base_pt = run.base_size_pt as f64;
     let dpi = run.dpi;
+    let px = |pt: f64| (pt * dpi / 72.0) as f32;
 
-    // Containers first (outermost → innermost). Deeper containers
-    // (larger range = outer) paint before smaller ones. We identify
-    // outer-vs-inner by range size.
-    let mut containers = run.containers.clone();
-    containers.sort_by(|a, b| {
-        let a_size = a.range.end - a.range.start;
-        let b_size = b.range.end - b.range.start;
-        b_size.cmp(&a_size)
-    });
-    for container in &containers {
-        if !has_paint(&container.delta.background, &container.delta.border_color) {
+    // Containers come first, outermost → innermost, so a leaf's
+    // background lands on top of its enclosing container's. `shape`
+    // already sorted `run.containers` outer-first.
+    for container in &run.containers {
+        if !has_paint(&container.style.background, &container.style.border_color) {
             continue;
         }
         // Union rect over every leaf whose range is contained in this
@@ -124,42 +112,32 @@ pub fn compute_block_paints(run: &RichTextRun) -> Vec<BlockPaint> {
         }
         // Effective block-axis direction for the container: inherit
         // from the first descendant leaf, whose `is_rtl` already
-        // applied the same overlay cascade that included this
-        // container. Under Rtl, the container's `.left` / `.right`
-        // padding + border_width are interpreted as start / end sides
-        // (swapped to physical via `resolve_for_direction`).
+        // applied the same cascade that included this container. Under
+        // Rtl the container's `.left` / `.right` padding +
+        // border_width are start / end sides, swapped to physical by
+        // `swap_lr`.
         let is_rtl = leaves.first().map(|bl| bl.is_rtl).unwrap_or(false);
         // Inflate outward by the container's own padding.
-        let (t_pt, r_pt, b_pt, l_pt) = container
-            .delta
-            .padding
-            .map(|m| m.resolve_for_direction(base_pt, is_rtl))
-            .unwrap_or((0.0, 0.0, 0.0, 0.0));
-        let px = |pt: f64| (pt * dpi / 72.0) as f32;
-        x0 -= px(l_pt);
-        x1 += px(r_pt);
-        y0 -= px(t_pt);
-        y1 += px(b_pt);
+        let pad = swap_lr(container.style.padding_pt, is_rtl);
+        x0 -= px(pad[3]);
+        x1 += px(pad[1]);
+        y0 -= px(pad[0]);
+        y1 += px(pad[2]);
         let outer_rect = Rect::new(x0 as f64, y0 as f64, x1 as f64, y1 as f64);
         let bg = container
-            .delta
+            .style
             .background
             .as_ref()
             .map(|c| c.resolve(palette));
         let border = border_for(
-            &container.delta.border_color,
-            container.delta.border_width,
-            container.delta.border_type.as_deref(),
+            &container.style.border_color,
+            container.style.border_width_pt,
+            container.style.border_type.as_deref(),
             palette,
-            base_pt,
             dpi,
             is_rtl,
         );
-        let corner_radius = container
-            .delta
-            .border_radius
-            .map(|l| (l.resolve(base_pt) * dpi / 72.0) as f32)
-            .unwrap_or(0.0);
+        let corner_radius = px(container.style.border_radius_pt);
         if bg.is_none() && border.is_none() {
             continue;
         }
@@ -173,27 +151,21 @@ pub fn compute_block_paints(run: &RichTextRun) -> Vec<BlockPaint> {
 
     // Then leaves.
     for bl in blocks.iter() {
-        let d = &bl.delta;
-        let has_bg = d.background.is_some();
-        let has_border = d.border_color.is_some() && d.border_width.is_some();
-        if !has_bg && !has_border {
+        let d = &bl.style;
+        if !has_paint(&d.background, &d.border_color) {
             continue;
         }
         let outer_rect = bl.outer_rect();
         let bg = d.background.as_ref().map(|c| c.resolve(palette));
         let border = border_for(
             &d.border_color,
-            d.border_width,
+            d.border_width_pt,
             d.border_type.as_deref(),
             palette,
-            base_pt,
             dpi,
             bl.is_rtl,
         );
-        let corner_radius = d
-            .border_radius
-            .map(|l| (l.resolve(base_pt) * dpi / 72.0) as f32)
-            .unwrap_or(0.0);
+        let corner_radius = px(d.border_radius_pt);
         if bg.is_none() && border.is_none() {
             continue;
         }
@@ -205,40 +177,32 @@ pub fn compute_block_paints(run: &RichTextRun) -> Vec<BlockPaint> {
         });
     }
 
-    // Suppress unused warning on ancestors_of_range (kept exported
-    // for future container-level introspection).
-    let _ = ancestors_of_range;
-
     paints
 }
 
-fn has_paint(
-    bg: &Option<crate::plot::theme::ThemeColor>,
-    border: &Option<crate::plot::theme::ThemeColor>,
-) -> bool {
+fn has_paint(bg: &Option<ThemeColor>, border: &Option<ThemeColor>) -> bool {
     bg.is_some() || border.is_some()
 }
 
 fn border_for(
-    color: &Option<crate::plot::theme::ThemeColor>,
-    width: Option<crate::plot::theme::Margin>,
+    color: &Option<ThemeColor>,
+    width_pt: [f64; 4],
     dash_pattern: Option<&[crate::scales::value::LinetypeStep]>,
     palette: &Palette,
-    base_pt: f64,
     dpi: f64,
     is_rtl: bool,
 ) -> Option<BlockBorder> {
-    let (c, w) = (color.as_ref()?, width?);
+    let c = color.as_ref()?;
     // Swap l/r under Rtl so a class that sets `border_width.left = 3`
     // — semantically the start-side bar — paints on the physical
     // right instead. Mirrors the padding / margin l/r swap in
     // `run.rs`'s block-layout math.
-    let (t, r, b, l) = w.resolve_for_direction(base_pt, is_rtl);
+    let w = swap_lr(width_pt, is_rtl);
     let widths_px = [
-        (t * dpi / 72.0) as f32,
-        (r * dpi / 72.0) as f32,
-        (b * dpi / 72.0) as f32,
-        (l * dpi / 72.0) as f32,
+        (w[0] * dpi / 72.0) as f32,
+        (w[1] * dpi / 72.0) as f32,
+        (w[2] * dpi / 72.0) as f32,
+        (w[3] * dpi / 72.0) as f32,
     ];
     if widths_px.iter().all(|&w| w <= 0.0) {
         return None;
@@ -257,7 +221,8 @@ fn border_for(
 mod tests {
     use super::*;
     use crate::color::Color;
-    use crate::plot::theme::{Length, Margin, ThemeColor};
+    use crate::style_vocab::ThemeColor;
+    use crate::text::rich::length::{pt, RichMargin};
     use crate::text::rich::style::StyleDelta;
     use crate::text::rich::{RichTextRun, RichTextStyleSheet};
     use crate::text::TextStyle;
@@ -283,7 +248,6 @@ mod tests {
             &palette(),
             96.0,
         )
-        .unwrap()
     }
 
     #[test]
@@ -314,8 +278,8 @@ mod tests {
         sheet.set(
             "block_quote",
             StyleDelta {
-                padding: Some(Margin::all(Length::Abs(10.0))),
-                margin: Some(Margin::all(Length::Abs(20.0))),
+                padding: Some(RichMargin::all(pt(10.0))),
+                margin: Some(RichMargin::all(pt(20.0))),
                 background: Some(ThemeColor::Fixed(Color::from_rgba8(200, 200, 200, 255))),
                 ..StyleDelta::empty()
             },
@@ -359,7 +323,7 @@ mod tests {
             "paragraph",
             StyleDelta {
                 border_color: Some(ThemeColor::Ink),
-                border_width: Some(Margin::all(Length::Abs(1.0))),
+                border_width: Some(RichMargin::all(pt(1.0))),
                 ..StyleDelta::empty()
             },
         );
@@ -377,7 +341,7 @@ mod tests {
             "paragraph",
             StyleDelta {
                 border_color: Some(ThemeColor::Ink),
-                border_width: Some(Margin::all(Length::Abs(0.0))),
+                border_width: Some(RichMargin::all(pt(0.0))),
                 ..StyleDelta::empty()
             },
         );
@@ -395,12 +359,7 @@ mod tests {
             "paragraph",
             StyleDelta {
                 border_color: Some(ThemeColor::Ink),
-                border_width: Some(Margin::new(
-                    Length::Abs(0.0),
-                    Length::Abs(0.0),
-                    Length::Abs(0.0),
-                    Length::Abs(4.0),
-                )),
+                border_width: Some(RichMargin::new(pt(0.0), pt(0.0), pt(0.0), pt(4.0))),
                 ..StyleDelta::empty()
             },
         );
@@ -425,7 +384,7 @@ mod tests {
             "paragraph",
             StyleDelta {
                 background: Some(ThemeColor::Fixed(Color::from_rgba8(200, 200, 200, 255))),
-                padding: Some(Margin::all(Length::Abs(10.0))),
+                padding: Some(RichMargin::all(pt(10.0))),
                 ..StyleDelta::empty()
             },
         );

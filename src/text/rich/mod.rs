@@ -7,8 +7,12 @@
 //! `{selector body}` inline spans. `{selector body}` heads carry
 //! **one** selector token; combine styles by nesting:
 //! `{.red {.17 x}}`. Selector tokens are `.name` (class or CSS colour
-//! fallback), `#RRGGBB` / `#RGB` (hex colour), or `.<number>` (size
-//! in pt).
+//! fallback), `#RRGGBB` / `#RGB` (hex colour), `.<number>` (size in
+//! pt), or `#name` (style-sheet lookup in the id namespace).
+//!
+//! **`_x_` is underline**, `*x*` is italic — marquee's reading of the
+//! two emphasis delimiters. Parsing never fails; malformed markup
+//! renders as the characters that spell it.
 //!
 //! **Drawing surface.** [`draw_rich_text`] mirrors marquee's
 //! `marquee_grob` positioning vocabulary: `(x, y)` plus a
@@ -31,14 +35,18 @@
 
 pub mod anchor;
 pub mod block;
+pub mod length;
 pub mod parser;
 pub mod reduce;
 pub mod run;
 pub mod style;
 
 pub use anchor::{AnchorOffsets, HAnchor, LayoutBounds, RichAnchor, VAnchor};
-pub use block::{compute_block_paints, BlockBorder, BlockPaint};
-pub use parser::{parse, ParseError, RichEvent, Selector};
+pub use block::{BlockBorder, BlockPaint};
+pub use length::{
+    em, pt, relative, rem, FieldSet, LengthSpec, LineHeightSpec, RichMargin, StyleField,
+};
+pub use parser::{parse, RichEvent, Selector};
 pub use reduce::{reduce, BaselineRun, Block, BlockKind, BuiltRuns, InlineRun};
 pub use run::{draw_rich_text, RichBrush, RichTextRun, RichTextWidth};
-pub use style::{css_color, Direction, RichTextStyleSheet, StyleDelta};
+pub use style::{css_color, Direction, ResolvedStyle, RichTextStyleSheet, StyleDelta};

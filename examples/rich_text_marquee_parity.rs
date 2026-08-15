@@ -12,15 +12,14 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::brush::Brush;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::geometry::{Affine, Rect};
-use hephaestus::path::FillRule;
 use hephaestus::pick::PickId;
-use hephaestus::plot::theme::{HAlign, Length, Margin, Palette, ThemeColor};
+use hephaestus::plot::theme::{HAlign, Palette, ThemeColor};
 use hephaestus::primitives::rect as rect_path;
 use hephaestus::scales::value::LinetypeStep;
 use hephaestus::stroke::Stroke;
 use hephaestus::text::rich::{
-    draw_rich_text, Direction, RichAnchor, RichTextRun, RichTextStyleSheet, RichTextWidth,
-    StyleDelta,
+    draw_rich_text, pt, relative, Direction, RichAnchor, RichMargin, RichTextRun,
+    RichTextStyleSheet, RichTextWidth, StyleDelta,
 };
 use hephaestus::text::{FontFeatureSetting, TextStyle};
 use hephaestus::{Renderer, SceneBuilder};
@@ -139,14 +138,14 @@ fn main() {
     sheet.set(
         "first-line-indent",
         StyleDelta {
-            indent: Some(Length::Rel(2.0)),
+            indent: Some(relative(2.0)),
             ..StyleDelta::empty()
         },
     );
     sheet.set(
         "hanging-block",
         StyleDelta {
-            hanging: Some(Length::Rel(2.5)),
+            hanging: Some(relative(2.5)),
             ..StyleDelta::empty()
         },
     );
@@ -165,7 +164,7 @@ fn main() {
             weight: Some(700),
             color: Some(ThemeColor::Fixed(rgb8(230, 60, 60))),
             text_stroke: Some(ThemeColor::Fixed(rgb8(255, 235, 205))),
-            text_stroke_width: Some(Length::Abs(2.0)),
+            text_stroke_width: Some(pt(2.0)),
             ..StyleDelta::empty()
         },
     );
@@ -193,18 +192,18 @@ fn main() {
         "dashed-note",
         StyleDelta {
             border_color: Some(ThemeColor::Fixed(rgb8(160, 90, 40))),
-            border_width: Some(Margin::all(Length::Abs(1.5))),
+            border_width: Some(RichMargin::all(pt(1.5))),
             border_type: Some(Arc::from(vec![
                 LinetypeStep::Dash(6.0),
                 LinetypeStep::Gap(3.0),
             ])),
-            border_radius: Some(Length::Abs(4.0)),
-            padding: Some(Margin::all(Length::Abs(8.0))),
-            margin: Some(Margin {
-                top: Length::Abs(6.0),
-                right: Length::Abs(0.0),
-                bottom: Length::Abs(6.0),
-                left: Length::Abs(0.0),
+            border_radius: Some(pt(4.0)),
+            padding: Some(RichMargin::all(pt(8.0))),
+            margin: Some(RichMargin {
+                top: pt(6.0),
+                right: pt(0.0),
+                bottom: pt(6.0),
+                left: pt(0.0),
             }),
             ..StyleDelta::empty()
         },
@@ -213,19 +212,19 @@ fn main() {
         "stamped-note",
         StyleDelta {
             border_color: Some(ThemeColor::Fixed(rgb8(80, 130, 90))),
-            border_width: Some(Margin::all(Length::Abs(1.0))),
+            border_width: Some(RichMargin::all(pt(1.0))),
             border_type: Some(Arc::from(vec![
                 LinetypeStep::Dash(6.0),
                 LinetypeStep::Gap(3.0),
                 LinetypeStep::Marker(Arc::from("circle")),
                 LinetypeStep::Gap(3.0),
             ])),
-            padding: Some(Margin::all(Length::Abs(8.0))),
-            margin: Some(Margin {
-                top: Length::Abs(6.0),
-                right: Length::Abs(0.0),
-                bottom: Length::Abs(6.0),
-                left: Length::Abs(0.0),
+            padding: Some(RichMargin::all(pt(8.0))),
+            margin: Some(RichMargin {
+                top: pt(6.0),
+                right: pt(0.0),
+                bottom: pt(6.0),
+                left: pt(0.0),
             }),
             ..StyleDelta::empty()
         },
@@ -234,12 +233,12 @@ fn main() {
         "rtl-quote",
         StyleDelta {
             text_direction: Some(Direction::Rtl),
-            padding: Some(Margin::all(Length::Abs(6.0))),
-            margin: Some(Margin {
-                top: Length::Abs(6.0),
-                right: Length::Abs(0.0),
-                bottom: Length::Abs(6.0),
-                left: Length::Abs(0.0),
+            padding: Some(RichMargin::all(pt(6.0))),
+            margin: Some(RichMargin {
+                top: pt(6.0),
+                right: pt(0.0),
+                bottom: pt(6.0),
+                left: pt(0.0),
             }),
             ..StyleDelta::empty()
         },
@@ -250,18 +249,18 @@ fn main() {
             border_color: Some(ThemeColor::Fixed(rgb8(60, 100, 160))),
             // Top + left only. Same width on both so they collapse
             // into one polyline through the top-left corner.
-            border_width: Some(Margin {
-                top: Length::Abs(2.0),
-                right: Length::Abs(0.0),
-                bottom: Length::Abs(0.0),
-                left: Length::Abs(2.0),
+            border_width: Some(RichMargin {
+                top: pt(2.0),
+                right: pt(0.0),
+                bottom: pt(0.0),
+                left: pt(2.0),
             }),
-            padding: Some(Margin::all(Length::Abs(8.0))),
-            margin: Some(Margin {
-                top: Length::Abs(6.0),
-                right: Length::Abs(0.0),
-                bottom: Length::Abs(6.0),
-                left: Length::Abs(0.0),
+            padding: Some(RichMargin::all(pt(8.0))),
+            margin: Some(RichMargin {
+                top: pt(6.0),
+                right: pt(0.0),
+                bottom: pt(6.0),
+                left: pt(0.0),
             }),
             ..StyleDelta::empty()
         },
@@ -279,8 +278,7 @@ fn main() {
         &palette,
         dpi,
         RichTextWidth::Fixed(column),
-    )
-    .expect("parse rich text");
+    );
     let mut renderer = VelloRenderer::new().expect("vello renderer init");
     {
         let scene = renderer.scene();
@@ -312,9 +310,6 @@ fn main() {
             Affine::IDENTITY,
             PickId::Skip,
         );
-        // Also paint a soft page background under the block so
-        // theme.rich_text default paints don't fight the export bg.
-        let _ = FillRule::NonZero;
     }
     let mut pixels = vec![0u8; (w * h * 4) as usize];
     renderer

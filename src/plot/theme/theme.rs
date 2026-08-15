@@ -426,6 +426,10 @@ pub struct ThemePart {
     pub geom: Option<GeomTheme>,
     /// Optional locale override.
     pub locale: Option<Locale>,
+    /// Optional rich-text style-sheet override (replaces the whole
+    /// sheet). Chrome slots and text geoms that opt into markdown
+    /// resolve their selectors through it.
+    pub rich_text: Option<std::sync::Arc<crate::text::rich::RichTextStyleSheet>>,
 }
 
 impl ThemePart {
@@ -463,6 +467,7 @@ impl ThemePart {
         set_field!(strip_padding);
         set_field!(geom);
         set_field!(locale);
+        set_field!(rich_text);
         for (k, v) in &self.legend_variants {
             theme.legend_variants.insert(k.clone(), v.clone());
         }

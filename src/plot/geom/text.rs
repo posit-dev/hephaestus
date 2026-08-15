@@ -104,8 +104,10 @@ use crate::plot::value::Value;
 use crate::primitives::{rect as rect_path, rounded_rect};
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
+use crate::style_vocab::ThemeColor;
 use crate::text::rich::{
-    draw_rich_text, HAnchor, RichAnchor, RichTextRun, RichTextStyleSheet, VAnchor,
+    draw_rich_text, pt as rich_pt, HAnchor, RichAnchor, RichTextRun, RichTextStyleSheet,
+    StyleDelta as RichStyleDelta, VAnchor,
 };
 use crate::text::{draw_text, Alignment, TextRun, TextStyle};
 
@@ -169,9 +171,8 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
 pub struct TextGeom {
     pub(crate) state: GeomState,
     /// Optional per-geom style sheet used when the `"markdown"`
-    /// channel resolves `true`. `None` falls back to
-    /// [`RichTextStyleSheet::new()`] (v1); a future
-    /// `theme.rich_text` slot will be the fallback (task 10).
+    /// channel resolves `true`. `None` falls back to the theme's
+    /// `rich_text` sheet.
     pub(crate) rich_sheet: Option<Arc<RichTextStyleSheet>>,
 }
 
@@ -306,11 +307,8 @@ impl Geom for TextGeom {
         let underline_ch = channels.get("underline");
         let strikethrough_ch = channels.get("strikethrough");
         let markdown_ch = channels.get("markdown");
-        // A `RichTextStyleSheet` is expensive to build so we lazily
-        // instantiate one per draw and reuse across markdown rows.
-        let default_rich_sheet = RichTextStyleSheet::new();
         let rich_sheet: &RichTextStyleSheet =
-            self.rich_sheet.as_deref().unwrap_or(&default_rich_sheet);
+            self.rich_sheet.as_deref().unwrap_or(&ctx.theme.rich_text);
         let text_stroke_ch = channels.get("text_stroke");
         let text_linewidth_ch = channels.get("text_linewidth");
         let anchor_x_ch = channels.get("anchor_x");
@@ -428,16 +426,44 @@ impl Geom for TextGeom {
                     resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i),
                 )
                 .unwrap_or_else(default_fill);
-                let Ok(rich) = RichTextRun::new(
+                // The row's outline channels fold onto the sheet's
+                // root selector so every span inherits them; a span
+                // that sets its own `text_stroke` still wins.
+                let row_stroke = resolve_color_channel_or_theme(
+                    text_stroke_ch,
+                    text_stroke_scale,
+                    i,
+                    ctx.theme.geom.text.text_stroke.as_ref(),
+                    &ctx.theme.palette,
+                );
+                let outlined_sheet = row_stroke.map(|c| {
+                    let width_pt = resolve_number_channel_or(
+                        text_linewidth_ch,
+                        text_linewidth_scale,
+                        i,
+                        ctx.theme.geom.text.text_linewidth_pt,
+                    );
+                    let mut s = rich_sheet.clone();
+                    let base = s.get("base").cloned().unwrap_or_default();
+                    s.set(
+                        "base",
+                        RichStyleDelta {
+                            text_stroke: Some(ThemeColor::Fixed(c)),
+                            text_stroke_width: Some(rich_pt(width_pt)),
+                            ..base
+                        },
+                    );
+                    s
+                });
+                let row_sheet = outlined_sheet.as_ref().unwrap_or(rich_sheet);
+                let rich = RichTextRun::new(
                     &text,
                     &style,
                     fill_color,
-                    rich_sheet,
+                    row_sheet,
                     &ctx.theme.palette,
                     ctx.dpi,
-                ) else {
-                    continue; // parse error — skip row
-                };
+                );
                 // Wrap.
                 let x_raw = x_col.get(i);
                 let x_band_width_px = band_width_at(x_scale, &x_raw) * panel_w;
@@ -445,8 +471,9 @@ impl Geom for TextGeom {
                 let width_band_frac =
                     resolve_number_channel_or(width_band_ch, width_band_scale, i, 0.0);
                 let wrap_width_px = pt_to_px(width_pt, ctx.dpi) + width_band_frac * x_band_width_px;
+                let justify_x = resolve_justify_channel(justify_x_ch, justify_x_scale, i);
                 let (text_w, text_h) = if wrap_width_px > 0.0 && wrap_width_px.is_finite() {
-                    rich.set_max_width(wrap_width_px as f32, HAlign::Start);
+                    rich.set_max_width(wrap_width_px as f32, alignment_to_halign(justify_x));
                     (rich.content_width(), rich.current_height())
                 } else {
                     (rich.natural_width(), rich.natural_height())
@@ -551,12 +578,6 @@ impl Geom for TextGeom {
                 // Emit rich text at (draw_x, draw_y) using top-left
                 // anchor — the anchor_x/anchor_y math above already
                 // positioned the top-left of the label there.
-                //
-                // v1 limitation: the geom's `text_stroke` /
-                // `text_linewidth` channels aren't applied on
-                // markdown rows. Use per-span `text_stroke` on the
-                // rich-text sheet if a haloed markdown label is
-                // needed.
                 draw_rich_text(
                     scene,
                     &rich,
@@ -806,6 +827,18 @@ fn resolve_str_channel(
         (false, Some(s)) => s.map(&raw),
     };
     mapped.as_str().map(str::to_owned)
+}
+
+/// Map a parley `Alignment` onto the block-level [`HAlign`] the rich
+/// pipeline takes. `Justify` keeps its own variant so a rich block can
+/// stretch its lines.
+fn alignment_to_halign(a: Alignment) -> HAlign {
+    match a {
+        Alignment::Center => HAlign::Center,
+        Alignment::End => HAlign::End,
+        Alignment::Justify => HAlign::Justify,
+        _ => HAlign::Start,
+    }
 }
 
 /// Resolve a `"justify_x"` channel to a parley `Alignment`. Recognises

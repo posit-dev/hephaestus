@@ -12,6 +12,18 @@
 //! **Enabled pulldown-cmark options**: strikethrough, superscript,
 //! subscript, math. Everything else is CommonMark.
 //!
+//! **Parsing never fails.** Any input is a valid document. A malformed
+//! construct degrades to the literal characters that spell it: an
+//! unrecognised selector head renders as `{`-plus-prose, an unclosed
+//! span renders its head as text, a stray `:::` line is body text, and
+//! an unclosed `:::` fence is closed at end of input. This mirrors
+//! marquee, where markdown is a formatting convenience layered over
+//! arbitrary user strings — a label that happens to contain a brace
+//! must still render.
+//!
+//! **Underscore emphasis is underline.** `*x*` is italic and `_x_` is
+//! underline, matching marquee. `**x**` and `__x__` are both bold.
+//!
 //! **Span head is one token.** Inside a `{…}` head, everything up to
 //! the first whitespace is the selector; the rest is body text. So
 //! `{.red .17 something}` is a red-classed span whose body is the
@@ -24,15 +36,17 @@
 //! paragraph or list cannot span a div boundary — each inter-fence
 //! chunk is parsed as its own markdown block.
 //!
-//! **Literal braces.** Doubled braces escape: `{{` yields a literal
-//! `{` and `}}` yields a literal `}`. Backslash-escapes (`\{`) do
-//! **not** work here because pulldown-cmark strips backslashes off
-//! ASCII punctuation before our post-pass sees the text.
+//! **Literal braces.** Both `\{` and `{{` yield a literal `{`; `\}`
+//! and `}}` yield a literal `}`.
+//!
+//! **Raw HTML passes through as text.** There is no HTML renderer
+//! behind this pipeline, so `<b>` renders as the four characters that
+//! spell it rather than vanishing.
 
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-/// One selector on a `{selector body}` span head. The three variants
-/// mirror marquee's literal-value fallbacks.
+/// One selector on a `{selector body}` span head. The variants mirror
+/// marquee's literal-value fallbacks.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Selector {
     /// `.name` — apply the style-sheet entry `name` if defined, else
@@ -44,6 +58,10 @@ pub enum Selector {
     HexColor([u8; 3]),
     /// `.<number>` (e.g. `.17`) — numeric size in points.
     Size(f32),
+    /// `#name` where `name` isn't a hex colour — a style-sheet lookup
+    /// in the id namespace. The payload keeps the leading `#`, so id
+    /// and class entries can share one map without colliding.
+    HashName(String),
 }
 
 /// Enriched event yielded by [`parse`]. Combines pulldown-cmark's
@@ -52,8 +70,9 @@ pub enum Selector {
 ///
 /// Block-level events (paragraph, heading, blockquote, list, item,
 /// code block, rule) come in matched Start / End pairs. Inline styling
-/// (emphasis, strong, strikethrough, sup, sub, link, span) also comes
-/// in Start / End pairs. Text, code, math, and breaks are leaf events.
+/// (emphasis, underline, strong, strikethrough, sup, sub, link, span)
+/// also comes in Start / End pairs. Text, code, math, and breaks are
+/// leaf events.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RichEvent {
     // ── Block boundaries ──
@@ -115,10 +134,14 @@ pub enum RichEvent {
     DivEnd,
 
     // ── Inline style boundaries ──
-    /// Start of `*em*` / `_em_`.
+    /// Start of `*em*`.
     EmphasisStart,
     /// End of emphasis.
     EmphasisEnd,
+    /// Start of `_underline_`.
+    UnderlineStart,
+    /// End of underline.
+    UnderlineEnd,
     /// Start of `**strong**` / `__strong__`.
     StrongStart,
     /// End of strong.
@@ -157,10 +180,10 @@ pub enum RichEvent {
     Text(String),
     /// Inline `` `code` ``.
     Code(String),
-    /// Inline `$math$`. Deferred for v1 — layers below may pass it
-    /// through as literal text until an equation shaper lands.
+    /// Inline `$math$`, passed through as its source text until an
+    /// equation shaper lands.
     InlineMath(String),
-    /// Display `$$math$$`. Deferred for v1.
+    /// Display `$$math$$`, passed through as its source text.
     DisplayMath(String),
     /// A soft line break (single newline in the source).
     SoftBreak,
@@ -168,38 +191,11 @@ pub enum RichEvent {
     HardBreak,
 }
 
-/// Error returned by [`parse`]. Currently only the malformed-span
-/// varieties survive parsing — unmatched braces are a legitimate
-/// authoring mistake worth flagging up front.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ParseError {
-    /// A `{` opened a span head that never closed with a matching
-    /// `}` before end-of-input.
-    UnclosedSpan {
-        /// Byte offset into the original source where the opening
-        /// `{` sits.
-        opened_at: usize,
-    },
-    /// A `{…}` head contained no selector (e.g. `{ body}` or `{}`).
-    EmptySelector {
-        /// Byte offset of the opening `{`.
-        opened_at: usize,
-    },
-    /// A `{` head selector didn't match any recognised token form.
-    /// The selector text is captured for diagnostic use.
-    UnrecognisedSelector {
-        /// Byte offset of the opening `{`.
-        opened_at: usize,
-        /// The offending selector token.
-        token: String,
-    },
-}
-
 /// Parse `source` as marquee-flavoured markdown and produce a
-/// [`RichEvent`] stream ready for layout. Errors indicate malformed
-/// `{selector body}` spans or `:::class` / `:::` fenced-div markers;
-/// unmatched `}` characters outside any span pass through as literal
-/// text (no error).
+/// [`RichEvent`] stream ready for layout.
+///
+/// Infallible: every input is a document. See the module docs for how
+/// malformed spans and fences degrade.
 ///
 /// The parser runs in two passes:
 ///
@@ -211,39 +207,65 @@ pub enum ParseError {
 /// 2. **Chunk pass** — feed each text chunk through pulldown-cmark
 ///    (with strikethrough, sup, sub, and math extensions enabled) and
 ///    layer on the `{selector body}` inline-span post-pass.
-pub fn parse(source: &str) -> Result<Vec<RichEvent>, ParseError> {
-    let chunks = split_divs(source)?;
+pub fn parse(source: &str) -> Vec<RichEvent> {
+    let chunks = split_divs(source);
 
     let mut out: Vec<RichEvent> = Vec::new();
     for chunk in chunks {
         match chunk {
             DivChunk::DivStart(class) => out.push(RichEvent::DivStart { class }),
             DivChunk::DivEnd => out.push(RichEvent::DivEnd),
-            DivChunk::Markdown(md) => translate_chunk(&md, &mut out)?,
+            DivChunk::Markdown(md) => translate_chunk(&md, &mut out),
         }
     }
-    Ok(out)
+    out
 }
 
-fn translate_chunk(md: &str, out: &mut Vec<RichEvent>) -> Result<(), ParseError> {
+/// An inline span whose `{head` has been seen but whose `}` hasn't.
+/// Carries what it takes to un-emit the span if the close never
+/// arrives.
+struct OpenSpan {
+    /// Index into the output stream of the emitted `SpanStart`.
+    event_idx: usize,
+    /// The source characters the head consumed, replayed as literal
+    /// text when the span turns out to be unclosed.
+    head: String,
+}
+
+fn translate_chunk(md: &str, out: &mut Vec<RichEvent>) {
     if md.is_empty() {
-        return Ok(());
+        return;
     }
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_SUPERSCRIPT);
     opts.insert(Options::ENABLE_SUBSCRIPT);
     opts.insert(Options::ENABLE_MATH);
-    let parser = Parser::new_ext(md, opts);
-    let mut span_depth: usize = 0;
-    let mut code_block_depth: usize = 0;
-    for event in parser {
-        translate_event(event, out, &mut span_depth, &mut code_block_depth)?;
+    let mut state = ChunkState {
+        spans: Vec::new(),
+        code_block_depth: 0,
+        emphasis_underscore: Vec::new(),
+    };
+    for (event, range) in Parser::new_ext(md, opts).into_offset_iter() {
+        translate_event(event, range, md, out, &mut state);
     }
-    if span_depth > 0 {
-        return Err(ParseError::UnclosedSpan { opened_at: 0 });
+    // A span left open at end of chunk was never a span — replay its
+    // head as the literal text it spells.
+    for open in state.spans {
+        out[open.event_idx] = RichEvent::Text(open.head);
     }
-    Ok(())
+}
+
+/// Per-chunk translation state carried across events.
+struct ChunkState {
+    /// Spans opened by `{head` and awaiting their `}`.
+    spans: Vec<OpenSpan>,
+    /// Nesting depth of code blocks — inside one, `{`, `~`, `^` are
+    /// all literal.
+    code_block_depth: usize,
+    /// One entry per open `Tag::Emphasis`, recording whether its
+    /// delimiter was `_` (underline) rather than `*` (italic).
+    emphasis_underscore: Vec<bool>,
 }
 
 /// One piece of the source, produced by [`split_divs`].
@@ -274,18 +296,13 @@ enum DivChunk {
 ///   line end is captured as part of the class token verbatim, so
 ///   `:::note-bold` is a class name `note-bold`).
 ///
-/// Errors: an unmatched close (bare `:::` with no open on the stack)
-/// or an unclosed div at end-of-input both surface as
-/// [`ParseError::UnclosedSpan`] with a byte offset pointing at the
-/// offending fence. We reuse the span-error variant rather than
-/// growing the enum for what is effectively the same authoring
-/// mistake — an unbalanced structural marker.
-fn split_divs(source: &str) -> Result<Vec<DivChunk>, ParseError> {
+/// Unbalanced fences degrade rather than fail: a bare `:::` with no
+/// open div is body text, and any div still open at end of input is
+/// closed there.
+fn split_divs(source: &str) -> Vec<DivChunk> {
     let mut out: Vec<DivChunk> = Vec::new();
     let mut current = String::new();
-    // Stack of byte offsets of open fences, used for the unclosed-at-
-    // end-of-input error message.
-    let mut depth: Vec<usize> = Vec::new();
+    let mut depth: usize = 0;
     let mut line_start: usize = 0;
     let bytes = source.as_bytes();
     let mut i = 0;
@@ -293,20 +310,20 @@ fn split_divs(source: &str) -> Result<Vec<DivChunk>, ParseError> {
         let at_eol = i == source.len() || bytes[i] == b'\n';
         if at_eol {
             let line = &source[line_start..i];
-            match classify_line(line) {
+            let mut classified = classify_line(line);
+            if matches!(classified, DivLine::Close) && depth == 0 {
+                classified = DivLine::Body;
+            }
+            match classified {
                 DivLine::Open(class) => {
                     if !current.is_empty() {
                         out.push(DivChunk::Markdown(std::mem::take(&mut current)));
                     }
                     out.push(DivChunk::DivStart(class));
-                    depth.push(line_start);
+                    depth += 1;
                 }
                 DivLine::Close => {
-                    if depth.pop().is_none() {
-                        return Err(ParseError::UnclosedSpan {
-                            opened_at: line_start,
-                        });
-                    }
+                    depth -= 1;
                     if !current.is_empty() {
                         out.push(DivChunk::Markdown(std::mem::take(&mut current)));
                     }
@@ -326,10 +343,10 @@ fn split_divs(source: &str) -> Result<Vec<DivChunk>, ParseError> {
     if !current.is_empty() {
         out.push(DivChunk::Markdown(current));
     }
-    if let Some(opened_at) = depth.pop() {
-        return Err(ParseError::UnclosedSpan { opened_at });
+    for _ in 0..depth {
+        out.push(DivChunk::DivEnd);
     }
-    Ok(out)
+    out
 }
 
 /// Classify one raw source line as a div-open, div-close, or body.
@@ -364,66 +381,77 @@ fn classify_line(line: &str) -> DivLine {
 
 fn translate_event(
     event: Event<'_>,
+    range: std::ops::Range<usize>,
+    md: &str,
     out: &mut Vec<RichEvent>,
-    span_depth: &mut usize,
-    code_block_depth: &mut usize,
-) -> Result<(), ParseError> {
+    state: &mut ChunkState,
+) {
     match event {
+        Event::Start(Tag::Emphasis) => {
+            // CommonMark forbids intraword `_`, so the byte at the
+            // tag's start is always the opening delimiter.
+            let underscore = md.as_bytes().get(range.start) == Some(&b'_');
+            state.emphasis_underscore.push(underscore);
+            out.push(if underscore {
+                RichEvent::UnderlineStart
+            } else {
+                RichEvent::EmphasisStart
+            });
+        }
+        Event::End(TagEnd::Emphasis) => {
+            let underscore = state.emphasis_underscore.pop().unwrap_or(false);
+            out.push(if underscore {
+                RichEvent::UnderlineEnd
+            } else {
+                RichEvent::EmphasisEnd
+            });
+        }
         Event::Start(tag) => {
             if matches!(tag, Tag::CodeBlock(_)) {
-                *code_block_depth += 1;
+                state.code_block_depth += 1;
             }
             translate_start_tag(tag, out);
-            Ok(())
         }
         Event::End(tag) => {
             if matches!(tag, TagEnd::CodeBlock) {
-                *code_block_depth = code_block_depth.saturating_sub(1);
+                state.code_block_depth = state.code_block_depth.saturating_sub(1);
             }
             translate_end_tag(tag, out);
-            Ok(())
         }
         Event::Text(s) => {
-            if *code_block_depth > 0 {
+            if state.code_block_depth > 0 {
                 // Inside a code block: `{`, `~`, `^`, etc. are all
                 // literal — no inline-span pre-pass.
                 out.push(RichEvent::Text(s.into_string()));
-                return Ok(());
+                return;
             }
-            scan_text_for_spans(&s, out, span_depth)
+            // pulldown reports an escaped character as its own text
+            // event starting *after* the backslash, so a preceding
+            // `\` in the source marks the payload's first character
+            // as escaped. That character bypasses span scanning, which
+            // is what makes `\{` a literal brace.
+            let escaped_head = range.start > 0 && md.as_bytes()[range.start - 1] == b'\\';
+            if escaped_head && !s.is_empty() {
+                let head_end = next_char_boundary(&s, 0);
+                out.push(RichEvent::Text(s[..head_end].to_string()));
+                scan_text_for_spans(&s[head_end..], out, &mut state.spans);
+            } else {
+                scan_text_for_spans(&s, out, &mut state.spans);
+            }
         }
-        Event::Code(s) => {
-            out.push(RichEvent::Code(s.into_string()));
-            Ok(())
-        }
-        Event::InlineMath(s) => {
-            out.push(RichEvent::InlineMath(s.into_string()));
-            Ok(())
-        }
-        Event::DisplayMath(s) => {
-            out.push(RichEvent::DisplayMath(s.into_string()));
-            Ok(())
-        }
-        Event::SoftBreak => {
-            out.push(RichEvent::SoftBreak);
-            Ok(())
-        }
-        Event::HardBreak => {
-            out.push(RichEvent::HardBreak);
-            Ok(())
-        }
-        Event::Rule => {
-            out.push(RichEvent::Rule);
-            Ok(())
-        }
-        // HTML / footnote / task-list events are ignored for v1; images
-        // are out of scope. Task-list markers ride inside Item bodies
-        // and would surface as text; the FootnoteReference / HTML
-        // events pass through silently.
-        Event::Html(_)
-        | Event::InlineHtml(_)
-        | Event::FootnoteReference(_)
-        | Event::TaskListMarker(_) => Ok(()),
+        Event::Code(s) => out.push(RichEvent::Code(s.into_string())),
+        Event::InlineMath(s) => out.push(RichEvent::InlineMath(s.into_string())),
+        Event::DisplayMath(s) => out.push(RichEvent::DisplayMath(s.into_string())),
+        Event::SoftBreak => out.push(RichEvent::SoftBreak),
+        Event::HardBreak => out.push(RichEvent::HardBreak),
+        Event::Rule => out.push(RichEvent::Rule),
+        // Raw HTML renders as the characters that spell it — there is
+        // no HTML renderer behind this pipeline, and dropping the
+        // markup would silently lose content.
+        Event::Html(s) | Event::InlineHtml(s) => out.push(RichEvent::Text(s.into_string())),
+        // Footnote references and task-list markers have no visual
+        // vocabulary here yet.
+        Event::FootnoteReference(_) | Event::TaskListMarker(_) => {}
     }
 }
 
@@ -442,7 +470,6 @@ fn translate_start_tag(tag: Tag<'_>, out: &mut Vec<RichEvent>) {
         Tag::CodeBlock(kind) => out.push(RichEvent::CodeBlockStart {
             lang: code_block_lang(kind),
         }),
-        Tag::Emphasis => out.push(RichEvent::EmphasisStart),
         Tag::Strong => out.push(RichEvent::StrongStart),
         Tag::Strikethrough => out.push(RichEvent::StrikethroughStart),
         Tag::Superscript => out.push(RichEvent::SuperscriptStart),
@@ -452,7 +479,8 @@ fn translate_start_tag(tag: Tag<'_>, out: &mut Vec<RichEvent>) {
         }),
         // Ignored / out-of-scope tags: HtmlBlock, FootnoteDefinition,
         // DefinitionList (+ friends), Table (+ friends), Image,
-        // MetadataBlock.
+        // MetadataBlock. `Emphasis` is handled by the caller, which
+        // needs the source range to tell `*` from `_`.
         _ => {}
     }
 }
@@ -467,7 +495,6 @@ fn translate_end_tag(tag: TagEnd, out: &mut Vec<RichEvent>) {
         TagEnd::List(_) => out.push(RichEvent::ListEnd),
         TagEnd::Item => out.push(RichEvent::ItemEnd),
         TagEnd::CodeBlock => out.push(RichEvent::CodeBlockEnd),
-        TagEnd::Emphasis => out.push(RichEvent::EmphasisEnd),
         TagEnd::Strong => out.push(RichEvent::StrongEnd),
         TagEnd::Strikethrough => out.push(RichEvent::StrikethroughEnd),
         TagEnd::Superscript => out.push(RichEvent::SuperscriptEnd),
@@ -507,20 +534,16 @@ fn code_block_lang(kind: pulldown_cmark::CodeBlockKind<'_>) -> Option<String> {
 
 /// Tokenize a Text payload for `{selector body}` markers.
 ///
-/// Walks `s` character-by-character. An unescaped `{` opens a span
-/// (parse the selector, emit `SpanStart`, increment depth). An
-/// unescaped `}` closes the innermost open span (emit `SpanEnd`,
-/// decrement depth) or, if no span is open, passes through as literal
-/// text. Backslash-escapes `\{` and `\}` produce literal braces.
+/// Walks `s` character-by-character. A `{` followed by a recognised
+/// selector opens a span (emit `SpanStart`, push onto `spans`); a `{`
+/// followed by anything else is literal. A `}` closes the innermost
+/// open span (emit `SpanEnd`, pop) or, if no span is open, passes
+/// through as literal text. Doubled `{{` / `}}` are literal braces.
 ///
 /// Non-span text is coalesced into a single `Text` event per contiguous
 /// run — one call to this function may emit any number of alternating
 /// text-run and span-start events.
-fn scan_text_for_spans(
-    s: &str,
-    out: &mut Vec<RichEvent>,
-    span_depth: &mut usize,
-) -> Result<(), ParseError> {
+fn scan_text_for_spans(s: &str, out: &mut Vec<RichEvent>, spans: &mut Vec<OpenSpan>) {
     let bytes = s.as_bytes();
     let mut buf = String::new();
     let mut i = 0;
@@ -530,37 +553,45 @@ fn scan_text_for_spans(
         // include a `{` or `}` in prose without opening a span. Only
         // applied at depth 0 — inside a span, `}}` is close-plus-close
         // (matching the natural reading of nested spans like
-        // `{.red {.17 x}}`), and `{{` is open-a-new-span-plus-error
-        // (the empty selector case).
-        if *span_depth == 0 && b == b'{' && i + 1 < s.len() && bytes[i + 1] == b'{' {
+        // `{.red {.17 x}}`), and `{{` opens a span whose selector is
+        // itself a brace, which falls back to literal.
+        if spans.is_empty() && b == b'{' && i + 1 < s.len() && bytes[i + 1] == b'{' {
             buf.push('{');
             i += 2;
             continue;
         }
-        if *span_depth == 0 && b == b'}' && i + 1 < s.len() && bytes[i + 1] == b'}' {
+        if spans.is_empty() && b == b'}' && i + 1 < s.len() && bytes[i + 1] == b'}' {
             buf.push('}');
             i += 2;
             continue;
         }
         if b == b'{' {
-            // Flush accumulated text.
-            if !buf.is_empty() {
-                out.push(RichEvent::Text(std::mem::take(&mut buf)));
+            match parse_selector_head(s, i + 1) {
+                Some((selector, body_start)) => {
+                    if !buf.is_empty() {
+                        out.push(RichEvent::Text(std::mem::take(&mut buf)));
+                    }
+                    out.push(RichEvent::SpanStart { selector });
+                    spans.push(OpenSpan {
+                        event_idx: out.len() - 1,
+                        head: s[i..body_start].to_string(),
+                    });
+                    i = body_start;
+                }
+                // No selector we recognise — the brace is prose.
+                None => {
+                    buf.push('{');
+                    i += 1;
+                }
             }
-            // Parse selector head from immediately after `{`.
-            let head_start = i + 1;
-            let (selector, body_start) = parse_selector_head(s, head_start)?;
-            out.push(RichEvent::SpanStart { selector });
-            *span_depth += 1;
-            i = body_start;
             continue;
         }
-        if b == b'}' && *span_depth > 0 {
+        if b == b'}' && !spans.is_empty() {
             if !buf.is_empty() {
                 out.push(RichEvent::Text(std::mem::take(&mut buf)));
             }
             out.push(RichEvent::SpanEnd);
-            *span_depth -= 1;
+            spans.pop();
             i += 1;
             continue;
         }
@@ -574,7 +605,6 @@ fn scan_text_for_spans(
     if !buf.is_empty() {
         out.push(RichEvent::Text(buf));
     }
-    Ok(())
 }
 
 /// Step to the next UTF-8 char boundary at or after `start`. Handles
@@ -589,10 +619,10 @@ fn next_char_boundary(s: &str, start: usize) -> usize {
 
 /// Read the selector token from `s[head_start..]`, stopping at the
 /// first whitespace (which begins the body) or at `}` (empty body).
-/// Returns `(selector, body_start_index)`.
-fn parse_selector_head(s: &str, head_start: usize) -> Result<(Selector, usize), ParseError> {
+/// Returns `(selector, body_start_index)`, or `None` when the head
+/// holds no recognisable selector.
+fn parse_selector_head(s: &str, head_start: usize) -> Option<(Selector, usize)> {
     let bytes = s.as_bytes();
-    let opened_at = head_start.saturating_sub(1);
     let mut i = head_start;
     // Skip leading whitespace inside the head — a courtesy so
     // `{ .red x }` behaves identically to `{.red x}`.
@@ -607,14 +637,7 @@ fn parse_selector_head(s: &str, head_start: usize) -> Result<(Selector, usize), 
         }
         i += 1;
     }
-    let token = &s[token_start..i];
-    if token.is_empty() {
-        return Err(ParseError::EmptySelector { opened_at });
-    }
-    let selector = classify_selector(token).ok_or_else(|| ParseError::UnrecognisedSelector {
-        opened_at,
-        token: token.to_string(),
-    })?;
+    let selector = classify_selector(&s[token_start..i])?;
     // Consume exactly one separating whitespace before the body, so
     // `{.red hello}` yields body `hello` rather than ` hello`. If the
     // very next char is `}`, the body is empty — leave `i` at the `}`.
@@ -624,15 +647,21 @@ fn parse_selector_head(s: &str, head_start: usize) -> Result<(Selector, usize), 
             i += 1;
         }
     }
-    Ok((selector, i))
+    Some((selector, i))
 }
 
-/// Classify a raw selector token as one of the three [`Selector`]
-/// variants. Returns `None` for unrecognised tokens (upstream turns
-/// this into `ParseError::UnrecognisedSelector`).
+/// Classify a raw selector token as one of the [`Selector`] variants.
+/// Returns `None` for unrecognised tokens, which the caller renders as
+/// literal text.
 fn classify_selector(token: &str) -> Option<Selector> {
     if let Some(rest) = token.strip_prefix('#') {
-        return parse_hex_color(rest).map(Selector::HexColor);
+        if let Some(rgb) = parse_hex_color(rest) {
+            return Some(Selector::HexColor(rgb));
+        }
+        if is_valid_class_name(rest) {
+            return Some(Selector::HashName(token.to_string()));
+        }
+        return None;
     }
     if let Some(rest) = token.strip_prefix('.') {
         // `.17` → numeric size; `.red` → class / colour name.
@@ -688,7 +717,16 @@ mod tests {
     use super::*;
 
     fn parse_ok(s: &str) -> Vec<RichEvent> {
-        parse(s).expect("parse failed")
+        parse(s)
+    }
+
+    fn joined_text(ev: &[RichEvent]) -> String {
+        ev.iter()
+            .filter_map(|e| match e {
+                RichEvent::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
@@ -865,29 +903,29 @@ mod tests {
     }
 
     #[test]
-    fn empty_selector_errors() {
-        let err = parse("{}").unwrap_err();
-        assert!(
-            matches!(err, ParseError::EmptySelector { .. }),
-            "got {err:?}"
-        );
-        let err = parse("{  }").unwrap_err();
-        assert!(
-            matches!(err, ParseError::EmptySelector { .. }),
-            "got {err:?}"
-        );
+    fn empty_selector_renders_the_brace_literally() {
+        for src in ["{}", "{  }"] {
+            let ev = parse(src);
+            assert!(
+                !ev.iter().any(|e| matches!(e, RichEvent::SpanStart { .. })),
+                "{src:?} opened a span"
+            );
+            assert!(joined_text(&ev).contains('{'), "{src:?} lost its brace");
+        }
     }
 
     #[test]
-    fn unrecognised_selector_errors() {
-        let err = parse("{gibberish body}").unwrap_err();
-        assert!(matches!(err, ParseError::UnrecognisedSelector { .. }));
+    fn unrecognised_selector_renders_the_brace_literally() {
+        let ev = parse("{gibberish body}");
+        assert!(!ev.iter().any(|e| matches!(e, RichEvent::SpanStart { .. })));
+        assert_eq!(joined_text(&ev), "{gibberish body}");
     }
 
     #[test]
-    fn unclosed_span_errors() {
-        let err = parse("{.red never closes").unwrap_err();
-        assert!(matches!(err, ParseError::UnclosedSpan { .. }));
+    fn unclosed_span_replays_its_head_as_text() {
+        let ev = parse("{.red never closes");
+        assert!(!ev.iter().any(|e| matches!(e, RichEvent::SpanStart { .. })));
+        assert_eq!(joined_text(&ev), "{.red never closes");
     }
 
     #[test]
@@ -1033,15 +1071,22 @@ mod tests {
     }
 
     #[test]
-    fn unclosed_div_errors() {
-        let err = parse(":::note\nunclosed").unwrap_err();
-        assert!(matches!(err, ParseError::UnclosedSpan { .. }));
+    fn unclosed_div_is_closed_at_end_of_input() {
+        let ev = parse(":::note\nunclosed");
+        assert_eq!(
+            ev.iter()
+                .filter(|e| matches!(e, RichEvent::DivStart { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(ev.last(), Some(&RichEvent::DivEnd));
     }
 
     #[test]
-    fn stray_close_div_errors() {
-        let err = parse("no open\n:::").unwrap_err();
-        assert!(matches!(err, ParseError::UnclosedSpan { .. }));
+    fn stray_close_div_is_body_text() {
+        let ev = parse("no open\n:::");
+        assert!(!ev.iter().any(|e| matches!(e, RichEvent::DivEnd)));
+        assert!(joined_text(&ev).contains(":::"));
     }
 
     #[test]
@@ -1067,5 +1112,52 @@ mod tests {
                 selector: Selector::HexColor([255, 0, 0])
             }
         ));
+    }
+
+    #[test]
+    fn underscore_emphasis_is_underline_and_star_is_italic() {
+        let ev = parse_ok("*italic* and _under_ and __bold__");
+        assert!(ev.contains(&RichEvent::EmphasisStart));
+        assert!(ev.contains(&RichEvent::EmphasisEnd));
+        assert!(ev.contains(&RichEvent::UnderlineStart));
+        assert!(ev.contains(&RichEvent::UnderlineEnd));
+        assert!(ev.contains(&RichEvent::StrongStart));
+    }
+
+    #[test]
+    fn backslash_escaped_braces_are_literal() {
+        // Pins the pulldown behaviour the escape detection relies on:
+        // an escaped character starts its own text event one byte
+        // after the backslash.
+        let ev = parse_ok(r"a \{.red b\} c");
+        assert!(!ev.iter().any(|e| matches!(e, RichEvent::SpanStart { .. })));
+        assert_eq!(joined_text(&ev), "a {.red b} c");
+    }
+
+    #[test]
+    fn hash_name_selector_survives_as_a_lookup_key() {
+        let ev = parse_ok("{#note body}");
+        let span = ev
+            .iter()
+            .find(|e| matches!(e, RichEvent::SpanStart { .. }))
+            .expect("span start");
+        assert!(matches!(
+            span,
+            RichEvent::SpanStart {
+                selector: Selector::HashName(n)
+            } if n == "#note"
+        ));
+    }
+
+    #[test]
+    fn raw_html_renders_as_literal_text() {
+        let ev = parse_ok("<b>hi</b>");
+        assert_eq!(joined_text(&ev), "<b>hi</b>");
+    }
+
+    #[test]
+    fn text_before_a_failed_span_is_not_lost() {
+        let ev = parse_ok("before {nope after");
+        assert_eq!(joined_text(&ev), "before {nope after");
     }
 }

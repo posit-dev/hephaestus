@@ -79,20 +79,7 @@ impl<T> Element<T> {
     }
 }
 
-/// Horizontal alignment — for text justification within a slot, and
-/// for `hjust`-style anchor positioning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum HAlign {
-    /// Align with the start edge (left in left-to-right scripts).
-    #[default]
-    Start,
-    /// Centre within the slot.
-    Center,
-    /// Align with the end edge (right in left-to-right scripts).
-    End,
-    /// Stretch lines to fill the slot width.
-    Justify,
-}
+pub use crate::style_vocab::{HAlign, VAlign};
 
 /// Which region a plot-level text slot (title / subtitle / caption)
 /// aligns to.
@@ -108,20 +95,6 @@ pub enum AlignTo {
     /// legends). A centered title sits over the whole figure.
     /// Mirrors ggplot2's `plot.title.position = "plot"`.
     Plot,
-}
-
-/// Vertical alignment — for text baseline positioning within a slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum VAlign {
-    /// Align with the top edge of the slot.
-    Top,
-    /// Centre vertically within the slot.
-    #[default]
-    Middle,
-    /// Align with the alphabetic baseline within the slot.
-    Baseline,
-    /// Align with the bottom edge of the slot.
-    Bottom,
 }
 
 /// Text rotation — either an absolute angle or a semantic

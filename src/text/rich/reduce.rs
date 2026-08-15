@@ -18,9 +18,10 @@
 
 use std::ops::Range;
 
+use super::length::pt;
 use super::parser::{RichEvent, Selector};
-use super::style::{css_color, RichTextStyleSheet, StyleDelta};
-use crate::plot::theme::{Length, ThemeColor};
+use super::style::{css_color, ResolvedStyle, RichTextStyleSheet, StyleDelta};
+use crate::style_vocab::ThemeColor;
 
 // ─── Output types ──────────────────────────────────────────────────────────
 
@@ -32,8 +33,8 @@ pub struct BuiltRuns {
     pub text: String,
     /// One entry per contiguous run of text sharing the same active
     /// style. The `range` is a byte range into [`Self::text`]; the
-    /// `delta` is fully resolved (all active spans overlaid). Runs
-    /// never overlap and cover [`Self::text`] end to end.
+    /// `style` has every active span already cascaded in. Runs never
+    /// overlap and cover [`Self::text`] end to end.
     pub inline: Vec<InlineRun>,
     /// One entry per baseline-shifted range (from `sup` / `sub` etc.).
     /// Non-empty and non-overlapping; the em shift is applied to the
@@ -51,17 +52,19 @@ pub struct BuiltRuns {
 pub struct InlineRun {
     /// Byte range into [`BuiltRuns::text`].
     pub range: Range<usize>,
-    /// Resolved style — every active span's delta already overlaid.
-    pub delta: StyleDelta,
+    /// Resolved style — every active span's delta already cascaded in,
+    /// lengths in points.
+    pub style: ResolvedStyle,
 }
 
-/// One baseline-shifted range.
+/// One baseline-shifted range. Nested shifts overlap; the innermost
+/// is emitted first, so a first-match lookup finds it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BaselineRun {
     /// Byte range into [`BuiltRuns::text`].
     pub range: Range<usize>,
-    /// Shift in em (positive = up).
-    pub shift_em: f32,
+    /// Accumulated shift in points (positive = up).
+    pub shift_pt: f64,
 }
 
 /// One block-level boundary recorded during reduction. The layout
@@ -77,11 +80,11 @@ pub struct Block {
     /// emission — `0` at the top level. Used by the layout pass to
     /// resolve nested div boxes.
     pub depth: usize,
-    /// Overlaid style delta for the block (from `paragraph`, `h1`,
+    /// Resolved style for the block (from `paragraph`, `h1`,
     /// `block_quote`, custom div classes, etc.). The layout pass
     /// reads margin / padding / background / border / indent /
-    /// hanging / bullet from here.
-    pub delta: StyleDelta,
+    /// hanging / bullet from here, all in points.
+    pub style: ResolvedStyle,
 }
 
 /// The kind of block a [`Block`] describes. Enough to route the
@@ -103,11 +106,14 @@ pub enum BlockKind {
         /// First number for ordered lists; 1 for unordered.
         start: u64,
     },
-    /// One item within a list. `ordinal` is the 1-based item index
-    /// used to render numeric markers (`1.`, `2.`, …).
+    /// One item within a list.
     ListItem {
         /// 1-based item index within its parent list.
         ordinal: u64,
+        /// The marker text (`•`, `1.`, …) the layout pass shapes and
+        /// places in the list's start gutter. `None` when the sheet
+        /// suppresses markers at this nesting depth.
+        marker: Option<String>,
     },
     /// Fenced code block. `lang` is the info string on the opening
     /// fence, `None` for indented or unlabelled blocks.
@@ -133,17 +139,27 @@ pub enum BlockKind {
 /// / pops one stack frame and, for text nodes, appends to the output
 /// string plus one `InlineRun` (coalesced when the resolved delta
 /// hasn't changed since the previous run).
-pub fn reduce(events: &[RichEvent], sheet: &RichTextStyleSheet) -> BuiltRuns {
+pub fn reduce(events: &[RichEvent], sheet: &RichTextStyleSheet, base: &ResolvedStyle) -> BuiltRuns {
+    // The document root is the caller's base style with the sheet's
+    // `base` selector applied, so a sheet can set run-wide line height
+    // or tracking without every block repeating it.
+    let root = match sheet.get("base") {
+        Some(d) => base.apply(d, base, base.size_pt),
+        None => base.clone(),
+    };
     let mut r = Reducer {
         text: String::new(),
         inline: Vec::new(),
         baseline_shifts: Vec::new(),
         blocks: Vec::new(),
-        inline_stack: Vec::new(),
-        baseline_stack: Vec::new(),
+        base_size_pt: base.size_pt,
+        style_stack: vec![StyleFrame {
+            style: root,
+            baseline_start: None,
+        }],
         block_stack: Vec::new(),
         list_stack: Vec::new(),
-        pending_item_marker: None,
+        item_body_pending: false,
         synthetic_paragraph_open: false,
     };
     for e in events {
@@ -152,17 +168,16 @@ pub fn reduce(events: &[RichEvent], sheet: &RichTextStyleSheet) -> BuiltRuns {
     r.finish()
 }
 
-/// Reduction state — one instance per reduction. Public for
-/// intra-crate reuse; not part of the module's external API.
+/// Reduction state — one instance per reduction.
 struct Reducer {
     text: String,
     inline: Vec<InlineRun>,
     baseline_shifts: Vec<BaselineRun>,
     blocks: Vec<Block>,
-    /// Stack of active inline deltas (deepest span at top).
-    inline_stack: Vec<StyleDelta>,
-    /// Stack of active baseline shifts (nested sup / sub etc.).
-    baseline_stack: Vec<BaselineFrame>,
+    /// The run's base font size — what `Rem` lengths measure against.
+    base_size_pt: f64,
+    /// Cascade stack, root at index 0 and the deepest span on top.
+    style_stack: Vec<StyleFrame>,
     /// Stack of open blocks (paragraph, heading, blockquote, item,
     /// code block, div). Each frame remembers the start offset and
     /// the delta at open-time.
@@ -170,8 +185,7 @@ struct Reducer {
     /// Stack of active lists — records ordered/start plus the running
     /// item ordinal so nested lists number independently.
     list_stack: Vec<ListFrame>,
-    /// Marker text queued at `ItemStart` waiting to be pushed into
-    /// the item's body paragraph. Cleared once the body opens.
+    /// True between an `ItemStart` and the item's body opening.
     ///
     /// **Tight vs loose detection.** CommonMark distinguishes tight
     /// lists (items with no blank lines) from loose lists (any blank
@@ -182,7 +196,7 @@ struct Reducer {
     /// means loose (body styled as `paragraph`, with its
     /// `margin.bottom`), anything else means tight (body styled as
     /// `list_item_body`, no default margin).
-    pending_item_marker: Option<String>,
+    item_body_pending: bool,
     /// True while a synthetic Paragraph body (opened for a tight
     /// list item by [`Reducer::ensure_item_body_open`]) sits on the
     /// block stack. Cleared when a nested container start or
@@ -198,18 +212,19 @@ struct BlockFrame {
     /// Depth of the block-container stack when this block opened
     /// (0 for top-level).
     depth: usize,
-    /// Overlaid delta captured at open-time. Used verbatim on
-    /// [`Block::delta`] so the layout pass reads the same style
+    /// Resolved style captured at open-time. Used verbatim on
+    /// [`Block::style`] so the layout pass reads the same style
     /// regardless of what child spans nested inside later.
-    delta: StyleDelta,
+    style: ResolvedStyle,
 }
 
-/// One frame on the baseline-shift stack — carries the em shift for
-/// the topmost sup/sub or explicit-baseline span.
-struct BaselineFrame {
-    /// Byte offset in the output text where the shift begins.
-    start: usize,
-    shift_em: f32,
+/// One frame on the cascade stack.
+struct StyleFrame {
+    /// The resolved style in effect while this frame is on the stack.
+    style: ResolvedStyle,
+    /// Byte offset where this frame's baseline shift began, when the
+    /// frame changed the shift relative to its parent.
+    baseline_start: Option<usize>,
 }
 
 /// One list container's running state.
@@ -235,11 +250,7 @@ impl Reducer {
                 // wrap their content in an explicit paragraph). Use
                 // the `paragraph` class so this paragraph picks up
                 // paragraph's default margin.bottom.
-                if let Some(marker) = self.pending_item_marker.take() {
-                    self.open_block(BlockKind::Paragraph, sheet, "paragraph");
-                    self.push_text(&marker);
-                    return;
-                }
+                self.item_body_pending = false;
                 self.open_block(BlockKind::Paragraph, sheet, "paragraph");
             }
             RichEvent::ParagraphEnd => self.close_block(),
@@ -277,15 +288,8 @@ impl Reducer {
                 // apply.
                 if nested {
                     if let Some(frame) = self.block_stack.last_mut() {
-                        let base = frame
-                            .delta
-                            .margin
-                            .unwrap_or(crate::plot::theme::Margin::ZERO);
-                        frame.delta.margin = Some(crate::plot::theme::Margin {
-                            top: crate::plot::theme::Length::Abs(0.0),
-                            bottom: crate::plot::theme::Length::Abs(0.0),
-                            ..base
-                        });
+                        frame.style.margin_pt[0] = 0.0;
+                        frame.style.margin_pt[2] = 0.0;
                     }
                 }
             }
@@ -303,7 +307,16 @@ impl Reducer {
                         (n, f.ordered)
                     })
                     .unwrap_or((1, false));
-                let list_depth = self.list_stack.len().saturating_sub(1);
+                // Bullets cycle on consecutive *unordered* nesting:
+                // an `ol` between two `ul`s restarts the bullet set,
+                // matching marquee.
+                let bullet_depth = self
+                    .list_stack
+                    .iter()
+                    .rev()
+                    .take_while(|f| !f.ordered)
+                    .count()
+                    .saturating_sub(1);
                 // Open the ListItem as a *container*. Its body
                 // paragraph opens later, only once we've seen enough
                 // events to know whether the item is tight (bare
@@ -312,15 +325,9 @@ impl Reducer {
                 // `paragraph` class with margin). This matches
                 // CommonMark's tight/loose semantics without pre-
                 // committing to a style.
-                self.open_block(BlockKind::ListItem { ordinal }, sheet, "list_item");
-                self.pending_item_marker = compute_marker(sheet, ordered, ordinal, list_depth);
-                // An item with no marker still needs a body paragraph
-                // to hold its (possibly empty) content — a plain
-                // empty string is stored so downstream `push_text`
-                // is a no-op but body opening still fires.
-                if self.pending_item_marker.is_none() {
-                    self.pending_item_marker = Some(String::new());
-                }
+                let marker = compute_marker(sheet, ordered, ordinal, bullet_depth);
+                self.open_block(BlockKind::ListItem { ordinal, marker }, sheet, "list_item");
+                self.item_body_pending = true;
             }
             RichEvent::ItemEnd => {
                 // Empty item — no content-carrying event ever fired,
@@ -368,14 +375,12 @@ impl Reducer {
             RichEvent::Rule => {
                 self.commit_pending_item_body(sheet, true);
                 let start = self.text.len();
-                let delta = self
-                    .lookup_class("hr", sheet)
-                    .unwrap_or_else(StyleDelta::empty);
+                let style = self.resolve_class("hr", sheet);
                 self.blocks.push(Block {
                     range: start..start,
                     kind: BlockKind::Rule,
                     depth: self.container_depth(),
-                    delta,
+                    style,
                 });
                 self.push_paragraph_break();
             }
@@ -394,26 +399,16 @@ impl Reducer {
             // ── Inline style boundaries ──
             RichEvent::EmphasisStart => self.push_inline("em", sheet),
             RichEvent::EmphasisEnd => self.pop_inline(),
+            RichEvent::UnderlineStart => self.push_inline("underline", sheet),
+            RichEvent::UnderlineEnd => self.pop_inline(),
             RichEvent::StrongStart => self.push_inline("strong", sheet),
             RichEvent::StrongEnd => self.pop_inline(),
             RichEvent::StrikethroughStart => self.push_inline("del", sheet),
             RichEvent::StrikethroughEnd => self.pop_inline(),
-            RichEvent::SuperscriptStart => {
-                self.push_inline("sup", sheet);
-                self.push_baseline("sup", sheet);
-            }
-            RichEvent::SuperscriptEnd => {
-                self.pop_baseline();
-                self.pop_inline();
-            }
-            RichEvent::SubscriptStart => {
-                self.push_inline("sub", sheet);
-                self.push_baseline("sub", sheet);
-            }
-            RichEvent::SubscriptEnd => {
-                self.pop_baseline();
-                self.pop_inline();
-            }
+            RichEvent::SuperscriptStart => self.push_inline("sup", sheet),
+            RichEvent::SuperscriptEnd => self.pop_inline(),
+            RichEvent::SubscriptStart => self.push_inline("sub", sheet),
+            RichEvent::SubscriptEnd => self.pop_inline(),
             RichEvent::LinkStart { .. } => self.push_inline("link", sheet),
             RichEvent::LinkEnd => self.pop_inline(),
             RichEvent::SpanStart { selector } => self.push_selector(selector, sheet),
@@ -447,37 +442,27 @@ impl Reducer {
         }
     }
 
-    /// Open a tight-item body paragraph if we have a pending item
-    /// marker but no body has opened yet. Called by every content-
-    /// carrying leaf event — the *first* such event after an
-    /// `ItemStart` decides "this item is tight" and creates the
-    /// `list_item_body` paragraph on the fly.
+    /// Open a tight-item body paragraph if an item is waiting for one.
+    /// Called by every content-carrying leaf event — the *first* such
+    /// event after an `ItemStart` decides "this item is tight" and
+    /// creates the `list_item_body` paragraph on the fly.
     fn ensure_item_body_open(&mut self, sheet: &RichTextStyleSheet) {
-        if let Some(marker) = self.pending_item_marker.take() {
+        if self.item_body_pending {
+            self.item_body_pending = false;
             self.open_block(BlockKind::Paragraph, sheet, "list_item_body");
             self.synthetic_paragraph_open = true;
-            if !marker.is_empty() {
-                self.push_text(&marker);
-            }
         }
     }
 
     /// Close whatever body-in-progress the current list item has
-    /// open. If a marker was queued but never got a chance to open
-    /// a body (the item was empty or its first content is a nested
-    /// container), synthesize a marker-only paragraph so the marker
-    /// still renders. If a synthetic body is already open, close it.
+    /// open. An item whose first content is a nested container still
+    /// needs an empty leaf so the layout pass has somewhere to anchor
+    /// its marker. If a synthetic body is already open, close it.
     /// No-op when neither state applies.
     fn commit_pending_item_body(&mut self, sheet: &RichTextStyleSheet, close_synthetic: bool) {
-        if let Some(marker) = self.pending_item_marker.take() {
-            // Marker-only paragraph — the item had no direct text
-            // before the next block boundary. Style as tight
-            // (`list_item_body`) since there's no content to justify
-            // a loose paragraph's margin.
+        if self.item_body_pending {
+            self.item_body_pending = false;
             self.open_block(BlockKind::Paragraph, sheet, "list_item_body");
-            if !marker.is_empty() {
-                self.push_text(&marker);
-            }
             self.close_block();
         } else if close_synthetic && self.synthetic_paragraph_open {
             self.close_block();
@@ -501,43 +486,32 @@ impl Reducer {
             self.push_paragraph_break();
         }
         let start = self.text.len();
-        let delta = self
-            .lookup_class(class_key, sheet)
-            .unwrap_or_else(StyleDelta::empty);
+        let style = self.resolve_class(class_key, sheet);
         let depth = self.container_depth();
-        // Push the block's delta onto the inline stack so its
-        // glyph-level fields (size / weight / family / colour) cascade
-        // into the block's content. Block-only fields (margin,
-        // padding, background, border, indent, hanging, bullet) ride
-        // along too, but `run.rs`'s `apply_delta_range` ignores them
-        // — they're consumed by the block-layout pass reading the
-        // `Block` list. This is what makes `# Big` actually render at
-        // 2× size and bold, and `` `code` `` at code_block's
-        // monospace family.
-        // Push only the glyph-level fields onto the inline cascade —
-        // block-only fields (background, border_*, padding, margin,
-        // indent, hanging, bullet, align, lineheight) must not
-        // reappear as inline chip/border on the block's own text.
-        self.inline_stack.push(delta.glyph_only());
+        // The block paints its own box, so the cascade its content
+        // inherits carries only the glyph-level fields — otherwise a
+        // descendant span would repaint the background and border.
+        self.push_style(style.for_inline());
         self.block_stack.push(BlockFrame {
             start,
             kind,
             depth,
-            delta,
+            style,
         });
     }
 
     fn close_block(&mut self) {
-        // Pop inline first (LIFO). block_stack and inline_stack were
-        // pushed in the same order, so they stay balanced.
-        self.inline_stack.pop();
+        // Pop the cascade frame first (LIFO). block_stack and
+        // style_stack were pushed in the same order, so they stay
+        // balanced.
+        self.pop_style();
         if let Some(frame) = self.block_stack.pop() {
             let end = self.text.len();
             self.blocks.push(Block {
                 range: frame.start..end,
                 kind: frame.kind,
                 depth: frame.depth,
-                delta: frame.delta,
+                style: frame.style,
             });
         }
     }
@@ -571,38 +545,65 @@ impl Reducer {
     }
 
     fn push_inline(&mut self, key: &str, sheet: &RichTextStyleSheet) {
-        let delta = self
-            .lookup_class(key, sheet)
-            .unwrap_or_else(StyleDelta::empty);
-        self.inline_stack.push(delta);
+        let style = self.resolve_class(key, sheet);
+        self.push_style(style);
     }
 
     fn pop_inline(&mut self) {
-        self.inline_stack.pop();
+        self.pop_style();
     }
 
-    fn push_baseline(&mut self, key: &str, sheet: &RichTextStyleSheet) {
-        // Read the sheet's baseline_em on the way in so a user-tuned
-        // `sup` / `sub` overrides the default.
-        let shift = sheet
-            .get(key)
-            .and_then(|d| d.baseline_em)
-            .unwrap_or_default();
-        self.baseline_stack.push(BaselineFrame {
-            start: self.text.len(),
-            shift_em: shift,
+    /// The style currently in effect — top of the cascade stack.
+    fn top(&self) -> &ResolvedStyle {
+        &self.style_stack.last().expect("cascade root").style
+    }
+
+    /// Cascade `delta` onto the current top of stack and push the
+    /// result. The frame opens a baseline range whenever it moves the
+    /// accumulated shift, so `sup` / `sub` and any span that sets
+    /// `baseline` all produce draw-time offsets.
+    fn push_resolved(&mut self, delta: &StyleDelta) {
+        let n = self.style_stack.len();
+        let parent = &self.style_stack[n - 1].style;
+        let grandparent = &self.style_stack[n.saturating_sub(2)].style;
+        let style = parent.apply(delta, grandparent, self.base_size_pt);
+        self.push_style(style);
+    }
+
+    fn push_style(&mut self, style: ResolvedStyle) {
+        let baseline_start = (style.baseline_pt != self.top().baseline_pt).then_some(self.text.len());
+        self.style_stack.push(StyleFrame {
+            style,
+            baseline_start,
         });
     }
 
-    fn pop_baseline(&mut self) {
-        if let Some(frame) = self.baseline_stack.pop() {
+    fn pop_style(&mut self) {
+        // Never pop the root frame — an unbalanced event stream would
+        // otherwise leave the cascade empty.
+        if self.style_stack.len() <= 1 {
+            return;
+        }
+        let frame = self.style_stack.pop().expect("non-root frame");
+        if let Some(start) = frame.baseline_start {
             let end = self.text.len();
-            if end > frame.start && frame.shift_em != 0.0 {
+            if end > start {
                 self.baseline_shifts.push(BaselineRun {
-                    range: frame.start..end,
-                    shift_em: frame.shift_em,
+                    range: start..end,
+                    shift_pt: frame.style.baseline_pt,
                 });
             }
+        }
+    }
+
+    /// Resolve a sheet selector against the current cascade top.
+    fn resolve_class(&self, key: &str, sheet: &RichTextStyleSheet) -> ResolvedStyle {
+        let n = self.style_stack.len();
+        let parent = &self.style_stack[n - 1].style;
+        let grandparent = &self.style_stack[n.saturating_sub(2)].style;
+        match sheet.get(key) {
+            Some(d) => parent.apply(d, grandparent, self.base_size_pt),
+            None => parent.clone(),
         }
     }
 
@@ -619,12 +620,18 @@ impl Reducer {
                 color: Some(ThemeColor::Fixed(rgb8_to_color(*r, *g, *b))),
                 ..StyleDelta::empty()
             },
-            Selector::Size(pt) => StyleDelta {
-                size: Some(Length::Abs(*pt as f64)),
+            Selector::Size(size_pt) => StyleDelta {
+                size: Some(pt(*size_pt as f64)),
                 ..StyleDelta::empty()
             },
+            // An id the sheet doesn't define carries no style — the
+            // span's content still renders, matching the unknown-class
+            // fallback.
+            Selector::HashName(name) => self
+                .lookup_class(name, sheet)
+                .unwrap_or_else(StyleDelta::empty),
         };
-        self.inline_stack.push(delta);
+        self.push_resolved(&delta);
     }
 
     fn lookup_class(&self, name: &str, sheet: &RichTextStyleSheet) -> Option<StyleDelta> {
@@ -638,29 +645,22 @@ impl Reducer {
         if s.is_empty() {
             return;
         }
-        let resolved = self.resolved_inline();
         let start = self.text.len();
         self.text.push_str(s);
         let end = self.text.len();
-        // If the last run has identical delta and abuts `start`, merge.
+        // If the last run carries the same style and abuts `start`,
+        // extend it rather than opening a second run.
+        let style = self.top().clone();
         if let Some(last) = self.inline.last_mut() {
-            if last.range.end == start && last.delta == resolved {
+            if last.range.end == start && last.style == style {
                 last.range.end = end;
                 return;
             }
         }
         self.inline.push(InlineRun {
             range: start..end,
-            delta: resolved,
+            style,
         });
-    }
-
-    fn resolved_inline(&self) -> StyleDelta {
-        let mut d = StyleDelta::empty();
-        for frame in &self.inline_stack {
-            d = d.overlay(frame);
-        }
-        d
     }
 
     fn finish(mut self) -> BuiltRuns {
@@ -669,8 +669,9 @@ impl Reducer {
         // in tests that feed hand-rolled streams. In production the
         // parser guarantees matched pairs.
         while self.block_stack.pop().is_some() {}
-        while self.baseline_stack.pop().is_some() {}
-        while self.inline_stack.pop().is_some() {}
+        while self.style_stack.len() > 1 {
+            self.pop_style();
+        }
         BuiltRuns {
             text: self.text,
             inline: self.inline,
@@ -680,7 +681,7 @@ impl Reducer {
     }
 }
 
-/// Compute the marker text for a list item at the given ordinal +
+/// The marker text for a list item at the given ordinal and bullet
 /// nesting depth. `None` when the sheet's `list_item.bullet` vector
 /// is empty (user opts out of markers) or when the depth's bullet is
 /// an empty string.
@@ -688,22 +689,22 @@ fn compute_marker(
     sheet: &RichTextStyleSheet,
     ordered: bool,
     ordinal: u64,
-    list_depth: usize,
+    bullet_depth: usize,
 ) -> Option<String> {
     if ordered {
-        return Some(format!("{ordinal}. "));
+        return Some(format!("{ordinal}."));
     }
     match sheet.get("list_item").and_then(|d| d.bullet.as_ref()) {
         Some(v) if v.is_empty() => None,
         Some(v) => {
-            let s = &v[list_depth % v.len()];
+            let s = &v[bullet_depth % v.len()];
             if s.is_empty() {
                 None
             } else {
-                Some(format!("{s} "))
+                Some(s.clone())
             }
         }
-        None => Some("• ".to_string()),
+        None => Some("•".to_string()),
     }
 }
 
@@ -727,135 +728,162 @@ fn rgb8_to_color(r: u8, g: u8, b: u8) -> crate::color::Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text::rich::length::{em, relative, RichMargin};
     use crate::text::rich::parser::parse;
+    use crate::text::TextStyle;
+
+    const BASE_PT: f64 = 10.0;
+
+    fn base_style() -> ResolvedStyle {
+        ResolvedStyle::from_base(&TextStyle::new(BASE_PT as f32))
+    }
+
+    fn reduce_with(src: &str, sheet: &RichTextStyleSheet) -> BuiltRuns {
+        reduce(&parse(src), sheet, &base_style())
+    }
 
     fn reduce_ok(src: &str) -> BuiltRuns {
-        let events = parse(src).expect("parse");
-        reduce(&events, &RichTextStyleSheet::new())
+        reduce_with(src, &RichTextStyleSheet::new())
+    }
+
+    fn run_for<'a>(r: &'a BuiltRuns, text: &str) -> &'a InlineRun {
+        r.inline
+            .iter()
+            .find(|run| &r.text[run.range.clone()] == text)
+            .unwrap_or_else(|| panic!("no run for {text:?} in {:?}", r.text))
+    }
+
+    fn items(r: &BuiltRuns) -> Vec<&Block> {
+        r.blocks
+            .iter()
+            .filter(|b| matches!(b.kind, BlockKind::ListItem { .. }))
+            .collect()
+    }
+
+    fn marker_of(b: &Block) -> Option<&str> {
+        match &b.kind {
+            BlockKind::ListItem { marker, .. } => marker.as_deref(),
+            _ => None,
+        }
     }
 
     #[test]
-    fn plain_text_yields_one_run() {
+    fn plain_text_yields_one_run_at_the_base_style() {
         let r = reduce_ok("hello");
         assert_eq!(r.text, "hello");
         assert_eq!(r.inline.len(), 1);
         assert_eq!(r.inline[0].range, 0..5);
-        // Glyph-level fields must all be unset — the paragraph
-        // delta on top of the stack may carry `margin` (a block-only
-        // field), which is fine because it's ignored by parley
-        // shaping.
-        let d = &r.inline[0].delta;
-        assert!(d.weight.is_none());
-        assert!(d.italic.is_none());
+        let d = &r.inline[0].style;
+        let base = base_style();
+        assert_eq!(d.weight, base.weight);
+        assert_eq!(d.italic, base.italic);
         assert!(d.family.is_none());
-        assert!(d.size.is_none());
+        assert_eq!(d.size_pt, BASE_PT);
         assert!(d.color.is_none());
-        assert!(d.underline.is_none());
-        assert!(d.strikethrough.is_none());
-        assert!(d.baseline_em.is_none());
+        assert!(!d.underline);
+        assert!(!d.strikethrough);
+        assert_eq!(d.baseline_pt, 0.0);
         assert!(r.baseline_shifts.is_empty());
+    }
+
+    #[test]
+    fn a_block_style_does_not_leak_its_box_onto_its_text() {
+        // `code_block` paints a background; the text inside it must
+        // not carry that background as an inline chip too.
+        let r = reduce_ok("```\nlet x = 1;\n```");
+        let body = r
+            .inline
+            .iter()
+            .find(|run| r.text[run.range.clone()].contains("let"))
+            .expect("code body run");
+        assert!(body.style.background.is_none());
+        assert_eq!(body.style.padding_pt, [0.0; 4]);
+        assert_eq!(body.style.family.as_deref(), Some("monospace"));
     }
 
     #[test]
     fn bold_run_gets_strong_weight() {
         let r = reduce_ok("a **bold** c");
-        // Runs: "a ", "bold", " c" — three runs.
         assert_eq!(r.inline.len(), 3, "got {:?}", r.inline);
-        let bold_run = &r.inline[1];
-        let bold_text = &r.text[bold_run.range.clone()];
-        assert_eq!(bold_text, "bold");
-        assert_eq!(bold_run.delta.weight, Some(700));
+        assert_eq!(run_for(&r, "bold").style.weight, 700);
     }
 
     #[test]
     fn nested_strong_and_em_overlay() {
         let r = reduce_ok("***both***");
-        // The bolded-italic span should have both weight and italic set.
-        let both = r
-            .inline
-            .iter()
-            .find(|run| &r.text[run.range.clone()] == "both")
-            .expect("run for 'both'");
-        assert_eq!(both.delta.weight, Some(700));
-        assert_eq!(both.delta.italic, Some(true));
+        let both = run_for(&r, "both");
+        assert_eq!(both.style.weight, 700);
+        assert!(both.style.italic);
     }
 
     #[test]
-    fn sup_produces_baseline_shift() {
+    fn underscore_emphasis_underlines() {
+        let r = reduce_ok("a _u_ b");
+        assert!(run_for(&r, "u").style.underline);
+        assert!(!run_for(&r, "u").style.italic);
+    }
+
+    #[test]
+    fn sup_produces_a_positive_baseline_shift() {
         // pulldown-cmark's `^…^` matcher wants word boundaries around
         // the caret pair, so we surround with spaces here.
         let r = reduce_ok("a ^2^ b");
         assert_eq!(r.baseline_shifts.len(), 1, "got {:?}", r.baseline_shifts);
         let bs = &r.baseline_shifts[0];
-        let shifted = &r.text[bs.range.clone()];
-        assert_eq!(shifted, "2");
-        assert!(bs.shift_em > 0.0, "sup shift should be positive");
+        assert_eq!(&r.text[bs.range.clone()], "2");
+        assert!(bs.shift_pt > 0.0, "sup shift should be positive");
     }
 
     #[test]
     fn sub_baseline_shift_is_negative() {
         let r = reduce_ok("a ~2~ b");
         assert_eq!(r.baseline_shifts.len(), 1);
-        assert!(r.baseline_shifts[0].shift_em < 0.0);
+        assert!(r.baseline_shifts[0].shift_pt < 0.0);
+    }
+
+    #[test]
+    fn sup_inside_sup_stops_shrinking_but_keeps_lifting() {
+        let r = reduce_ok("a ^b ^c^^ d");
+        let outer = run_for(&r, "b ");
+        let inner = run_for(&r, "c");
+        assert!((outer.style.size_pt - inner.style.size_pt).abs() < 1e-9);
+        assert!(inner.style.baseline_pt > outer.style.baseline_pt);
     }
 
     #[test]
     fn hex_color_span_sets_color() {
         let r = reduce_ok("{#ff8800 warm}");
-        let warm = r
-            .inline
-            .iter()
-            .find(|run| &r.text[run.range.clone()] == "warm")
-            .expect("run for 'warm'");
-        match &warm.delta.color {
-            Some(ThemeColor::Fixed(_)) => {}
-            other => panic!("expected Fixed colour, got {other:?}"),
-        }
+        assert!(matches!(
+            run_for(&r, "warm").style.color,
+            Some(ThemeColor::Fixed(_))
+        ));
     }
 
     #[test]
     fn css_color_fallback_when_class_undefined() {
-        // No `steelblue` class in the sheet → CSS-name fallback.
         let r = reduce_ok("{.steelblue hi}");
-        let hi = r
-            .inline
-            .iter()
-            .find(|run| &r.text[run.range.clone()] == "hi")
-            .expect("run for 'hi'");
         assert!(
-            matches!(&hi.delta.color, Some(ThemeColor::Fixed(_))),
+            matches!(run_for(&r, "hi").style.color, Some(ThemeColor::Fixed(_))),
             "expected CSS colour fallback"
         );
     }
 
     #[test]
-    fn size_selector_sets_size() {
+    fn size_selector_sets_an_absolute_size() {
         let r = reduce_ok("{.17 x}");
-        let x = r
-            .inline
-            .iter()
-            .find(|run| &r.text[run.range.clone()] == "x")
-            .expect("run for 'x'");
-        assert!(matches!(x.delta.size, Some(Length::Abs(v)) if (v - 17.0).abs() < 1e-6));
+        assert!((run_for(&r, "x").style.size_pt - 17.0).abs() < 1e-6);
     }
 
     #[test]
     fn nested_selectors_overlay() {
-        // Outer red + inner size=17 → the interior text has both.
         let r = reduce_ok("{.red {.17 x}}");
-        let x = r
-            .inline
-            .iter()
-            .find(|run| &r.text[run.range.clone()] == "x")
-            .expect("run for 'x'");
-        assert!(matches!(x.delta.color, Some(ThemeColor::Fixed(_))));
-        assert!(matches!(x.delta.size, Some(Length::Abs(_))));
+        let x = run_for(&r, "x");
+        assert!(matches!(x.style.color, Some(ThemeColor::Fixed(_))));
+        assert!((x.style.size_pt - 17.0).abs() < 1e-6);
     }
 
     #[test]
     fn user_class_overrides_css_name() {
-        // Define a `red` class in the sheet — the sheet entry wins
-        // over the CSS colour fallback.
         let mut sheet = RichTextStyleSheet::new();
         sheet.set(
             "red",
@@ -864,24 +892,26 @@ mod tests {
                 ..StyleDelta::empty()
             },
         );
-        let events = parse("{.red word}").unwrap();
-        let r = reduce(&events, &sheet);
-        let word = r
-            .inline
-            .iter()
-            .find(|run| &r.text[run.range.clone()] == "word")
-            .unwrap();
-        assert_eq!(word.delta.weight, Some(900));
+        let r = reduce_with("{.red word}", &sheet);
+        let word = run_for(&r, "word");
+        assert_eq!(word.style.weight, 900);
         // Colour comes from the CSS fallback ONLY when the class is
         // undefined — so redefining `red` clears the colour bit.
-        assert!(word.delta.color.is_none());
+        assert!(word.style.color.is_none());
+    }
+
+    #[test]
+    fn unknown_hash_selector_leaves_the_body_unstyled() {
+        let r = reduce_ok("{#nosuchid word}");
+        let word = run_for(&r, "word");
+        assert!(word.style.color.is_none());
+        assert_eq!(word.style.weight, base_style().weight);
     }
 
     #[test]
     fn two_paragraphs_separated_by_double_newline() {
         let r = reduce_ok("first\n\nsecond");
         assert!(r.text.contains("\n\n"), "got text = {:?}", r.text);
-        // Two block frames of kind Paragraph.
         let paragraph_count = r
             .blocks
             .iter()
@@ -898,66 +928,75 @@ mod tests {
             .iter()
             .find(|b| matches!(&b.kind, BlockKind::Div { class } if class == "warning"))
             .expect("div block");
-        // The div's range must cover the paragraph inside it.
-        let body_run = r
-            .inline
-            .iter()
-            .find(|run| &r.text[run.range.clone()] == "body")
-            .unwrap();
+        let body_run = run_for(&r, "body");
         assert!(div.range.start <= body_run.range.start);
         assert!(div.range.end >= body_run.range.end);
     }
 
     #[test]
-    fn heading_text_inherits_heading_delta() {
-        // # Big — the "Big" text run should carry weight=700 and a
-        // Rel-size delta from the h1 sheet entry.
+    fn heading_text_inherits_heading_style() {
         let r = reduce_ok("# Big");
-        let big = r
-            .inline
-            .iter()
-            .find(|run| &r.text[run.range.clone()] == "Big")
-            .expect("run for 'Big'");
-        assert_eq!(
-            big.delta.weight,
-            Some(700),
-            "h1 weight should apply to text"
-        );
+        let big = run_for(&r, "Big");
+        assert_eq!(big.style.weight, 700, "h1 weight should apply to text");
         assert!(
-            matches!(big.delta.size, Some(Length::Rel(m)) if m > 1.5),
-            "h1 size delta should apply to text, got {:?}",
-            big.delta.size
+            big.style.size_pt > BASE_PT * 1.5,
+            "h1 size should apply to text, got {}",
+            big.style.size_pt
         );
     }
 
     #[test]
+    fn heading_margins_measure_against_the_headings_own_size() {
+        let r = reduce_ok("# Big");
+        let heading = r
+            .blocks
+            .iter()
+            .find(|b| matches!(b.kind, BlockKind::Heading(1)))
+            .expect("h1 block");
+        // `em(1)` of top margin at 2.25 × 10pt.
+        assert!(
+            (heading.style.margin_pt[0] - heading.style.size_pt).abs() < 1e-6,
+            "got {:?} for a {}pt heading",
+            heading.style.margin_pt,
+            heading.style.size_pt
+        );
+    }
+
+    #[test]
+    fn sizes_compound_through_nested_divs() {
+        let mut sheet = RichTextStyleSheet::new();
+        sheet.set(
+            "half",
+            StyleDelta {
+                size: Some(relative(0.5)),
+                ..StyleDelta::empty()
+            },
+        );
+        let r = reduce_with(":::half\n:::half\ndeep\n:::\n:::", &sheet);
+        assert!((run_for(&r, "deep").style.size_pt - BASE_PT * 0.25).abs() < 1e-6);
+    }
+
+    #[test]
     fn nested_strong_inside_heading_composes() {
-        // # **bold** heading — every run in the heading should carry
-        // h1's size delta AND weight=700 (h1 sets it; strong also sets
-        // it on the "bold" sub-range, matching value).
         let r = reduce_ok("# **bold** heading");
-        // The heading block boundary tells us where the header text
-        // lives — everything inline that overlaps it should inherit
-        // h1's delta.
         let heading = r
             .blocks
             .iter()
             .find(|b| matches!(b.kind, BlockKind::Heading(1)))
             .expect("h1 block");
         for inline in &r.inline {
-            // Only inline runs that overlap the heading's range.
             if inline.range.start >= heading.range.end || inline.range.end <= heading.range.start {
                 continue;
             }
             assert!(
-                matches!(inline.delta.size, Some(Length::Rel(m)) if m > 1.5),
-                "run {:?} inside h1 should inherit Rel size, got {:?}",
+                inline.style.size_pt > BASE_PT * 1.5,
+                "run {:?} inside h1 should inherit the heading size, got {}",
                 &r.text[inline.range.clone()],
-                inline.delta.size
+                inline.style.size_pt
             );
             assert_eq!(
-                inline.delta.weight,
-                Some(700),
+                inline.style.weight,
+                700,
                 "run {:?} inside h1 should be bold",
                 &r.text[inline.range.clone()]
             );
@@ -972,79 +1011,43 @@ mod tests {
             .iter()
             .find(|run| r.text[run.range.clone()].contains("let"))
             .expect("code body run");
-        assert_eq!(body.delta.family.as_deref(), Some("monospace"));
-    }
-
-    #[test]
-    fn heading_block_carries_heading_delta() {
-        let r = reduce_ok("# Big\n\nSmall");
-        let heading = r
-            .blocks
-            .iter()
-            .find(|b| matches!(b.kind, BlockKind::Heading(1)))
-            .expect("h1 block");
-        assert!(
-            matches!(heading.delta.size, Some(Length::Rel(m)) if m > 1.5),
-            "h1 size should be >= 1.5× base, got {:?}",
-            heading.delta.size
-        );
+        assert_eq!(body.style.family.as_deref(), Some("monospace"));
     }
 
     #[test]
     fn list_items_carry_ordinal() {
         let r = reduce_ok("1. one\n2. two\n3. three");
-        let items: Vec<&Block> = r
-            .blocks
-            .iter()
-            .filter(|b| matches!(b.kind, BlockKind::ListItem { .. }))
-            .collect();
-        assert_eq!(items.len(), 3);
-        let ords: Vec<u64> = items
+        let ords: Vec<u64> = items(&r)
             .iter()
             .map(|b| match b.kind {
-                BlockKind::ListItem { ordinal } => ordinal,
+                BlockKind::ListItem { ordinal, .. } => ordinal,
                 _ => unreachable!(),
             })
             .collect();
-        assert_eq!(ords, vec![1, 2, 3]);
+        assert_eq!(ords.len(), 3);
+        assert!(ords.contains(&1) && ords.contains(&2) && ords.contains(&3));
     }
 
     #[test]
-    fn unordered_item_prepends_bullet_marker() {
+    fn markers_ride_on_the_item_not_in_its_text() {
         let r = reduce_ok("- alpha");
-        // The item's byte range must cover both "• " and "alpha".
-        let item = r
-            .blocks
-            .iter()
-            .find(|b| matches!(b.kind, BlockKind::ListItem { .. }))
-            .expect("list item");
-        let body = &r.text[item.range.clone()];
-        assert!(
-            body.starts_with("• "),
-            "expected bullet marker at start; body = {body:?}"
+        let item = items(&r)[0];
+        assert_eq!(marker_of(item), Some("•"));
+        assert_eq!(
+            r.text[item.range.clone()].trim(),
+            "alpha",
+            "the marker must not be injected into the item's text"
         );
-        assert!(body.contains("alpha"));
     }
 
     #[test]
-    fn ordered_item_prepends_number_marker() {
+    fn ordered_markers_carry_the_ordinal() {
         let r = reduce_ok("1. one\n2. two");
-        let items: Vec<&Block> = r
-            .blocks
-            .iter()
-            .filter(|b| matches!(b.kind, BlockKind::ListItem { .. }))
-            .collect();
-        assert_eq!(items.len(), 2);
-        let body0 = &r.text[items[0].range.clone()];
-        let body1 = &r.text[items[1].range.clone()];
-        assert!(
-            body0.starts_with("1. "),
-            "expected '1. ' marker; body = {body0:?}"
-        );
-        assert!(
-            body1.starts_with("2. "),
-            "expected '2. ' marker; body = {body1:?}"
-        );
+        let it = items(&r);
+        assert_eq!(it.len(), 2);
+        let mut markers: Vec<&str> = it.iter().filter_map(|b| marker_of(b)).collect();
+        markers.sort_unstable();
+        assert_eq!(markers, vec!["1.", "2."]);
     }
 
     #[test]
@@ -1057,18 +1060,8 @@ mod tests {
                 ..StyleDelta::empty()
             },
         );
-        let events = parse("- one").unwrap();
-        let r = reduce(&events, &sheet);
-        let item = r
-            .blocks
-            .iter()
-            .find(|b| matches!(b.kind, BlockKind::ListItem { .. }))
-            .unwrap();
-        let body = &r.text[item.range.clone()];
-        assert!(
-            body.starts_with("★ "),
-            "expected custom marker; body = {body:?}"
-        );
+        let r = reduce_with("- one", &sheet);
+        assert_eq!(marker_of(items(&r)[0]), Some("★"));
     }
 
     #[test]
@@ -1081,24 +1074,12 @@ mod tests {
                 ..StyleDelta::empty()
             },
         );
-        let events = parse("- naked").unwrap();
-        let r = reduce(&events, &sheet);
-        let item = r
-            .blocks
-            .iter()
-            .find(|b| matches!(b.kind, BlockKind::ListItem { .. }))
-            .unwrap();
-        let body = &r.text[item.range.clone()];
-        assert!(
-            body.starts_with("naked"),
-            "empty bullet vec should suppress marker; body = {body:?}"
-        );
+        let r = reduce_with("- naked", &sheet);
+        assert_eq!(marker_of(items(&r)[0]), None);
     }
 
     #[test]
     fn empty_string_entry_suppresses_at_that_depth() {
-        // Two-entry vector, second entry is empty — the outer list
-        // gets `•`, the nested list gets no marker.
         let mut sheet = RichTextStyleSheet::new();
         sheet.set(
             "list_item",
@@ -1107,31 +1088,16 @@ mod tests {
                 ..StyleDelta::empty()
             },
         );
-        let events = parse("- outer\n  - inner").unwrap();
-        let r = reduce(&events, &sheet);
-        let items: Vec<&Block> = r
-            .blocks
-            .iter()
-            .filter(|b| matches!(b.kind, BlockKind::ListItem { .. }))
-            .collect();
-        assert_eq!(items.len(), 2);
+        let r = reduce_with("- outer\n  - inner", &sheet);
+        let it = items(&r);
+        assert_eq!(it.len(), 2);
         // Blocks emit in close order — inner before outer.
-        let inner_body = &r.text[items[0].range.clone()];
-        let outer_body = &r.text[items[1].range.clone()];
-        assert!(
-            inner_body.starts_with("inner"),
-            "inner (depth-1) should have no marker; body = {inner_body:?}"
-        );
-        assert!(
-            outer_body.starts_with("• "),
-            "outer (depth-0) should keep `•`; body = {outer_body:?}"
-        );
+        assert_eq!(marker_of(it[0]), None, "depth 1 is suppressed");
+        assert_eq!(marker_of(it[1]), Some("•"));
     }
 
     #[test]
     fn bullet_cycles_through_vector_by_depth() {
-        // Two-entry vector: `•` at even depths, `◦` at odd. A
-        // three-level nested list cycles: `•`, `◦`, `•`.
         let mut sheet = RichTextStyleSheet::new();
         sheet.set(
             "list_item",
@@ -1140,46 +1106,38 @@ mod tests {
                 ..StyleDelta::empty()
             },
         );
-        let events = parse("- a\n  - b\n    - c").unwrap();
-        let r = reduce(&events, &sheet);
-        let items: Vec<&Block> = r
-            .blocks
-            .iter()
-            .filter(|b| matches!(b.kind, BlockKind::ListItem { .. }))
-            .collect();
-        assert_eq!(items.len(), 3);
-        // Close order = deepest first — items[0] is depth 2, [1] is
-        // depth 1, [2] is depth 0.
-        assert!(&r.text[items[0].range.clone()].starts_with("• c")); // depth 2 → cycles to `•`
-        assert!(&r.text[items[1].range.clone()].starts_with("◦ b")); // depth 1 → `◦`
-        assert!(&r.text[items[2].range.clone()].starts_with("• a")); // depth 0 → `•`
+        let r = reduce_with("- a\n  - b\n    - c", &sheet);
+        let it = items(&r);
+        assert_eq!(it.len(), 3);
+        // Close order = deepest first.
+        assert_eq!(marker_of(it[0]), Some("•"), "depth 2 cycles back");
+        assert_eq!(marker_of(it[1]), Some("◦"));
+        assert_eq!(marker_of(it[2]), Some("•"));
+    }
+
+    #[test]
+    fn an_ordered_list_restarts_the_bullet_cycle() {
+        // `ul > ol > ul`: the innermost unordered list is one level
+        // of *unordered* nesting deep, so it returns to `•`.
+        let r = reduce_ok("- a\n  1. b\n     - c");
+        let inner = items(&r)
+            .into_iter()
+            .find(|b| r.text[b.range.clone()].contains('c'))
+            .expect("innermost item");
+        assert_eq!(marker_of(inner), Some("•"));
     }
 
     #[test]
     fn tight_list_items_use_list_item_body_class() {
-        // A tight list — CommonMark: no blank lines between items,
-        // no explicit paragraphs in pulldown's event stream. Body
-        // paragraphs open with the `list_item_body` class (empty
-        // delta) rather than `paragraph` (which carries margin.bottom).
         let mut sheet = RichTextStyleSheet::new();
-        // Use a distinct margin on `list_item_body` so we can detect
-        // it in the paragraph's delta.
         sheet.set(
             "list_item_body",
             StyleDelta {
-                margin: Some(crate::plot::theme::Margin::new(
-                    Length::Abs(0.0),
-                    Length::Abs(0.0),
-                    Length::Abs(1.0),
-                    Length::Abs(0.0),
-                )),
+                margin: Some(RichMargin::new(pt(0.0), pt(0.0), pt(1.0), pt(0.0))),
                 ..StyleDelta::empty()
             },
         );
-        let events = parse("- a\n- b").unwrap();
-        let r = reduce(&events, &sheet);
-        // Both item bodies should carry the `list_item_body` margin,
-        // NOT the `paragraph` margin (0.5rel).
+        let r = reduce_with("- a\n- b", &sheet);
         let bodies: Vec<&Block> = r
             .blocks
             .iter()
@@ -1187,30 +1145,17 @@ mod tests {
             .collect();
         assert!(bodies.len() >= 2, "expected two body paragraphs");
         for body in bodies {
-            let expected = crate::plot::theme::Margin::new(
-                Length::Abs(0.0),
-                Length::Abs(0.0),
-                Length::Abs(1.0),
-                Length::Abs(0.0),
-            );
             assert_eq!(
-                body.delta.margin,
-                Some(expected),
-                "tight body should carry list_item_body margin, got {:?}",
-                body.delta.margin
+                body.style.margin_pt,
+                [0.0, 0.0, 1.0, 0.0],
+                "tight body should carry the list_item_body margin"
             );
         }
     }
 
     #[test]
     fn loose_list_items_use_paragraph_class() {
-        // Loose list — blank line between items. CommonMark forces
-        // pulldown to wrap the items' content in Paragraph events.
-        // Body paragraphs open with the `paragraph` class (with
-        // margin.bottom = Rel(0.5)) rather than `list_item_body`.
-        let sheet = RichTextStyleSheet::new();
-        let events = parse("- a\n\n- b").unwrap();
-        let r = reduce(&events, &sheet);
+        let r = reduce_ok("- a\n\n- b");
         let bodies: Vec<&Block> = r
             .blocks
             .iter()
@@ -1218,73 +1163,55 @@ mod tests {
             .collect();
         assert!(bodies.len() >= 2, "expected two body paragraphs");
         for body in bodies {
-            // Paragraph's default margin has Rel(0.5) bottom.
-            match body.delta.margin {
-                Some(m) => assert!(
-                    matches!(m.bottom, Length::Rel(v) if v > 0.0),
-                    "loose body should have paragraph's margin.bottom, got {:?}",
-                    m.bottom
-                ),
-                None => panic!("loose body should have a margin"),
-            }
+            assert!(
+                body.style.margin_pt[2] > 0.0,
+                "loose body should carry paragraph's bottom margin, got {:?}",
+                body.style.margin_pt
+            );
         }
     }
 
     #[test]
-    fn default_sheet_uses_three_marker_cycle() {
-        // The built-in `list_item` entry ships `• ◦ ▪` — verify the
-        // second-nesting bullet is `◦`, not `•`.
-        let events = parse("- outer\n  - inner").unwrap();
-        let r = reduce(&events, &RichTextStyleSheet::new());
-        let items: Vec<&Block> = r
+    fn lists_indent_their_items_through_container_padding() {
+        let r = reduce_ok("- a");
+        let list = r
             .blocks
             .iter()
-            .filter(|b| matches!(b.kind, BlockKind::ListItem { .. }))
+            .find(|b| matches!(b.kind, BlockKind::List { .. }))
+            .expect("list container");
+        // The default sheet gives lists `em(2)` of start padding.
+        assert!((list.style.padding_pt[3] - BASE_PT * 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn nested_lists_drop_the_container_margin() {
+        let r = reduce_ok("- a\n  - b");
+        let lists: Vec<&Block> = r
+            .blocks
+            .iter()
+            .filter(|b| matches!(b.kind, BlockKind::List { .. }))
             .collect();
-        assert_eq!(items.len(), 2);
-        // items[0] = inner (depth 1), items[1] = outer (depth 0).
+        assert_eq!(lists.len(), 2);
+        // Close order = inner first.
+        assert_eq!(lists[0].style.margin_pt[0], 0.0);
+        assert_eq!(lists[0].style.margin_pt[2], 0.0);
         assert!(
-            r.text[items[0].range.clone()].starts_with("◦ "),
-            "inner should use second entry `◦`; body = {:?}",
-            &r.text[items[0].range.clone()]
-        );
-        assert!(
-            r.text[items[1].range.clone()].starts_with("• "),
-            "outer should use first entry `•`; body = {:?}",
-            &r.text[items[1].range.clone()]
+            lists[1].style.margin_pt[0] > 0.0,
+            "outer list keeps its gap"
         );
     }
 
     #[test]
     fn nested_ordered_lists_number_independently() {
-        // Outer list has three items; the middle item contains a
-        // nested ordered list starting from 1.
         let r = reduce_ok("1. first\n2. second\n   1. inner1\n   2. inner2\n3. third");
-        let items: Vec<&Block> = r
-            .blocks
-            .iter()
-            .filter(|b| matches!(b.kind, BlockKind::ListItem { .. }))
-            .collect();
-        // Five items total: 3 outer + 2 inner. The nested ordinals
-        // reset at inner1 because each `ListStart` pushes a fresh
-        // frame.
-        assert_eq!(items.len(), 5);
-        let ords: Vec<u64> = items
+        let ords: Vec<u64> = items(&r)
             .iter()
             .map(|b| match b.kind {
-                BlockKind::ListItem { ordinal } => ordinal,
+                BlockKind::ListItem { ordinal, .. } => ordinal,
                 _ => unreachable!(),
             })
             .collect();
-        // Emission order is block-close order (children before parent),
-        // so inner1 and inner2 come out before the outer item that
-        // contains them closes.
-        assert!(
-            ords.contains(&1) && ords.contains(&2) && ords.contains(&3),
-            "expected outer ordinals 1..=3, got {ords:?}"
-        );
-        // Two `1`s: one for the outer's first item, one for the
-        // nested list's first item.
+        assert_eq!(ords.len(), 5);
         assert_eq!(
             ords.iter().filter(|&&n| n == 1).count(),
             2,
@@ -1293,28 +1220,49 @@ mod tests {
     }
 
     #[test]
+    fn base_selector_applies_run_wide() {
+        let mut sheet = RichTextStyleSheet::new();
+        sheet.set(
+            "base",
+            StyleDelta {
+                tracking: Some(50.0),
+                ..StyleDelta::empty()
+            },
+        );
+        let r = reduce_with("plain", &sheet);
+        assert_eq!(r.inline[0].style.tracking, 50.0);
+    }
+
+    #[test]
+    fn em_lengths_inside_a_scaled_block_follow_that_block() {
+        let mut sheet = RichTextStyleSheet::new();
+        sheet.set(
+            "big",
+            StyleDelta {
+                size: Some(relative(2.0)),
+                padding: Some(RichMargin::all(em(1.0))),
+                ..StyleDelta::empty()
+            },
+        );
+        let r = reduce_with(":::big\nx\n:::", &sheet);
+        let div = r
+            .blocks
+            .iter()
+            .find(|b| matches!(&b.kind, BlockKind::Div { .. }))
+            .expect("div");
+        assert!((div.style.padding_pt[3] - BASE_PT * 2.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn inline_runs_coalesce_across_soft_breaks() {
-        // A soft break is a SoftBreak event that becomes a space in
-        // the output text — the two adjacent plain-text pieces plus
-        // the space should collapse into one run at the paragraph's
-        // resolved delta (all glyph-level fields still None, only
-        // the block-only `margin` set from the `paragraph` sheet
-        // entry).
         let r = reduce_ok("first\nsecond");
         assert_eq!(r.text, "first second");
         assert_eq!(r.inline.len(), 1, "got {:?}", r.inline);
-        let d = &r.inline[0].delta;
-        assert!(d.weight.is_none());
-        assert!(d.italic.is_none());
-        assert!(d.family.is_none());
-        assert!(d.size.is_none());
-        assert!(d.color.is_none());
     }
 
     #[test]
     fn depth_increments_inside_nested_divs() {
         let r = reduce_ok(":::outer\n:::inner\nx\n:::\n:::");
-        // The inner div should have depth = 1 (outer is 0).
         let inner = r
             .blocks
             .iter()

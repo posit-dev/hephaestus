@@ -472,7 +472,7 @@ impl CompositionChrome {
                     r,
                     col,
                     Span::rc(rs, cs),
-                    text_cell_for_element(t, &el, root_pt, ctx.dpi),
+                    text_cell_for_element(t, &el, root_pt, ctx.dpi, theme),
                 );
             }
         }
@@ -602,7 +602,23 @@ impl CompositionChrome {
                 .angle
                 .or(text_defaults.angle)
                 .expect("text_concrete_defaults sets angle");
-            let run = TextRun::new(title, &super::plot::text_style_from(&el, root_pt), dpi);
+            let style = super::plot::text_style_from(&el, root_pt);
+            if matches!(el.markdown, Some(true)) {
+                super::plot::draw_axis_title_markdown(
+                    scene,
+                    title,
+                    &style,
+                    color.resolve(&theme.palette),
+                    &theme.palette,
+                    &theme.rich_text,
+                    dpi,
+                    rect,
+                    side,
+                    angle,
+                );
+                continue;
+            }
+            let run = TextRun::new(title, &style, dpi);
             let outline = super::plot::text_outline_from(&el, &theme.palette, dpi);
             draw_axis_title(
                 scene,
