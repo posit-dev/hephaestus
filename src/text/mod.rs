@@ -213,7 +213,7 @@ impl Default for LineHeight {
 ///
 /// Additional axes (letter spacing, decorations, …) are added as
 /// chrome paths and geoms call for them.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TextStyle {
     /// Font size in points (1pt = 1/72 inch).
     pub size_pt: f32,

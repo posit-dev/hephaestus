@@ -94,6 +94,8 @@
 //! Hit-testing falls out of the standard rasterised-pick path (alpha
 //! coverage in the pick scene).
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::brush::Brush;
@@ -106,8 +108,8 @@ use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
 use crate::style_vocab::ThemeColor;
 use crate::text::rich::{
-    draw_rich_text, pt as rich_pt, HAnchor, RichAnchor, RichTextRun, RichTextStyleSheet,
-    StyleDelta as RichStyleDelta, VAnchor,
+    draw_rich_text, pt as rich_pt, HAnchor, RichAnchor, RichKey, RichShapeCache, RichTextRun,
+    RichTextStyleSheet, RichTextWidth, StyleDelta as RichStyleDelta, VAnchor,
 };
 use crate::text::{draw_text, Alignment, TextRun, TextStyle};
 
@@ -174,6 +176,16 @@ pub struct TextGeom {
     /// channel resolves `true`. `None` falls back to the theme's
     /// `rich_text` sheet.
     pub(crate) rich_sheet: Option<Arc<RichTextStyleSheet>>,
+    /// Shaped markdown rows, reused across frames. Cleared whenever
+    /// the geom's data is replaced.
+    pub(crate) rich_cache: RichShapeCache,
+    /// Sheets derived from the base one by folding a row's
+    /// `text_stroke` / `text_linewidth` onto its root selector, keyed
+    /// by `(base sheet identity, colour, width)`. Held so the derived
+    /// sheet keeps one identity across frames — [`RichShapeCache`]
+    /// keys on that identity, and a fresh `Arc` per frame would miss
+    /// every time.
+    pub(crate) rich_outline_sheets: RefCell<HashMap<(usize, u128, u64), Arc<RichTextStyleSheet>>>,
 }
 
 crate::impl_geom_inherents!(TextGeom);
@@ -191,6 +203,14 @@ impl TextGeom {
     /// `Plot::update_geom(&mut TextGeom)`.
     pub fn set_rich_sheet(&mut self, sheet: Arc<RichTextStyleSheet>) {
         self.rich_sheet = Some(sheet);
+    }
+
+    /// Clear the shaped-markdown cache. The key covers the sheet's
+    /// identity, so swapping sheets doesn't require this — it exists
+    /// for callers that mutate a sheet in place despite the
+    /// immutable-once-installed convention.
+    pub fn clear_rich_cache(&mut self) {
+        self.rich_cache.clear();
     }
 
     /// Clear any per-geom rich-text sheet override — falls back to
@@ -218,6 +238,8 @@ impl BuildableGeom for TextGeom {
         TextGeom {
             state,
             rich_sheet: None,
+            rich_cache: RichShapeCache::new(),
+            rich_outline_sheets: RefCell::new(HashMap::new()),
         }
     }
 }
@@ -235,6 +257,11 @@ impl Geom for TextGeom {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+
+    fn invalidate_caches(&mut self) {
+        self.rich_cache.clear();
+        self.rich_outline_sheets.borrow_mut().clear();
     }
 
     fn draw(&self, scene: &mut dyn SceneBuilder, ctx: &GeomContext<'_>) {
@@ -307,8 +334,9 @@ impl Geom for TextGeom {
         let underline_ch = channels.get("underline");
         let strikethrough_ch = channels.get("strikethrough");
         let markdown_ch = channels.get("markdown");
-        let rich_sheet: &RichTextStyleSheet =
-            self.rich_sheet.as_deref().unwrap_or(&ctx.theme.rich_text);
+        // Kept as an `Arc` so the shape cache can key on its identity.
+        let rich_sheet: &Arc<RichTextStyleSheet> =
+            self.rich_sheet.as_ref().unwrap_or(&ctx.theme.rich_text);
         let text_stroke_ch = channels.get("text_stroke");
         let text_linewidth_ch = channels.get("text_linewidth");
         let anchor_x_ch = channels.get("anchor_x");
@@ -401,11 +429,8 @@ impl Geom for TextGeom {
             // marquee-flavoured markdown via [`RichTextRun`]. The
             // geom's `bg_*` channels compose: they wrap the whole
             // label; markdown's block-level backgrounds paint inside.
-            //
-            // v1 limitation: the `text_stroke` per-glyph outline is
-            // not applied on markdown rows (RichTextRun doesn't
-            // expose an outline surface). Fall back to the plain-
-            // text path if outlines are needed on this label.
+            // The row's `text_stroke` / `text_linewidth` fold onto the
+            // sheet's root selector so every span inherits the halo.
             let markdown = resolve_bool_channel_or(
                 markdown_ch,
                 markdown_scale,
@@ -436,34 +461,41 @@ impl Geom for TextGeom {
                     ctx.theme.geom.text.text_stroke.as_ref(),
                     &ctx.theme.palette,
                 );
-                let outlined_sheet = row_stroke.map(|c| {
-                    let width_pt = resolve_number_channel_or(
-                        text_linewidth_ch,
-                        text_linewidth_scale,
-                        i,
-                        ctx.theme.geom.text.text_linewidth_pt,
-                    );
-                    let mut s = rich_sheet.clone();
-                    let base = s.get("base").cloned().unwrap_or_default();
-                    s.set(
-                        "base",
-                        RichStyleDelta {
-                            text_stroke: Some(ThemeColor::Fixed(c)),
-                            text_stroke_width: Some(rich_pt(width_pt)),
-                            ..base
-                        },
-                    );
-                    s
-                });
-                let row_sheet = outlined_sheet.as_ref().unwrap_or(rich_sheet);
-                let rich = RichTextRun::new(
-                    &text,
-                    &style,
-                    fill_color,
-                    row_sheet,
-                    &ctx.theme.palette,
-                    ctx.dpi,
-                );
+                let row_sheet = match row_stroke {
+                    None => Arc::clone(rich_sheet),
+                    Some(c) => {
+                        let width_pt = resolve_number_channel_or(
+                            text_linewidth_ch,
+                            text_linewidth_scale,
+                            i,
+                            ctx.theme.geom.text.text_linewidth_pt,
+                        );
+                        let [r, g, b, a] = c.components;
+                        let color_bits = (r.to_bits() as u128) << 96
+                            | (g.to_bits() as u128) << 64
+                            | (b.to_bits() as u128) << 32
+                            | a.to_bits() as u128;
+                        let key = (
+                            Arc::as_ptr(rich_sheet) as usize,
+                            color_bits,
+                            width_pt.to_bits(),
+                        );
+                        let mut sheets = self.rich_outline_sheets.borrow_mut();
+                        Arc::clone(sheets.entry(key).or_insert_with(|| {
+                            let mut s = (**rich_sheet).clone();
+                            let base = s.get("base").cloned().unwrap_or_default();
+                            s.set(
+                                "base",
+                                RichStyleDelta {
+                                    text_stroke: Some(ThemeColor::Fixed(c)),
+                                    text_stroke_width: Some(rich_pt(width_pt)),
+                                    ..base
+                                },
+                            );
+                            Arc::new(s)
+                        }))
+                    }
+                };
                 // Wrap.
                 let x_raw = x_col.get(i);
                 let x_band_width_px = band_width_at(x_scale, &x_raw) * panel_w;
@@ -472,8 +504,38 @@ impl Geom for TextGeom {
                     resolve_number_channel_or(width_band_ch, width_band_scale, i, 0.0);
                 let wrap_width_px = pt_to_px(width_pt, ctx.dpi) + width_band_frac * x_band_width_px;
                 let justify_x = resolve_justify_channel(justify_x_ch, justify_x_scale, i);
-                let (text_w, text_h) = if wrap_width_px > 0.0 && wrap_width_px.is_finite() {
-                    rich.set_max_width(wrap_width_px as f32, alignment_to_halign(justify_x));
+                let wraps = wrap_width_px > 0.0 && wrap_width_px.is_finite();
+                let align = alignment_to_halign(justify_x);
+                let width_spec = if wraps {
+                    RichTextWidth::Fixed(wrap_width_px as f32)
+                } else {
+                    RichTextWidth::Natural
+                };
+                let key = RichKey::new(
+                    &text,
+                    &style,
+                    fill_color,
+                    &row_sheet,
+                    &ctx.theme.palette,
+                    ctx.dpi,
+                    width_spec,
+                    align,
+                );
+                let rich = self.rich_cache.get_or_shape(key, || {
+                    let run = RichTextRun::new(
+                        &text,
+                        &style,
+                        fill_color,
+                        &row_sheet,
+                        &ctx.theme.palette,
+                        ctx.dpi,
+                    );
+                    if wraps {
+                        run.set_max_width(wrap_width_px as f32, align);
+                    }
+                    run
+                });
+                let (text_w, text_h) = if wraps {
                     (rich.content_width(), rich.current_height())
                 } else {
                     (rich.natural_width(), rich.natural_height())
@@ -893,7 +955,6 @@ fn resolve_bool_or_italic_string(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     use crate::color::Color;
     use crate::geometry::Rect;
@@ -1817,5 +1878,55 @@ mod tests {
             count_glyphs(&s_plain),
             count_glyphs(&s_md)
         );
+    }
+
+    #[test]
+    fn markdown_rows_shape_once_and_are_reused_next_frame() {
+        let geom = TextGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("text", vec!["**bold** and *italic*"])
+            .set("markdown", vec![true])
+            .build();
+        let registry = shapes();
+        let sx = scale::continuous(0.0..=1.0);
+        let scales = DirectScaleResolver::new().with("x", &sx).with("y", &sx);
+        let panel = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let mut scene = RecordingScene::default();
+        geom.draw(&mut scene, &ctx(panel, &registry, &scales));
+        assert_eq!(geom.rich_cache.len(), 1, "the row should be cached");
+        let ops_after_first = scene.ops.len();
+        geom.draw(&mut scene, &ctx(panel, &registry, &scales));
+        assert_eq!(
+            geom.rich_cache.len(),
+            1,
+            "the second frame must reuse the shaped run, not add another"
+        );
+        assert_eq!(
+            scene.ops.len(),
+            ops_after_first * 2,
+            "both frames should emit the same drawing work"
+        );
+    }
+
+    #[test]
+    fn invalidate_caches_drops_shaped_markdown() {
+        let mut geom = TextGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("text", vec!["**bold**"])
+            .set("markdown", vec![true])
+            .build();
+        let registry = shapes();
+        let sx = scale::continuous(0.0..=1.0);
+        let scales = DirectScaleResolver::new().with("x", &sx).with("y", &sx);
+        let mut scene = RecordingScene::default();
+        geom.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 200.0, 100.0), &registry, &scales),
+        );
+        assert!(!geom.rich_cache.is_empty());
+        geom.invalidate_caches();
+        assert!(geom.rich_cache.is_empty());
     }
 }

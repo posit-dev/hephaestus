@@ -31,8 +31,11 @@ A one-block tour of the marquee-flavoured styling vocabulary.
 
 ## Inline formatting
 
-Plain text can carry **strong emphasis**, *soft emphasis*, ~~struck through~~
-fragments, and inline `code` spans. Named or hex colour spans work anywhere:
+Plain text can carry **strong emphasis**, *soft emphasis*, _underline_,
+~~struck through~~ fragments, and inline `code` spans. Underscore emphasis
+underlines rather than slanting, matching marquee. Braces that are meant
+literally get escaped: \\{like so\\}, or doubled as {{like so}}. Named or hex
+colour spans work anywhere:
 {.crimson red}, {#3369e8 hex-blue}. Combine styles by **nesting**: {.royalblue *slanted*}.
 Superscript ^like this^ and subscript ~like this~ require whitespace around the
 outer markers (pulldown-cmark's grammar) — chemistry / physics notation with
@@ -54,11 +57,20 @@ tabular numerals so digits share a fixed advance.
   - Nested items indent under their parent's continuation position.
   - The nested marker cycles to `◦`.
 
-Ordered lists number themselves:
+Ordered lists number themselves, and multi-digit ordinals right-align on
+their period because markers live in the list's start gutter rather than
+in the item's own text flow:
 
 1. First step
 2. Second step
 3. Third step
+4. Fourth
+5. Fifth
+6. Sixth
+7. Seventh
+8. Eighth
+9. Ninth
+10. Tenth — note the right-aligned period
 
 ## Blockquotes and code
 
@@ -73,7 +85,7 @@ fn code_block() {
 
 ---
 
-A horizontal rule sits above this paragraph, drawn as a top-only border.
+A horizontal rule sits above this paragraph, drawn as the rule block's\nbottom-only border.
 
 :::note
 Fenced divs pick up a custom class; users can theme them via the sheet.

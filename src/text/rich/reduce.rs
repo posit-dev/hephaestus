@@ -33,8 +33,10 @@ pub struct BuiltRuns {
     pub text: String,
     /// One entry per contiguous run of text sharing the same active
     /// style. The `range` is a byte range into [`Self::text`]; the
-    /// `style` has every active span already cascaded in. Runs never
-    /// overlap and cover [`Self::text`] end to end.
+    /// `style` has every active span already cascaded in. Runs are in
+    /// document order and never overlap. They can leave gaps: the
+    /// `\n\n` separators the reducer inserts between top-level blocks
+    /// belong to no block, and no block's byte range includes them.
     pub inline: Vec<InlineRun>,
     /// One entry per baseline-shifted range (from `sup` / `sub` etc.).
     /// Non-empty and non-overlapping; the em shift is applied to the
@@ -265,70 +267,12 @@ impl Reducer {
                 self.open_block(BlockKind::BlockQuote, sheet, "block_quote");
             }
             RichEvent::BlockQuoteEnd => self.close_block(),
-            RichEvent::ListStart { ordered, start } => {
-                self.commit_pending_item_body(sheet, true);
-                let nested = !self.list_stack.is_empty();
-                self.list_stack.push(ListFrame {
-                    next_ordinal: *start,
-                    ordered: *ordered,
-                });
-                self.open_block(
-                    BlockKind::List {
-                        ordered: *ordered,
-                        start: *start,
-                    },
-                    sheet,
-                    if *ordered { "list_ordered" } else { "list" },
-                );
-                // Nested lists sit inside a ListItem's content flow, so
-                // the outer `list` / `list_ordered` top/bottom margin
-                // (which separates lists from surrounding prose) would
-                // introduce a spurious gap. Zero those two edges on the
-                // just-opened frame; horizontal padding / indent still
-                // apply.
-                if nested {
-                    if let Some(frame) = self.block_stack.last_mut() {
-                        frame.style.margin_pt[0] = 0.0;
-                        frame.style.margin_pt[2] = 0.0;
-                    }
-                }
-            }
+            RichEvent::ListStart { ordered, start } => self.on_list_start(*ordered, *start, sheet),
             RichEvent::ListEnd => {
                 self.close_block();
                 self.list_stack.pop();
             }
-            RichEvent::ItemStart => {
-                let (ordinal, ordered) = self
-                    .list_stack
-                    .last_mut()
-                    .map(|f| {
-                        let n = f.next_ordinal;
-                        f.next_ordinal += 1;
-                        (n, f.ordered)
-                    })
-                    .unwrap_or((1, false));
-                // Bullets cycle on consecutive *unordered* nesting:
-                // an `ol` between two `ul`s restarts the bullet set,
-                // matching marquee.
-                let bullet_depth = self
-                    .list_stack
-                    .iter()
-                    .rev()
-                    .take_while(|f| !f.ordered)
-                    .count()
-                    .saturating_sub(1);
-                // Open the ListItem as a *container*. Its body
-                // paragraph opens later, only once we've seen enough
-                // events to know whether the item is tight (bare
-                // Text → `list_item_body` class, empty delta) or
-                // loose (`ParagraphStart` from pulldown →
-                // `paragraph` class with margin). This matches
-                // CommonMark's tight/loose semantics without pre-
-                // committing to a style.
-                let marker = compute_marker(sheet, ordered, ordinal, bullet_depth);
-                self.open_block(BlockKind::ListItem { ordinal, marker }, sheet, "list_item");
-                self.item_body_pending = true;
-            }
+            RichEvent::ItemStart => self.on_item_start(sheet),
             RichEvent::ItemEnd => {
                 // Empty item — no content-carrying event ever fired,
                 // so commit a synthetic body now to preserve the
@@ -344,46 +288,8 @@ impl Reducer {
                     "code_block",
                 );
             }
-            RichEvent::CodeBlockEnd => {
-                // pulldown-cmark emits the code-block content
-                // verbatim including the trailing newline before the
-                // closing fence. That trailing `\n` pushes parley to
-                // shape an empty last line inside the block, which
-                // reads visually as an extra blank line. Strip a
-                // single trailing '\n' from the current block's
-                // content — only if the block hasn't been made empty
-                // by other logic.
-                if let Some(frame) = self.block_stack.last() {
-                    if self.text.len() > frame.start && self.text.ends_with('\n') {
-                        self.text.pop();
-                        // Trim any InlineRun that ended at the popped
-                        // byte so parley doesn't see a range past the
-                        // new text end.
-                        let new_len = self.text.len();
-                        if let Some(last) = self.inline.last_mut() {
-                            if last.range.end > new_len {
-                                last.range.end = new_len;
-                                if last.range.is_empty() {
-                                    self.inline.pop();
-                                }
-                            }
-                        }
-                    }
-                }
-                self.close_block();
-            }
-            RichEvent::Rule => {
-                self.commit_pending_item_body(sheet, true);
-                let start = self.text.len();
-                let style = self.resolve_class("hr", sheet);
-                self.blocks.push(Block {
-                    range: start..start,
-                    kind: BlockKind::Rule,
-                    depth: self.container_depth(),
-                    style,
-                });
-                self.push_paragraph_break();
-            }
+            RichEvent::CodeBlockEnd => self.on_code_block_end(),
+            RichEvent::Rule => self.on_rule(sheet),
             RichEvent::DivStart { class } => {
                 self.commit_pending_item_body(sheet, true);
                 self.open_block(
@@ -440,6 +346,97 @@ impl Reducer {
                 self.push_text("\n");
             }
         }
+    }
+
+    /// Open a list container. Nested lists sit inside a ListItem's
+    /// content flow, so the top/bottom margin that separates a list
+    /// from surrounding prose would read as a spurious gap; zero it.
+    fn on_list_start(&mut self, ordered: bool, start: u64, sheet: &RichTextStyleSheet) {
+        self.commit_pending_item_body(sheet, true);
+        let nested = !self.list_stack.is_empty();
+        self.list_stack.push(ListFrame {
+            next_ordinal: start,
+            ordered,
+        });
+        self.open_block(
+            BlockKind::List { ordered, start },
+            sheet,
+            if ordered { "list_ordered" } else { "list" },
+        );
+        if nested {
+            if let Some(frame) = self.block_stack.last_mut() {
+                frame.style.margin_pt[0] = 0.0;
+                frame.style.margin_pt[2] = 0.0;
+            }
+        }
+    }
+
+    /// Open a list item as a *container*. Its body paragraph opens
+    /// later, once we've seen enough events to know whether the item
+    /// is tight (bare `Text` → `list_item_body`) or loose (an
+    /// explicit `ParagraphStart` → `paragraph`, with its margin).
+    /// That matches CommonMark's tight/loose semantics without
+    /// pre-committing to a style.
+    fn on_item_start(&mut self, sheet: &RichTextStyleSheet) {
+        let (ordinal, ordered) = self
+            .list_stack
+            .last_mut()
+            .map(|f| {
+                let n = f.next_ordinal;
+                f.next_ordinal += 1;
+                (n, f.ordered)
+            })
+            .unwrap_or((1, false));
+        // Bullets cycle on consecutive *unordered* nesting: an `ol`
+        // between two `ul`s restarts the bullet set, matching marquee.
+        let bullet_depth = self
+            .list_stack
+            .iter()
+            .rev()
+            .take_while(|f| !f.ordered)
+            .count()
+            .saturating_sub(1);
+        let marker = compute_marker(sheet, ordered, ordinal, bullet_depth);
+        self.open_block(BlockKind::ListItem { ordinal, marker }, sheet, "list_item");
+        self.item_body_pending = true;
+    }
+
+    /// Close a code block, dropping the trailing newline pulldown
+    /// emits before the closing fence. Left in place it would make
+    /// parley shape an empty last line, which reads as a blank row.
+    fn on_code_block_end(&mut self) {
+        if let Some(frame) = self.block_stack.last() {
+            if self.text.len() > frame.start && self.text.ends_with('\n') {
+                self.text.pop();
+                // Trim any InlineRun that ended at the popped byte so
+                // parley doesn't see a range past the new text end.
+                let new_len = self.text.len();
+                if let Some(last) = self.inline.last_mut() {
+                    if last.range.end > new_len {
+                        last.range.end = new_len;
+                        if last.range.is_empty() {
+                            self.inline.pop();
+                        }
+                    }
+                }
+            }
+        }
+        self.close_block();
+    }
+
+    /// Record a horizontal rule as a zero-length block. It carries no
+    /// text; the layout pass stretches it to the run's content width.
+    fn on_rule(&mut self, sheet: &RichTextStyleSheet) {
+        self.commit_pending_item_body(sheet, true);
+        let start = self.text.len();
+        let style = self.resolve_class("hr", sheet);
+        self.blocks.push(Block {
+            range: start..start,
+            kind: BlockKind::Rule,
+            depth: self.container_depth(),
+            style,
+        });
+        self.push_paragraph_break();
     }
 
     /// Open a tight-item body paragraph if an item is waiting for one.
@@ -571,7 +568,8 @@ impl Reducer {
     }
 
     fn push_style(&mut self, style: ResolvedStyle) {
-        let baseline_start = (style.baseline_pt != self.top().baseline_pt).then_some(self.text.len());
+        let baseline_start =
+            (style.baseline_pt != self.top().baseline_pt).then_some(self.text.len());
         self.style_stack.push(StyleFrame {
             style,
             baseline_start,

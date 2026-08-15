@@ -17,7 +17,6 @@ use std::sync::Arc;
 use crate::brush::Brush;
 use crate::color::{Color, ColorSpace};
 use crate::geometry::{Affine, Point, Vec2};
-pub(crate) use crate::linetype::MARKER_INK_COVERAGE_BOOST;
 use crate::linetype::{draw_linetype_with_markers, emit_marker_shape};
 use crate::path::Path;
 use crate::pick::PickId;

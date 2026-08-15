@@ -31,22 +31,39 @@
 //! the wrap width comes from the layout solver, matching marquee's
 //! `width = NULL` "parent container width" semantics.
 //!
+//! **Known limitations.** Images are not rendered: `![alt](path)`
+//! drops the image and renders `alt` as plain text, since there is no
+//! host image-resolver hook yet. Math renders as its source
+//! characters rather than as an equation. Marquee's seven-value
+//! alignment vocabulary, gradient backgrounds, and explicit control
+//! over underline / strikethrough metrics are also unimplemented.
+//!
 //! See `src/text/rich/CLAUDE.md` for the full architectural note.
 
 pub mod anchor;
 pub mod block;
+mod border;
+pub mod cache;
+pub mod draw;
 pub mod length;
 pub mod parser;
 pub mod reduce;
 pub mod run;
+mod shape;
 pub mod style;
+mod wrap;
+
+#[cfg(test)]
+mod tests;
 
 pub use anchor::{AnchorOffsets, HAnchor, LayoutBounds, RichAnchor, VAnchor};
 pub use block::{BlockBorder, BlockPaint};
+pub use cache::{RichKey, RichShapeCache};
+pub use draw::draw_rich_text;
 pub use length::{
     em, pt, relative, rem, FieldSet, LengthSpec, LineHeightSpec, RichMargin, StyleField,
 };
 pub use parser::{parse, RichEvent, Selector};
 pub use reduce::{reduce, BaselineRun, Block, BlockKind, BuiltRuns, InlineRun};
-pub use run::{draw_rich_text, RichBrush, RichTextRun, RichTextWidth};
+pub use run::{RichBrush, RichTextRun, RichTextWidth};
 pub use style::{css_color, Direction, ResolvedStyle, RichTextStyleSheet, StyleDelta};

@@ -75,7 +75,7 @@ Folders (each with its own CLAUDE.md):
 - `primitives/` — compound 2D primitives: path constructors (rect / circle / wedge / polyline / polygon / arc), composable vertex transforms (clip / offset / round corners), arc-length sampling, ribbon tessellation.
 - `plot/` — high-level plot API: `Plot`, `PlotComposition` orchestrator, key-based diff for identity-preserving animation. Geoms in `plot/geom/`; axis / legend rendering in `plot/chrome/`. Scales and values themselves live in [`crate::scales`] (see below).
 - `scales/` — leaf module: `Value`, `DataColumn`, `Scale`, scale types, transforms, break / tick algorithms. Backend-agnostic and plot-agnostic; nothing inside imports from `src/plot/`, `src/scene/`, etc. Intended to be lifted into its own crate once the API settles. Hephaestus's own `Scale` bundle, `ScaleRegistry` and the ggplot-style constructors live in `plot/scale/` (which also re-exports `crate::scales::*`, so `hephaestus::plot::scale::*` reaches both); `plot/value.rs` is a pure re-export shim over `crate::scales::value`.
-- `text/` — parley-backed text shaping and layout. Gated on the `text` feature. A host crate may swap in its own shaper behind the `TextRun` / `draw_text` surface, but the parley path is the committed default.
+- `text/` — parley-backed text shaping and layout. Gated on the `text` feature. A host crate may swap in its own shaper behind the `TextRun` / `draw_text` surface, but the parley path is the committed default. `text/rich/` layers marquee-flavoured markdown on top of it (see `src/text/rich/CLAUDE.md`).
 
 Single-file modules (no CLAUDE.md, one-line descriptions here):
 
@@ -83,9 +83,11 @@ Single-file modules (no CLAUDE.md, one-line descriptions here):
 - `brush.rs` — `Brush`, `Image`, `Sampling` (Nearest / Bilinear).
 - `color.rs` — re-exports peniko `Color`; owns `ColorSpace` (Oklab / Srgb) and `lerp_color`, the one place two colors get blended. Every blend names its space; `ColorSpace::default()` is Oklab.
 - `geometry.rs` — re-exports kurbo `Affine`, `Point`, `Rect`, `Size`, `Vec2`.
+- `linetype.rs` — the linetype pattern vocabulary (`Dash` / `Gap` / `Marker` sequences, the named `solid` / `dashed` / `dotted` / `dashdot` constructors) plus `draw_linetype_with_markers`, the arc-length walk that stamps marker shapes along a polyline. At the crate root rather than under `plot/geom/` because rich-text block borders express their strokes as linetypes too, and `text/` must not depend on `plot/`; `plot::geom::linetype` re-exports it.
 - `mesh.rs` — `Mesh`: flat 2D triangle list with per-vertex colour. Used by `primitives::ribbon` and consumed by `SceneBuilder::draw_mesh`.
 - `path.rs` — `Path` (kurbo `BezPath` wrapper) and `FillRule` (intersection enum).
 - `pick.rs` — `PickId` and the authoritative encoding into `Rgba8Unorm` RGB.
 - `png.rs` — gated PNG writer (`png` feature).
 - `shape.rs` — `Shape` / `ShapeRegistry` / `ShapeStyle`: named glyphs / paths for scatterplot markers and line endpoint terminators.
 - `stroke.rs` — re-exports kurbo `Stroke`, `Cap`, `Join`. Stroke alignment and variable-width strokes are not in scope.
+- `style_vocab.rs` — the styling vocabulary shared by the plot theme and the text layer: `Length` / `Margin` (absolute-or-relative measurements), `Palette` / `ThemeColor` (semantic colour anchors and references into them), `HAlign` / `VAlign`. Lives at the crate root for the same reason `linetype.rs` does — `text::rich` resolves palette colours and relative sizes while shaping. `plot::theme` re-exports every item, so plot-side code addresses them through the theme.

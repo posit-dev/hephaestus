@@ -27,15 +27,15 @@ Mixing these — palette references + Option-per-field cascade + Inherit/Blank/S
 
 ## Module map
 
-- **`palette.rs`** — `Palette` (paper / ink / accent) and `ThemeColor` (`Fixed` / `Paper` / `Ink` / `Accent` / `Mix` / `Alpha`).
-- **`length.rs`** — `Length::Abs(pt)` / `Length::Rel(multiplier)` plus the `Margin` 4-sided container. `Length::resolve(parent_pt)` is one step; walking the inheritance chain is the caller's job.
+- **`palette.rs`** — re-exports `Palette` (paper / ink / accent) and `ThemeColor` (`Fixed` / `Paper` / `Ink` / `Accent` / `Mix` / `Alpha`) from [`crate::style_vocab`].
+- **`length.rs`** — re-exports `Length::Abs(pt)` / `Length::Rel(multiplier)` and the `Margin` 4-sided container from [`crate::style_vocab`]. `Length::resolve(parent_pt)` is one step; walking the inheritance chain is the caller's job. Both types live at the crate root so the text layer can resolve them without depending on `plot/`.
 - **`element.rs`** — `Element<T>` (the Inherit / Blank / Set wrapper), the three element types (`TextElement` / `LineElement` / `RectElement`), the `*_concrete_defaults()` safety-net constructors, and the alignment / rotation enums (`HAlign`, `VAlign`, `AlignTo`, `Rotation`).
 - **`font.rs`** — `FontSpec` (sparse modern font surface: family / weight / width / style / features / variations) with per-field cascade and per-tag list merge.
 - **`cascade.rs`** — `PerChannel<T>` and `Sided<T>` — the wholesale-cascade containers used for grid lines and strips.
 - **`axis.rs`** — `AxisTheme`, `PerAxis` (three-layer per-field cascade), `ResolvedAxis` (the bundle returned by `PerAxis::resolve`), and `axis_concrete_defaults()`.
 - **`legend.rs`** — `LegendTheme` with `KeyTheme` / `BarTheme` sub-structs and `Direction` (`Auto` / `Horizontal` / `Vertical`).
 - **`geom.rs`** — `GeomTheme` and the per-geom default sub-structs (`PointDefaults`, `LineDefaults`, `ShapeDefaults`, `TextDefaults`, `TextFitDefaults`).
-- **`theme.rs`** — the top-level `Theme` struct, its sparse `ThemePart` mirror, and `SharedTheme = Arc<Theme>`.
+- **`theme.rs`** — the top-level `Theme` struct, its sparse `ThemePart` mirror, and `SharedTheme = Arc<Theme>`. `Theme::rich_text` holds the `Arc<RichTextStyleSheet>` every markdown-enabled text slot resolves selectors through; `ThemePart::rich_text` overrides it per plot.
 - **`builtin.rs`** — pre-built variants: `Theme::default()` / `dark()` / `minimal()` / `classic()` / `bw()` / `void()`.
 
 ## The cascade — how a field resolves

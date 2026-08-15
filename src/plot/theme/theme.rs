@@ -429,6 +429,9 @@ pub struct ThemePart {
     /// Optional rich-text style-sheet override (replaces the whole
     /// sheet). Chrome slots and text geoms that opt into markdown
     /// resolve their selectors through it.
+    ///
+    /// Gated on the `text` feature, like [`Theme::rich_text`].
+    #[cfg(feature = "text")]
     pub rich_text: Option<std::sync::Arc<crate::text::rich::RichTextStyleSheet>>,
 }
 
@@ -467,6 +470,7 @@ impl ThemePart {
         set_field!(strip_padding);
         set_field!(geom);
         set_field!(locale);
+        #[cfg(feature = "text")]
         set_field!(rich_text);
         for (k, v) in &self.legend_variants {
             theme.legend_variants.insert(k.clone(), v.clone());

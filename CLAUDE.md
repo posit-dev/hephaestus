@@ -54,7 +54,7 @@ Style rules (apply everywhere, including comments in `tests/` and `examples/`):
 
 - **`vello`** (default) — the GPU rasterising backend (wgpu + vello + pollster + futures-intrusive + bytemuck).
 - **`png`** (default) — PNG writer (`png` crate). Used by examples and tests.
-- **`text`** (off by default) — parley-backed text shaping / layout. Needed by the chrome on plot scales (axes, legends, titles) and by `TextGeom` / `TextFitGeom` / `TextPathGeom`. A host crate that prefers its own shaper can swap in behind `TextRun` / `draw_text`; see `src/text/CLAUDE.md`.
+- **`text`** (off by default) — parley-backed text shaping / layout, plus the marquee-flavoured rich-text pipeline (pulldown-cmark). Needed by the chrome on plot scales (axes, legends, titles), by `TextGeom` / `TextFitGeom` / `TextPathGeom`, and by every markdown-enabled theme slot. A host crate that prefers its own shaper can swap in behind `TextRun` / `draw_text`; see `src/text/CLAUDE.md` and `src/text/rich/CLAUDE.md`.
 - **`geom-wkt`**, **`geom-wkb`**, **`geom-geojson`** (off by default) — opt-in parsers for `crate::scales::Geometry`. Each gate enables one of `Geometry::from_wkt` / `from_wkb` / `from_geojson`. Hand-rolled and dependency-free, so toggling them only affects what constructors compile, not the dependency tree.
 - **`blend2d`**, **`svg`**, **`pdf`** — feature placeholders only; no backend code behind them yet. Wired so dependent crates can write `features = ["blend2d"]` once they exist.
 
@@ -74,7 +74,7 @@ The `plot/` module is in-scope: it is the high-level layer inside this crate tha
 ## Where to look next
 
 - **`src/CLAUDE.md`** — code architecture: API levels, two-trait split, intersection-of-backends rule, picking model, module map.
-- **Per-module `CLAUDE.md` files** under `src/scene/`, `src/backend/`, `src/backend/vello/`, `src/layout/`, `src/composition/`, `src/primitives/`, `src/plot/`, `src/plot/geom/`, `src/plot/theme/`, `src/scales/`, `src/text/`.
+- **Per-module `CLAUDE.md` files** under `src/scene/`, `src/backend/`, `src/backend/vello/`, `src/layout/`, `src/composition/`, `src/primitives/`, `src/plot/`, `src/plot/geom/`, `src/plot/theme/`, `src/scales/`, `src/text/`, `src/text/rich/`.
 
 ## Help / feedback
 
