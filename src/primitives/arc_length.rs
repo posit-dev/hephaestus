@@ -15,9 +15,7 @@ use crate::geometry::{Point, Vec2};
 use crate::path::Path;
 
 use super::path_to_rings;
-
-const DEFAULT_TOLERANCE: f64 = 0.5;
-const EPSILON: f64 = 1e-9;
+use super::tolerance::{DEGENERATE_EPS as EPSILON, SAMPLER_FLATTEN_TOLERANCE};
 
 /// A sample yielded by [`ArcLengthWalker`].
 #[derive(Clone, Copy, Debug)]
@@ -86,7 +84,7 @@ impl ArcLengthWalker {
             "ArcLengthWalker::new: step must be strictly positive and finite, got {step}",
         );
         Self {
-            tolerance: DEFAULT_TOLERANCE,
+            tolerance: SAMPLER_FLATTEN_TOLERANCE,
             step,
             trailing: TrailingPolicy::default(),
             include_start: true,

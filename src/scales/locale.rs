@@ -36,6 +36,7 @@ pub struct Locale {
     /// user formatters can opt in by checking this field.
     pub grouping: Option<char>,
     /// Three-letter month abbreviations, January through December.
+    /// Read by user formatters; the default one renders ISO dates.
     pub month_short: [&'static str; 12],
     /// Full month names, January through December.
     pub month_long: [&'static str; 12],
@@ -160,5 +161,100 @@ impl Default for Locale {
     /// US English ([`Self::EN_US`]).
     fn default() -> Self {
         Self::EN_US
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BUILT_INS: [(&str, Locale); 3] = [
+        ("EN_US", Locale::EN_US),
+        ("DE_DE", Locale::DE_DE),
+        ("FR_FR", Locale::FR_FR),
+    ];
+
+    /// Drop a trailing abbreviation dot so short and long names can be
+    /// compared as prefixes (`"janv."` → `"janv"`).
+    fn undotted(s: &str) -> &str {
+        s.strip_suffix('.').unwrap_or(s)
+    }
+
+    #[test]
+    fn default_locale_is_us_english() {
+        assert_eq!(Locale::default(), Locale::EN_US);
+    }
+
+    #[test]
+    fn separators_never_collide_within_a_locale() {
+        // A grouped number is unreadable when the same character both
+        // groups the thousands and marks the decimal.
+        for (name, loc) in BUILT_INS {
+            if let Some(grouping) = loc.grouping {
+                assert_ne!(
+                    grouping, loc.decimal,
+                    "{name} uses '{grouping}' for both grouping and decimal"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn calendar_names_are_populated_and_distinct() {
+        for (name, loc) in BUILT_INS {
+            for (label, names) in [
+                ("month_short", &loc.month_short[..]),
+                ("month_long", &loc.month_long[..]),
+                ("day_short", &loc.day_short[..]),
+                ("day_long", &loc.day_long[..]),
+            ] {
+                for entry in names {
+                    assert!(!entry.trim().is_empty(), "{name}.{label} has a blank entry");
+                }
+                let mut seen: Vec<&str> = names.to_vec();
+                seen.sort_unstable();
+                let before = seen.len();
+                seen.dedup();
+                assert_eq!(
+                    seen.len(),
+                    before,
+                    "{name}.{label} repeats a name — the table is misaligned"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn short_calendar_names_abbreviate_their_long_counterparts() {
+        // Catches an off-by-one or a transposition between the short and
+        // long tables: entry `i` of each pair names the same month / day.
+        for (name, loc) in BUILT_INS {
+            for i in 0..12 {
+                let (short, long) = (undotted(loc.month_short[i]), loc.month_long[i]);
+                assert!(
+                    long.to_lowercase().starts_with(&short.to_lowercase()),
+                    "{name}: month {i} short \"{short}\" does not abbreviate \"{long}\""
+                );
+            }
+            for i in 0..7 {
+                let (short, long) = (undotted(loc.day_short[i]), loc.day_long[i]);
+                assert!(
+                    long.to_lowercase().starts_with(&short.to_lowercase()),
+                    "{name}: day {i} short \"{short}\" does not abbreviate \"{long}\""
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn day_tables_run_monday_first_independently_of_the_first_day_of_week() {
+        // The arrays are indexed Monday-through-Sunday whatever calendar
+        // convention `first_dow` states.
+        assert_eq!(Locale::EN_US.day_long[0], "Monday");
+        assert_eq!(Locale::EN_US.day_long[6], "Sunday");
+        assert_eq!(Locale::DE_DE.day_long[0], "Montag");
+        assert_eq!(Locale::FR_FR.day_long[0], "lundi");
+        assert_eq!(Locale::EN_US.first_dow, Weekday::Sunday);
+        assert_eq!(Locale::DE_DE.first_dow, Weekday::Monday);
     }
 }

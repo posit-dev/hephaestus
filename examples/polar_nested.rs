@@ -12,10 +12,10 @@
 //! angular gaps on the left and right.
 //!
 //! All three plots disable bbox-based repositioning
-//! (`fit_to_bbox = false`) so they share the panel's geometric
+//! (`fit_to_bbox(false)`) so they share the panel's geometric
 //! centre and the same maximum radius — the per-projection
-//! `outer_radius_frac` / `inner_radius_frac` then partition the
-//! disk between them.
+//! `outer_radius` / `inner_radius` then partition the disk
+//! between them.
 //!
 //! Produces `examples/polar_nested.png`.
 
@@ -39,32 +39,30 @@ fn main() {
 
     // Inner full-circle polar. Outer radius cap = 0.45 leaves a
     // radial gap to the outer ring.
-    let inner_projection = Projection::Polar(PolarProjection {
-        outer_radius_frac: Some(0.45),
-        fit_to_bbox: false,
-        ..PolarProjection::full_circle()
-    });
+    let inner_projection = Projection::Polar(
+        PolarProjection::full_circle()
+            .outer_radius(0.45)
+            .fit_to_bbox(false),
+    );
 
-    // Outer top arc: theta_start = 165° (left, near 9 o'clock) CW
-    // to theta_end = 15° (right, near 3 o'clock). Sweep = -150°
+    // Outer top arc: sweep start = 165° (left, near 9 o'clock) CW
+    // to end = 15° (right, near 3 o'clock). Sweep = -150°
     // (CW). Leaves 30° gaps on both left and right.
-    let outer_top_projection = Projection::Polar(PolarProjection {
-        theta_start: 165.0_f64.to_radians(),
-        theta_end: 15.0_f64.to_radians(),
-        inner_radius_frac: 0.55,
-        fit_to_bbox: false,
-        ..PolarProjection::full_circle()
-    });
+    let outer_top_projection = Projection::Polar(
+        PolarProjection::full_circle()
+            .theta_range(165.0_f64.to_radians(), 15.0_f64.to_radians())
+            .inner_radius(0.55)
+            .fit_to_bbox(false),
+    );
 
     // Outer bottom arc: mirror across the horizontal.
-    // theta_start = -15° CW to theta_end = -165°. Sweep = -150°.
-    let outer_bottom_projection = Projection::Polar(PolarProjection {
-        theta_start: -15.0_f64.to_radians(),
-        theta_end: -165.0_f64.to_radians(),
-        inner_radius_frac: 0.55,
-        fit_to_bbox: false,
-        ..PolarProjection::full_circle()
-    });
+    // Sweep start = -15° CW to end = -165°. Sweep = -150°.
+    let outer_bottom_projection = Projection::Polar(
+        PolarProjection::full_circle()
+            .theta_range(-15.0_f64.to_radians(), -165.0_f64.to_radians())
+            .inner_radius(0.55)
+            .fit_to_bbox(false),
+    );
 
     // ── Data ──
     // Inner scatter: 60 points scattered around the full disk.

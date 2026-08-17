@@ -23,7 +23,7 @@ fn main() {
     let mut outer_id = 1u64;
     for r in 1..=3u16 {
         for c in 1..=5u16 {
-            root.place(Placement::at(r, c), Grid::cell().id(CellId(outer_id)));
+            root.place_mut(Placement::at(r, c), Grid::cell().id(CellId(outer_id)));
             outer_id += 1;
         }
     }
@@ -35,13 +35,13 @@ fn main() {
     );
     for r in 1..=2u16 {
         for c in 1..=2u16 {
-            inner.place(
+            inner.place_mut(
                 Placement::at(r, c),
                 Grid::cell().id(CellId(100 + (r as u64) * 2 + c as u64)),
             );
         }
     }
-    root.place(
+    root.place_mut(
         Placement::at(2, 3).span(1, 3).inset(
             Inset::default()
                 .left(Extent::cm(1.0))
@@ -51,7 +51,7 @@ fn main() {
     );
 
     // A 2:1 cell in the top-left, expressed via respect + fr weights.
-    root.place(
+    root.place_mut(
         Placement::at(1, 1),
         Grid::new([Track::Fr(2.0)], [Track::Fr(1.0)])
             .respect()

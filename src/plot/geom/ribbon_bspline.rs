@@ -120,7 +120,6 @@ use crate::brush::Brush;
 use crate::color::Color;
 use crate::geometry::{Affine, Point, Rect};
 use crate::path::{FillRule, Path};
-use crate::plot::diff::{diff_columns, diff_positional, KeyIndex};
 use crate::plot::scale::Scale;
 use crate::plot::value::DataColumn;
 use crate::scene::SceneBuilder;
@@ -128,14 +127,14 @@ use crate::scene::SceneBuilder;
 use super::bspline_eval::{
     build_polyline_fallback, build_spline_flatten, de_boor, project_ctrl_pts, InterpolationSpace,
 };
-use super::marks::{build_marks_from_column, unique_values_at_first_rows, MarkSlot};
+use super::marks::{build_marks_from_column, MarkSlot};
 use super::outline::{draw_curve_outline, resolve_outline_spec, OutlineChannels, OutlineScales};
 use super::resolve::{
-    apply_per_row_offsets, channel_color_space, override_alpha, resolve_color_channel,
-    resolve_color_channel_or_theme, resolve_number_channel, resolve_number_channel_or,
-    resolve_pick_id, resolve_position, resolve_str_channel_or, ChannelBind,
+    apply_per_row_offsets, override_alpha, resolve_color_channel_or_theme, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, resolve_position, resolve_str_channel_or,
+    ChannelBind,
 };
-use super::ribbon::{append_cap_fan_to_mesh, resolve_b_row, CapDirection, Orientation};
+use super::ribbon::{append_cap_fan_to_mesh, resolve_b_row, CapDirection, Orientation, RowFill};
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
 
@@ -367,30 +366,14 @@ impl Geom for RibbonBSplineGeom {
             Keys::Explicit(col) if !col.is_empty() => build_marks_from_column(col),
             _ => Vec::new(),
         };
-        let (enter, update, exit) = match (&self.state.prev_keys, &self.state.keys) {
-            (Keys::Explicit(prev_col), Keys::Explicit(next_col)) => {
-                let prev_unique = unique_values_at_first_rows(
-                    prev_col,
-                    prev_marks.iter().map(|m| m.first_row),
-                    "RibbonBSplineGeom",
-                );
-                let next_unique = unique_values_at_first_rows(
-                    next_col,
-                    next_marks.iter().map(|m| m.first_row),
-                    "RibbonBSplineGeom",
-                );
-                let idx = KeyIndex::build(&prev_unique);
-                diff_columns(&prev_unique, &idx, &next_unique)
-            }
-            _ => diff_positional(prev_marks.len(), next_marks.len()),
-        };
-        self.state.enter = enter;
-        self.state.update = update;
-        self.state.exit = exit;
+        let first_rows =
+            |ms: &[MarkSlot]| -> Vec<usize> { ms.iter().map(|m| m.first_row).collect() };
+        self.state.rebuild_grouped_diff(
+            &first_rows(&prev_marks),
+            &first_rows(&next_marks),
+            "RibbonBSplineGeom",
+        );
         self.marks = next_marks;
-        self.state.prev_keys = self.state.keys.clone();
-        self.state.prev_channels = self.state.channels.clone();
-        self.state.dirty = false;
     }
 
     fn draw(&self, scene: &mut dyn SceneBuilder, ctx: &GeomContext<'_>) {
@@ -486,15 +469,8 @@ fn draw_one_ribbon_bspline_mark(
                 ch: y2_band_ch,
                 scale: y2_band_scale,
             },
-        fill: ChannelBind {
-            ch: fill_ch,
-            scale: fill_scale,
-        },
-        fill_opacity:
-            ChannelBind {
-                ch: fill_opacity_ch,
-                scale: fill_opacity_scale,
-            },
+        fill,
+        fill_opacity,
         degree: ChannelBind {
             ch: degree_ch,
             scale: degree_scale,
@@ -519,28 +495,30 @@ fn draw_one_ribbon_bspline_mark(
 
     let mark_fill = override_alpha(
         resolve_color_channel_or_theme(
-            fill_ch,
-            fill_scale,
+            fill.ch,
+            fill.scale,
             i0,
             ctx.theme.geom.ribbon_bspline.fill.as_ref(),
             &ctx.theme.palette,
         ),
-        resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i0),
+        resolve_number_channel(fill_opacity.ch, fill_opacity.scale, i0),
     );
     let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
     let outline_a_spec = resolve_outline_spec(
         ctx,
-        &ctx.theme.geom.ribbon_bspline,
+        (&ctx.theme.geom.ribbon_bspline).into(),
         &outline_a_ch,
         &outline_a_scales,
+        ChannelBind::default(),
         i0,
         pick,
     );
     let outline_b_spec = resolve_outline_spec(
         ctx,
-        &ctx.theme.geom.ribbon_bspline,
+        (&ctx.theme.geom.ribbon_bspline).into(),
         &outline_b_ch,
         &outline_b_scales,
+        ChannelBind::default(),
         i0,
         pick,
     );
@@ -687,10 +665,10 @@ fn draw_one_ribbon_bspline_mark(
     // contour; varying fill → per-vertex mesh on a merged-u grid
     // so paired (A, B) vertices align across the two curves.
     if let Some(mark_color) = mark_fill {
-        let varies = super::resolve::channel_varies_across(fill_ch, fill_scale, &row_for_ctrl)
+        let varies = super::resolve::channel_varies_across(fill.ch, fill.scale, &row_for_ctrl)
             || super::resolve::channel_varies_across(
-                fill_opacity_ch,
-                fill_opacity_scale,
+                fill_opacity.ch,
+                fill_opacity.scale,
                 &row_for_ctrl,
             );
 
@@ -731,11 +709,7 @@ fn draw_one_ribbon_bspline_mark(
                 let colors = build_per_vertex_colors(
                     &merged_u,
                     &row_for_ctrl,
-                    fill_ch,
-                    fill_scale,
-                    fill_opacity_ch,
-                    fill_opacity_scale,
-                    mark_color,
+                    &RowFill::new(fill, fill_opacity, mark_color),
                 );
                 let mut mesh = crate::primitives::ribbon_band_mesh(
                     &curve_a_merged,
@@ -904,24 +878,11 @@ fn build_merged_grid(
 
 /// Build per-vertex colours for the mesh path. Each sample's `u`
 /// position lerps the bracketing rows' resolved `(fill, fill_opacity)`.
-#[allow(clippy::too_many_arguments)]
 fn build_per_vertex_colors(
     merged_u: &[f64],
     row_for_ctrl: &[usize],
-    fill_ch: Option<&Channel>,
-    fill_scale: Option<&crate::plot::scale::Scale>,
-    fill_opacity_ch: Option<&Channel>,
-    fill_opacity_scale: Option<&crate::plot::scale::Scale>,
-    fallback: Color,
+    fill: &RowFill<'_>,
 ) -> Vec<Color> {
-    let resolve_at = |row: usize| -> Color {
-        override_alpha(
-            resolve_color_channel(fill_ch, fill_scale, row),
-            resolve_number_channel(fill_opacity_ch, fill_opacity_scale, row),
-        )
-        .unwrap_or(fallback)
-    };
-    let fill_space = channel_color_space(fill_scale);
     let n_rows = row_for_ctrl.len();
     merged_u
         .iter()
@@ -934,11 +895,9 @@ fn build_per_vertex_colors(
             let hi = (lo + 1).min(n_rows - 1);
             let t = u_clamped - lo as f64;
             if lo == hi || t.abs() < 1e-9 {
-                resolve_at(row_for_ctrl[lo])
+                fill.at(row_for_ctrl[lo])
             } else {
-                let c0 = resolve_at(row_for_ctrl[lo]);
-                let c1 = resolve_at(row_for_ctrl[hi]);
-                crate::color::lerp_color(c0, c1, t, fill_space)
+                fill.between(row_for_ctrl[lo], row_for_ctrl[hi], t)
             }
         })
         .collect()

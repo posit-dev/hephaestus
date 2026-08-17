@@ -12,7 +12,7 @@
 //!
 //! The projection contributes the geometry — what the outline path
 //! looks like, what a "grid line" is for each channel — via the
-//! [`panel_outline_path`] / [`channel_grid_path`] free functions
+//! `panel_outline_path` / `channel_grid_path` free functions
 //! below. The drawing order, styling, and scale-break iteration are
 //! shared across all projections.
 
@@ -491,9 +491,9 @@ fn cartesian_grid(panel: Rect, channel: usize, frac: f64) -> Path {
 
 fn polar_grid(p: &PolarProjection, panel: Rect, channel: usize, frac: f64) -> Option<Path> {
     let g = p.geometry(panel);
-    let span = p.theta_end - p.theta_start;
+    let span = p.theta_end() - p.theta_start();
     let is_full_circle = (span.abs() - std::f64::consts::TAU).abs() < 1e-6;
-    let is_chord = matches!(p.edge_style, PolarEdgeStyle::Chord);
+    let is_chord = matches!(p.edge_style(), PolarEdgeStyle::Chord);
 
     if channel == 0 {
         // Spoke at theta_for_frac(frac), from r_inner to r_outer. Skip
@@ -502,14 +502,9 @@ fn polar_grid(p: &PolarProjection, panel: Rect, channel: usize, frac: f64) -> Op
             return None;
         }
         let theta = p.theta_for_frac(frac);
-        let p_in = Point::new(
-            g.cx + g.r_inner * theta.cos(),
-            g.cy - g.r_inner * theta.sin(),
-        );
-        let p_out = Point::new(
-            g.cx + g.r_outer * theta.cos(),
-            g.cy - g.r_outer * theta.sin(),
-        );
+        let centre = Point::new(g.cx, g.cy);
+        let p_in = PolarProjection::polar_point(centre, g.r_inner, theta);
+        let p_out = PolarProjection::polar_point(centre, g.r_outer, theta);
         Some(segment(p_in, p_out))
     } else {
         // Ring at radius r_inner + frac * (r_outer - r_inner).
@@ -518,7 +513,7 @@ fn polar_grid(p: &PolarProjection, panel: Rect, channel: usize, frac: f64) -> Op
             return None;
         }
         let centre = Point::new(g.cx, g.cy);
-        Some(if is_chord && !p.theta_break_fracs.is_empty() {
+        Some(if is_chord && !p.theta_break_fracs().is_empty() {
             polar_polygon_ring(p, centre, r_px, is_full_circle)
         } else if is_full_circle {
             circle(centre, r_px)
@@ -526,7 +521,7 @@ fn polar_grid(p: &PolarProjection, panel: Rect, channel: usize, frac: f64) -> Op
             // Negate so the math-convention CCW arc renders as the
             // visual sweep (consistent with how the projection maps
             // angles into screen y-down space).
-            arc(centre, r_px, -p.theta_start, -span)
+            arc(centre, r_px, -p.theta_start(), -span)
         })
     }
 }
@@ -541,15 +536,15 @@ fn polar_polygon_ring(
     radius: f64,
     is_full_circle: bool,
 ) -> Path {
-    let mut thetas: Vec<f64> = Vec::with_capacity(p.theta_break_fracs.len() + 2);
+    let mut thetas: Vec<f64> = Vec::with_capacity(p.theta_break_fracs().len() + 2);
     if !is_full_circle {
-        thetas.push(p.theta_start);
+        thetas.push(p.theta_start());
     }
-    for &frac in &p.theta_break_fracs {
+    for &frac in p.theta_break_fracs() {
         thetas.push(p.theta_for_frac(frac));
     }
     if !is_full_circle {
-        thetas.push(p.theta_end);
+        thetas.push(p.theta_end());
     }
     let mut pts: Vec<Point> = thetas
         .iter()
@@ -568,9 +563,9 @@ fn polar_polygon_ring(
 /// stroked for the outline.
 fn polar_panel_outline(p: &PolarProjection, panel: Rect) -> Path {
     let g = p.geometry(panel);
-    let span = p.theta_end - p.theta_start;
+    let span = p.theta_end() - p.theta_start();
     let is_full_circle = (span.abs() - std::f64::consts::TAU).abs() < 1e-6;
-    let is_chord = matches!(p.edge_style, PolarEdgeStyle::Chord);
+    let is_chord = matches!(p.edge_style(), PolarEdgeStyle::Chord);
     let centre = Point::new(g.cx, g.cy);
     let has_inner = g.r_inner > 0.0;
 
@@ -592,14 +587,16 @@ fn polar_panel_outline(p: &PolarProjection, panel: Rect) -> Path {
             path
         }
         // Geodesic partial pie / annular wedge.
-        (false, false, false) => wedge(centre, g.r_outer, -p.theta_start, -span),
-        (false, false, true) => annular_wedge(centre, g.r_inner, g.r_outer, -p.theta_start, -span),
+        (false, false, false) => wedge(centre, g.r_outer, -p.theta_start(), -span),
+        (false, false, true) => {
+            annular_wedge(centre, g.r_inner, g.r_outer, -p.theta_start(), -span)
+        }
         // Chord-style full polygon / annular polygon.
-        (true, true, false) => closed_polygon_ring(p, centre, g.r_outer),
+        (true, true, false) => polygon_ring(p, centre, g.r_outer, false),
         (true, true, true) => {
-            let mut path = closed_polygon_ring(p, centre, g.r_outer);
+            let mut path = polygon_ring(p, centre, g.r_outer, false);
             // Reverse-wound inner polygon so the annulus fills correctly.
-            for el in reverse_polygon_ring(p, centre, g.r_inner).elements() {
+            for el in polygon_ring(p, centre, g.r_inner, true).elements() {
                 path.push(*el);
             }
             path
@@ -611,28 +608,18 @@ fn polar_panel_outline(p: &PolarProjection, panel: Rect) -> Path {
     }
 }
 
-fn closed_polygon_ring(p: &PolarProjection, centre: Point, radius: f64) -> Path {
-    let pts: Vec<Point> = p
-        .theta_break_fracs
-        .iter()
-        .map(|&frac| {
-            let t = p.theta_for_frac(frac);
-            Point::new(centre.x + radius * t.cos(), centre.y - radius * t.sin())
-        })
-        .collect();
-    polygon(&[&pts], PolygonOptions::default())
-}
-
-fn reverse_polygon_ring(p: &PolarProjection, centre: Point, radius: f64) -> Path {
+/// The chord-style ring at `radius` — one vertex per theta break.
+/// `reversed` flips the winding, which is how an annulus punches its
+/// inner ring out of the outer one under the nonzero fill rule.
+fn polygon_ring(p: &PolarProjection, centre: Point, radius: f64, reversed: bool) -> Path {
     let mut pts: Vec<Point> = p
-        .theta_break_fracs
+        .theta_break_fracs()
         .iter()
-        .map(|&frac| {
-            let t = p.theta_for_frac(frac);
-            Point::new(centre.x + radius * t.cos(), centre.y - radius * t.sin())
-        })
+        .map(|&frac| PolarProjection::polar_point(centre, radius, p.theta_for_frac(frac)))
         .collect();
-    pts.reverse();
+    if reversed {
+        pts.reverse();
+    }
     polygon(&[&pts], PolygonOptions::default())
 }
 
@@ -646,9 +633,9 @@ fn reverse_circle(centre: Point, radius: f64) -> Path {
 /// `theta_start` through each break to `theta_end`, then either back
 /// to centre (no inner) or back along the inner polygon (with inner).
 fn chord_partial_filled(p: &PolarProjection, centre: Point, r_outer: f64, r_inner: f64) -> Path {
-    let thetas: Vec<f64> = std::iter::once(p.theta_start)
-        .chain(p.theta_break_fracs.iter().map(|&f| p.theta_for_frac(f)))
-        .chain(std::iter::once(p.theta_end))
+    let thetas: Vec<f64> = std::iter::once(p.theta_start())
+        .chain(p.theta_break_fracs().iter().map(|&f| p.theta_for_frac(f)))
+        .chain(std::iter::once(p.theta_end()))
         .collect();
     let outer: Vec<Point> = thetas
         .iter()

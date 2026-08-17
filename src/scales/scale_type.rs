@@ -239,7 +239,7 @@ fn transform_minor_breaks(min: f64, max: f64, kind: TransformKind, majors: &[Val
 /// - [`TemporalUnit::Time`] → `Value::Time(ns)`
 /// - [`TemporalUnit::Duration`] → `Value::Duration(μs)`
 ///
-/// The tick label formatter ([`Scale::format`] in `crate::plot::scale`)
+/// The tick label formatter (`format` in `crate::plot::scale`)
 /// renders each variant in calendar form (`YYYY-MM-DD`, etc.).
 pub fn temporal_breaks(
     input_range: Option<&InputRange>,
@@ -572,7 +572,7 @@ pub fn binned_band_width(bins: Option<&[f64]>) -> f64 {
 }
 
 /// Per-bin band width — the proportional panel slot of the bin containing
-/// `input`. Lets [`Scale::map_with_offset`] (in `crate::plot::scale`) apply
+/// `input`. Lets `map_with_offset` (in `crate::plot::scale`) apply
 /// `*_band` channel offsets correctly across non-uniform bin widths.
 pub fn binned_band_width_at(
     input: &Value,
@@ -619,7 +619,9 @@ pub fn identity_map(input: &Value) -> Value {
 /// - `Numbers(vs)` → piecewise-linear interpolation across `vs.len() - 1`
 ///   segments. Empty vec returns `Null`; single-stop returns that stop.
 /// - `Colors(vs)` → piecewise-linear interpolation through `color_space`.
-/// - `Strings(_)` → `Null` (strings can't be interpolated).
+/// - `Strings(vs)` / `Linetypes(vs)` → the entry nearest `t`. Neither
+///   has a meaningful midpoint, so the fraction selects rather than
+///   blends. Empty vec returns `Null`.
 fn interpolate_range(t: f64, range: Option<&OutputRange>, color_space: ColorSpace) -> Value {
     match range {
         None => Value::Number(t),
@@ -717,6 +719,279 @@ mod tests {
         assert_eq!(find_bin(5.0, &edges), 0);
         assert_eq!(find_bin(-100.0, &edges), 0);
         assert_eq!(find_bin(35.0, &edges), 1);
+    }
+
+    fn srgb() -> ColorSpace {
+        ColorSpace::Srgb
+    }
+
+    fn cat(s: &str) -> Value {
+        Value::String(std::sync::Arc::from(s))
+    }
+
+    fn strings(items: &[&str]) -> OutputRange {
+        OutputRange::Strings(items.iter().map(|s| std::sync::Arc::from(*s)).collect())
+    }
+
+    fn dash(len: f64) -> std::sync::Arc<[crate::scales::value::LinetypeStep]> {
+        std::sync::Arc::from(vec![crate::scales::value::LinetypeStep::Dash(len)])
+    }
+
+    // ── pick_segment ────────────────────────────────────────────────
+
+    #[test]
+    fn pick_segment_walks_one_segment_per_stop_pair() {
+        // Three stops = two segments; each covers half the unit interval.
+        assert_eq!(pick_segment(0.0, 3), (0, 0.0));
+        assert_eq!(pick_segment(0.25, 3), (0, 0.5));
+        assert_eq!(pick_segment(0.5, 3), (1, 0.0));
+        assert_eq!(pick_segment(0.75, 3), (1, 0.5));
+    }
+
+    #[test]
+    fn pick_segment_holds_the_top_stop_pair_at_the_upper_end() {
+        // `t = 1` must address the last segment fully rather than
+        // indexing one past the final stop.
+        let (lo, frac) = pick_segment(1.0, 3);
+        assert_eq!(lo, 1);
+        assert!((frac - 1.0).abs() < 1e-12, "{frac}");
+    }
+
+    #[test]
+    fn pick_segment_extrapolates_past_both_ends() {
+        // Out-of-range fractions keep the nearest segment and let the
+        // interpolation weight run past `[0, 1]`.
+        let (lo, frac) = pick_segment(1.5, 3);
+        assert_eq!(lo, 1);
+        assert!((frac - 2.0).abs() < 1e-12, "{frac}");
+        let (lo, frac) = pick_segment(-0.5, 3);
+        assert_eq!(lo, 0);
+        assert!((frac + 1.0).abs() < 1e-12, "{frac}");
+    }
+
+    // ── interpolate_range ───────────────────────────────────────────
+
+    #[test]
+    fn interpolate_range_without_a_range_returns_the_fraction() {
+        let v = interpolate_range(0.42, None, srgb());
+        assert_eq!(v.as_number(), Some(0.42));
+    }
+
+    #[test]
+    fn interpolate_range_over_numbers_is_piecewise_linear() {
+        let range = OutputRange::Numbers(vec![0.0, 10.0, 100.0]);
+        let at = |t: f64| {
+            interpolate_range(t, Some(&range), srgb())
+                .as_number()
+                .unwrap()
+        };
+        assert!((at(0.0) - 0.0).abs() < 1e-12);
+        assert!((at(0.25) - 5.0).abs() < 1e-12);
+        assert!((at(0.5) - 10.0).abs() < 1e-12);
+        assert!((at(0.75) - 55.0).abs() < 1e-12);
+        assert!((at(1.0) - 100.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn interpolate_range_over_an_empty_or_single_stop_range() {
+        assert!(interpolate_range(0.5, Some(&OutputRange::Numbers(vec![])), srgb()).is_null());
+        let one = OutputRange::Numbers(vec![7.0]);
+        assert_eq!(
+            interpolate_range(0.9, Some(&one), srgb()).as_number(),
+            Some(7.0)
+        );
+        assert!(interpolate_range(0.5, Some(&OutputRange::Colors(vec![])), srgb()).is_null());
+        assert!(interpolate_range(0.5, Some(&strings(&[])), srgb()).is_null());
+        assert!(interpolate_range(0.5, Some(&OutputRange::Linetypes(vec![])), srgb()).is_null());
+    }
+
+    #[test]
+    fn interpolate_range_over_colors_blends_componentwise_in_the_named_space() {
+        let range = OutputRange::Colors(vec![
+            crate::color::rgb(0.0, 0.0, 0.0),
+            crate::color::rgb(1.0, 0.0, 0.0),
+            crate::color::rgb(1.0, 1.0, 1.0),
+        ]);
+        let mid = match interpolate_range(0.25, Some(&range), ColorSpace::Srgb) {
+            Value::Color(c) => c,
+            other => panic!("expected a color, got {other:?}"),
+        };
+        let [r, g, b, a] = mid.components;
+        assert!((r - 0.5).abs() < 1e-6, "{r}");
+        assert!(g.abs() < 1e-6 && b.abs() < 1e-6);
+        assert!((a - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn interpolate_range_over_strings_picks_the_nearest_entry() {
+        let range = strings(&["a", "b", "c"]);
+        let at = |t: f64| match interpolate_range(t, Some(&range), srgb()) {
+            Value::String(s) => s.to_string(),
+            other => panic!("expected a string, got {other:?}"),
+        };
+        assert_eq!(at(0.0), "a");
+        assert_eq!(at(0.4), "b");
+        assert_eq!(at(0.9), "c");
+        // Out-of-range fractions clamp to the ends rather than wrapping.
+        assert_eq!(at(-2.0), "a");
+        assert_eq!(at(3.0), "c");
+    }
+
+    #[test]
+    fn interpolate_range_over_linetypes_picks_the_nearest_entry() {
+        let range = OutputRange::Linetypes(vec![dash(1.0), dash(2.0), dash(3.0)]);
+        let at = |t: f64| match interpolate_range(t, Some(&range), srgb()) {
+            Value::Linetype(p) => p,
+            other => panic!("expected a linetype, got {other:?}"),
+        };
+        assert_eq!(&*at(0.1), &*dash(1.0));
+        assert_eq!(&*at(0.5), &*dash(2.0));
+        assert_eq!(&*at(1.0), &*dash(3.0));
+        assert_eq!(&*at(4.0), &*dash(3.0));
+    }
+
+    #[test]
+    fn ordinal_map_interpolates_a_palette_shorter_than_the_domain() {
+        // Five levels over a two-stop ramp: intermediate levels land on
+        // interpolated points instead of falling off the palette.
+        let domain = InputRange::Discrete(vec![cat("a"), cat("b"), cat("c"), cat("d"), cat("e")]);
+        let range = OutputRange::Numbers(vec![0.0, 100.0]);
+        let at = |v: &str| {
+            ordinal_map(
+                &cat(v),
+                Some(&domain),
+                Some(&range),
+                srgb(),
+                Direction::Forward,
+            )
+            .as_number()
+            .unwrap()
+        };
+        assert!((at("a") - 0.0).abs() < 1e-12);
+        assert!((at("b") - 25.0).abs() < 1e-12);
+        assert!((at("c") - 50.0).abs() < 1e-12);
+        assert!((at("e") - 100.0).abs() < 1e-12);
+    }
+
+    // ── Direction::Reversed ─────────────────────────────────────────
+
+    #[test]
+    fn discrete_map_reversed_mirrors_band_and_palette_index() {
+        let domain =
+            InputRange::Discrete(vec![Value::from("a"), Value::from("b"), Value::from("c")]);
+        let band = |v: &str| {
+            discrete_map(&cat(v), Some(&domain), None, Direction::Reversed)
+                .as_number()
+                .unwrap()
+        };
+        // The first category takes the last band centre.
+        assert!((band("a") - 2.5 / 3.0).abs() < 1e-12, "{}", band("a"));
+        assert!((band("c") - 0.5 / 3.0).abs() < 1e-12, "{}", band("c"));
+
+        let range = OutputRange::Numbers(vec![1.0, 2.0, 3.0]);
+        let pick = |v: &str| {
+            discrete_map(&cat(v), Some(&domain), Some(&range), Direction::Reversed)
+                .as_number()
+                .unwrap()
+        };
+        assert_eq!(pick("a"), 3.0);
+        assert_eq!(pick("c"), 1.0);
+    }
+
+    #[test]
+    fn ordinal_map_reversed_walks_the_gradient_from_the_far_end() {
+        let domain =
+            InputRange::Discrete(vec![Value::from("a"), Value::from("b"), Value::from("c")]);
+        let range = OutputRange::Numbers(vec![0.0, 10.0]);
+        let at = |v: &str| {
+            ordinal_map(
+                &cat(v),
+                Some(&domain),
+                Some(&range),
+                srgb(),
+                Direction::Reversed,
+            )
+            .as_number()
+            .unwrap()
+        };
+        assert!((at("a") - 10.0).abs() < 1e-12);
+        assert!((at("b") - 5.0).abs() < 1e-12);
+        assert!((at("c") - 0.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn ordinal_map_reversed_without_a_range_mirrors_the_band_centre() {
+        let domain = InputRange::Discrete(vec![cat("a"), cat("b")]);
+        let at = |v: &str| {
+            ordinal_map(&cat(v), Some(&domain), None, srgb(), Direction::Reversed)
+                .as_number()
+                .unwrap()
+        };
+        assert!((at("a") - 0.75).abs() < 1e-12);
+        assert!((at("b") - 0.25).abs() < 1e-12);
+    }
+
+    // ── binned_band_width_at ────────────────────────────────────────
+
+    #[test]
+    fn binned_band_width_at_reports_the_containing_bins_own_slot() {
+        // Uneven bins: each value's band is its own bin's share of the
+        // domain, not the uniform `1 / n_bins` the scale-wide helper
+        // reports.
+        let domain = InputRange::Continuous {
+            min: 0.0,
+            max: 100.0,
+        };
+        let edges = [0.0, 10.0, 50.0, 100.0];
+        let at = |v: f64| binned_band_width_at(&Value::Number(v), Some(&domain), Some(&edges));
+        assert!((at(5.0) - 0.1).abs() < 1e-12, "{}", at(5.0));
+        assert!((at(20.0) - 0.4).abs() < 1e-12, "{}", at(20.0));
+        assert!((at(60.0) - 0.5).abs() < 1e-12, "{}", at(60.0));
+        // The uniform helper can't tell the three bins apart.
+        assert!((binned_band_width(Some(&edges)) - 1.0 / 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn binned_band_width_at_is_zero_without_a_domain_or_bins() {
+        let domain = InputRange::Continuous {
+            min: 0.0,
+            max: 10.0,
+        };
+        let edges = [0.0, 5.0, 10.0];
+        assert_eq!(
+            binned_band_width_at(&cat("a"), Some(&domain), Some(&edges)),
+            0.0
+        );
+        assert_eq!(
+            binned_band_width_at(&Value::Number(1.0), None, Some(&edges)),
+            0.0
+        );
+        assert_eq!(
+            binned_band_width_at(&Value::Number(1.0), Some(&domain), Some(&[3.0])),
+            0.0
+        );
+    }
+
+    // ── wrap_temporal_value ─────────────────────────────────────────
+
+    #[test]
+    fn wrap_temporal_value_restores_each_units_typed_variant() {
+        assert!(matches!(
+            wrap_temporal_value(19_723.0, TemporalUnit::Date),
+            Value::Date(19_723)
+        ));
+        assert!(matches!(
+            wrap_temporal_value(1_704_067_200_000_000.0, TemporalUnit::DateTime),
+            Value::DateTime(1_704_067_200_000_000)
+        ));
+        assert!(matches!(
+            wrap_temporal_value(3_600_000_000_000.0, TemporalUnit::Time),
+            Value::Time(3_600_000_000_000)
+        ));
+        assert!(matches!(
+            wrap_temporal_value(-90_000_000.0, TemporalUnit::Duration),
+            Value::Duration(-90_000_000)
+        ));
     }
 
     #[test]

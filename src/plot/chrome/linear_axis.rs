@@ -119,7 +119,7 @@ pub(crate) struct AxisChromeStyle {
     pub text_style: TextStyle,
     pub text_brush: Brush,
     /// Outline pass for tick labels. `None` draws labels fill-only.
-    pub text_outline: Option<crate::plot::plot::TextOutline>,
+    pub text_outline: Option<crate::plot::chrome::text::TextOutline>,
     pub draw_labels: bool,
 }
 
@@ -184,9 +184,9 @@ impl AxisChromeStyle {
                     // weight, width, style, features, variations, line
                     // height, letter spacing and decorations are all
                     // themeable on tick labels.
-                    crate::plot::plot::text_style_from(el, root_pt),
+                    crate::plot::chrome::text::text_style_from(el, root_pt),
                     mk_brush(color),
-                    crate::plot::plot::text_outline_from(el, palette, dpi),
+                    crate::plot::chrome::text::text_outline_from(el, palette, dpi),
                     true,
                 )
             }
@@ -337,7 +337,7 @@ pub(crate) fn draw_axis_label(
     text: &str,
     style: &TextStyle,
     brush: &Brush,
-    outline: Option<&crate::plot::plot::TextOutline>,
+    outline: Option<&crate::plot::chrome::text::TextOutline>,
     at: AxisLabelAt,
     dpi: f64,
 ) {
@@ -388,7 +388,7 @@ pub(crate) fn draw_axis_label(
 
     let x = label_cx - label_w * 0.5;
     let y = label_cy - cap_h * 0.5 - cap_top_offset;
-    crate::plot::plot::draw_text_outline_pass(scene, outline, &run, x, y, Affine::IDENTITY);
+    crate::plot::chrome::text::draw_text_outline_pass(scene, outline, &run, x, y, Affine::IDENTITY);
     draw_text(scene, &run, x, y, brush, Affine::IDENTITY, PickId::Skip);
 }
 

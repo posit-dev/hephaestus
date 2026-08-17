@@ -49,6 +49,7 @@ use super::outline::{
     PolygonSpec,
 };
 use super::point::GLYPH_BBOX_REFERENCE;
+use super::project::{project_and_densify_one, PathOptions, PathVertex};
 use super::resolve::{
     override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or, resolve_cap_channel,
     resolve_color_channel, resolve_color_channel_or_theme, resolve_join_channel,
@@ -446,49 +447,17 @@ fn project_path(
     } else {
         coords
     };
-    let is_linear = ctx.projection.is_linear();
-    let mut out: Vec<Point> = Vec::with_capacity(coords.len());
-    let mut interior: Vec<(f64, f64)> = Vec::new();
-    let mut prev_frac: Option<[f64; 2]> = None;
-    let mut first_frac: Option<[f64; 2]> = None;
-    for c in coords {
-        let frac = dc.frac(*c);
-        if !frac[0].is_finite() || !frac[1].is_finite() {
-            continue;
-        }
-        let pt = dc.point_at(ctx, &frac);
-        if !pt.x.is_finite() || !pt.y.is_finite() {
-            continue;
-        }
-        if !is_linear {
-            if let Some(prev) = prev_frac {
-                interior.clear();
-                ctx.projection
-                    .interpolate_segment(ctx.panel_rect, &prev, &frac, &mut interior);
-                out.extend(interior.iter().map(|(px, py)| Point::new(*px, *py)));
-            }
-        }
-        out.push(pt);
-        if first_frac.is_none() {
-            first_frac = Some(frac);
-        }
-        prev_frac = Some(frac);
-    }
-    if closing && !is_linear {
-        if let (Some(prev), Some(first)) = (prev_frac, first_frac) {
-            if prev != first {
-                interior.clear();
-                ctx.projection.interpolate_closing_segment(
-                    ctx.panel_rect,
-                    &prev,
-                    &first,
-                    &mut interior,
-                );
-                out.extend(interior.iter().map(|(px, py)| Point::new(*px, *py)));
-            }
-        }
-    }
-    out
+    let opts = if closing {
+        PathOptions::ring(1)
+    } else {
+        PathOptions::path(1)
+    };
+    project_and_densify_one(ctx, coords.len(), &opts, |k| PathVertex {
+        frac: dc.frac(coords[k]),
+        offset_px: (dc.dx_px, dc.dy_px),
+        attrs: None,
+    })
+    .points
 }
 
 /// A ring without the trailing duplicate of its first coordinate.

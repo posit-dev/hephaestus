@@ -405,7 +405,7 @@ impl Value {
     /// Deterministic equality for diff/lookup keys. Two `Value::Number`
     /// NaNs compare equal; positive and negative zero compare equal.
     /// `Value::Linetype` compares element-wise via
-    /// [`linetype_step_key_eq`].
+    /// `linetype_step_key_eq`.
     pub fn key_eq(&self, other: &Value) -> bool {
         use Value::*;
         match (self, other) {

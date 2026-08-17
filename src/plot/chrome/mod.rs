@@ -10,6 +10,7 @@ pub(crate) mod linear_axis;
 pub mod panel;
 pub mod polar;
 pub mod strip;
+pub(crate) mod text;
 
 /// The font size a chrome slot's `Length::Rel` text size resolves
 /// against — `theme.text.size_pt`, or the crate default when the theme

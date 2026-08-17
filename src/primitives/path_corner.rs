@@ -21,16 +21,14 @@
 //! circular fillet (Bezier-arc magic `(4/3) · tan(bend/4)`) is a one-line
 //! swap when the visual difference matters.
 
+use super::corner_class::{angle_between_deg, classify_angle, Class};
+use super::tolerance::{ARCLEN_ACCURACY, DEGENERATE_EPS};
 use crate::geometry::{
     CubicBez, Line, ParamCurve, ParamCurveArclen, ParamCurveDeriv, PathSeg, QuadBez,
 };
 use crate::geometry::{Point, Vec2};
 use crate::path::{Path, PathEl};
 use crate::primitives::CornerRounding;
-
-const COLLINEAR_TOL_DEG: f64 = 1e-3;
-const ARCLEN_ACCURACY: f64 = 1e-3;
-const DEGENERATE_EPS: f64 = 1e-9;
 
 /// Round corners on an arbitrary `Path`. Unlike [`super::round_corners`],
 /// this operates on the path's segments directly, so it works for shapes
@@ -102,13 +100,6 @@ fn split_subpaths(path: &Path) -> Vec<Subpath> {
         out.push(Subpath { segs, closed });
     }
     out
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Class {
-    Corner,
-    Collinear,
-    NonCorner,
 }
 
 struct JoinInfo {
@@ -224,16 +215,7 @@ fn classify_join(left: &PathSeg, right: &PathSeg, max_angle_deg: f64) -> Class {
     let t_in = unit_tangent_at(left, 1.0);
     let t_out = unit_tangent_at(right, 0.0);
     // Interior angle = angle between (-T_in) and T_out.
-    let cos = (-t_in.x) * t_out.x + (-t_in.y) * t_out.y;
-    let cos = cos.clamp(-1.0, 1.0);
-    let angle_deg = cos.acos().to_degrees();
-    if angle_deg >= 180.0 - COLLINEAR_TOL_DEG || angle_deg <= COLLINEAR_TOL_DEG {
-        Class::Collinear
-    } else if angle_deg <= max_angle_deg {
-        Class::Corner
-    } else {
-        Class::NonCorner
-    }
+    classify_angle(angle_between_deg(-t_in, t_out), max_angle_deg)
 }
 
 fn unit_tangent_at(seg: &PathSeg, t: f64) -> Vec2 {

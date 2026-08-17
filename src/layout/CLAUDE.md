@@ -8,6 +8,8 @@ The public API covers: n × m grids, content leaves with an intrinsic-size proto
 
 Layout is unconditional — built into every cargo profile, no feature flag.
 
+Files: `mod.rs` (the grid vocabulary — `Grid`, `Track`, `Placement`, `Inset`, `Layout`), `length.rs` (`Extent` and its arithmetic), `measure.rs` (the `Measure` / `WidthHint` leaf protocol and `Cell`), `solver.rs` (the two-pass solver), `tests.rs`.
+
 ## Core types
 
 - **`Grid`** — n × m grid. Built with `Grid::new(widths, heights)`. Place children with `Grid::place(row, col, span_rows, span_cols, child)` where the child is `impl Into<Node>` (either a `Cell` or another `Grid`). `Grid::cell()` is shorthand for `Cell::empty()`. `Grid::respect()` enables cross-axis fr coupling.
@@ -25,15 +27,19 @@ Layout is unconditional — built into every cargo profile, no feature flag.
 
 ## Solver — width-major two-pass
 
-1. **Pass 1** walks the tree resolving every column track. Auto columns use child `min_width` recursively, with `WidthHint::Min` / `seeds[path]` for leaves. Records per-grid `(col_sizes, x_range)` in side tables keyed by `Vec<usize>` tree path.
+1. **Pass 1** walks the tree resolving every column track. Auto columns use child `min_width` recursively, with `WidthHint::Min` / the current seed for leaves. Records per-grid `(col_sizes, x_range)` in side tables indexed by the node's dense index, assigned to every grid and cell by the pre-pass walk.
 2. **Pass 2** walks the tree again with all widths known, resolving rows. Auto rows query each child with `height_at(child_width)`.
 3. After the two passes, a separate `emit_rects` walk produces the flat `HashMap<CellId, Rect>`.
 
-`Track::Auto` resolves in pass 1 for cols (from `min_width` queries: cells use `WidthHint::Min { seed }`; grids recurse) and in pass 2 for rows (from `height_at(known_width)` queries). Pass 1 skips multi-span children entirely (the v1 deliberate simplification); **pass 2 does not** — because widths are known when row Autos resolve, a multi-span child contributes to its (single) Auto row using `height_at(sum_of_spanned_widths)`.
+Both passes are the *same code*. Track resolution, Auto sizing, placement and inset arithmetic are written once against the `AxisView` trait and instantiated for `Horizontal` (columns) and `Vertical` (rows); the `MinSizer` trait supplies the two steps that genuinely differ per pass — how a leaf reports its size (`width_hint` versus `height_at`), and what cross-axis size a child was allotted (unknown in pass 1, resolved in pass 2).
+
+`Track::Auto` resolves in pass 1 for cols (from `min_width` queries: cells use `WidthHint::Min { seed }`; grids recurse) and in pass 2 for rows (from `height_at(known_width)` queries). A child contributes only to an Auto track it occupies **alone**: each pass skips children spanning several tracks *on the axis it is sizing*. Spanning the **cross** axis is fine in pass 2 — widths are known by then, so a child spanning several columns contributes to its (single) Auto row using `height_at(sum_of_spanned_widths)`. Pass 1 has no counterpart because row heights aren't resolved yet. Regression test: `multi_span_contributes_to_auto_row_in_pass_2`.
+
+The recursive intrinsic-size query is memoized per node for the duration of a pass — its inputs (seeds, or pass 1's widths) are fixed within one iteration, and every ancestor with an Auto track would otherwise re-walk the whole subtree.
 
 `respect()` implements a variant of R grid's `allocateRespected`: per-fr-w and per-fr-h are clamped to the smaller, with each axis's per-fr divided into `total_fr = respected + unrespected` (rather than just the respected portion) so unrespected sibling tracks retain their share before the aspect lock claims the rest of the axis. A 2×2 grid with one square-locked cell and three flex cells therefore resolves cleanly — the locked cell gets the min-axis fr share, the flex siblings absorb the leftover on each axis. Width-pass needs height-axis numbers it doesn't have yet, so it works from *provisional* row heights: Auto rows count as 0 on iteration 0 (a safe lower bound — they only grow from content) and reuse the previous iteration's resolved heights from then on. Pass 2 re-clamps using the actual per-fr-h. With no Auto rows the provisional matches the actual exactly.
 
-Those provisional heights feed **two** consumers, and both must use the same numbers: the grid's own `per_fr_h_provisional`, and the y-window handed to each child (`row_sizes_provisional` → `child_y_range`). A child spanning Auto rows whose window omits their height reads the height axis as tighter than it is — for a respected child that undersizes its aspect-locked cells and leaves the surplus as centering slack, which surfaces as dead space between siblings rather than at the composition's outer edge. Regression test: `nested_respected_grid_sees_full_window_height`. With Auto rows that grow from content, the grid is allowed to **exceed** respect's prediction in height — content height wins; respect becomes a best-effort coupling, not an inviolable invariant.
+Those provisional heights feed **two** consumers, and both must use the same numbers — they come from one provisional resolve of the row axis: its free space sets the cross-axis scale the column respect clamp uses, and its track sizes set the y-window handed to each child. A child spanning Auto rows whose window omits their height reads the height axis as tighter than it is — for a respected child that undersizes its aspect-locked cells and leaves the surplus as centering slack, which surfaces as dead space between siblings rather than at the composition's outer edge. Regression test: `nested_respected_grid_sees_full_window_height`. With Auto rows that grow from content, the grid is allowed to **exceed** respect's prediction in height — content height wins; respect becomes a best-effort coupling, not an inviolable invariant.
 
 ## Iteration
 

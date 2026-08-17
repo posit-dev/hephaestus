@@ -16,7 +16,7 @@ Construction is id-addressed: every [`Patch`] is created with a string id, and r
 - **`Slot`** — 21 named anatomical positions: Panel, Background, AxisTop / Bottom / Left / Right, AxisTopTitle / etc., StripTop / etc., LegendTop / Bottom / Left / Right, Title, Subtitle, Caption. Each has a fixed `(row, col, row_span, col_span)`; see `Slot::placement`. The mapping is total — for positions outside this fixed anatomy use `Patch::place_at`.
 - **`Span`** — `Span::cell()` (1×1), `Span::rows(n)`, `Span::cols(n)`, `Span::rc(r, c)`. Used by `Patch::place_at` and `Composition::place`.
 - **`CompositionLayout`** — resolved rects. Query with `layout.get(patch_id, slot.name())` or `layout.get(patch_id, "custom_region")` for `place_at` regions.
-- **`CompositionError`** — solve-time error (e.g. duplicate patch ids).
+- **`CompositionError`** — every way a composition can be malformed: a degenerate extent, `Slot::Panel` on a composition, a placement off the grid or covering the panel cell, a mismatched track list, an append onto a multi-track composition, a `grid` cell-count mismatch, and duplicate patch ids.
 
 Module-level constants: `TABLE_COLS = 13`, `TABLE_ROWS = 16`, plus the anatomical landmark constants (`PANEL_ROW = 9`, `PANEL_COL = 7`, `PLOT_LEFT / RIGHT / TOP / BOTTOM`, `MARGIN_*`, `PADDING_*`).
 
@@ -44,6 +44,7 @@ The effect: inner-composition chrome (axis titles on facet borders, etc.) couple
 ## Conventions
 
 - **Patch ids must be unique across the entire reachable element tree.** Duplicate ids return `CompositionError` from `try_solve` (and panic from `solve`).
+- **Builders record errors; `try_solve` reports them.** A malformed call (`place` off the grid, `widths` with the wrong length, `slot(Slot::Panel, …)`) doesn't panic — it stores the first `CompositionError` on the composition and keeps the chain going. `try_solve` returns it, walking nested compositions so an error three levels down still reaches the root; `solve` panics on it. Deferring rather than panicking is what makes `try_solve` a complete validation entry point — a caller building a composition from untrusted input sees every failure mode there, not just the ones that survive to solve time. `Composition::error()` reads the pending error without solving.
 - **`Composition::aspect` cascades depth-first** to every descendant without its own aspect; a child with its own aspect blocks propagation past that node. The walk has to complete before the aspect accounting in `build_composition_grid` runs — `composition_natural_aspect` reports `None` for a nested composition whose leaves aren't locked yet, which would leave that block's panel track unrespected and let it claim the whole axis.
 - **Slack from an aspect lock pools at the composition's outer edges**, not between siblings. Every aspect-bearing block's panel track is respected, so the resolved tracks come out narrower than the canvas and the solver's grid centering (`layout/solver.rs`) splits the remainder into equal outer gutters. Covered by `aspect_slack_pools_outside_the_composition`.
 - **Panel cells span across all spanned outer blocks**; chrome cells anchor to the start block (left / top) or end block (right / bottom) of the span, enabling asymmetric multi-block spans.

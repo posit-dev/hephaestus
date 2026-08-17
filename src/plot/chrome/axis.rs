@@ -7,7 +7,7 @@
 //! - All tick labels are horizontal (no rotation). Wide labels on a
 //!   vertical axis grow the axis chrome column.
 //! - Tick mark length, label gap, and font size are pulled from the
-//!   theme's resolved [`AxisChromeStyle`] — the same style the renderer
+//!   theme's resolved `AxisChromeStyle` — the same style the renderer
 //!   uses at draw time, so the slot reservation matches the visible
 //!   chrome.
 //! - Tick labels use the scale's own [`Scale::format`], which renders
@@ -55,9 +55,9 @@ impl AxisId {
 pub struct Axis {
     /// Scale that supplies the breaks + map for the rail. `None`
     /// means "no rail" — the title (if any) still renders.
-    pub scale_name: Option<String>,
-    pub placement: AxisPlacement,
-    pub title: Option<String>,
+    scale_name: Option<String>,
+    placement: AxisPlacement,
+    title: Option<String>,
 }
 
 /// Where an axis sits relative to its plot.
@@ -65,7 +65,7 @@ pub struct Axis {
 pub enum AxisPlacement {
     /// Standard rectilinear axis along one of the panel's four
     /// edges. Wired into the corresponding patch slot via
-    /// [`Scale::axis_measure`] + [`Scale::draw_axis`].
+    /// [`measure`] + [`draw`].
     Cartesian(AxisSide),
     /// Radius axis along a spoke at `theta_frac ∈ [0, 1]` on a
     /// polar projection. The spoke direction is computed via the
@@ -116,6 +116,22 @@ impl Axis {
     pub fn title(mut self, t: impl Into<String>) -> Self {
         self.title = Some(t.into());
         self
+    }
+
+    /// Name of the scale driving the rail, or `None` when the axis
+    /// has no rail.
+    pub fn scale_name(&self) -> Option<&str> {
+        self.scale_name.as_deref()
+    }
+
+    /// Where the axis sits relative to its plot.
+    pub fn placement(&self) -> AxisPlacement {
+        self.placement
+    }
+
+    /// The axis title, or `None` when the axis carries no title.
+    pub fn title_ref(&self) -> Option<&str> {
+        self.title.as_deref()
     }
 }
 
@@ -214,134 +230,133 @@ impl Measure for AxisMeasure {
     }
 }
 
-// ─── Scale::axis_measure + draw_axis ─────────────────────────────────────────
+// ─── Measure + draw ──────────────────────────────────────────────────────────
 
-impl Scale {
-    /// Pre-shape this scale's tick labels into a [`Measure`] cell suitable
-    /// for dropping into a [`composition::Patch`](crate::composition::Patch)
-    /// slot. The chrome style (label text style, tick / gap pixel sizes)
-    /// is resolved from `theme` against the channel + side derived from
-    /// `side`, so the slot reservation matches what [`Scale::draw_axis`]
-    /// emits at draw time.
-    pub fn axis_measure(&self, side: AxisSide, dpi: f64, theme: &Theme) -> Box<dyn Measure> {
-        let (ch, side_idx) = axis_side_to_channel_side(side);
-        let resolved = theme.resolved_axis(ch, side_idx);
-        let chrome_style = AxisChromeStyle::from_resolved(
-            &resolved,
-            &theme.palette,
-            dpi,
-            crate::plot::chrome::root_text_pt(theme),
-        );
-        Box::new(AxisMeasure::new(
-            self,
-            side,
-            dpi,
-            &chrome_style,
-            &theme.locale,
-        ))
+/// Pre-shape `scale`'s tick labels into a [`Measure`] cell suitable for
+/// dropping into a [`composition::Patch`](crate::composition::Patch)
+/// slot. The chrome style (label text style, tick / gap pixel sizes) is
+/// resolved from `theme` against the channel + side derived from
+/// `side`, so the slot reservation matches what [`draw`] emits.
+pub fn measure(scale: &Scale, side: AxisSide, dpi: f64, theme: &Theme) -> Box<dyn Measure> {
+    let (ch, side_idx) = axis_side_to_channel_side(side);
+    let resolved = theme.resolved_axis(ch, side_idx);
+    let chrome_style = AxisChromeStyle::from_resolved(
+        &resolved,
+        &theme.palette,
+        dpi,
+        crate::plot::chrome::root_text_pt(theme),
+    );
+    Box::new(AxisMeasure::new(
+        scale,
+        side,
+        dpi,
+        &chrome_style,
+        &theme.locale,
+    ))
+}
+
+/// Stroke tick marks and draw tick labels into `slot_rect`, mapping
+/// the scale's breaks into panel-space pixels via `panel_rect`.
+///
+/// Conventions:
+/// - For position scales (no output range), `scale.map_break(value)`
+///   returns a `Value::Number` in `[0, 1]`; the geom-side convention
+///   `px = panel.x0 + frac * panel_w` (and `panel.y1 - frac * panel_h`
+///   for y, to flip pixels-grow-downward) applies here too.
+/// - Tick marks stroke outward from the panel edge into `slot_rect`.
+/// - Labels are anchored toward `slot_rect`'s far edge from the panel.
+///
+/// Silently does nothing if the scale has no input range, has empty
+/// breaks, or the slot rect is degenerate.
+#[allow(clippy::too_many_arguments)]
+pub fn draw(
+    scale: &Scale,
+    scene: &mut dyn SceneBuilder,
+    slot_rect: Rect,
+    panel_rect: Rect,
+    side: AxisSide,
+    dpi: f64,
+    theme: &Theme,
+) {
+    let breaks = scale.breaks(DEFAULT_BREAK_COUNT);
+    if breaks.is_empty() {
+        return;
+    }
+    let panel_w = panel_rect.x1 - panel_rect.x0;
+    let panel_h = panel_rect.y1 - panel_rect.y0;
+    if panel_w <= 0.0 || panel_h <= 0.0 {
+        return;
     }
 
-    /// Stroke tick marks and draw tick labels into `slot_rect`, mapping
-    /// the scale's breaks into panel-space pixels via `panel_rect`.
-    ///
-    /// Conventions:
-    /// - For position scales (no output range), `scale.map_break(value)`
-    ///   returns a `Value::Number` in `[0, 1]`; the geom-side convention
-    ///   `px = panel.x0 + frac * panel_w` (and `panel.y1 - frac * panel_h`
-    ///   for y, to flip pixels-grow-downward) applies here too.
-    /// - Tick marks stroke outward from the panel edge into `slot_rect`.
-    /// - Labels are anchored toward `slot_rect`'s far edge from the panel.
-    ///
-    /// Silently does nothing if the scale has no input range, has empty
-    /// breaks, or the slot rect is degenerate.
-    pub fn draw_axis(
-        &self,
-        scene: &mut dyn SceneBuilder,
-        slot_rect: Rect,
-        panel_rect: Rect,
-        side: AxisSide,
-        dpi: f64,
-        theme: &Theme,
-    ) {
-        let breaks = self.breaks(DEFAULT_BREAK_COUNT);
-        if breaks.is_empty() {
-            return;
-        }
-        let panel_w = panel_rect.x1 - panel_rect.x0;
-        let panel_h = panel_rect.y1 - panel_rect.y0;
-        if panel_w <= 0.0 || panel_h <= 0.0 {
-            return;
-        }
+    // Translate the side + slot/panel layout into the linear-axis
+    // primitives: baseline endpoints and the perpendicular tick
+    // direction. `frac=0` corresponds to `start`; `frac=1` to
+    // `end`. y axes flip so `frac=0` is at the panel BOTTOM.
+    let (start, end, tick_direction) = match side {
+        AxisSide::Bottom => (
+            Point::new(panel_rect.x0, slot_rect.y0),
+            Point::new(panel_rect.x1, slot_rect.y0),
+            (0.0, 1.0),
+        ),
+        AxisSide::Top => (
+            Point::new(panel_rect.x0, slot_rect.y1),
+            Point::new(panel_rect.x1, slot_rect.y1),
+            (0.0, -1.0),
+        ),
+        AxisSide::Left => (
+            Point::new(slot_rect.x1, panel_rect.y1),
+            Point::new(slot_rect.x1, panel_rect.y0),
+            (-1.0, 0.0),
+        ),
+        AxisSide::Right => (
+            Point::new(slot_rect.x0, panel_rect.y1),
+            Point::new(slot_rect.x0, panel_rect.y0),
+            (1.0, 0.0),
+        ),
+    };
 
-        // Translate the side + slot/panel layout into the linear-axis
-        // primitives: baseline endpoints and the perpendicular tick
-        // direction. `frac=0` corresponds to `start`; `frac=1` to
-        // `end`. y axes flip so `frac=0` is at the panel BOTTOM.
-        let (start, end, tick_direction) = match side {
-            AxisSide::Bottom => (
-                Point::new(panel_rect.x0, slot_rect.y0),
-                Point::new(panel_rect.x1, slot_rect.y0),
-                (0.0, 1.0),
-            ),
-            AxisSide::Top => (
-                Point::new(panel_rect.x0, slot_rect.y1),
-                Point::new(panel_rect.x1, slot_rect.y1),
-                (0.0, -1.0),
-            ),
-            AxisSide::Left => (
-                Point::new(slot_rect.x1, panel_rect.y1),
-                Point::new(slot_rect.x1, panel_rect.y0),
-                (-1.0, 0.0),
-            ),
-            AxisSide::Right => (
-                Point::new(slot_rect.x0, panel_rect.y1),
-                Point::new(slot_rect.x0, panel_rect.y0),
-                (1.0, 0.0),
-            ),
-        };
+    let majors: Vec<(f64, String)> = breaks
+        .iter()
+        .filter(|v| !matches!(v, Value::Null))
+        .filter_map(|v| {
+            scale
+                .map_break(v)
+                .as_number()
+                .map(|f| (f, scale.format(v, &theme.locale)))
+        })
+        .filter(|(f, _)| f.is_finite())
+        .collect();
+    let minors: Vec<f64> = scale
+        .minor_breaks(DEFAULT_BREAK_COUNT)
+        .into_iter()
+        .filter(|v| !matches!(v, Value::Null))
+        .filter_map(|v| scale.map_break(&v).as_number())
+        .filter(|f| f.is_finite())
+        .collect();
 
-        let majors: Vec<(f64, String)> = breaks
-            .iter()
-            .filter(|v| !matches!(v, Value::Null))
-            .filter_map(|v| {
-                self.map_break(v)
-                    .as_number()
-                    .map(|f| (f, self.format(v, &theme.locale)))
-            })
-            .filter(|(f, _)| f.is_finite())
-            .collect();
-        let minors: Vec<f64> = self
-            .minor_breaks(DEFAULT_BREAK_COUNT)
-            .into_iter()
-            .filter(|v| !matches!(v, Value::Null))
-            .filter_map(|v| self.map_break(&v).as_number())
-            .filter(|f| f.is_finite())
-            .collect();
-
-        // Resolve the (channel, side) axis from the theme. Channel
-        // is determined by which axis side this is — Bottom/Top
-        // belong to channel 0 (x), Left/Right to channel 1 (y).
-        // Side 0 / 1 within the channel selects between the two
-        // possible axes for that channel.
-        let (ch, side_idx) = axis_side_to_channel_side(side);
-        let resolved = theme.resolved_axis(ch, side_idx);
-        let style = AxisChromeStyle::from_resolved(
-            &resolved,
-            &theme.palette,
-            dpi,
-            crate::plot::chrome::root_text_pt(theme),
-        );
-        draw_linear_axis_at(
-            scene,
-            start,
-            end,
-            tick_direction,
-            &majors,
-            &minors,
-            &style,
-            dpi,
-        );
-    }
+    // Resolve the (channel, side) axis from the theme. Channel
+    // is determined by which axis side this is — Bottom/Top
+    // belong to channel 0 (x), Left/Right to channel 1 (y).
+    // Side 0 / 1 within the channel selects between the two
+    // possible axes for that channel.
+    let (ch, side_idx) = axis_side_to_channel_side(side);
+    let resolved = theme.resolved_axis(ch, side_idx);
+    let style = AxisChromeStyle::from_resolved(
+        &resolved,
+        &theme.palette,
+        dpi,
+        crate::plot::chrome::root_text_pt(theme),
+    );
+    draw_linear_axis_at(
+        scene,
+        start,
+        end,
+        tick_direction,
+        &majors,
+        &minors,
+        &style,
+        dpi,
+    );
 }
 
 /// Map an `AxisSide` to the projection-agnostic `(channel, side)`
@@ -377,13 +392,27 @@ mod tests {
         Rect::new(50.0, 20.0, 450.0, 320.0)
     }
 
+    // ── Axis spec ──
+
+    #[test]
+    fn axis_builders_round_trip_through_the_accessors() {
+        let rail = Axis::rail("x", AxisPlacement::Cartesian(AxisSide::Bottom)).title("Time");
+        assert_eq!(rail.scale_name(), Some("x"));
+        assert_eq!(rail.placement(), AxisPlacement::Cartesian(AxisSide::Bottom));
+        assert_eq!(rail.title_ref(), Some("Time"));
+
+        let title_only = Axis::title_only("Depth", AxisPlacement::PolarAngular(PolarRing::Outer));
+        assert_eq!(title_only.scale_name(), None);
+        assert_eq!(title_only.title_ref(), Some("Depth"));
+    }
+
     // ── axis_measure ──
 
     #[test]
     fn bottom_axis_measure_reports_chrome_height() {
         let s = scale::continuous(0.0..=100.0);
         let theme = Theme::default();
-        let m = s.axis_measure(AxisSide::Bottom, dpi_96(), &theme);
+        let m = measure(&s, AxisSide::Bottom, dpi_96(), &theme);
         // Bottom axis: width contribution = 0, height = tick + gap + label_h.
         assert_eq!(m.width_hint(dpi_96()), WidthHint::Min(0.0));
         let h = m.height_at(400.0, dpi_96());
@@ -396,7 +425,7 @@ mod tests {
     fn left_axis_measure_reports_chrome_width() {
         let s = scale::continuous(0.0..=100.0);
         let theme = Theme::default();
-        let m = s.axis_measure(AxisSide::Left, dpi_96(), &theme);
+        let m = measure(&s, AxisSide::Left, dpi_96(), &theme);
         let w = match m.width_hint(dpi_96()) {
             WidthHint::Min(w) => w,
             WidthHint::NeedsHeight { seed } => seed,
@@ -413,8 +442,8 @@ mod tests {
         let s_short = scale::continuous(0.0..=10.0);
         let s_long = scale::continuous(0.0..=100_000_000.0);
         let theme = Theme::default();
-        let m_short = s_short.axis_measure(AxisSide::Left, dpi_96(), &theme);
-        let m_long = s_long.axis_measure(AxisSide::Left, dpi_96(), &theme);
+        let m_short = measure(&s_short, AxisSide::Left, dpi_96(), &theme);
+        let m_long = measure(&s_long, AxisSide::Left, dpi_96(), &theme);
         let w_short = match m_short.width_hint(dpi_96()) {
             WidthHint::Min(w) => w,
             WidthHint::NeedsHeight { seed } => seed,
@@ -450,12 +479,13 @@ mod tests {
         let panel = panel_400_300();
         // Place the slot directly below the panel — height = chrome.
         let theme = Theme::default();
-        let m = s.axis_measure(AxisSide::Bottom, dpi_96(), &theme);
+        let m = measure(&s, AxisSide::Bottom, dpi_96(), &theme);
         let chrome_h = m.height_at(panel.x1 - panel.x0, dpi_96());
         let slot = Rect::new(panel.x0, panel.y1, panel.x1, panel.y1 + chrome_h);
 
         let mut scene = RecordingScene::default();
-        s.draw_axis(
+        draw(
+            &s,
             &mut scene,
             slot,
             panel,
@@ -487,7 +517,7 @@ mod tests {
         let s = scale::continuous(0.0..=1.0);
         let panel = panel_400_300();
         let theme = Theme::default();
-        let m = s.axis_measure(AxisSide::Left, dpi_96(), &theme);
+        let m = measure(&s, AxisSide::Left, dpi_96(), &theme);
         let chrome_w = match m.width_hint(dpi_96()) {
             WidthHint::Min(w) => w,
             WidthHint::NeedsHeight { seed } => seed,
@@ -495,7 +525,8 @@ mod tests {
         let slot = Rect::new(panel.x0 - chrome_w, panel.y0, panel.x0, panel.y1);
 
         let mut scene = RecordingScene::default();
-        s.draw_axis(
+        draw(
+            &s,
             &mut scene,
             slot,
             panel,
@@ -522,12 +553,20 @@ mod tests {
         let s = scale::binned(2500.0..=6500.0, edges.clone());
         let panel = panel_400_300();
         let theme = Theme::default();
-        let m = s.axis_measure(AxisSide::Bottom, dpi_96(), &theme);
+        let m = measure(&s, AxisSide::Bottom, dpi_96(), &theme);
         let chrome_h = m.height_at(panel.x1 - panel.x0, dpi_96());
         let slot = Rect::new(panel.x0, panel.y1, panel.x1, panel.y1 + chrome_h);
 
         let mut scene = RecordingScene::default();
-        s.draw_axis(&mut scene, slot, panel, AxisSide::Bottom, dpi_96(), &theme);
+        draw(
+            &s,
+            &mut scene,
+            slot,
+            panel,
+            AxisSide::Bottom,
+            dpi_96(),
+            &theme,
+        );
 
         let tick_xs: Vec<f64> = scene
             .ops
@@ -559,7 +598,8 @@ mod tests {
         let slot = Rect::new(panel.x0, panel.y1, panel.x1, panel.y1 + 30.0);
 
         let mut scene = RecordingScene::default();
-        s.draw_axis(
+        draw(
+            &s,
             &mut scene,
             slot,
             panel,
@@ -581,7 +621,8 @@ mod tests {
         let panel = Rect::new(0.0, 0.0, 0.0, 0.0);
         let slot = Rect::new(0.0, 0.0, 10.0, 10.0);
         let mut scene = RecordingScene::default();
-        s.draw_axis(
+        draw(
+            &s,
             &mut scene,
             slot,
             panel,

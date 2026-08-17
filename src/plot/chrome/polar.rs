@@ -1,5 +1,5 @@
 //! Polar axis renderers. Per-axis entry points called from
-//! [`Plot::draw_chrome_into`] for each `Axis` whose placement is
+//! `draw_chrome_into` for each `Axis` whose placement is
 //! polar-shaped. Cartesian axes go through
 //! [`crate::plot::chrome::axis`]; the in-panel grid (rings + spokes
 //! + background) goes through [`crate::plot::chrome::panel`].
@@ -138,7 +138,7 @@ pub fn draw_radius_axis(
 /// space, not into the data area). Labels follow the tick direction
 /// using the same quadrant-aware placement as cartesian axes.
 ///
-/// The inner variant is a no-op when `polar.inner_radius_frac == 0`
+/// The inner variant is a no-op when `polar.inner_radius_frac() == 0`
 /// — there's no inner ring to label.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_angular_axis(
@@ -165,7 +165,7 @@ pub fn draw_angular_axis(
         }
     };
 
-    let span = polar.theta_end - polar.theta_start;
+    let span = polar.theta_end() - polar.theta_start();
     let is_full_circle = (span.abs() - std::f64::consts::TAU).abs() < 1e-6;
 
     // Resolve from theme: angular axis = channel 0; outer ring is
@@ -202,7 +202,7 @@ pub fn draw_angular_axis(
             continue;
         }
         let theta = polar.theta_for_frac(theta_frac);
-        let on_ring = Point::new(g.cx + ring_r * theta.cos(), g.cy - ring_r * theta.sin());
+        let on_ring = PolarProjection::polar_point(Point::new(g.cx, g.cy), ring_r, theta);
         let (rx, ry) = (tick_sign * theta.cos(), -tick_sign * theta.sin());
         let tick_end = Point::new(
             on_ring.x + minor_tick_px * rx,
@@ -235,7 +235,7 @@ pub fn draw_angular_axis(
             continue;
         }
         let theta = polar.theta_for_frac(theta_frac);
-        let on_ring = Point::new(g.cx + ring_r * theta.cos(), g.cy - ring_r * theta.sin());
+        let on_ring = PolarProjection::polar_point(Point::new(g.cx, g.cy), ring_r, theta);
         let (rx, ry) = (tick_sign * theta.cos(), -tick_sign * theta.sin());
         let tick_end = Point::new(on_ring.x + tick_px * rx, on_ring.y + tick_px * ry);
         if let (Some(tick_brush), tick_stroke) =
@@ -617,7 +617,7 @@ pub(crate) enum BleedLabelKind {
 /// picks the "exterior" side of the swept wedge.
 fn radius_axis_tick_direction(polar: &PolarProjection, theta_frac: f64) -> (f64, f64) {
     // sign = +1 for CCW sweep (theta_end > theta_start in math), -1 for CW.
-    let sign = if polar.theta_end > polar.theta_start {
+    let sign = if polar.theta_end() > polar.theta_start() {
         1.0
     } else {
         -1.0
@@ -643,7 +643,7 @@ fn angular_title_text_style(
     resolved
         .title
         .as_ref()
-        .map(|el| crate::plot::plot::text_style_from(el, root_pt))
+        .map(|el| crate::plot::chrome::text::text_style_from(el, root_pt))
 }
 
 /// Render a radius axis title past the outer end of the tick labels,
@@ -685,7 +685,7 @@ fn draw_radius_title(
     // Rotation angle (screen coords, y-down).
     let mut theta_spoke = sy.atan2(sx);
 
-    let style = crate::plot::plot::text_style_from(title_el, root_pt);
+    let style = crate::plot::chrome::text::text_style_from(title_el, root_pt);
     let run = crate::text::TextRun::new(title, &style, dpi);
     let title_w = run.natural_width();
     let title_h = run.set_max_width(f32::INFINITY, crate::text::Alignment::Start) as f64;
@@ -743,7 +743,7 @@ fn draw_radius_title(
         .expect("text_concrete_defaults sets color")
         .resolve(palette);
     let brush = Brush::Solid(title_color);
-    let outline = crate::plot::plot::text_outline_from(title_el, palette, dpi);
+    let outline = crate::plot::chrome::text::text_outline_from(title_el, palette, dpi);
     for g_glyph in &glyphs {
         let y_above_baseline = g_glyph.y as f64 - baseline_ref;
         let xform = Affine::translate(Vec2::new(origin_x, origin_y))
@@ -811,7 +811,7 @@ fn draw_angular_title(
     if g.r_outer <= 0.0 {
         return;
     }
-    let style = crate::plot::plot::text_style_from(title_el, root_pt);
+    let style = crate::plot::chrome::text::text_style_from(title_el, root_pt);
     let run = crate::text::TextRun::new(title, &style, dpi);
     let text_w = run.natural_width();
     let _title_h = run.set_max_width(f32::INFINITY, crate::text::Alignment::Start) as f64;
@@ -829,12 +829,12 @@ fn draw_angular_title(
     }
 
     // Arc midpoint angle (math convention).
-    let span = polar.theta_end - polar.theta_start;
+    let span = polar.theta_end() - polar.theta_start();
     let is_full_circle = (span.abs() - std::f64::consts::TAU).abs() < 1e-6;
     let theta_mid_math = if is_full_circle {
         std::f64::consts::FRAC_PI_2 // 12 o'clock for full circles.
     } else {
-        (polar.theta_start + polar.theta_end) * 0.5
+        (polar.theta_start() + polar.theta_end()) * 0.5
     };
     // Arc length the title spans, in radians.
     let arc_radians = text_w / r_title;
@@ -842,7 +842,7 @@ fn draw_angular_title(
         return;
     }
     // Sweep direction matches the polar's natural sweep (CCW or CW).
-    let sweep_sign = if polar.theta_end > polar.theta_start {
+    let sweep_sign = if polar.theta_end() > polar.theta_start() {
         -1.0
     } else {
         1.0
@@ -912,7 +912,7 @@ fn draw_angular_title(
         .expect("text_concrete_defaults sets color")
         .resolve(palette);
     let brush = Brush::Solid(title_color);
-    let outline = crate::plot::plot::text_outline_from(title_el, palette, dpi);
+    let outline = crate::plot::chrome::text::text_outline_from(title_el, palette, dpi);
     for gph in &glyphs {
         let half_advance = gph.advance as f64 * 0.5;
         let d_glyph = hjust_shift + gph.x as f64 + half_advance;

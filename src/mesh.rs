@@ -15,12 +15,12 @@
 //!
 //! # Storage
 //!
-//! - [`Self::vertices`]: positions in path coordinates.
-//! - [`Self::colors`]: same length as `vertices` — one colour per
+//! - `vertices`: positions in path coordinates.
+//! - `colors`: same length as `vertices` — one colour per
 //!   vertex. Per-vertex colour is the *whole point* of the mesh op; if
 //!   every vertex has the same colour, a plain `fill` with a solid
 //!   brush is cheaper.
-//! - [`Self::indices`]: flat `u32` triples. `len() % 3 == 0`. Each
+//! - `indices`: flat `u32` triples. `len() % 3 == 0`. Each
 //!   triple `(i, j, k)` references vertices `vertices[i]`,
 //!   `vertices[j]`, `vertices[k]` (and their matching colours).
 //!

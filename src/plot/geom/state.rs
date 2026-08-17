@@ -134,6 +134,48 @@ impl GeomState {
         self.prev_channels = self.channels.clone();
         self.dirty = false;
     }
+
+    /// [`Self::rebuild_diff_against_previous`] at **mark** granularity.
+    ///
+    /// A grouped geom's rows aren't its marks — several rows share one
+    /// key — so the key column is first collapsed to one entry per
+    /// mark, using each mark's first row. Callers pass the first-row
+    /// index of every previous and current mark; how those marks are
+    /// grouped is the geom's own business (`PolygonGeom` splits on
+    /// rings as well as keys).
+    ///
+    /// Leaves `dirty` set for the caller to clear once it has also
+    /// rebuilt whatever mark cache it keeps alongside the state.
+    pub fn rebuild_grouped_diff(
+        &mut self,
+        prev_first_rows: &[usize],
+        next_first_rows: &[usize],
+        geom_name: &str,
+    ) {
+        let (enter, update, exit) = match (&self.prev_keys, &self.keys) {
+            (Keys::Explicit(prev_col), Keys::Explicit(next_col)) => {
+                let prev_unique = super::marks::unique_values_at_first_rows(
+                    prev_col,
+                    prev_first_rows.iter().copied(),
+                    geom_name,
+                );
+                let next_unique = super::marks::unique_values_at_first_rows(
+                    next_col,
+                    next_first_rows.iter().copied(),
+                    geom_name,
+                );
+                let idx = KeyIndex::build(&prev_unique);
+                diff_columns(&prev_unique, &idx, &next_unique)
+            }
+            _ => diff_positional(prev_first_rows.len(), next_first_rows.len()),
+        };
+        self.enter = enter;
+        self.update = update;
+        self.exit = exit;
+        self.prev_keys = self.keys.clone();
+        self.prev_channels = self.channels.clone();
+        self.dirty = false;
+    }
 }
 
 // ─── KeysStrategy ────────────────────────────────────────────────────────────
@@ -502,4 +544,192 @@ macro_rules! impl_geom_inherents_grouped {
             }
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plot::value::Value;
+
+    const CATALOG: &[(&str, ExpectedOutput)] = &[
+        ("x", ExpectedOutput::Numbers),
+        ("y", ExpectedOutput::Numbers),
+        ("fill", ExpectedOutput::Colors),
+        ("pick_id", ExpectedOutput::Numbers),
+    ];
+
+    fn channels(entries: Vec<(&str, Channel)>) -> HashMap<String, Channel> {
+        entries
+            .into_iter()
+            .map(|(name, ch)| (name.to_string(), ch))
+            .collect()
+    }
+
+    fn xy(n: usize) -> HashMap<String, Channel> {
+        channels(vec![
+            ("x", Channel::Data(DataColumn::F64(vec![0.0; n]))),
+            ("y", Channel::Data(DataColumn::F64(vec![0.0; n]))),
+        ])
+    }
+
+    fn finalize(ch: HashMap<String, Channel>, n: usize, strategy: KeysStrategy) -> GeomState {
+        finalize_state(None, ch, n, strategy, CATALOG, "TestGeom")
+    }
+
+    // ── Validation ─────────────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "unknown channel \"colour\" — not declared by this geom")]
+    fn finalize_state_rejects_a_channel_the_geom_does_not_declare() {
+        let mut ch = xy(2);
+        ch.insert("colour".to_string(), Channel::Constant(Value::Number(1.0)));
+        finalize(ch, 2, KeysStrategy::PerRow);
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown channels \"colour\", \"shape\"")]
+    fn finalize_state_lists_every_unknown_channel_sorted() {
+        let mut ch = xy(2);
+        ch.insert("shape".to_string(), Channel::Constant(Value::Number(1.0)));
+        ch.insert("colour".to_string(), Channel::Constant(Value::Number(1.0)));
+        finalize(ch, 2, KeysStrategy::PerRow);
+    }
+
+    #[test]
+    #[should_panic(expected = "\"y\" length 2 does not match row count 3")]
+    fn finalize_state_rejects_a_short_data_column() {
+        let ch = channels(vec![
+            ("x", Channel::Data(DataColumn::F64(vec![0.0; 3]))),
+            ("y", Channel::Data(DataColumn::F64(vec![0.0; 2]))),
+        ]);
+        finalize(ch, 3, KeysStrategy::PerRow);
+    }
+
+    #[test]
+    #[should_panic(expected = "\"pick_id\" data column must be a non-negative integer")]
+    fn finalize_state_rejects_a_fractional_pick_id() {
+        let mut ch = xy(2);
+        ch.insert(
+            "pick_id".to_string(),
+            Channel::Data(DataColumn::F64(vec![1.0, 2.5])),
+        );
+        finalize(ch, 2, KeysStrategy::PerRow);
+    }
+
+    #[test]
+    #[should_panic(expected = "missing required channel \"x\"")]
+    fn require_data_column_reports_a_missing_channel() {
+        require_data_column("x", &HashMap::new(), "TestGeom");
+    }
+
+    #[test]
+    #[should_panic(expected = "\"x\" must be data, not constant")]
+    fn require_data_column_rejects_a_constant_where_a_column_is_needed() {
+        let ch = channels(vec![("x", Channel::Constant(Value::Number(1.0)))]);
+        require_data_column("x", &ch, "TestGeom");
+    }
+
+    #[test]
+    #[should_panic(expected = "\"y\" length 1 does not match \"x\" length 3")]
+    fn require_x_and_siblings_rejects_a_sibling_of_a_different_length() {
+        let ch = channels(vec![
+            ("x", Channel::Data(DataColumn::F64(vec![0.0; 3]))),
+            ("y", Channel::Data(DataColumn::F64(vec![0.0; 1]))),
+        ]);
+        require_x_and_siblings(&ch, &["y"], "TestGeom");
+    }
+
+    #[test]
+    #[should_panic(expected = "keys length 2 does not match row count 3")]
+    fn from_builder_rejects_a_key_column_of_the_wrong_length() {
+        GeomState::from_builder(
+            Some(DataColumn::String(vec![Arc::from("a"), Arc::from("b")])),
+            xy(3),
+            3,
+            KeysStrategy::PerRow,
+            Vec::new(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "\"fill\" length 4 does not match row count 2")]
+    fn set_rejects_a_column_that_does_not_match_the_row_count() {
+        let mut state = finalize(xy(2), 2, KeysStrategy::PerRow);
+        state.set(
+            "fill",
+            Channel::Data(DataColumn::F64(vec![0.0, 1.0, 2.0, 3.0])),
+        );
+    }
+
+    // ── Key synthesis ──────────────────────────────────────────────
+
+    #[test]
+    fn per_row_strategy_synthesises_positional_keys() {
+        let state = finalize(xy(3), 3, KeysStrategy::PerRow);
+        match &state.keys {
+            Keys::Positional(n) => assert_eq!(*n, 3),
+            Keys::Explicit(_) => panic!("expected positional keys"),
+        }
+        assert_eq!(state.len(), 3);
+        assert!(!state.is_empty());
+    }
+
+    #[test]
+    fn one_mark_strategy_synthesises_a_single_shared_key() {
+        // Every row carries the same placeholder, so the diff machinery
+        // and mark grouping both see exactly one mark.
+        let state = finalize(xy(3), 3, KeysStrategy::OneMark);
+        match &state.keys {
+            Keys::Explicit(col) => {
+                assert_eq!(col.len(), 3);
+                assert!(col.get(0).key_eq(&col.get(2)));
+            }
+            Keys::Positional(_) => panic!("expected an explicit placeholder column"),
+        }
+        assert_eq!(super::super::marks::build_marks(&state.keys).len(), 1);
+    }
+
+    #[test]
+    fn a_supplied_key_column_survives_either_strategy() {
+        for strategy in [KeysStrategy::PerRow, KeysStrategy::OneMark] {
+            let keys = DataColumn::String(vec![Arc::from("a"), Arc::from("b")]);
+            let state = GeomState::from_builder(Some(keys), xy(2), 2, strategy, Vec::new());
+            match &state.keys {
+                Keys::Explicit(col) => assert!(col.get(0).key_eq(&Value::String(Arc::from("a")))),
+                Keys::Positional(_) => panic!("supplied keys must not be replaced"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_fresh_state_diffs_as_all_enter() {
+        // `prev_*` is seeded with the length-zero counterpart, so the
+        // first draw treats every row as entering.
+        let mut state = finalize(xy(3), 3, KeysStrategy::PerRow);
+        assert!(state.dirty);
+        state.rebuild_diff_against_previous();
+        assert_eq!(state.enter, vec![0, 1, 2]);
+        assert!(state.update.is_empty());
+        assert!(state.exit.is_empty());
+        assert!(!state.dirty);
+    }
+
+    // ── Declared channels ──────────────────────────────────────────
+
+    #[test]
+    fn filter_declared_keeps_supplied_catalog_entries_in_name_order() {
+        let mut ch = xy(2);
+        ch.insert(
+            "fill".to_string(),
+            Channel::Constant(Value::Color(crate::color::rgb(1.0, 0.0, 0.0))),
+        );
+        let state = finalize(ch, 2, KeysStrategy::PerRow);
+        let names: Vec<&str> = state.declared.iter().map(|d| d.name).collect();
+        assert_eq!(names, vec!["fill", "x", "y"]);
+        let fill = state.declared.iter().find(|d| d.name == "fill").unwrap();
+        assert!(!fill.data_bound, "a constant channel is not data-bound");
+        assert_eq!(fill.expected_output, ExpectedOutput::Colors);
+        let x = state.declared.iter().find(|d| d.name == "x").unwrap();
+        assert!(x.data_bound);
+    }
 }

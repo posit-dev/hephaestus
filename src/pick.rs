@@ -73,3 +73,95 @@ pub fn raw_id(pick: PickId) -> Option<u32> {
         PickId::Id(n) => Some(n),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The u32 a little-endian `Rgba8Unorm` readback yields for an
+    /// encoded pick colour: red in the low byte, alpha in the high one.
+    fn readback_u32(c: Color) -> u32 {
+        let px = c.to_rgba8();
+        ((px.a as u32) << 24) | ((px.b as u32) << 16) | ((px.g as u32) << 8) | px.r as u32
+    }
+
+    /// Ids that bracket each byte boundary of the 24-bit space.
+    const BOUNDARIES: [u32; 10] = [
+        1, 0x7F, 0xFF, 0x100, 0x101, 0xFFFF, 0x1_0000, 0x1_0001, 0xFE_FFFF, 0xFF_FFFF,
+    ];
+
+    #[test]
+    fn boundary_ids_round_trip_through_the_encoded_pixel() {
+        for id in BOUNDARIES {
+            let got = decode(readback_u32(id_to_color(id)));
+            assert_eq!(got, Some(id), "id {id:#x} did not round-trip");
+        }
+    }
+
+    #[test]
+    fn every_sampled_id_across_the_24_bit_space_round_trips() {
+        // Prime stride so the sweep hits every byte value in each of the
+        // three channels rather than aliasing to a fixed pattern.
+        let mut id = 1u32;
+        while id <= 0xFF_FFFF {
+            assert_eq!(decode(readback_u32(id_to_color(id))), Some(id));
+            id += 7919;
+        }
+    }
+
+    #[test]
+    fn encoded_pixel_is_opaque_with_the_id_in_the_low_24_bits() {
+        for id in BOUNDARIES {
+            assert_eq!(
+                readback_u32(id_to_color(id)),
+                (0xFF << 24) | (id & 0x00FF_FFFF),
+                "id {id:#x} encoded to an unexpected pixel"
+            );
+        }
+    }
+
+    #[test]
+    fn id_zero_encodes_the_same_pixel_as_block() {
+        let block = id_to_color(raw_id(PickId::Block).unwrap());
+        let id_zero = id_to_color(raw_id(PickId::Id(0)).unwrap());
+        assert_eq!(raw_id(PickId::Id(0)), raw_id(PickId::Block));
+        assert_eq!(readback_u32(id_zero), readback_u32(block));
+        // Opaque black — the no-hit sentinel, which still occludes.
+        assert_eq!(readback_u32(block), 0xFF00_0000);
+        assert_eq!(decode(readback_u32(block)), None);
+    }
+
+    #[test]
+    fn ids_past_24_bits_lose_their_high_byte() {
+        assert_eq!(
+            readback_u32(id_to_color(0x0100_0001)),
+            readback_u32(id_to_color(1))
+        );
+        assert_eq!(decode(readback_u32(id_to_color(0x0100_0001))), Some(1));
+        assert_eq!(decode(readback_u32(id_to_color(u32::MAX))), Some(0xFF_FFFF));
+        // A caller id whose payload is entirely in the high byte collides
+        // with the no-hit sentinel and becomes unhittable.
+        assert_eq!(decode(readback_u32(id_to_color(0x0100_0000))), None);
+    }
+
+    #[test]
+    fn decode_ignores_the_alpha_byte() {
+        assert_eq!(decode(0x0000_1234), Some(0x1234));
+        assert_eq!(decode(0xFF00_1234), Some(0x1234));
+        assert_eq!(decode(0x0000_0000), None);
+        assert_eq!(decode(0xFF00_0000), None);
+    }
+
+    #[test]
+    fn raw_id_omits_skip_and_maps_block_to_zero() {
+        assert_eq!(raw_id(PickId::Skip), None);
+        assert_eq!(raw_id(PickId::Block), Some(0));
+        assert_eq!(raw_id(PickId::Id(7)), Some(7));
+    }
+
+    #[test]
+    fn default_pick_id_stays_out_of_the_hitmap() {
+        assert_eq!(PickId::default(), PickId::Skip);
+        assert_eq!(raw_id(PickId::default()), None);
+    }
+}

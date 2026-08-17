@@ -817,4 +817,166 @@ mod tests {
             y_end
         );
     }
+
+    // ── Font-size search ──
+
+    /// Font size in px of the first glyph run a draw emitted.
+    fn first_glyph_font_size(scene: &RecordingScene) -> Option<f32> {
+        scene.ops.iter().find_map(|op| match op {
+            Op::DrawGlyphs(gr) => Some(gr.font_size),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn text_that_already_fits_draws_at_the_maximum_font_size() {
+        // The search tries the maximum before bisecting, so the upper
+        // bound is attainable rather than merely approached.
+        let g = TextFitGeom::builder()
+            .set("x", vec![0.05_f64])
+            .set("y", vec![0.05_f64])
+            .set("x2", vec![0.95_f64])
+            .set("y2", vec![0.95_f64])
+            .set("text", vec!["ab"])
+            .set("min_font_size", 6.0_f64)
+            .set("max_font_size", 12.0_f64)
+            .set("fill", Color::new([0.0, 0.0, 0.0, 1.0]))
+            .build();
+        let panel = Rect::new(0.0, 0.0, 600.0, 400.0);
+        let shapes = shapes();
+        let resolver = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &ctx(panel, &shapes, &resolver));
+        // 12pt at 96 dpi = 16px.
+        let size = first_glyph_font_size(&scene).expect("expected glyphs");
+        assert!((size - 16.0).abs() < 1e-3, "{size}");
+    }
+
+    #[test]
+    fn text_that_never_fits_draws_at_the_minimum_font_size() {
+        // A rect too small for even `min_font_size`: the search finds no
+        // candidate and the geom falls back to the minimum.
+        let g = TextFitGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("x2", vec![0.51_f64])
+            .set("y2", vec![0.55_f64])
+            .set("text", vec!["overflowing text"])
+            .set("min_font_size", 9.0_f64)
+            .set("max_font_size", 40.0_f64)
+            .set("fill", Color::new([0.0, 0.0, 0.0, 1.0]))
+            .build();
+        let panel = Rect::new(0.0, 0.0, 400.0, 200.0);
+        let shapes = shapes();
+        let resolver = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &ctx(panel, &shapes, &resolver));
+        // 9pt at 96 dpi = 12px.
+        let size = first_glyph_font_size(&scene).expect("expected glyphs");
+        assert!((size - 12.0).abs() < 1e-3, "{size}");
+    }
+
+    #[test]
+    fn the_search_lands_between_the_two_bounds_when_only_part_of_the_range_fits() {
+        // A rect that takes the text at some sizes but not at the
+        // maximum: the result is smaller than the bound it could not
+        // reach and no smaller than the floor it never needed.
+        let g = TextFitGeom::builder()
+            .set("x", vec![0.1_f64])
+            .set("y", vec![0.4_f64])
+            .set("x2", vec![0.9_f64])
+            .set("y2", vec![0.6_f64])
+            .set("text", vec!["a fitted label"])
+            .set("min_font_size", 6.0_f64)
+            .set("max_font_size", 200.0_f64)
+            .set("fill", Color::new([0.0, 0.0, 0.0, 1.0]))
+            .build();
+        let panel = Rect::new(0.0, 0.0, 400.0, 200.0);
+        let shapes = shapes();
+        let resolver = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &ctx(panel, &shapes, &resolver));
+        let size = first_glyph_font_size(&scene).expect("expected glyphs");
+        let px = |pt: f64| (pt * 96.0 / 72.0) as f32;
+        assert!(size > px(6.0) && size < px(200.0), "{size}");
+        // Fitting text pushes no clip layer.
+        assert!(!scene
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::PushLayer { .. })));
+    }
+
+    #[test]
+    fn justify_y_center_places_the_block_midway_through_the_slack() {
+        // `justify_y` distributes the vertical slack, so "center" lands
+        // exactly halfway between the "start" and "end" placements.
+        let mk = |justify: &'static str| {
+            TextFitGeom::builder()
+                .set("x", vec![0.2_f64])
+                .set("y", vec![0.05_f64])
+                .set("x2", vec![0.8_f64])
+                .set("y2", vec![0.95_f64])
+                .set("text", vec!["abc"])
+                .set("fill", Color::new([0.0, 0.0, 0.0, 1.0]))
+                .set("justify_y", justify)
+                .set("max_font_size", 14.0_f64)
+                .build()
+        };
+        let panel = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let shapes = shapes();
+        let resolver = DirectScaleResolver::new();
+        let glyph_y = |justify: &'static str| {
+            let mut scene = RecordingScene::default();
+            mk(justify).draw(&mut scene, &ctx(panel, &shapes, &resolver));
+            scene
+                .ops
+                .iter()
+                .find_map(|op| match op {
+                    Op::DrawGlyphs(gr) => gr.glyphs.first().map(|g| g.y),
+                    _ => None,
+                })
+                .expect("expected glyphs")
+        };
+        let (start, center, end) = (glyph_y("start"), glyph_y("center"), glyph_y("end"));
+        assert!(end > start, "start={start} end={end}");
+        let expected = 0.5 * (start + end);
+        assert!(
+            (center - expected).abs() < 1e-3,
+            "center={center} expected={expected}"
+        );
+    }
+
+    // ── Justification vocabulary ──
+
+    #[test]
+    fn justify_y_frac_covers_the_alignment_vocabulary() {
+        let frac = |s: &'static str| {
+            let ch = Channel::Constant(Value::from(s));
+            resolve_justify_y_frac(Some(&ch), None, 0)
+        };
+        assert_eq!(frac("start"), 0.0);
+        assert_eq!(frac("center"), 0.5);
+        assert_eq!(frac("centre"), 0.5);
+        assert_eq!(frac("middle"), 0.5);
+        assert_eq!(frac("end"), 1.0);
+        // Unrecognised names and an unset channel both sit at the top.
+        assert_eq!(frac("sideways"), 0.0);
+        assert_eq!(resolve_justify_y_frac(None, None, 0), 0.0);
+    }
+
+    #[test]
+    fn justify_x_covers_the_alignment_vocabulary() {
+        let align = |s: &'static str| {
+            let ch = Channel::Constant(Value::from(s));
+            resolve_justify_x(Some(&ch), None, 0)
+        };
+        assert!(matches!(align("start"), Alignment::Start));
+        assert!(matches!(align("center"), Alignment::Center));
+        assert!(matches!(align("middle"), Alignment::Center));
+        assert!(matches!(align("end"), Alignment::End));
+        assert!(matches!(align("justify"), Alignment::Justify));
+        assert!(matches!(align("justified"), Alignment::Justify));
+        assert!(matches!(align("sideways"), Alignment::Start));
+        assert!(matches!(resolve_justify_x(None, None, 0), Alignment::Start));
+    }
 }

@@ -82,15 +82,14 @@
 //! are drawn in user-supplied order; the geom does not sort.
 
 use crate::brush::Brush;
-use crate::color::Color;
+use crate::color::{Color, ColorSpace};
 use crate::geometry::{Affine, Point, Rect};
 use crate::path::{FillRule, Path};
-use crate::plot::diff::{diff_columns, diff_positional, KeyIndex};
 use crate::plot::scale::Scale;
 use crate::plot::value::DataColumn;
 use crate::scene::SceneBuilder;
 
-use super::marks::{build_marks_from_column, unique_values_at_first_rows, MarkSlot};
+use super::marks::{build_marks_from_column, MarkSlot};
 use super::outline::{draw_curve_outline, resolve_outline_spec, OutlineChannels, OutlineScales};
 use super::resolve::{
     channel_color_space, channel_varies_across, override_alpha, pt_to_px, resolve_color_channel,
@@ -345,30 +344,14 @@ impl Geom for RibbonGeom {
             Keys::Explicit(col) if !col.is_empty() => build_marks_from_column(col),
             _ => Vec::new(),
         };
-        let (enter, update, exit) = match (&self.state.prev_keys, &self.state.keys) {
-            (Keys::Explicit(prev_col), Keys::Explicit(next_col)) => {
-                let prev_unique = unique_values_at_first_rows(
-                    prev_col,
-                    prev_marks.iter().map(|m| m.first_row),
-                    "RibbonGeom",
-                );
-                let next_unique = unique_values_at_first_rows(
-                    next_col,
-                    next_marks.iter().map(|m| m.first_row),
-                    "RibbonGeom",
-                );
-                let idx = KeyIndex::build(&prev_unique);
-                diff_columns(&prev_unique, &idx, &next_unique)
-            }
-            _ => diff_positional(prev_marks.len(), next_marks.len()),
-        };
-        self.state.enter = enter;
-        self.state.update = update;
-        self.state.exit = exit;
+        let first_rows =
+            |ms: &[MarkSlot]| -> Vec<usize> { ms.iter().map(|m| m.first_row).collect() };
+        self.state.rebuild_grouped_diff(
+            &first_rows(&prev_marks),
+            &first_rows(&next_marks),
+            "RibbonGeom",
+        );
         self.marks = next_marks;
-        self.state.prev_keys = self.state.keys.clone();
-        self.state.prev_channels = self.state.channels.clone();
-        self.state.dirty = false;
     }
 
     fn draw(&self, scene: &mut dyn SceneBuilder, ctx: &GeomContext<'_>) {
@@ -463,15 +446,8 @@ fn draw_one_ribbon_mark(
                 ch: y2_band_ch,
                 scale: y2_band_scale,
             },
-        fill: ChannelBind {
-            ch: fill_ch,
-            scale: fill_scale,
-        },
-        fill_opacity:
-            ChannelBind {
-                ch: fill_opacity_ch,
-                scale: fill_opacity_scale,
-            },
+        fill,
+        fill_opacity,
         pick_id:
             ChannelBind {
                 ch: pick_id_ch,
@@ -491,28 +467,30 @@ fn draw_one_ribbon_mark(
     // own fill is unresolved.
     let mark_fill = override_alpha(
         resolve_color_channel_or_theme(
-            fill_ch,
-            fill_scale,
+            fill.ch,
+            fill.scale,
             i0,
             ctx.theme.geom.ribbon.fill.as_ref(),
             &ctx.theme.palette,
         ),
-        resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i0),
+        resolve_number_channel(fill_opacity.ch, fill_opacity.scale, i0),
     );
     let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
     let outline_a_spec = resolve_outline_spec(
         ctx,
-        &ctx.theme.geom.ribbon,
+        (&ctx.theme.geom.ribbon).into(),
         &outline_a_ch,
         &outline_a_scales,
+        ChannelBind::default(),
         i0,
         pick,
     );
     let outline_b_spec = resolve_outline_spec(
         ctx,
-        &ctx.theme.geom.ribbon,
+        (&ctx.theme.geom.ribbon).into(),
         &outline_b_ch,
         &outline_b_scales,
+        ChannelBind::default(),
         i0,
         pick,
     );
@@ -715,20 +693,14 @@ fn draw_one_ribbon_mark(
     // follows the band's actual sweep instead of a screen-aligned
     // axis.
     if let Some(mark_color) = mark_fill {
-        let varies = channel_varies_across(fill_ch, fill_scale, &row_for_vertex)
-            || channel_varies_across(fill_opacity_ch, fill_opacity_scale, &row_for_vertex);
+        let varies = channel_varies_across(fill.ch, fill.scale, &row_for_vertex)
+            || channel_varies_across(fill_opacity.ch, fill_opacity.scale, &row_for_vertex);
         let axis_aligned = matches!(orientation, Orientation::Horizontal | Orientation::Vertical);
         let use_mesh = varies && (!axis_aligned || !is_linear);
 
+        let row_fill = RowFill::new(fill, fill_opacity, mark_color);
         if use_mesh {
-            let (colors_a, colors_b) = build_per_vertex_colors(
-                &vertex_origins,
-                fill_ch,
-                fill_scale,
-                fill_opacity_ch,
-                fill_opacity_scale,
-                mark_color,
-            );
+            let (colors_a, colors_b) = build_per_vertex_colors(&vertex_origins, &row_fill);
             let mut mesh = crate::primitives::ribbon_band_mesh(
                 &curve_a_pts,
                 &curve_b_pts,
@@ -782,18 +754,9 @@ fn draw_one_ribbon_mark(
             }
         } else {
             let brush = if varies {
-                build_gradient_brush(
-                    orientation,
-                    &curve_a_pts,
-                    &vertex_origins,
-                    fill_ch,
-                    fill_scale,
-                    fill_opacity_ch,
-                    fill_opacity_scale,
-                    mark_color,
-                )
-                .map(Brush::Gradient)
-                .unwrap_or_else(|| Brush::Solid(mark_color))
+                build_gradient_brush(orientation, &curve_a_pts, &vertex_origins, &row_fill)
+                    .map(Brush::Gradient)
+                    .unwrap_or_else(|| Brush::Solid(mark_color))
             } else {
                 Brush::Solid(mark_color)
             };
@@ -846,16 +809,11 @@ fn draw_one_ribbon_mark(
 /// the shared axis. Densified interior points (added between rows under
 /// polar projection) are skipped — only the real per-row vertices
 /// contribute stops, since interior points have no row identity.
-#[allow(clippy::too_many_arguments)]
 fn build_gradient_brush(
     orientation: Orientation,
     curve_a_pts: &[Point],
     vertex_origins: &[VertexOrigin],
-    fill_ch: Option<&Channel>,
-    fill_scale: Option<&crate::plot::scale::Scale>,
-    fill_opacity_ch: Option<&Channel>,
-    fill_opacity_scale: Option<&crate::plot::scale::Scale>,
-    fallback: Color,
+    fill: &RowFill<'_>,
 ) -> Option<crate::brush::Gradient> {
     // Free orientation has no single axis for a linear gradient to run
     // along; the caller routes that case through the mesh path.
@@ -914,12 +872,7 @@ fn build_gradient_brush(
     let mut pairs: Vec<(f64, Color)> = Vec::with_capacity(n);
     for (k, &(i, _)) in real.iter().enumerate() {
         let offset = ((coords[k] - min_c) / span).clamp(0.0, 1.0);
-        let row_color = override_alpha(
-            resolve_color_channel(fill_ch, fill_scale, i),
-            resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i),
-        )
-        .unwrap_or(fallback);
-        pairs.push((offset, row_color));
+        pairs.push((offset, fill.at(i)));
     }
     pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -1107,36 +1060,66 @@ fn resolve_optional_position(
     }
 }
 
+/// Per-row fill resolver for the band interior, shared by every path
+/// that paints a ribbon from per-row fills.
+///
+/// A row's colour is its `"fill"` channel at its `"fill_opacity"`,
+/// falling back to the mark's colour when either is unbound. Blends
+/// between two rows walk the fill scale's own colour space, so a
+/// densified vertex sits on the ramp the scale defines.
+#[derive(Clone, Copy)]
+pub(crate) struct RowFill<'a> {
+    fill: ChannelBind<'a>,
+    fill_opacity: ChannelBind<'a>,
+    fallback: Color,
+    space: ColorSpace,
+}
+
+impl<'a> RowFill<'a> {
+    /// Bundle the two fill channels with the mark's fallback colour.
+    pub(crate) fn new(
+        fill: ChannelBind<'a>,
+        fill_opacity: ChannelBind<'a>,
+        fallback: Color,
+    ) -> Self {
+        RowFill {
+            fill,
+            fill_opacity,
+            fallback,
+            space: channel_color_space(fill.scale),
+        }
+    }
+
+    /// The colour one source row paints.
+    pub(crate) fn at(&self, row: usize) -> Color {
+        override_alpha(
+            resolve_color_channel(self.fill.ch, self.fill.scale, row),
+            resolve_number_channel(self.fill_opacity.ch, self.fill_opacity.scale, row),
+        )
+        .unwrap_or(self.fallback)
+    }
+
+    /// The colour a point `t` of the way from `row_a` to `row_b` paints.
+    pub(crate) fn between(&self, row_a: usize, row_b: usize, t: f64) -> Color {
+        crate::color::lerp_color(self.at(row_a), self.at(row_b), t, self.space)
+    }
+}
+
 /// Build per-vertex colours for both curve sides of the mesh path.
-/// Real vertices take the per-row resolved fill at the per-row fill
-/// opacity; densified interior vertices lerp linearly between the
-/// two bracketing rows' colours along `t`. Both sides share the same
-/// colour at the same vertex index — the ribbon has one fill per
-/// vertex pair.
+/// Real vertices take the per-row resolved fill; densified interior
+/// vertices lerp between the two bracketing rows' colours along `t`.
+/// Both sides share the same colour at the same vertex index — the
+/// ribbon has one fill per vertex pair.
 fn build_per_vertex_colors(
     vertex_origins: &[VertexOrigin],
-    fill_ch: Option<&Channel>,
-    fill_scale: Option<&crate::plot::scale::Scale>,
-    fill_opacity_ch: Option<&Channel>,
-    fill_opacity_scale: Option<&crate::plot::scale::Scale>,
-    fallback: Color,
+    fill: &RowFill<'_>,
 ) -> (Vec<Color>, Vec<Color>) {
-    let resolve_row = |row: usize| -> Color {
-        override_alpha(
-            resolve_color_channel(fill_ch, fill_scale, row),
-            resolve_number_channel(fill_opacity_ch, fill_opacity_scale, row),
-        )
-        .unwrap_or(fallback)
-    };
-    let fill_space = channel_color_space(fill_scale);
     let mut colors: Vec<Color> = Vec::with_capacity(vertex_origins.len());
     for origin in vertex_origins {
         let c = if origin.prev_row == origin.next_row {
-            resolve_row(origin.prev_row)
+            fill.at(origin.prev_row)
         } else {
-            let prev = resolve_row(origin.prev_row);
-            let next = resolve_row(origin.next_row);
-            crate::color::lerp_color(prev, next, origin.t, fill_space)
+            fill.between(origin.prev_row, origin.next_row, origin.t)
         };
         colors.push(c);
     }

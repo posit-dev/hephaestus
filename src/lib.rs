@@ -1,7 +1,7 @@
 //! `hephaestus` — backend-agnostic 2D scene renderer for data visualization.
 //!
-//! The public API is the [`SceneBuilder`](scene::SceneBuilder) trait (what plot
-//! code calls) plus the [`Renderer`](backend::Renderer) trait (what produces
+//! The public API is the [`scene::SceneBuilder`] trait (what plot
+//! code calls) plus the [`backend::Renderer`] trait (what produces
 //! pixels). Backends slot in behind cargo features; the initial backend is
 //! Vello (GPU compute via wgpu).
 //!

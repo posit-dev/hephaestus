@@ -33,11 +33,12 @@ use crate::primitives::{
 use crate::scene::SceneBuilder;
 
 use super::resolve::{
-    auto_endpoint_clip_pt, draw_stroke_with_linetype, emit_endpoint_marker, endpoint_outward,
-    override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or, resolve_cap_channel,
-    resolve_color_channel, resolve_color_channel_or_theme, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
-    resolve_position, resolve_str_channel_or,
+    auto_endpoint_clip_pt, draw_stroke_with_linetype, emit_endpoint_marker,
+    endpoint_marker_outline_px, endpoint_outward, override_alpha, pt_to_px, resolve_angle_channel,
+    resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel,
+    resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
+    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
+    resolve_str_channel_or,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
@@ -404,7 +405,7 @@ impl Geom for SegmentGeom {
 
             // Start marker emitted before the stroke; end marker
             // after — matching LineGeom's path-order convention.
-            let marker_outline_px = linewidth_px.max(pt_to_px(0.5, ctx.dpi));
+            let marker_outline_px = endpoint_marker_outline_px(linewidth_px, ctx.dpi);
 
             if !start_name.is_empty() {
                 let size_px = pt_to_px(start_marker_size_pt, ctx.dpi);

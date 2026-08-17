@@ -28,8 +28,8 @@ use crate::text::shape_common::{emit_decoration_rect, glyphs_of_run, DecorationR
 /// `(x, y)`. `transform` composes around that anchor.
 ///
 /// Draw order per glyph run: span background/border (from any
-/// overlapping [`StyleDelta`] with `background` / `border_*`) →
-/// per-span outline stroke (from [`StyleDelta::text_stroke`] +
+/// overlapping `StyleDelta` with `background` / `border_*`) →
+/// per-span outline stroke (from `text_stroke` +
 /// `text_stroke_width`) → fill glyphs → text decorations
 /// (underline / strikethrough). A caller who wants an outline on
 /// every glyph regardless of source styles should set `text_stroke`

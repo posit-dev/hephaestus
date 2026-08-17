@@ -42,7 +42,7 @@ use hephaestus::scales::value::Value;
 use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
-fn comp_shape(aspect: Option<(f32, f32)>) -> Composition {
+fn comp_shape(aspect: Option<(f64, f64)>) -> Composition {
     let facets: Vec<Element> = ["q1", "q2", "q3", "q4"]
         .into_iter()
         .map(|id| Patch::new(id).into())

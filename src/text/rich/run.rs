@@ -7,7 +7,7 @@
 //! the outer max width minus any ancestor container `padding.left` /
 //! `padding.right` (blockquote / div) minus this block's own
 //! hanging or first-line indent. Blocks stack vertically ourselves;
-//! see [`stack_blocks`] for the margin-collapse walk.
+//! see `stack_blocks` for the margin-collapse walk.
 //!
 //! **Everything is already resolved.** The reducer hands over a
 //! [`ResolvedStyle`] per block and per inline run with every length
@@ -32,7 +32,7 @@
 //! **List items are containers.** The reducer emits every `ListItem`
 //! as a container wrapping a synthetic Paragraph leaf that holds the
 //! item's body, and hangs the item's marker off the `ListItem` block
-//! for [`MarkerLayout`] to shape into the list's start gutter.
+//! for `MarkerLayout` to shape into the list's start gutter.
 //!
 //! **Baseline shifts** (`sup` / `sub`) live in a parallel
 //! `Vec<BaselineRun>` per block layout (parley has no baseline-shift

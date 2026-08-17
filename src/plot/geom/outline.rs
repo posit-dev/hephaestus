@@ -21,15 +21,17 @@
 //! without duplicating ~150 lines of orchestration.
 
 use crate::brush::Brush;
-use crate::color::Color;
+use crate::color::{Color, ColorSpace};
 use crate::geometry::{Affine, Point};
 use crate::path::{FillRule, Path};
 use crate::pick::PickId;
 use crate::plot::scale::Scale;
+use crate::plot::theme::{LineDefaults, ShapeDefaults, ThemeColor};
 use crate::plot::value::LinetypeStep;
 use crate::primitives::offset_polygon;
 use crate::primitives::{
-    clip_polyline, polyline, round_corners, CornerRounding, EndClip, PolylineOptions,
+    clip_polyline, clip_polyline_with_attrs, polyline, polyline_ribbon_full, round_corners,
+    CornerRounding, EndClip, PolylineOptions, RibbonOptions,
 };
 use crate::scene::SceneBuilder;
 use crate::shape::ShapeRegistry;
@@ -42,14 +44,49 @@ use super::resolve::{
     endpoint_marker_outline_px, endpoint_outward, override_alpha, pt_to_px,
     resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel,
     resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
-    resolve_number_channel, resolve_number_channel_or, resolve_str_channel_or,
+    resolve_number_channel, resolve_number_channel_or, resolve_str_channel_or, ChannelBind,
 };
 use super::{Channel, GeomContext};
 
-// Style defaults (linewidth, cap, join) for outlines come from the
-// caller-supplied `ShapeDefaults` so RibbonGeom and RibbonBSplineGeom
-// (which both call into here) can carry independent defaults under
-// `theme.geom.ribbon` vs `theme.geom.ribbon_bspline`.
+/// Miter limit used when tessellating a variable-width curve.
+const RIBBON_MITER_LIMIT: f64 = 4.0;
+
+/// The theme defaults an outline consumes, narrowed to the four fields
+/// that matter so both the stroke-only (`LineDefaults`) and the
+/// filled-shape (`ShapeDefaults`) theme entries can drive it.
+#[derive(Clone, Copy)]
+pub(crate) struct OutlineDefaults<'a> {
+    /// Stroke colour when no `"stroke"` channel is bound.
+    pub stroke: Option<&'a ThemeColor>,
+    /// Stroke width in pt when no `"linewidth"` channel is bound.
+    pub linewidth_pt: f64,
+    /// Stroke endpoint cap style.
+    pub cap: Cap,
+    /// Stroke segment join style.
+    pub join: Join,
+}
+
+impl<'a> From<&'a LineDefaults> for OutlineDefaults<'a> {
+    fn from(d: &'a LineDefaults) -> Self {
+        OutlineDefaults {
+            stroke: d.stroke.as_ref(),
+            linewidth_pt: d.linewidth_pt,
+            cap: d.cap,
+            join: d.join,
+        }
+    }
+}
+
+impl<'a> From<&'a ShapeDefaults> for OutlineDefaults<'a> {
+    fn from(d: &'a ShapeDefaults) -> Self {
+        OutlineDefaults {
+            stroke: d.stroke.as_ref(),
+            linewidth_pt: d.linewidth_pt,
+            cap: d.cap,
+            join: d.join,
+        }
+    }
+}
 
 /// Channel handles for one curve's full LineGeom-style outline surface,
 /// keyed off a suffix (`""` for curve A, `"2"` for curve B in a ribbon
@@ -159,11 +196,18 @@ impl<'a> OutlineScales<'a> {
 /// Returns `None` when no stroke colour is bound (no outline to draw).
 /// The curve's `"stroke_opacity"` channel overrides the stroke colour's
 /// own alpha.
+///
+/// `marker_fill` is an optional channel overriding the interior colour
+/// of every marker the curve stamps; unbound, markers take the curve's
+/// own stroke colour. [`OutlineSpec::xform`] and
+/// [`OutlineSpec::corner_rounding`] come back neutral — a caller that
+/// wants either sets it on the returned spec.
 pub(crate) fn resolve_outline_spec(
     ctx: &GeomContext<'_>,
-    defaults: &crate::plot::theme::ShapeDefaults,
+    defaults: OutlineDefaults<'_>,
     ch: &OutlineChannels<'_>,
     sc: &OutlineScales<'_>,
+    marker_fill: ChannelBind<'_>,
     i0: usize,
     pick: PickId,
 ) -> Option<OutlineSpec> {
@@ -172,7 +216,7 @@ pub(crate) fn resolve_outline_spec(
             ch.stroke,
             sc.stroke,
             i0,
-            defaults.stroke.as_ref(),
+            defaults.stroke,
             &ctx.theme.palette,
         ),
         resolve_number_channel(ch.stroke_opacity, sc.stroke_opacity, i0),
@@ -215,9 +259,10 @@ pub(crate) fn resolve_outline_spec(
         dash_offset_pt,
         cap,
         join,
-        // Default marker fill = stroke colour; per-endpoint override
-        // happens via the `EndpointMarker::fill` field below.
-        marker_fill: stroke_color,
+        // Marker fill falls back to the stroke colour; the per-endpoint
+        // override happens via the `EndpointMarker::fill` field below.
+        marker_fill: resolve_color_channel(marker_fill.ch, marker_fill.scale, i0)
+            .unwrap_or(stroke_color),
         user_clip_start_pt,
         user_clip_end_pt,
         start_marker: EndpointMarker {
@@ -242,6 +287,7 @@ pub(crate) fn resolve_outline_spec(
 ///
 /// Built once per curve from the per-mark resolved channels, then handed
 /// to [`draw_curve_outline`] alongside the curve's pre-built polyline.
+#[derive(Clone)]
 pub(crate) struct OutlineSpec {
     /// Resolved stroke colour (with alpha folded in).
     pub stroke_color: Color,
@@ -279,6 +325,7 @@ pub(crate) struct OutlineSpec {
 }
 
 /// Endpoint marker configuration for one side of a curve.
+#[derive(Clone)]
 pub(crate) struct EndpointMarker {
     /// Shape name registered in the [`ShapeRegistry`]. Empty disables.
     pub name: String,
@@ -599,5 +646,272 @@ pub(crate) fn draw_curve_outline(
             shapes,
             spec.pick,
         );
+    }
+}
+
+/// Tessellate a curve carrying per-vertex widths and colours into a
+/// mesh, with the same endpoint clipping and endpoint markers
+/// [`draw_curve_outline`] applies to a uniform stroke.
+///
+/// `points`, `half_widths` and `colors` are length-aligned; `space` is
+/// the colour space a synthesised clip vertex blends its neighbours
+/// through. The per-vertex widths carry the curve's thickness, so
+/// [`OutlineSpec::linewidth_pt`] governs only the marker outline width
+/// and the marker default size.
+///
+/// `marker_xform` positions the two endpoint markers; the mesh itself
+/// takes [`OutlineSpec::xform`].
+///
+/// No-op when fewer than two vertices survive the endpoint clip.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_ribbon_mode_curve(
+    scene: &mut dyn SceneBuilder,
+    shapes: &ShapeRegistry,
+    dpi: f64,
+    points: &[Point],
+    half_widths: &[f64],
+    colors: &[Color],
+    space: ColorSpace,
+    spec: &OutlineSpec,
+    marker_xform: Affine,
+) {
+    if points.len() < 2 {
+        return;
+    }
+
+    let auto_clip_start_pt = auto_endpoint_clip_pt(
+        &spec.start_marker.name,
+        spec.start_marker.size_pt,
+        spec.start_marker.invert,
+        shapes,
+    );
+    let auto_clip_end_pt = auto_endpoint_clip_pt(
+        &spec.end_marker.name,
+        spec.end_marker.size_pt,
+        spec.end_marker.invert,
+        shapes,
+    );
+    let clip_start_pt = spec.user_clip_start_pt + auto_clip_start_pt;
+    let clip_end_pt = spec.user_clip_end_pt + auto_clip_end_pt;
+
+    let (clipped, clipped_widths, clipped_colors) = if clip_start_pt > 0.0 || clip_end_pt > 0.0 {
+        let start = (clip_start_pt > 0.0).then(|| EndClip::Circle {
+            center: points[0],
+            radius: pt_to_px(clip_start_pt, dpi),
+        });
+        let end = (clip_end_pt > 0.0).then(|| EndClip::Circle {
+            center: *points.last().unwrap(),
+            radius: pt_to_px(clip_end_pt, dpi),
+        });
+        clip_polyline_with_attrs(points, half_widths, colors, start, end, space)
+    } else {
+        (points.to_vec(), half_widths.to_vec(), colors.to_vec())
+    };
+    if clipped.len() < 2 {
+        return;
+    }
+
+    let marker_outline_px = endpoint_marker_outline_px(pt_to_px(spec.linewidth_pt, dpi), dpi);
+
+    if !spec.start_marker.name.is_empty() {
+        let size_px = pt_to_px(spec.start_marker.size_pt, dpi);
+        let fill = spec.start_marker.fill.unwrap_or(spec.marker_fill);
+        let outward = endpoint_outward(&clipped, points, true, clip_start_pt > 0.0);
+        emit_endpoint_marker(
+            scene,
+            clipped[0],
+            outward,
+            spec.start_marker.invert,
+            &spec.start_marker.name,
+            size_px,
+            fill,
+            spec.stroke_color,
+            marker_outline_px,
+            marker_xform,
+            shapes,
+            spec.pick,
+        );
+    }
+
+    let opts = RibbonOptions {
+        half_width: 0.0, // superseded by the per-vertex half widths
+        cap: spec.cap,
+        join: spec.join,
+        miter_limit: RIBBON_MITER_LIMIT,
+    };
+    let mesh = polyline_ribbon_full(
+        &clipped,
+        Some(&clipped_colors),
+        Some(&clipped_widths),
+        &opts,
+    );
+    scene.draw_mesh(&mesh, spec.xform, spec.pick);
+
+    if !spec.end_marker.name.is_empty() {
+        let size_px = pt_to_px(spec.end_marker.size_pt, dpi);
+        let fill = spec.end_marker.fill.unwrap_or(spec.marker_fill);
+        let outward = endpoint_outward(&clipped, points, false, clip_end_pt > 0.0);
+        let placement = *clipped.last().unwrap();
+        emit_endpoint_marker(
+            scene,
+            placement,
+            outward,
+            spec.end_marker.invert,
+            &spec.end_marker.name,
+            size_px,
+            fill,
+            spec.stroke_color,
+            marker_outline_px,
+            marker_xform,
+            shapes,
+            spec.pick,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::Rect;
+    use crate::plot::geom::DirectScaleResolver;
+    use crate::plot::value::Value;
+
+    fn shapes() -> ShapeRegistry {
+        ShapeRegistry::with_builtins()
+    }
+
+    fn channels(entries: Vec<(&str, Channel)>) -> HashMap<String, Channel> {
+        entries
+            .into_iter()
+            .map(|(name, ch)| (name.to_string(), ch))
+            .collect()
+    }
+
+    fn spec_for(
+        ctx: &GeomContext<'_>,
+        defaults: &ShapeDefaults,
+        map: &HashMap<String, Channel>,
+    ) -> Option<OutlineSpec> {
+        let ch = OutlineChannels::from_map(map, "");
+        let sc = OutlineScales::from_ctx(ctx, "");
+        resolve_outline_spec(
+            ctx,
+            defaults.into(),
+            &ch,
+            &sc,
+            ChannelBind::default(),
+            0,
+            PickId::Skip,
+        )
+    }
+
+    #[test]
+    fn no_stroke_channel_and_no_theme_stroke_means_no_outline() {
+        let shapes = shapes();
+        let resolver = DirectScaleResolver::new();
+        let ctx = GeomContext::new(Rect::new(0.0, 0.0, 100.0, 100.0), 96.0, &shapes, &resolver);
+        let defaults = ShapeDefaults::default();
+        assert!(defaults.stroke.is_none());
+        assert!(spec_for(&ctx, &defaults, &channels(vec![])).is_none());
+    }
+
+    #[test]
+    fn an_unbound_stroke_channel_falls_back_to_the_theme_default() {
+        let shapes = shapes();
+        let resolver = DirectScaleResolver::new();
+        let ctx = GeomContext::new(Rect::new(0.0, 0.0, 100.0, 100.0), 96.0, &shapes, &resolver);
+        let defaults = ShapeDefaults {
+            stroke: Some(ThemeColor::Ink),
+            ..ShapeDefaults::default()
+        };
+        let spec = spec_for(&ctx, &defaults, &channels(vec![])).expect("theme stroke draws");
+        assert_eq!(spec.stroke_color, ctx.theme.palette.ink);
+    }
+
+    #[test]
+    fn a_bound_stroke_channel_wins_over_the_theme_default() {
+        let shapes = shapes();
+        let resolver = DirectScaleResolver::new();
+        let ctx = GeomContext::new(Rect::new(0.0, 0.0, 100.0, 100.0), 96.0, &shapes, &resolver);
+        let red = crate::color::rgb(1.0, 0.0, 0.0);
+        let defaults = ShapeDefaults {
+            stroke: Some(ThemeColor::Ink),
+            ..ShapeDefaults::default()
+        };
+        let map = channels(vec![("stroke", Channel::Constant(Value::Color(red)))]);
+        let spec = spec_for(&ctx, &defaults, &map).expect("channel stroke draws");
+        assert_eq!(spec.stroke_color, red);
+    }
+
+    #[test]
+    fn stroke_opacity_overrides_the_stroke_colors_own_alpha() {
+        let shapes = shapes();
+        let resolver = DirectScaleResolver::new();
+        let ctx = GeomContext::new(Rect::new(0.0, 0.0, 100.0, 100.0), 96.0, &shapes, &resolver);
+        let opaque = crate::color::rgba(0.2, 0.4, 0.6, 1.0);
+        let map = channels(vec![
+            ("stroke", Channel::Constant(Value::Color(opaque))),
+            ("stroke_opacity", Channel::Constant(Value::Number(0.25))),
+        ]);
+        let spec = spec_for(&ctx, &ShapeDefaults::default(), &map).expect("stroke draws");
+        let [r, g, b, a] = spec.stroke_color.components;
+        assert!((r - 0.2).abs() < 1e-6 && (g - 0.4).abs() < 1e-6 && (b - 0.6).abs() < 1e-6);
+        assert!((a - 0.25).abs() < 1e-6, "{a}");
+    }
+
+    #[test]
+    fn unbound_style_channels_take_the_supplied_shape_defaults() {
+        let shapes = shapes();
+        let resolver = DirectScaleResolver::new();
+        let ctx = GeomContext::new(Rect::new(0.0, 0.0, 100.0, 100.0), 96.0, &shapes, &resolver);
+        let defaults = ShapeDefaults {
+            stroke: Some(ThemeColor::Ink),
+            linewidth_pt: 3.0,
+            cap: Cap::Round,
+            join: Join::Bevel,
+            ..ShapeDefaults::default()
+        };
+        let spec = spec_for(&ctx, &defaults, &channels(vec![])).expect("theme stroke draws");
+        assert_eq!(spec.linewidth_pt, 3.0);
+        assert!(matches!(spec.cap, Cap::Round));
+        assert!(matches!(spec.join, Join::Bevel));
+        // Endpoint markers size themselves off the resolved linewidth.
+        assert_eq!(spec.start_marker.size_pt, 9.0);
+        assert_eq!(spec.end_marker.size_pt, 9.0);
+        // Marker interiors default to the curve's own stroke colour.
+        assert_eq!(spec.marker_fill, ctx.theme.palette.ink);
+        assert!(spec.start_marker.name.is_empty());
+        assert!(spec.dash_pattern_pt.is_empty(), "unset linetype is solid");
+    }
+
+    #[test]
+    fn a_suffix_addresses_the_second_curves_channels() {
+        let shapes = shapes();
+        let resolver = DirectScaleResolver::new();
+        let ctx = GeomContext::new(Rect::new(0.0, 0.0, 100.0, 100.0), 96.0, &shapes, &resolver);
+        let red = crate::color::rgb(1.0, 0.0, 0.0);
+        let blue = crate::color::rgb(0.0, 0.0, 1.0);
+        let map = channels(vec![
+            ("stroke", Channel::Constant(Value::Color(red))),
+            ("stroke2", Channel::Constant(Value::Color(blue))),
+            ("linewidth2", Channel::Constant(Value::Number(5.0))),
+        ]);
+        let defaults = ShapeDefaults::default();
+        let curve_b = resolve_outline_spec(
+            &ctx,
+            (&defaults).into(),
+            &OutlineChannels::from_map(&map, "2"),
+            &OutlineScales::from_ctx(&ctx, "2"),
+            ChannelBind::default(),
+            0,
+            PickId::Skip,
+        )
+        .expect("curve B has its own stroke");
+        assert_eq!(curve_b.stroke_color, blue);
+        assert_eq!(curve_b.linewidth_pt, 5.0);
+        // Curve A keeps the unsuffixed bindings.
+        let curve_a = spec_for(&ctx, &defaults, &map).expect("curve A stroke draws");
+        assert_eq!(curve_a.stroke_color, red);
+        assert_eq!(curve_a.linewidth_pt, defaults.linewidth_pt);
     }
 }

@@ -61,7 +61,7 @@ Rendering of axis and legend chrome lives in `crate::plot::chrome::{axis, legend
 - **Reversal is a `Direction`, never a backwards domain.** Reading the domain end-to-start only works for a linear continuous scale by coincidence; a binned scale rejects everything outside `min..=max` and every tick algorithm past the linear one requires `lo < hi`. So `Direction::Reversed` mirrors the mapping and the domain stays ascending. Two consequences worth knowing: `breaks()` returns the same values either way (only where they land changes), and a legend lists its domain in domain order either way — a reversed material scale shows the same rows against a mirrored palette, matching Vega-Lite's `scale.reverse`. Descending endpoints are still ordered on the way into break generation (`ordered` in `scale_type.rs`) rather than silently emitting no ticks.
 - **Generation counter is plumbed but unused in v1.** `Scale::generation` is bumped on every mutation; v1.5+ will use it to invalidate per-channel output caches without value comparison.
 - **`OutputRange::Numbers` is in pt for absolute sizes**, unitless otherwise. The geom's `resolve_*` helper applies `pt_to_px` where appropriate.
-- **Non-numeric endpoints panic.** `Scale::domain_continuous(String("a"), String("b"))` panics at the call site — no continuous ordering on strings or colours. Use `domain_discrete` for that.
+- **Non-numeric endpoints have no continuous ordering.** `Scale::domain_continuous(String("a"), String("b"))` panics at the call site; `try_domain_continuous` / `try_set_domain_continuous` hand the offending `Value` back instead, for endpoints that come from data rather than literals. Use `domain_discrete` for categories.
 
 ## Adding a new scale type
 

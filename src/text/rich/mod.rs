@@ -27,7 +27,7 @@
 //! wrap). Use [`RichTextRun::new_with_width`] or
 //! [`RichTextRun::set_max_width`] to force wrap at a specific
 //! pixel width, mirroring marquee's `marquee_grob(width = ...)`.
-//! When the run is used in a composition (via [`Measure::height_at`])
+//! When the run is used in a composition (via `height_at`)
 //! the wrap width comes from the layout solver, matching marquee's
 //! `width = NULL` "parent container width" semantics.
 //!

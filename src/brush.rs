@@ -3,8 +3,8 @@
 //! Vello and Blend2D support natively.
 
 pub use peniko::{
-    Blob, Brush, ColorStop, ColorStops, Extend, Gradient, GradientKind, ImageData as Image,
-    ImageFormat, LinearGradientPosition,
+    Blob, Brush, ColorStop, ColorStops, Extend, Gradient, GradientKind, ImageAlphaType,
+    ImageData as Image, ImageFormat, LinearGradientPosition,
 };
 
 /// Image sampling mode used when an image brush is scaled or rotated.

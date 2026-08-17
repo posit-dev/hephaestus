@@ -50,24 +50,23 @@
 //! offset result is what users typically want ("inset by 4pt, then
 //! round the result").
 
-use crate::color::{lerp_color, Color};
-use crate::geometry::{Affine, Point, Rect};
+use crate::color::Color;
+use crate::geometry::{Affine, Point};
 #[cfg(test)]
 use crate::path::FillRule;
-use crate::plot::diff::{diff_columns, diff_positional, KeyIndex};
-use crate::plot::projection::InteriorSample;
 use crate::plot::scale::Scale;
 use crate::plot::value::DataColumn;
 use crate::primitives::{polygon_ribbon_full, CornerRounding, RibbonOptions};
 use crate::scene::SceneBuilder;
 
-use super::marks::unique_values_at_first_rows;
 use super::outline::{draw_polygon_fill_and_stroke, expand_polygons, PolygonSpec};
+use super::project::{project_and_densify_one, PathOptions, PathVertex, VertexAttrs};
 use super::resolve::{
-    channel_color_space, channel_varies_across, override_alpha, pt_to_px, resolve_angle_channel,
-    resolve_cap_channel, resolve_color_channel, resolve_color_channel_or_theme,
-    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position, ChannelBind,
+    channel_color_space, channel_varies_across, offset_px, override_alpha, pt_to_px,
+    resolve_angle_channel, resolve_cap_channel, resolve_color_channel,
+    resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
+    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
+    ChannelBind,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
@@ -359,30 +358,14 @@ impl Geom for PolygonGeom {
             }
             _ => Vec::new(),
         };
-        let (enter, update, exit) = match (&self.state.prev_keys, &self.state.keys) {
-            (Keys::Explicit(prev_col), Keys::Explicit(next_col)) => {
-                let prev_unique = unique_values_at_first_rows(
-                    prev_col,
-                    prev_marks.iter().map(|m| m.first_row),
-                    "PolygonGeom",
-                );
-                let next_unique = unique_values_at_first_rows(
-                    next_col,
-                    next_marks.iter().map(|m| m.first_row),
-                    "PolygonGeom",
-                );
-                let idx = KeyIndex::build(&prev_unique);
-                diff_columns(&prev_unique, &idx, &next_unique)
-            }
-            _ => diff_positional(prev_marks.len(), next_marks.len()),
-        };
-        self.state.enter = enter;
-        self.state.update = update;
-        self.state.exit = exit;
+        let first_rows =
+            |ms: &[PolygonMarkSlot]| -> Vec<usize> { ms.iter().map(|m| m.first_row).collect() };
+        self.state.rebuild_grouped_diff(
+            &first_rows(&prev_marks),
+            &first_rows(&next_marks),
+            "PolygonGeom",
+        );
         self.marks = next_marks;
-        self.state.prev_keys = self.state.keys.clone();
-        self.state.prev_channels = self.state.channels.clone();
-        self.state.dirty = false;
     }
 
     fn draw(&self, scene: &mut dyn SceneBuilder, ctx: &GeomContext<'_>) {
@@ -410,7 +393,7 @@ impl Geom for PolygonGeom {
         };
 
         for mark in marks.iter() {
-            draw_one_polygon_mark(scene, ctx, panel, dc, mark);
+            draw_one_polygon_mark(scene, ctx, dc, mark);
         }
     }
 }
@@ -422,7 +405,6 @@ impl Geom for PolygonGeom {
 fn draw_one_polygon_mark(
     scene: &mut dyn SceneBuilder,
     ctx: &GeomContext<'_>,
-    panel: Rect,
     dc: PolygonDrawCtx<'_>,
     mark: &PolygonMarkSlot,
 ) {
@@ -580,11 +562,7 @@ fn draw_one_polygon_mark(
     //
     // In ribbon mode, co-build per-ring `widths` and `colors`
     // alongside `points`, lerping each interior-sample attr at
-    // the channel-space `t` returned by
-    // `interpolate_segment_with_t`.
-    let is_linear = ctx.projection.is_linear();
-    let mut interior: Vec<(f64, f64)> = Vec::new();
-    let mut interior_t: Vec<InteriorSample> = Vec::new();
+    // the channel-space `t` the projection reports.
     let mut rings_pts: Vec<Vec<Point>> = Vec::with_capacity(mark.rings.len());
     let mut rings_widths: Vec<Vec<f64>> = if ribbon_mode {
         Vec::with_capacity(mark.rings.len())
@@ -598,154 +576,47 @@ fn draw_one_polygon_mark(
     };
     let fallback_stroke = stroke_color.unwrap_or_else(|| Color::new([0.0, 0.0, 0.0, 1.0]));
     let stroke_space = channel_color_space(stroke_scale);
+    let opts = PathOptions::ring(3).with_color_space(stroke_space);
     for ring in &mark.rings {
-        let mut points: Vec<Point> = Vec::with_capacity(ring.len());
-        let mut widths: Vec<f64> = if ribbon_mode {
-            Vec::with_capacity(ring.len())
-        } else {
-            Vec::new()
-        };
-        let mut colors: Vec<Color> = if ribbon_mode {
-            Vec::with_capacity(ring.len())
-        } else {
-            Vec::new()
-        };
-        let mut prev_channels: Option<[f64; 2]> = None;
-        let mut first_channels: Option<[f64; 2]> = None;
-        let mut prev_w: Option<f64> = None;
-        let mut prev_c: Option<Color> = None;
-        let mut first_w: Option<f64> = None;
-        let mut first_c: Option<Color> = None;
-        for &i in ring {
+        let run = project_and_densify_one(ctx, ring.len(), &opts, |k| {
+            let i = ring[k];
             let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
             let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
-            let x_frac = resolve_position(x_col.get(i), x_scale, x_band);
-            let y_frac = resolve_position(y_col.get(i), y_scale, y_band);
-            if !x_frac.is_finite() || !y_frac.is_finite() {
-                continue;
-            }
-            let curr_channels = [x_frac, y_frac];
-
-            let (curr_w, curr_c) = if ribbon_mode {
+            let attrs = ribbon_mode.then(|| {
                 let w_pt = resolve_number_channel_or(
                     linewidth_ch,
                     linewidth_scale,
                     i,
                     ctx.theme.geom.polygon.linewidth_pt,
                 );
-                // Clamp so a scale range reaching below zero pinches
-                // the ribbon shut instead of flipping its shoulders.
-                let w_half_px = (pt_to_px(w_pt, ctx.dpi) * 0.5).max(0.0);
-                let c = override_alpha(
-                    resolve_color_channel(stroke_ch, stroke_scale, i),
-                    resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i),
-                )
-                .unwrap_or(fallback_stroke);
-                (w_half_px, c)
-            } else {
-                (0.0, fallback_stroke)
-            };
-
-            if !is_linear {
-                if let Some(prev) = prev_channels {
-                    if ribbon_mode {
-                        interior_t.clear();
-                        ctx.projection.interpolate_segment_with_t(
-                            panel,
-                            &prev,
-                            &curr_channels,
-                            &mut interior_t,
-                        );
-                        let pw = prev_w.unwrap();
-                        let pc = prev_c.unwrap();
-                        for s in &interior_t {
-                            points.push(Point::new(s.px, s.py));
-                            widths.push(pw + s.t * (curr_w - pw));
-                            colors.push(lerp_color(pc, curr_c, s.t, stroke_space));
-                        }
-                    } else {
-                        interior.clear();
-                        ctx.projection.interpolate_segment(
-                            panel,
-                            &prev,
-                            &curr_channels,
-                            &mut interior,
-                        );
-                        for (ipx, ipy) in &interior {
-                            points.push(Point::new(*ipx, *ipy));
-                        }
-                    }
+                VertexAttrs {
+                    // Clamp so a scale range reaching below zero pinches
+                    // the ribbon shut instead of flipping its shoulders.
+                    half_width_px: (pt_to_px(w_pt, ctx.dpi) * 0.5).max(0.0),
+                    color: override_alpha(
+                        resolve_color_channel(stroke_ch, stroke_scale, i),
+                        resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i),
+                    )
+                    .unwrap_or(fallback_stroke),
                 }
+            });
+            PathVertex {
+                frac: [
+                    resolve_position(x_col.get(i), x_scale, x_band),
+                    resolve_position(y_col.get(i), y_scale, y_band),
+                ],
+                offset_px: (
+                    offset_px(x_offset_ch, x_offset_scale, i, ctx.dpi),
+                    offset_px(y_offset_ch, y_offset_scale, i, ctx.dpi),
+                ),
+                attrs,
             }
-            let (px0, py0) = ctx.projection.project_to_panel_px(panel, &curr_channels);
-            let mut px = px0;
-            let mut py = py0;
-            if let Some(off) = resolve_number_channel(x_offset_ch, x_offset_scale, i) {
-                px += pt_to_px(off, ctx.dpi);
-            }
-            if let Some(off) = resolve_number_channel(y_offset_ch, y_offset_scale, i) {
-                py -= pt_to_px(off, ctx.dpi);
-            }
-            points.push(Point::new(px, py));
+        });
+        if !run.points.is_empty() {
+            rings_pts.push(run.points);
             if ribbon_mode {
-                widths.push(curr_w);
-                colors.push(curr_c);
-                prev_w = Some(curr_w);
-                prev_c = Some(curr_c);
-                if first_w.is_none() {
-                    first_w = Some(curr_w);
-                    first_c = Some(curr_c);
-                }
-            }
-            if first_channels.is_none() {
-                first_channels = Some(curr_channels);
-            }
-            prev_channels = Some(curr_channels);
-        }
-        // Densify the closing edge (last vertex back to first). This
-        // one goes through `interpolate_closing_segment`, so on a
-        // full-turn polar projection it closes across the theta seam
-        // rather than retracing the ring's own perimeter backwards.
-        if !is_linear {
-            if let (Some(prev), Some(first)) = (prev_channels, first_channels) {
-                if prev != first {
-                    if ribbon_mode {
-                        interior_t.clear();
-                        ctx.projection.interpolate_closing_segment_with_t(
-                            panel,
-                            &prev,
-                            &first,
-                            &mut interior_t,
-                        );
-                        let pw = prev_w.unwrap();
-                        let pc = prev_c.unwrap();
-                        let fw = first_w.unwrap();
-                        let fc = first_c.unwrap();
-                        for s in &interior_t {
-                            points.push(Point::new(s.px, s.py));
-                            widths.push(pw + s.t * (fw - pw));
-                            colors.push(lerp_color(pc, fc, s.t, stroke_space));
-                        }
-                    } else {
-                        interior.clear();
-                        ctx.projection.interpolate_closing_segment(
-                            panel,
-                            &prev,
-                            &first,
-                            &mut interior,
-                        );
-                        for (ipx, ipy) in &interior {
-                            points.push(Point::new(*ipx, *ipy));
-                        }
-                    }
-                }
-            }
-        }
-        if points.len() >= 3 {
-            rings_pts.push(points);
-            if ribbon_mode {
-                rings_widths.push(widths);
-                rings_colors.push(colors);
+                rings_widths.push(run.widths);
+                rings_colors.push(run.colors);
             }
         }
     }

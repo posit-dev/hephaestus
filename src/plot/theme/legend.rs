@@ -60,7 +60,7 @@ pub enum ResolvedDirection {
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyTheme {
     /// Frame around each key cell — fill + border combined.
-    /// `RectElement` carries both `fill` (Option<ThemeColor>) and
+    /// `RectElement` carries both `fill` (`Option<ThemeColor>`) and
     /// `linewidth_pt`, so a single element covers backgrounds, borders,
     /// or both. Set `fill = None` for no background, `linewidth_pt =
     /// Abs(0.0)` for no border.

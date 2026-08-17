@@ -10,8 +10,8 @@
 //! Each plot pairs a `scale::discrete([N category names])` for the
 //! angle channel with `Projection::radar(N)` (or a hand-rolled
 //! chord-style `PolarProjection` for the gauge / partial-arc
-//! variants). `Projection::radar(N)` defaults its
-//! `theta_break_fracs` to band centres `(i + 0.5) / N` — the same
+//! variants). `Projection::radar(N)` defaults its theta breaks
+//! to band centres `(i + 0.5) / N` — the same
 //! positions a discrete scale's `map` returns — so polygon
 //! corners, axis spokes, and data points all sit on the same
 //! ring of angles.
@@ -49,28 +49,29 @@ fn comp_shape() -> Composition {
 /// (left → top → right), with a 40 % centre hole. Five evenly-
 /// spaced categories along the sweep at band centres.
 fn radar_gauge_projection(n: usize) -> Projection {
-    Projection::Polar(PolarProjection {
-        theta_start: std::f64::consts::PI,
-        theta_end: 0.0,
-        inner_radius_frac: 0.4,
-        edge_style: PolarEdgeStyle::Chord,
-        theta_break_fracs: (0..n).map(|i| (i as f64 + 0.5) / n as f64).collect(),
-        ..PolarProjection::full_circle()
-    })
+    Projection::Polar(
+        PolarProjection::full_circle()
+            .theta_range(std::f64::consts::PI, 0.0)
+            .inner_radius(0.4)
+            .edges(PolarEdgeStyle::Chord)
+            .theta_breaks((0..n).map(|i| (i as f64 + 0.5) / n as f64)),
+    )
 }
 
 /// Non-axis-aligned partial radar — same -60° → 135° sweep as the
 /// polar example's partial panel, but with chord-style edges and
 /// band-centre break positions over `n` categories.
 fn radar_partial_projection(n: usize) -> Projection {
-    Projection::Polar(PolarProjection {
-        theta_start: -std::f64::consts::PI / 3.0,
-        theta_end: 3.0 * std::f64::consts::PI / 4.0,
-        inner_radius_frac: 0.2,
-        edge_style: PolarEdgeStyle::Chord,
-        theta_break_fracs: (0..n).map(|i| (i as f64 + 0.5) / n as f64).collect(),
-        ..PolarProjection::full_circle()
-    })
+    Projection::Polar(
+        PolarProjection::full_circle()
+            .theta_range(
+                -std::f64::consts::PI / 3.0,
+                3.0 * std::f64::consts::PI / 4.0,
+            )
+            .inner_radius(0.2)
+            .edges(PolarEdgeStyle::Chord)
+            .theta_breaks((0..n).map(|i| (i as f64 + 0.5) / n as f64)),
+    )
 }
 
 fn cats(strings: &[&'static str]) -> Vec<Value> {

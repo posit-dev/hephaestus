@@ -15,8 +15,9 @@
 //!    Clipper2 (positive area = outer, negative = hole), which renders
 //!    correctly under both `NonZero` and `EvenOdd` fill rules.
 
+use super::clipper::{from_paths_d, to_path_d, PRECISION};
 use crate::geometry::Point;
-use clipper2_rust::{inflate_paths_d, EndType, JoinType, PathD, PathsD, Point as ClipperPoint};
+use clipper2_rust::{inflate_paths_d, EndType, JoinType, PathsD};
 
 /// Inflate / deflate a polygon's rings via Clipper2, returning the new ring
 /// vertices. `rings[0]` is the outer boundary; `rings[1..]` are holes.
@@ -40,13 +41,13 @@ pub fn offset_polygon(rings: &[&[Point]], offset: f64, miter_limit: f64) -> Vec<
     let outer_pos = outer_area >= 0.0;
 
     let mut paths: PathsD = PathsD::new();
-    paths.push(to_clipper(rings[0], !outer_pos));
+    paths.push(to_path_d(rings[0], !outer_pos));
     for hole in &rings[1..] {
         if hole.len() < 3 {
             continue;
         }
         let hole_pos = signed_area(hole) >= 0.0;
-        paths.push(to_clipper(hole, hole_pos));
+        paths.push(to_path_d(hole, hole_pos));
     }
 
     let inflated = inflate_paths_d(
@@ -55,35 +56,15 @@ pub fn offset_polygon(rings: &[&[Point]], offset: f64, miter_limit: f64) -> Vec<
         JoinType::Miter,
         EndType::Polygon,
         miter_limit,
-        2,
+        PRECISION,
         0.0,
     );
 
-    let mut out_rings = Vec::with_capacity(inflated.len());
-    for ring in &inflated {
-        let mut converted = Vec::with_capacity(ring.len());
-        for pt in ring {
-            converted.push(Point::new(pt.x, pt.y));
-        }
-        if converted.len() >= 3 {
-            out_rings.push(converted);
-        }
-    }
+    let mut out_rings = from_paths_d(&inflated);
+    // A ring of one or two vertices bounds no area — Clipper2 can emit
+    // one when an inset all but collapses a ring.
+    out_rings.retain(|ring| ring.len() >= 3);
     out_rings
-}
-
-fn to_clipper(ring: &[Point], reverse: bool) -> PathD {
-    let mut path: PathD = PathD::with_capacity(ring.len());
-    if reverse {
-        for p in ring.iter().rev() {
-            path.push(ClipperPoint::<f64>::new(p.x, p.y));
-        }
-    } else {
-        for p in ring {
-            path.push(ClipperPoint::<f64>::new(p.x, p.y));
-        }
-    }
-    path
 }
 
 fn signed_area(ring: &[Point]) -> f64 {

@@ -42,9 +42,11 @@ pub use crate::scales::{
 
 /// Tick-label formatter closure stored on a [`Scale`]. Receives a break
 /// value and the active [`Locale`], and returns its rendered label.
-/// User formatters can ignore the locale, consult its decimal /
-/// grouping separators, or look up month / day names —
-/// [`Scale::default_format`] does the latter automatically.
+///
+/// The default formatter consults only `locale.decimal`. Grouping
+/// separators and the month / weekday name tables are vocabulary for
+/// formatters that want them — a calendar-native axis is built by
+/// supplying a closure, not by switching locale.
 pub type LabelFormatter = dyn Fn(&Value, &Locale) -> String + Send + Sync;
 
 /// Reject a bin-edge list that can't describe a bin ladder. Bin lookup
@@ -234,14 +236,35 @@ impl Scale {
     /// its canonical unit (days / microseconds). Non-numeric endpoints
     /// (`String`, `Bool`, `Color`, `Null`) panic at the call site since
     /// they have no continuous ordering.
-    pub fn domain_continuous<T>(mut self, min: T, max: T) -> Self
+    /// # Panics
+    ///
+    /// If either endpoint has no numeric or temporal projection —
+    /// there's no continuous ordering on strings or colours. Use
+    /// [`Self::try_domain_continuous`] for endpoints that come from
+    /// data rather than literals, or `domain_discrete` for categories.
+    pub fn domain_continuous<T>(self, min: T, max: T) -> Self
     where
         T: Into<Value>,
     {
-        let lo = endpoint_to_f64(min.into(), "domain_continuous: min");
-        let hi = endpoint_to_f64(max.into(), "domain_continuous: max");
+        match self.try_domain_continuous(min, max) {
+            Ok(scale) => scale,
+            Err(v) => {
+                panic!("domain_continuous: expected numeric or temporal endpoints, got {v:?}")
+            }
+        }
+    }
+
+    /// [`Self::domain_continuous`] but hands back the offending value
+    /// instead of panicking.
+    pub fn try_domain_continuous<T>(mut self, min: T, max: T) -> Result<Self, Value>
+    where
+        T: Into<Value>,
+    {
+        let (min, max) = (min.into(), max.into());
+        let lo = min.as_number().ok_or(min)?;
+        let hi = max.as_number().ok_or(max)?;
         self.input_range = Some(InputRange::Continuous { min: lo, max: hi });
-        self
+        Ok(self)
     }
 
     /// Configure a discrete domain — explicit ordered list of input
@@ -330,14 +353,33 @@ impl Scale {
 
     /// Replace the continuous domain in place. Bumps the generation
     /// counter.
+    ///
+    /// # Panics
+    ///
+    /// If either endpoint has no numeric or temporal projection. See
+    /// [`Self::try_set_domain_continuous`].
     pub fn set_domain_continuous<T>(&mut self, min: T, max: T)
     where
         T: Into<Value>,
     {
-        let lo = endpoint_to_f64(min.into(), "set_domain_continuous: min");
-        let hi = endpoint_to_f64(max.into(), "set_domain_continuous: max");
+        if let Err(v) = self.try_set_domain_continuous(min, max) {
+            panic!("set_domain_continuous: expected numeric or temporal endpoints, got {v:?}");
+        }
+    }
+
+    /// [`Self::set_domain_continuous`] but hands back the offending
+    /// value instead of panicking. The domain is left untouched on
+    /// error.
+    pub fn try_set_domain_continuous<T>(&mut self, min: T, max: T) -> Result<(), Value>
+    where
+        T: Into<Value>,
+    {
+        let (min, max) = (min.into(), max.into());
+        let lo = min.as_number().ok_or(min)?;
+        let hi = max.as_number().ok_or(max)?;
         self.input_range = Some(InputRange::Continuous { min: lo, max: hi });
         self.bump_generation();
+        Ok(())
     }
 
     /// Replace the discrete domain in place. Bumps the generation
@@ -924,10 +966,10 @@ impl Scale {
     /// ([`Self::default_format`]). Numeric values render via Rust's
     /// shortest round-trip `Display` after a 12-sig-fig snap (so
     /// `0.30000000000000004` reads as `"0.3"`), then the decimal
-    /// mark is swapped to `locale.decimal`; temporal variants render
-    /// compact `YYYY-MM-DD` / `HH:MM:SS` strings (locale-insensitive
-    /// today; user formatters can build language-specific layouts
-    /// from the locale's `month_short` / `month_long` arrays).
+    /// mark is swapped to `locale.decimal`. Temporal variants render
+    /// as compact `YYYY-MM-DD` / `HH:MM:SS` and are locale-insensitive;
+    /// a formatter that wants language-specific layouts builds them
+    /// from the locale's `month_short` / `month_long` / `day_*` arrays.
     pub fn format(&self, v: &Value, locale: &Locale) -> String {
         if let Some(BreaksSpec::Labeled { breaks, labels }) = &self.breaks_spec {
             if let Some(i) = breaks.iter().position(|b| b.key_eq(v)) {
@@ -1223,13 +1265,6 @@ fn format_number(n: f64, locale: &Locale) -> String {
 /// Project a continuous-domain endpoint to its canonical f64. Accepts
 /// numeric and temporal `Value` variants; panics for other variants since
 /// they have no continuous ordering.
-fn endpoint_to_f64(v: Value, ctx: &str) -> f64 {
-    match v.as_number() {
-        Some(n) => n,
-        None => panic!("{ctx}: expected a numeric or temporal value, got {v:?}"),
-    }
-}
-
 /// Split microseconds-since-midnight into (hour, minute, second, sub_us).
 /// Used by the DateTime formatter (DateTime stays μs even though Time
 /// switched to ns).
@@ -1336,6 +1371,31 @@ impl ScaleRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_comma_decimal_locale_reaches_the_default_formatter() {
+        // `decimal` is the one `Locale` field the default formatter
+        // consults, and every other format test uses `EN_US` — where a
+        // dropped swap is invisible.
+        let s = continuous(0.0..=1.0);
+        assert_eq!(s.format(&Value::Number(0.5), &Locale::EN_US), "0.5");
+        assert_eq!(s.format(&Value::Number(0.5), &Locale::DE_DE), "0,5");
+        assert_eq!(s.format(&Value::Number(0.5), &Locale::FR_FR), "0,5");
+        // Negative and integral values take the same path.
+        assert_eq!(s.format(&Value::Number(-1.25), &Locale::DE_DE), "-1,25");
+        assert_eq!(s.format(&Value::Number(3.0), &Locale::DE_DE), "3");
+    }
+
+    #[test]
+    fn temporal_labels_are_locale_insensitive() {
+        // Dates render ISO regardless of locale — the calendar-name
+        // tables are vocabulary for user formatters, not something the
+        // default one reaches for.
+        let s = Scale::new(ScaleTypeKind::Temporal(TemporalUnit::Date));
+        let v = Value::Date(crate::scales::value::Date::from_ymd(2024, 3, 7).to_days());
+        assert_eq!(s.format(&v, &Locale::EN_US), "2024-03-07");
+        assert_eq!(s.format(&v, &Locale::DE_DE), "2024-03-07");
+    }
+
     #[test]
     fn breaks_memo_follows_the_generation_counter() {
         // The memo is keyed on `(generation, n)`, so a domain change has

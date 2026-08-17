@@ -10,7 +10,7 @@
 //!
 //! - **Variant-strict.** A `Date(1)` and a `Number(1.0)` are distinct
 //!   keys even though both project to f64 `1.0`. The columnar
-//!   [`DataColumn::key_eq_at`] / [`DataColumn::key_hash_at`] helpers
+//!   `key_eq_at` / `key_hash_at` helpers
 //!   handle this.
 //! - **Deterministic.** `enter` and `update` are returned in
 //!   next-iteration order; `exit` is returned in prev-iteration order.
@@ -170,7 +170,7 @@ fn hash_at(col: &DataColumn, i: usize) -> u64 {
 /// - `exit` — tail prev indices `[common .. prev_n)` returned as
 ///   `Value::Number(i as f64)`, matching what `DataColumn::I64::get(i)`
 ///   would produce. Identical to the equivalent [`diff_columns`] output;
-///   verified by [`tests::positional_matches_columns_form`].
+///   verified by `positional_matches_columns_form`.
 pub fn diff_positional(
     prev_n: usize,
     next_n: usize,

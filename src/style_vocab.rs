@@ -260,7 +260,7 @@ pub enum ThemeColor {
     /// [`ThemeColor::mix`] builds this with [`ColorSpace::Srgb`], which is
     /// what addresses palette anchors by channel fraction (`mix(Paper,
     /// Ink, 0.08)` is grey92 against the default palette).
-    Mix(Box<ThemeColor>, Box<ThemeColor>, f32, ColorSpace),
+    Mix(Box<ThemeColor>, Box<ThemeColor>, f64, ColorSpace),
     /// Same colour, modulated alpha. `Alpha(inner, a)` multiplies the
     /// resolved colour's alpha channel by `a`.
     Alpha(Box<ThemeColor>, f32),
@@ -276,7 +276,7 @@ impl ThemeColor {
             ThemeColor::Ink => palette.ink,
             ThemeColor::Accent => palette.accent,
             ThemeColor::Mix(a, b, t, space) => {
-                lerp_color(a.resolve(palette), b.resolve(palette), *t as f64, *space)
+                lerp_color(a.resolve(palette), b.resolve(palette), *t, *space)
             }
             ThemeColor::Alpha(inner, a) => {
                 let c = inner.resolve(palette);
@@ -290,7 +290,7 @@ impl ThemeColor {
     /// fraction between the two anchors, so palette greys land on their
     /// nominal levels.
     #[inline]
-    pub fn mix(a: ThemeColor, b: ThemeColor, t: f32) -> Self {
+    pub fn mix(a: ThemeColor, b: ThemeColor, t: f64) -> Self {
         ThemeColor::Mix(Box::new(a), Box::new(b), t, ColorSpace::Srgb)
     }
 
@@ -298,7 +298,7 @@ impl ThemeColor {
     /// even blend between two saturated anchors, where [`Self::mix`]'s
     /// channel arithmetic would read as a dip in lightness.
     #[inline]
-    pub fn mix_in(a: ThemeColor, b: ThemeColor, t: f32, space: ColorSpace) -> Self {
+    pub fn mix_in(a: ThemeColor, b: ThemeColor, t: f64, space: ColorSpace) -> Self {
         ThemeColor::Mix(Box::new(a), Box::new(b), t, space)
     }
 
@@ -355,6 +355,93 @@ mod tests {
         for c in &grey.components[0..3] {
             assert!((c - 0.92).abs() < 1e-5, "expected grey92, got {grey:?}");
         }
+    }
+
+    /// A palette whose three anchors are primaries, so a resolved
+    /// channel names which anchor it came from.
+    fn primary_palette() -> Palette {
+        Palette::new(rgb(1.0, 0.0, 0.0), rgb(0.0, 0.0, 1.0), rgb(0.0, 1.0, 0.0))
+    }
+
+    #[track_caller]
+    fn assert_components(got: Color, want: [f32; 4]) {
+        for (i, (g, w)) in got.components.iter().zip(want.iter()).enumerate() {
+            assert!(
+                (g - w).abs() < 1e-6,
+                "component {i}: got {got:?}, want {want:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mix_nested_in_a_mix_resolves_before_the_outer_blend() {
+        // Half paper / half ink, then half of that toward ink again.
+        let c = ThemeColor::mix(
+            ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.5),
+            ThemeColor::Ink,
+            0.5,
+        )
+        .resolve(&Palette::default());
+        assert_components(c, [0.25, 0.25, 0.25, 1.0]);
+    }
+
+    #[test]
+    fn mixing_two_mixes_averages_their_resolved_colors() {
+        let c = ThemeColor::mix(
+            ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.25),
+            ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.75),
+            0.5,
+        )
+        .resolve(&Palette::default());
+        assert_components(c, [0.5, 0.5, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn nested_mixes_address_the_supplied_palette_anchors() {
+        // Half paper (red) / half accent (green), then half toward ink
+        // (blue).
+        let c = ThemeColor::mix(
+            ThemeColor::mix(ThemeColor::Paper, ThemeColor::Accent, 0.5),
+            ThemeColor::Ink,
+            0.5,
+        )
+        .resolve(&primary_palette());
+        assert_components(c, [0.25, 0.25, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn nested_alphas_multiply_rather_than_replace() {
+        let c = ThemeColor::alpha(ThemeColor::alpha(ThemeColor::Accent, 0.5), 0.5)
+            .resolve(&primary_palette());
+        assert_components(c, [0.0, 1.0, 0.0, 0.25]);
+    }
+
+    #[test]
+    fn alpha_scales_a_fixed_colors_own_alpha() {
+        let c = ThemeColor::alpha(ThemeColor::Fixed(Color::new([0.2, 0.4, 0.6, 0.5])), 0.5)
+            .resolve(&Palette::default());
+        assert_components(c, [0.2, 0.4, 0.6, 0.25]);
+    }
+
+    #[test]
+    fn alpha_wrapping_a_mix_keeps_the_blended_channels() {
+        let c = ThemeColor::alpha(
+            ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.25),
+            0.4,
+        )
+        .resolve(&Palette::default());
+        assert_components(c, [0.75, 0.75, 0.75, 0.4]);
+    }
+
+    #[test]
+    fn a_mix_interpolates_the_alpha_of_its_nested_operands() {
+        let c = ThemeColor::mix(
+            ThemeColor::alpha(ThemeColor::Paper, 0.0),
+            ThemeColor::Paper,
+            0.5,
+        )
+        .resolve(&Palette::default());
+        assert_components(c, [1.0, 1.0, 1.0, 0.5]);
     }
 
     #[test]

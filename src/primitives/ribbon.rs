@@ -39,28 +39,29 @@
 //! All distances are in **panel pixels**. Callers convert from pt at
 //! their own draw sites (`px = pt * dpi / 72.0`).
 
-use crate::geometry::Vec2;
+use std::ops::RangeInclusive;
 
+use super::tolerance::{
+    ARC_FAN_MAX_STEP, ARC_FAN_MIN_STEP, ARC_FAN_TOLERANCE, DEGENERATE_EPS as EPSILON,
+};
 use crate::color::Color;
-use crate::geometry::Point;
+use crate::geometry::{Point, Vec2};
 use crate::mesh::Mesh;
 use crate::stroke::{Cap, Join};
 
-const EPSILON: f64 = 1e-9;
-/// Approximation tolerance for round-cap / round-join arcs, in panel
-/// pixels. Sub-pixel deviation from the true arc — visually
-/// indistinguishable at any reasonable zoom.
-const ROUND_TOLERANCE: f64 = 0.5;
+/// Colour used by the entry points that accept an optional per-vertex
+/// colour slice when none is supplied.
+const DEFAULT_COLOR: Color = Color::new([0.0, 0.0, 0.0, 1.0]);
 
-/// Maximum angular step per fan triangle, in radians. The chord-error
-/// formula `ε = R(1 − cos(Δθ/2))` keeps the *positional* deviation
-/// sub-pixel, but at small `R` (typical line half-widths of 1–3 px)
-/// it picks angular steps of 60–90°, which read as visible corners
-/// even though the chord error itself is sub-pixel. Capping the step
-/// at 15° (= π/12 rad) ensures at least 12 segments per semicircle
-/// at any radius, eliminating the perceptible faceting on round
-/// caps and joins of thin lines.
-const ROUND_MAX_ANGULAR_STEP: f64 = std::f64::consts::PI / 12.0;
+/// Segment-count bounds for a round **cap** fan. The floor keeps a
+/// hairline cap from collapsing to a triangle; the ceiling caps the
+/// vertex cost of a very wide one.
+const CAP_FAN_SEGMENTS: RangeInclusive<usize> = 4..=64;
+/// Segment-count bounds for a round **join** fan. A join sweeps only
+/// the turn angle rather than a half-circle, so it needs fewer
+/// segments than a cap at the same radius.
+const JOIN_FAN_SEGMENTS: RangeInclusive<usize> = 2..=32;
+
 /// Per-segment seam-bleed in panel pixels. Each interior quad is
 /// extended this far past its natural endpoint at both ends along the
 /// local segment tangent, so adjacent quads overlap and SrcOver
@@ -109,50 +110,47 @@ impl Default for RibbonOptions {
 /// Constant-colour, constant-width ribbon. Equivalent to a uniformly
 /// stroked polyline expressed as a mesh.
 pub fn polyline_ribbon(points: &[Point], color: Color, opts: &RibbonOptions) -> Mesh {
-    ribbon_inner(points, ColorSource::Constant(color), None, opts, false)
+    ribbon(
+        "polyline_ribbon",
+        points,
+        ColorSource::Constant(color),
+        None,
+        opts,
+        false,
+    )
 }
 
 /// Per-vertex coloured, constant-width ribbon. `colors.len()` must
 /// equal `points.len()`.
 pub fn polyline_gradient(points: &[Point], colors: &[Color], opts: &RibbonOptions) -> Mesh {
-    assert_eq!(
-        points.len(),
-        colors.len(),
-        "polyline_gradient: points.len() ({}) != colors.len() ({})",
-        points.len(),
-        colors.len(),
-    );
-    ribbon_inner(points, ColorSource::PerVertex(colors), None, opts, false)
+    ribbon(
+        "polyline_gradient",
+        points,
+        ColorSource::PerVertex(colors),
+        None,
+        opts,
+        false,
+    )
 }
 
 /// Full ribbon: optionally per-vertex coloured, optionally per-vertex
-/// half-width. Either slice may be `None`; the defaults are taken
-/// from `opts`.
+/// half-width. `colors` defaults to opaque black and `half_widths` to
+/// [`RibbonOptions::half_width`]; a supplied slice must match
+/// `points.len()`.
 pub fn polyline_ribbon_full(
     points: &[Point],
     colors: Option<&[Color]>,
     half_widths: Option<&[f64]>,
     opts: &RibbonOptions,
 ) -> Mesh {
-    if let Some(c) = colors {
-        assert_eq!(
-            points.len(),
-            c.len(),
-            "polyline_ribbon_full: colors.len() must match points.len()"
-        );
-    }
-    if let Some(w) = half_widths {
-        assert_eq!(
-            points.len(),
-            w.len(),
-            "polyline_ribbon_full: half_widths.len() must match points.len()"
-        );
-    }
-    let color_source = match colors {
-        Some(c) => ColorSource::PerVertex(c),
-        None => ColorSource::Constant(Color::new([0.0, 0.0, 0.0, 1.0])),
-    };
-    ribbon_inner(points, color_source, half_widths, opts, false)
+    ribbon(
+        "polyline_ribbon_full",
+        points,
+        ColorSource::from_optional(colors),
+        half_widths,
+        opts,
+        false,
+    )
 }
 
 /// Constant-colour, constant-width closed-polygon ribbon. The loop
@@ -161,7 +159,14 @@ pub fn polyline_ribbon_full(
 /// closed loop has no endpoints to cap). Returns an empty mesh when
 /// `points.len() < 3`.
 pub fn polygon_ribbon(points: &[Point], color: Color, opts: &RibbonOptions) -> Mesh {
-    ribbon_inner(points, ColorSource::Constant(color), None, opts, true)
+    ribbon(
+        "polygon_ribbon",
+        points,
+        ColorSource::Constant(color),
+        None,
+        opts,
+        true,
+    )
 }
 
 /// Per-vertex coloured, constant-width closed-polygon ribbon.
@@ -170,45 +175,66 @@ pub fn polygon_ribbon(points: &[Point], color: Color, opts: &RibbonOptions) -> M
 /// so the gradient closes seamlessly. See [`polygon_ribbon`] for the
 /// closure convention.
 pub fn polygon_gradient(points: &[Point], colors: &[Color], opts: &RibbonOptions) -> Mesh {
-    assert_eq!(
-        points.len(),
-        colors.len(),
-        "polygon_gradient: points.len() ({}) != colors.len() ({})",
-        points.len(),
-        colors.len(),
-    );
-    ribbon_inner(points, ColorSource::PerVertex(colors), None, opts, true)
+    ribbon(
+        "polygon_gradient",
+        points,
+        ColorSource::PerVertex(colors),
+        None,
+        opts,
+        true,
+    )
 }
 
 /// Full closed-polygon ribbon: optionally per-vertex coloured,
-/// optionally per-vertex half-width. Either slice may be `None`; the
-/// defaults are taken from `opts`. See [`polygon_ribbon`] for the
-/// closure convention.
+/// optionally per-vertex half-width. `colors` defaults to opaque black
+/// and `half_widths` to [`RibbonOptions::half_width`]; a supplied slice
+/// must match `points.len()`. See [`polygon_ribbon`] for the closure
+/// convention.
 pub fn polygon_ribbon_full(
     points: &[Point],
     colors: Option<&[Color]>,
     half_widths: Option<&[f64]>,
     opts: &RibbonOptions,
 ) -> Mesh {
-    if let Some(c) = colors {
+    ribbon(
+        "polygon_ribbon_full",
+        points,
+        ColorSource::from_optional(colors),
+        half_widths,
+        opts,
+        true,
+    )
+}
+
+/// Validate the per-vertex slices on behalf of one of the six entry
+/// points — `who` names it in the panic — then tessellate.
+fn ribbon(
+    who: &str,
+    points: &[Point],
+    colors: ColorSource<'_>,
+    half_widths: Option<&[f64]>,
+    opts: &RibbonOptions,
+    closed: bool,
+) -> Mesh {
+    if let ColorSource::PerVertex(c) = colors {
         assert_eq!(
             points.len(),
             c.len(),
-            "polygon_ribbon_full: colors.len() must match points.len()"
+            "{who}: points.len() ({}) != colors.len() ({})",
+            points.len(),
+            c.len(),
         );
     }
     if let Some(w) = half_widths {
         assert_eq!(
             points.len(),
             w.len(),
-            "polygon_ribbon_full: half_widths.len() must match points.len()"
+            "{who}: points.len() ({}) != half_widths.len() ({})",
+            points.len(),
+            w.len(),
         );
     }
-    let color_source = match colors {
-        Some(c) => ColorSource::PerVertex(c),
-        None => ColorSource::Constant(Color::new([0.0, 0.0, 0.0, 1.0])),
-    };
-    ribbon_inner(points, color_source, half_widths, opts, true)
+    ribbon_inner(points, colors, half_widths, opts, closed)
 }
 
 /// Build a filled quad-strip mesh between two co-indexed polylines.
@@ -324,7 +350,16 @@ enum ColorSource<'a> {
     PerVertex(&'a [Color]),
 }
 
-impl ColorSource<'_> {
+impl<'a> ColorSource<'a> {
+    /// Per-vertex when a colour slice is supplied, opaque black
+    /// otherwise.
+    fn from_optional(colors: Option<&'a [Color]>) -> Self {
+        match colors {
+            Some(c) => ColorSource::PerVertex(c),
+            None => ColorSource::Constant(DEFAULT_COLOR),
+        }
+    }
+
     fn at(&self, i: usize) -> Color {
         match self {
             ColorSource::Constant(c) => *c,
@@ -664,13 +699,19 @@ fn emit_join_fill(
             indices.extend_from_slice(&[i_p, i_oi, i_oo]);
         }
         Join::Round => {
-            emit_round_fan(
+            // The fan fills the outside notch, so it takes the shorter
+            // of the two sweeps between the outside shoulders.
+            let va = outside_in - pi;
+            emit_arc_fan(
                 vertices,
                 vcolors,
                 indices,
                 pi,
                 outside_in,
-                outside_out,
+                va.hypot(),
+                va.y.atan2(va.x),
+                normalized_delta(va, outside_out - pi),
+                JOIN_FAN_SEGMENTS,
                 color,
             );
         }
@@ -719,140 +760,95 @@ fn emit_cap(
             indices.extend_from_slice(&[i_a, i_b, i_be, i_a, i_be, i_ae]);
         }
         Cap::Round => {
-            emit_round_cap_fan(
-                vertices, vcolors, indices, endpoint, a, b, color, half_width,
+            // Sweep from shoulder `a` round to shoulder `b` on the
+            // outward side: the semicircle, not the (zero-length) sweep
+            // straight across the endpoint.
+            let va = a - endpoint;
+            let mut delta = normalized_delta(va, b - endpoint);
+            // The two shoulders sit on opposite sides of the endpoint,
+            // so the semicircle is whichever direction has magnitude
+            // ≈ π. When the natural (-π, π] delta is shorter than that,
+            // the cap has to go the other way round.
+            if delta.abs() < std::f64::consts::PI - 1e-6 {
+                delta = if delta >= 0.0 {
+                    delta - std::f64::consts::TAU
+                } else {
+                    delta + std::f64::consts::TAU
+                };
+            }
+            emit_arc_fan(
+                vertices,
+                vcolors,
+                indices,
+                endpoint,
+                a,
+                half_width.max(EPSILON),
+                va.y.atan2(va.x),
+                delta,
+                CAP_FAN_SEGMENTS,
+                color,
             );
         }
     }
 }
 
-/// Round-cap fan: triangles fanning out from the polyline endpoint,
-/// approximating a semicircle from shoulder `a` around to shoulder `b`.
-/// The fan rotates from `a` (relative to the endpoint) to `b` along
-/// the outward side.
-#[allow(clippy::too_many_arguments)]
-fn emit_round_cap_fan(
-    vertices: &mut Vec<Point>,
-    vcolors: &mut Vec<Color>,
-    indices: &mut Vec<u32>,
-    endpoint: Point,
-    a: Point,
-    b: Point,
-    color: Color,
-    half_width: f64,
-) {
-    // Two complementary bounds on the angular step:
-    //   1. Chord error: ε = R · (1 - cos(Δθ/2)) → Δθ ≈ 2·acos(1 - ε/R).
-    //      Sub-pixel chord deviation at any radius.
-    //   2. Max angular step: capped at ROUND_MAX_ANGULAR_STEP so even
-    //      thin lines (small R) get enough segments to read as smooth.
-    // Take the smaller (= denser) of the two.
-    let r = half_width.max(EPSILON);
-    let chord_step = (1.0 - (ROUND_TOLERANCE / r).clamp(0.0, 1.0)).acos() * 2.0;
-    let theta_step = chord_step.clamp(1e-3, ROUND_MAX_ANGULAR_STEP);
-    let segments = (std::f64::consts::PI / theta_step).ceil() as usize;
-    let segments = segments.clamp(4, 64);
-
-    // From endpoint, the angle of vector (a - endpoint) and (b - endpoint).
-    let va = a - endpoint;
-    let vb = b - endpoint;
-    let theta_a = va.y.atan2(va.x);
-    let theta_b = vb.y.atan2(vb.x);
-    // Sweep from a → b on the outward side. Pick the shorter signed
-    // sweep that crosses the outward direction (which is at the
-    // half-angle bisector of va and vb on the convex side). We
-    // achieve "go round the outside" by sweeping in the direction
-    // that takes us past the cross-product sign-flip point.
-    let mut delta = theta_b - theta_a;
-    // Normalise into (-π, π].
+/// Signed angle from `from` to `to`, normalised into `(-π, π]` — the
+/// shorter of the two ways round.
+fn normalized_delta(from: Vec2, to: Vec2) -> f64 {
+    let mut delta = to.y.atan2(to.x) - from.y.atan2(from.x);
     while delta > std::f64::consts::PI {
         delta -= std::f64::consts::TAU;
     }
     while delta <= -std::f64::consts::PI {
         delta += std::f64::consts::TAU;
     }
-    // We want the sweep that's a semicircle (≈ ±π). If the natural
-    // (-π, π] delta has magnitude < π, the cap should go the OTHER
-    // way (over the top) to make a semicircle. Otherwise it's the
-    // right direction.
-    if delta.abs() < std::f64::consts::PI - 1e-6 {
-        delta = if delta >= 0.0 {
-            delta - std::f64::consts::TAU
-        } else {
-            delta + std::f64::consts::TAU
-        };
-    }
-    let n_steps = segments.max(2);
+    delta
+}
+
+/// Emit a triangle fan approximating the circular arc of radius `r`
+/// centred at `center`, running `delta` radians (signed) from angle
+/// `theta_a`. The fan's first rim vertex is `start`, which the caller
+/// supplies so the fan meets the neighbouring geometry exactly;
+/// subsequent rim vertices are placed on the arc.
+///
+/// Two complementary bounds set the angular step: the chord error
+/// `ε = R · (1 − cos(Δθ/2))` keeps positional deviation within
+/// [`ARC_FAN_TOLERANCE`] at any radius, and [`ARC_FAN_MAX_STEP`] keeps
+/// small radii from reading as faceted. The denser of the two wins,
+/// and `seg_clamp` bounds the resulting count.
+#[allow(clippy::too_many_arguments)]
+fn emit_arc_fan(
+    vertices: &mut Vec<Point>,
+    vcolors: &mut Vec<Color>,
+    indices: &mut Vec<u32>,
+    center: Point,
+    start: Point,
+    r: f64,
+    theta_a: f64,
+    delta: f64,
+    seg_clamp: RangeInclusive<usize>,
+    color: Color,
+) {
+    let chord_step = (1.0 - (ARC_FAN_TOLERANCE / r.max(EPSILON)).clamp(0.0, 1.0)).acos() * 2.0;
+    let theta_step = chord_step.clamp(ARC_FAN_MIN_STEP, ARC_FAN_MAX_STEP);
+    let segments = (delta.abs() / theta_step).ceil() as usize;
+    let n_steps = segments.clamp(*seg_clamp.start(), *seg_clamp.end());
     let step = delta / n_steps as f64;
 
     let i_center = vertices.len() as u32;
-    vertices.push(endpoint);
+    vertices.push(center);
     vcolors.push(color);
-    let i_a = vertices.len() as u32;
-    vertices.push(a);
+    let i_start = vertices.len() as u32;
+    vertices.push(start);
     vcolors.push(color);
-    let mut prev = i_a;
+    let mut prev = i_start;
     for k in 1..=n_steps {
         let theta = theta_a + step * k as f64;
-        let p = Point::new(endpoint.x + r * theta.cos(), endpoint.y + r * theta.sin());
+        let p = Point::new(center.x + r * theta.cos(), center.y + r * theta.sin());
         let idx = vertices.len() as u32;
         vertices.push(p);
         vcolors.push(color);
         indices.extend_from_slice(&[i_center, prev, idx]);
-        prev = idx;
-    }
-}
-
-/// Round-join fan: triangles fanning from the polyline vertex out to
-/// the outside arc connecting the two outside shoulders.
-fn emit_round_fan(
-    vertices: &mut Vec<Point>,
-    vcolors: &mut Vec<Color>,
-    indices: &mut Vec<u32>,
-    pivot: Point,
-    a: Point,
-    b: Point,
-    color: Color,
-) {
-    let va = a - pivot;
-    let vb = b - pivot;
-    let r = va.hypot();
-    let theta_a = va.y.atan2(va.x);
-    let theta_b = vb.y.atan2(vb.x);
-
-    let mut delta = theta_b - theta_a;
-    while delta > std::f64::consts::PI {
-        delta -= std::f64::consts::TAU;
-    }
-    while delta <= -std::f64::consts::PI {
-        delta += std::f64::consts::TAU;
-    }
-    // The bevel direction is the SHORTER of the two sweeps around
-    // pivot. Stick with the (-π, π] delta directly.
-    //
-    // Angular step is the smaller of (a) chord-error driven and
-    // (b) the absolute cap — see `emit_round_cap_fan` for the
-    // rationale.
-    let chord_step = (1.0 - (ROUND_TOLERANCE / r.max(EPSILON)).clamp(0.0, 1.0)).acos() * 2.0;
-    let theta_step = chord_step.clamp(1e-3, ROUND_MAX_ANGULAR_STEP);
-    let segments = (delta.abs() / theta_step).ceil() as usize;
-    let n_steps = segments.clamp(2, 32);
-    let step = delta / n_steps as f64;
-
-    let i_pivot = vertices.len() as u32;
-    vertices.push(pivot);
-    vcolors.push(color);
-    let i_a = vertices.len() as u32;
-    vertices.push(a);
-    vcolors.push(color);
-    let mut prev = i_a;
-    for k in 1..=n_steps {
-        let theta = theta_a + step * k as f64;
-        let p = Point::new(pivot.x + r * theta.cos(), pivot.y + r * theta.sin());
-        let idx = vertices.len() as u32;
-        vertices.push(p);
-        vcolors.push(color);
-        indices.extend_from_slice(&[i_pivot, prev, idx]);
         prev = idx;
     }
 }

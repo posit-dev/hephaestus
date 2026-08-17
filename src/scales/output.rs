@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::color::Color;
 use crate::scales::value::LinetypeStep;
 
-/// The output range of a [`Scale`](super::Scale) — the set of visual
+/// The output range of a `Scale` — the set of visual
 /// values a domain entry can map to.
 ///
 /// For continuous scales, ordinal-with-numeric-range scales, and similar,

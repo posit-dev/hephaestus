@@ -265,3 +265,139 @@ pub(crate) fn de_boor(ctrl: &[Point], degree: usize, t: f64) -> Point {
     }
     working[degree]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pt(x: f64, y: f64) -> Point {
+        Point::new(x, y)
+    }
+
+    fn approx(a: Point, b: Point, tol: f64) -> bool {
+        (a.x - b.x).abs() <= tol && (a.y - b.y).abs() <= tol
+    }
+
+    /// The cubic Bezier `de Casteljau` result, computed independently of
+    /// the de Boor path under test.
+    fn bezier3(p: [Point; 4], t: f64) -> Point {
+        let u = 1.0 - t;
+        let (b0, b1, b2, b3) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+        Point::new(
+            b0 * p[0].x + b1 * p[1].x + b2 * p[2].x + b3 * p[3].x,
+            b0 * p[0].y + b1 * p[1].y + b2 * p[2].y + b3 * p[3].y,
+        )
+    }
+
+    #[test]
+    fn de_boor_reproduces_a_cubic_bezier() {
+        // A clamped uniform B-spline with exactly `degree + 1` control
+        // points has no interior knots, so it *is* the Bezier over the
+        // same points. Any error in the recursion's knot indices shows
+        // up as a divergence away from the endpoints.
+        let ctrl = [pt(0.0, 0.0), pt(1.0, 3.0), pt(4.0, 3.0), pt(5.0, 0.0)];
+        for i in 0..=20 {
+            let t = i as f64 / 20.0;
+            let got = de_boor(&ctrl, 3, t);
+            let want = bezier3(ctrl, t);
+            assert!(
+                approx(got, want, 1e-9),
+                "t = {t}: de Boor {got:?} vs Bezier {want:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn clamped_spline_interpolates_its_end_control_points() {
+        // The clamping is the whole reason the first and last control
+        // points sit on the curve; interior ones only pull toward it.
+        let ctrl = [
+            pt(0.0, 0.0),
+            pt(1.0, 5.0),
+            pt(2.0, -5.0),
+            pt(3.0, 5.0),
+            pt(4.0, 0.0),
+        ];
+        for degree in 1..=3 {
+            let domain_max = (ctrl.len() - degree) as f64;
+            assert!(
+                approx(de_boor(&ctrl, degree, 0.0), ctrl[0], 1e-12),
+                "degree {degree} start"
+            );
+            assert!(
+                approx(
+                    de_boor(&ctrl, degree, domain_max),
+                    ctrl[ctrl.len() - 1],
+                    1e-12
+                ),
+                "degree {degree} end"
+            );
+        }
+    }
+
+    #[test]
+    fn degree_one_spline_is_the_control_polygon() {
+        // Degree 1 has no smoothing to do, so every sample must land on
+        // the straight segment between two control points.
+        let ctrl = [pt(0.0, 0.0), pt(10.0, 0.0), pt(10.0, 10.0)];
+        let mid_first = de_boor(&ctrl, 1, 0.5);
+        assert!(approx(mid_first, pt(5.0, 0.0), 1e-12), "{mid_first:?}");
+        let mid_second = de_boor(&ctrl, 1, 1.5);
+        assert!(approx(mid_second, pt(10.0, 5.0), 1e-12), "{mid_second:?}");
+    }
+
+    #[test]
+    fn knot_vector_is_clamped_uniform() {
+        // `[0]*(d+1) ++ [1 .. n-d-1] ++ [n-d]*(d+1)`.
+        let (d, n) = (3usize, 7usize);
+        let domain_max = (n - d) as f64;
+        for j in 0..=d {
+            assert_eq!(knot(j, d, n), 0.0, "leading knot {j}");
+        }
+        for j in n..=n + d {
+            assert_eq!(knot(j, d, n), domain_max, "trailing knot {j}");
+        }
+        // Interior knots step by one.
+        for i in 1..=(n - d - 1) {
+            assert_eq!(knot(d + i, d, n), i as f64, "interior knot {i}");
+        }
+    }
+
+    #[test]
+    fn find_span_stays_inside_the_valid_range() {
+        let (d, n) = (3usize, 7usize);
+        let domain_max = (n - d) as f64;
+        // Below and at the start clamp to the first evaluable span.
+        assert_eq!(find_span(-1.0, d, n), d);
+        assert_eq!(find_span(0.0, d, n), d);
+        // At and beyond the end clamp to the last, so endpoint
+        // evaluation returns the final control point.
+        assert_eq!(find_span(domain_max, d, n), n - 1);
+        assert_eq!(find_span(domain_max + 5.0, d, n), n - 1);
+        // Interior parameters land in a span containing them.
+        for i in 0..(n - d) {
+            let t = i as f64 + 0.5;
+            let k = find_span(t, d, n);
+            assert!(
+                (d..=n - 1).contains(&k),
+                "t = {t} gave span {k}, outside {d}..={}",
+                n - 1
+            );
+            assert!(
+                knot(k, d, n) <= t && t <= knot(k + 1, d, n),
+                "span {k} does not bracket t = {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn degree_is_capped_by_the_control_point_count() {
+        // Fewer control points than `degree + 1` would index past the
+        // knot vector; callers clamp, and the clamped result still has
+        // to interpolate both ends.
+        let ctrl = [pt(0.0, 0.0), pt(2.0, 4.0)];
+        let effective = 1usize;
+        assert!(approx(de_boor(&ctrl, effective, 0.0), ctrl[0], 1e-12));
+        assert!(approx(de_boor(&ctrl, effective, 1.0), ctrl[1], 1e-12));
+    }
+}

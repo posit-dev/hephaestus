@@ -27,7 +27,7 @@ use crate::color::Color;
 use crate::style_vocab::{Palette, ThemeColor};
 
 /// A drawing instruction for one block-level box. Emitted by
-/// [`compute_block_paints`] in outer-first order.
+/// `compute_block_paints` in outer-first order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockPaint {
     /// Outer rectangle (background + border edge) in RichTextRun-
@@ -55,7 +55,7 @@ pub struct BlockBorder {
     /// [`crate::text::rich::StyleDelta::border_type`], carried in pt
     /// (raw form). The draw pass routes marker-free patterns through
     /// kurbo's `with_dashes` fast path and marker-bearing patterns
-    /// through [`crate::linetype::draw_linetype_with_markers`]
+    /// through `draw_linetype_with_markers`
     /// (per-polyline chain). `None` = solid stroke.
     pub linetype_pt: Option<std::sync::Arc<[crate::scales::value::LinetypeStep]>>,
 }

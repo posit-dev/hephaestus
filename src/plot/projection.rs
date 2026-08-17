@@ -122,11 +122,10 @@ pub enum Projection {
     #[default]
     Cartesian,
     /// Polar coordinates with a configurable angular range. Reads two
-    /// channels — `angle_channel` (theta) and `radius_channel`
-    /// (radius) — and projects them onto a centred inscribed disk
-    /// (or annular ring if `inner_radius_frac > 0`). Supports
-    /// partial-arc layouts (gauges, half-disks) via `theta_start` /
-    /// `theta_end`. See [`PolarProjection`].
+    /// channels — one for theta, one for radius — and projects them
+    /// onto a centred inscribed disk (or an annular ring when the
+    /// projection has an inner radius). Supports partial-arc layouts
+    /// (gauges, half-disks). See [`PolarProjection`].
     Polar(PolarProjection),
     /// Custom drawing surface defined by an arbitrary set of polygons
     /// in data space, plus user-supplied graticule polylines as overlay
@@ -180,82 +179,61 @@ pub enum PolarEdgeStyle {
 /// Configurable polar projection. Maps two channel-space fractions
 /// onto a centred inscribed disk inside the panel rect:
 ///
-/// - **`angle_channel`** (default `"x"`) — the theta channel. Frac 0
-///   maps to `theta_start`, frac 1 to `theta_end`.
-/// - **`radius_channel`** (default `"y"`) — the radius channel. Frac
-///   0 maps to `inner_radius_frac * r_outer`, frac 1 to `r_outer`
-///   (the inscribed disk radius).
-/// - **`theta_start` / `theta_end`** — angular span in radians, math
+/// - **Channels** ([`Self::channels`], default `"x"` / `"y"`) — which
+///   channel drives theta and which drives radius. Theta frac 0 maps
+///   to the sweep start, frac 1 to the sweep end; radius frac 0 maps
+///   to the inner radius, frac 1 to the outer radius.
+/// - **Sweep** ([`Self::theta_range`]) — angular span in radians, math
 ///   convention (0 = 3 o'clock, π/2 = 12 o'clock). Span sign sets
 ///   sweep direction: `end - start < 0` is clockwise, `> 0` is
 ///   counter-clockwise.
-/// - **`inner_radius_frac`** — fraction of `r_outer` for the hole at
-///   the centre. `0.0` = filled disk; `> 0` = ring (donut, gauge).
-/// - **`edge_style`** — [`PolarEdgeStyle::Geodesic`] (default; arcs
-///   between data points) or [`PolarEdgeStyle::Chord`] (straight
-///   chords — the radar / spider chart look).
+/// - **Radii** ([`Self::inner_radius`] / [`Self::outer_radius`]) — the
+///   hole at the centre and the cap on the outer edge, both as
+///   fractions. A zero inner radius is a filled disk; a positive one
+///   is a ring (donut, gauge).
+/// - **Edge style** ([`Self::edges`]) — [`PolarEdgeStyle::Geodesic`]
+///   (default; arcs between data points) or [`PolarEdgeStyle::Chord`]
+///   (straight chords — the radar / spider chart look).
 ///
 /// Constructed via [`Projection::polar`] (full clockwise circle from
 /// 12 o'clock), [`Projection::gauge`] (half-disk arc with a hole),
 /// or [`Projection::radar`] (full circle with chord-style edges and
-/// polygon grid).
+/// polygon grid), then refined with the chainable builders:
+///
+/// ```
+/// use hephaestus::plot::projection::PolarProjection;
+///
+/// let quarter = PolarProjection::full_circle()
+///     .theta_range(0.0, std::f64::consts::FRAC_PI_2)
+///     .inner_radius(0.3);
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct PolarProjection {
     /// Channel name read as theta.
-    pub angle_channel: String,
+    angle_channel: String,
     /// Channel name read as radius.
-    pub radius_channel: String,
+    radius_channel: String,
     /// Angle at `theta_frac = 0`, in radians (math convention).
-    pub theta_start: f64,
-    /// Angle at `theta_frac = 1`, in radians (math convention). The
-    /// sign of `theta_end - theta_start` determines sweep direction:
-    /// negative = clockwise (the visual default), positive =
-    /// counter-clockwise.
-    pub theta_end: f64,
-    /// Inner radius as a fraction of `r_outer`. `0.0` = filled disk.
-    pub inner_radius_frac: f64,
-    /// How edges between data points are interpreted. Defaults to
-    /// [`PolarEdgeStyle::Geodesic`]; set to
-    /// [`PolarEdgeStyle::Chord`] for radar / spider charts.
-    pub edge_style: PolarEdgeStyle,
-    /// Theta-break positions (channel-space fractions in `[0, 1]`)
-    /// used as polygon vertices under `Chord` edge style. Empty for
-    /// `Geodesic` (the field is ignored there). Typically `[0.0,
-    /// 1.0/N, 2.0/N, …, (N-1)/N]` for N evenly-spaced categories;
-    /// for a non-closed radar partial use the partial range.
-    ///
-    /// Affects two things under `Chord`:
-    /// - Chrome polygon rings draw their vertices at these
-    ///   theta positions.
-    /// - [`Projection::interpolate_segment`] emits one interior
-    ///   sample per break that the segment crosses, so a polyline
-    ///   correctly bends at each category boundary instead of
-    ///   cutting diagonally across them.
-    pub theta_break_fracs: Vec<f64>,
-    /// Use the projected bbox to size + offset the inscribed disk
-    /// inside the panel rect. `true` by default — partial-arc
-    /// projections (gauges, half-disks) get their swept area
-    /// centred in the panel rather than the full-circle's centre.
-    ///
-    /// Set to `false` when two or more polar projections share the
-    /// same panel (concentric nesting, multiple partial arcs at
-    /// different theta_start offsets, etc.) so they share a common
-    /// centre + max radius regardless of their individual sweeps.
-    pub fit_to_bbox: bool,
-    /// Optional outer-radius override, as a fraction of the
-    /// projection's natural maximum radius (the inscribed-disk
-    /// radius for full-circle, or the bbox-fitted radius for
-    /// partial arcs when `fit_to_bbox` is on). `None` = fill the
-    /// available space.
-    ///
-    /// Pairs with [`Self::inner_radius_frac`] for concentric
-    /// nesting: an outer projection with
-    /// `outer_radius_frac = None, inner_radius_frac = 0.5` and an
-    /// inner projection with `outer_radius_frac = Some(0.5)`
-    /// (both with `fit_to_bbox = false`) draw on disjoint annular
-    /// regions of the same panel.
-    pub outer_radius_frac: Option<f64>,
+    theta_start: f64,
+    /// Angle at `theta_frac = 1`, in radians (math convention).
+    theta_end: f64,
+    /// Inner radius as a fraction of the outer radius, in `[0, 1)`.
+    inner_radius_frac: f64,
+    /// How edges between data points are interpreted.
+    edge_style: PolarEdgeStyle,
+    /// Theta-break positions, sorted ascending.
+    theta_break_fracs: Vec<f64>,
+    /// Size + offset the disk from the projected bbox rather than the
+    /// panel's geometric centre.
+    fit_to_bbox: bool,
+    /// Outer radius as a fraction of the natural maximum, in `[0, 1]`.
+    outer_radius_frac: f64,
 }
+
+/// Largest inner-radius fraction [`PolarProjection::inner_radius`]
+/// accepts — the hole has to stay strictly inside the outer edge, so
+/// the bound is the largest `f64` below one.
+const MAX_INNER_RADIUS_FRAC: f64 = 1.0 - f64::EPSILON;
 
 impl PolarProjection {
     /// Full clockwise circle from 12 o'clock. Default for
@@ -270,7 +248,7 @@ impl PolarProjection {
             edge_style: PolarEdgeStyle::Geodesic,
             theta_break_fracs: Vec::new(),
             fit_to_bbox: true,
-            outer_radius_frac: None,
+            outer_radius_frac: 1.0,
         }
     }
 
@@ -287,7 +265,7 @@ impl PolarProjection {
             edge_style: PolarEdgeStyle::Geodesic,
             theta_break_fracs: Vec::new(),
             fit_to_bbox: true,
-            outer_radius_frac: None,
+            outer_radius_frac: 1.0,
         }
     }
 
@@ -299,10 +277,10 @@ impl PolarProjection {
     /// Sweep direction is **CW** (negative span) — matching
     /// [`PolarProjection::full_circle`] and the typical decoding
     /// direction a viewer reads angular position in (clockwise from
-    /// 12 o'clock, like a clock face). Override `theta_start` /
-    /// `theta_end` for a CCW radar or partial-arc radar.
+    /// 12 o'clock, like a clock face). Chain [`Self::theta_range`] for
+    /// a CCW radar or partial-arc radar.
     ///
-    /// `theta_break_fracs` is set to **band-centre** positions
+    /// The theta breaks are set to **band-centre** positions
     /// `(i + 0.5) / N` — these match what `Scale::map` returns for a
     /// discrete scale with `N` entries, so the natural pairing
     /// `scale::discrete([N category names])` + `Projection::radar(N)`
@@ -320,8 +298,145 @@ impl PolarProjection {
             edge_style: PolarEdgeStyle::Chord,
             theta_break_fracs,
             fit_to_bbox: true,
-            outer_radius_frac: None,
+            outer_radius_frac: 1.0,
         }
+    }
+
+    /// Set the channel names read as theta and radius. Both are
+    /// matched against the names a geom passes for its first and
+    /// second spatial channel, so naming radius `"x"` puts the x
+    /// channel on the radial axis.
+    pub fn channels(mut self, angle: impl Into<String>, radius: impl Into<String>) -> Self {
+        self.angle_channel = angle.into();
+        self.radius_channel = radius.into();
+        self
+    }
+
+    /// Set the angular sweep in radians, math convention (0 = 3
+    /// o'clock, π/2 = 12 o'clock). Theta frac 0 lands on `start` and
+    /// frac 1 on `end`, so `end < start` sweeps clockwise. Non-finite
+    /// endpoints leave the sweep untouched.
+    pub fn theta_range(mut self, start: f64, end: f64) -> Self {
+        if start.is_finite() && end.is_finite() {
+            self.theta_start = start;
+            self.theta_end = end;
+        }
+        self
+    }
+
+    /// Set the hole at the centre as a fraction of the outer radius.
+    /// `0.0` is a filled disk; anything larger opens a ring (donut,
+    /// gauge). Clamped into `[0, 1)` so the hole always stays inside
+    /// the outer edge; non-finite input resets to a filled disk.
+    pub fn inner_radius(mut self, frac: f64) -> Self {
+        self.inner_radius_frac = if frac.is_finite() {
+            frac.clamp(0.0, MAX_INNER_RADIUS_FRAC)
+        } else {
+            0.0
+        };
+        self
+    }
+
+    /// Set the outer radius as a fraction of the projection's natural
+    /// maximum — the inscribed-disk radius for a full circle, or the
+    /// bbox-fitted radius for a partial arc under [`Self::fit_to_bbox`].
+    /// `1.0` (the default) fills the available space. Clamped into
+    /// `[0, 1]`; non-finite input resets to `1.0`.
+    ///
+    /// Pairs with [`Self::inner_radius`] for concentric nesting: an
+    /// outer projection with `inner_radius(0.5)` and an inner one with
+    /// `outer_radius(0.5)`, both with `fit_to_bbox(false)`, draw on
+    /// disjoint annular regions of the same panel.
+    pub fn outer_radius(mut self, frac: f64) -> Self {
+        self.outer_radius_frac = if frac.is_finite() {
+            frac.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self
+    }
+
+    /// Set how edges between data points are interpreted — arcs along
+    /// the projected geodesic, or straight chords bending at each
+    /// theta break.
+    pub fn edges(mut self, style: PolarEdgeStyle) -> Self {
+        self.edge_style = style;
+        self
+    }
+
+    /// Set the theta-break positions (channel-space fractions) used as
+    /// polygon vertices under [`PolarEdgeStyle::Chord`]. Typically
+    /// band centres `(i + 0.5) / N` for N evenly-spaced categories.
+    ///
+    /// The input is **sorted ascending** and non-finite entries are
+    /// dropped: chrome polygon rings and
+    /// [`Projection::interpolate_segment`] both walk the list in
+    /// order, so an unsorted list would draw self-crossing rings.
+    pub fn theta_breaks(mut self, fracs: impl IntoIterator<Item = f64>) -> Self {
+        let mut fracs: Vec<f64> = fracs.into_iter().filter(|f| f.is_finite()).collect();
+        fracs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        self.theta_break_fracs = fracs;
+        self
+    }
+
+    /// Size and offset the inscribed disk from the projected bounding
+    /// box rather than the panel's geometric centre. On by default, so
+    /// partial-arc projections (gauges, half-disks) fill the panel with
+    /// their swept area.
+    ///
+    /// Turn it off when two or more polar projections share one panel
+    /// (concentric nesting, partial arcs at different sweep offsets) so
+    /// they agree on a common centre and maximum radius.
+    pub fn fit_to_bbox(mut self, fit: bool) -> Self {
+        self.fit_to_bbox = fit;
+        self
+    }
+
+    /// Channel name read as theta.
+    pub fn angle_channel(&self) -> &str {
+        &self.angle_channel
+    }
+
+    /// Channel name read as radius.
+    pub fn radius_channel(&self) -> &str {
+        &self.radius_channel
+    }
+
+    /// Angle at theta frac 0, in radians (math convention).
+    pub fn theta_start(&self) -> f64 {
+        self.theta_start
+    }
+
+    /// Angle at theta frac 1, in radians (math convention).
+    pub fn theta_end(&self) -> f64 {
+        self.theta_end
+    }
+
+    /// Hole at the centre as a fraction of the outer radius, in `[0, 1)`.
+    pub fn inner_radius_frac(&self) -> f64 {
+        self.inner_radius_frac
+    }
+
+    /// Outer radius as a fraction of the natural maximum, in `[0, 1]`.
+    pub fn outer_radius_frac(&self) -> f64 {
+        self.outer_radius_frac
+    }
+
+    /// How edges between data points are interpreted.
+    pub fn edge_style(&self) -> PolarEdgeStyle {
+        self.edge_style
+    }
+
+    /// Theta-break positions, sorted ascending. Empty unless breaks
+    /// were configured.
+    pub fn theta_break_fracs(&self) -> &[f64] {
+        &self.theta_break_fracs
+    }
+
+    /// True when the disk is sized and offset from the projected
+    /// bounding box rather than the panel's geometric centre.
+    pub fn is_fit_to_bbox(&self) -> bool {
+        self.fit_to_bbox
     }
 
     /// Bounding box in unit-radius math-convention coordinates — the
@@ -453,7 +568,7 @@ impl PolarProjection {
             (cx, cy, max_radius)
         };
 
-        let r_outer = max_radius * self.outer_radius_frac.unwrap_or(1.0);
+        let r_outer = max_radius * self.outer_radius_frac;
         let r_inner = r_outer * self.inner_radius_frac;
 
         PolarGeometry {
@@ -462,6 +577,23 @@ impl PolarProjection {
             r_outer,
             r_inner,
         }
+    }
+
+    /// The screen point at polar `(radius, theta)` around `centre`.
+    ///
+    /// Screen y grows downward while theta is measured
+    /// counter-clockwise, so the y term is subtracted. Chrome builds
+    /// every ring, spoke and label anchor through this, which keeps
+    /// that one sign convention in a single place.
+    pub(crate) fn polar_point(
+        centre: crate::geometry::Point,
+        radius: f64,
+        theta: f64,
+    ) -> crate::geometry::Point {
+        crate::geometry::Point::new(
+            centre.x + radius * theta.cos(),
+            centre.y - radius * theta.sin(),
+        )
     }
 
     /// Map a theta fraction to the radians angle.
@@ -867,7 +999,7 @@ impl Projection {
     ///
     /// For Polar, `angle_channel` / `radius_channel` decide which of
     /// those two feeds theta vs radius (see
-    /// [`PolarProjection::theta_r_from_xy`]), so a projection with
+    /// `theta_r_from_xy`), so a projection with
     /// `angle_channel = "y"` puts the y channel on theta. This mirrors
     /// how [`Self::consume_channels`] routes the scales for chrome, so
     /// geometry and axes agree.
@@ -1629,11 +1761,7 @@ mod tests {
         // theta_start = 0, theta_end = π/2 (first quadrant), filled
         // pie (no inner radius). Sweep includes angles in [0, π/2]
         // and the origin → x ∈ [0, 1], y ∈ [0, 1].
-        let pie = PolarProjection {
-            theta_start: 0.0,
-            theta_end: std::f64::consts::FRAC_PI_2,
-            ..PolarProjection::full_circle()
-        };
+        let pie = PolarProjection::full_circle().theta_range(0.0, std::f64::consts::FRAC_PI_2);
         let (mn_x, mn_y, mx_x, mx_y) = pie.bounding_box_units();
         approx_pt((mn_x, mn_y), (0.0, 0.0), 1e-9, "quarter-pie min");
         approx_pt((mx_x, mx_y), (1.0, 1.0), 1e-9, "quarter-pie max");
@@ -1778,11 +1906,11 @@ mod tests {
         // Breaks laid out so the seam itself carries a spoke: the
         // closing edge 0.9 → 0.1 crosses frac 0.0 ≡ 1.0 halfway.
         let panel = square_panel();
-        let proj = Projection::Polar(PolarProjection {
-            edge_style: PolarEdgeStyle::Chord,
-            theta_break_fracs: vec![0.0, 0.2, 0.4, 0.6, 0.8],
-            ..PolarProjection::full_circle()
-        });
+        let proj = Projection::Polar(
+            PolarProjection::full_circle()
+                .edges(PolarEdgeStyle::Chord)
+                .theta_breaks([0.0, 0.2, 0.4, 0.6, 0.8]),
+        );
         let mut out = Vec::new();
         proj.interpolate_closing_segment_with_t(panel, &[0.9, 1.0], &[0.1, 1.0], &mut out);
         assert_eq!(out.len(), 1, "expected the seam spoke only: {out:?}");
@@ -1989,15 +2117,12 @@ mod tests {
 
     #[test]
     fn radar_segment_with_no_configured_breaks_emits_nothing() {
-        // Degenerate radar (no theta_break_fracs) → naïve chord,
-        // no break-awareness — even though the projection is still
+        // Degenerate radar (no theta breaks) → naïve chord, no
+        // break-awareness — even though the projection is still
         // chord-style.
         let panel = square_panel();
-        let radar_no_breaks = Projection::Polar(PolarProjection {
-            edge_style: PolarEdgeStyle::Chord,
-            theta_break_fracs: Vec::new(),
-            ..PolarProjection::full_circle()
-        });
+        let radar_no_breaks =
+            Projection::Polar(PolarProjection::full_circle().edges(PolarEdgeStyle::Chord));
         let mut out = Vec::new();
         radar_no_breaks.interpolate_segment(panel, &[0.0, 1.0], &[0.5, 1.0], &mut out);
         assert!(out.is_empty());
@@ -2008,11 +2133,8 @@ mod tests {
         // The point-to-pixel math is identical between Geodesic and
         // Chord — only the edge interpretation differs.
         let panel = square_panel();
-        let radar_cw = Projection::Polar(PolarProjection {
-            edge_style: PolarEdgeStyle::Chord,
-            theta_break_fracs: Vec::new(),
-            ..PolarProjection::full_circle()
-        });
+        let radar_cw =
+            Projection::Polar(PolarProjection::full_circle().edges(PolarEdgeStyle::Chord));
         let polar = Projection::polar();
         for (theta_frac, r_frac) in [(0.0, 1.0), (0.25, 1.0), (0.5, 0.5), (0.75, 0.0)] {
             let a = polar.project_to_panel_px(panel, &[theta_frac, r_frac]);
@@ -2032,14 +2154,88 @@ mod tests {
     #[test]
     fn radar_default_has_n_band_centre_break_fracs() {
         if let Projection::Polar(p) = Projection::radar(6) {
-            assert_eq!(p.theta_break_fracs.len(), 6);
+            assert_eq!(p.theta_break_fracs().len(), 6);
             // Band centres: (i + 0.5) / N for i in 0..N — matches
             // `scale::discrete(N entries).map(entry_i)`.
-            for (i, frac) in p.theta_break_fracs.iter().enumerate() {
+            for (i, frac) in p.theta_break_fracs().iter().enumerate() {
                 assert!((frac - (i as f64 + 0.5) / 6.0).abs() < 1e-9);
             }
         } else {
             panic!("expected Polar");
+        }
+    }
+
+    // ── Builder normalisation ──
+
+    #[test]
+    fn theta_breaks_builder_sorts_and_drops_non_finite() {
+        let p = PolarProjection::full_circle().theta_breaks([0.8, f64::NAN, 0.2, 0.5, 0.1]);
+        assert_eq!(p.theta_break_fracs(), &[0.1, 0.2, 0.5, 0.8]);
+    }
+
+    #[test]
+    fn inner_radius_builder_clamps_below_one() {
+        assert_eq!(
+            PolarProjection::full_circle()
+                .inner_radius(-2.0)
+                .inner_radius_frac(),
+            0.0
+        );
+        assert_eq!(
+            PolarProjection::full_circle()
+                .inner_radius(f64::NAN)
+                .inner_radius_frac(),
+            0.0
+        );
+        let hot = PolarProjection::full_circle().inner_radius(7.0);
+        assert!(hot.inner_radius_frac() < 1.0);
+        assert!(hot.inner_radius_frac() > 0.999);
+    }
+
+    #[test]
+    fn outer_radius_builder_clamps_to_the_unit_interval() {
+        assert_eq!(
+            PolarProjection::full_circle()
+                .outer_radius(3.0)
+                .outer_radius_frac(),
+            1.0
+        );
+        assert_eq!(
+            PolarProjection::full_circle()
+                .outer_radius(-1.0)
+                .outer_radius_frac(),
+            0.0
+        );
+        assert_eq!(
+            PolarProjection::full_circle()
+                .outer_radius(0.45)
+                .outer_radius_frac(),
+            0.45
+        );
+    }
+
+    #[test]
+    fn theta_range_builder_ignores_non_finite_endpoints() {
+        let base = PolarProjection::full_circle();
+        let p = base.clone().theta_range(f64::INFINITY, 0.0);
+        assert_eq!(p.theta_start(), base.theta_start());
+        assert_eq!(p.theta_end(), base.theta_end());
+    }
+
+    #[test]
+    fn unsorted_breaks_still_draw_a_convex_polygon() {
+        // The sort in `theta_breaks` is what stops a shuffled input
+        // from producing a self-crossing ring: every unit position
+        // stays on the polygon inscribed in the unit circle.
+        let shuffled = PolarProjection::full_circle()
+            .edges(PolarEdgeStyle::Chord)
+            .theta_breaks([0.75, 0.0, 0.5, 0.25]);
+        for i in 0..40 {
+            let frac = i as f64 / 40.0;
+            let (ux, uy) = shuffled.unit_position(frac);
+            let r = (ux * ux + uy * uy).sqrt();
+            assert!(r <= 1.0 + 1e-9, "frac {frac} landed off the polygon");
+            assert!(r > 0.5, "frac {frac} collapsed toward the centre (r={r})");
         }
     }
 

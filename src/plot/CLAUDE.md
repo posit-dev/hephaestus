@@ -60,6 +60,20 @@ Chrome belongs to whichever thing owns the space it sits in: a patch's title goe
 - **Two things a composition can't have.** `LegendSide::InPanel` panics: an in-panel legend anchors to a panel rect, and the composition's panel cell is filled by its facets. And `TitleLocation::Inside` is ignored for composition axis titles for the same reason — they always take the outer slot.
 - **Chrome `Cell`s set on the composition before construction are dropped**, exactly as pre-attached patch chrome is. A raw `Cell` reserves space but carries nothing the orchestrator could draw, so keeping it would produce reserved-but-blank bands. `examples/nesting_faceted_title.rs` shows the low-level path, where the caller solves and draws the cells themselves.
 
+## Error policy
+
+Construction that can only fail through a mistake in the calling code panics, and every one of those carries a `# Panics` section. Where the input plausibly comes from configuration or data rather than a literal, there's a `try_` twin that returns instead:
+
+| panicking | fallible | fails when |
+|---|---|---|
+| `Plot::new` | `Plot::try_new` | no patch with that id |
+| `Plot::add_axis` | `Plot::try_add_axis` | placement doesn't match the projection |
+| `PlotComposition::add_legend` | `PlotComposition::try_add_legend` | `LegendSide::InPanel` on a composition |
+| `Scale::domain_continuous` | `Scale::try_domain_continuous` | endpoint has no numeric projection |
+| `Composition::solve` | `Composition::try_solve` | any `CompositionError` |
+
+`PlotError` is the shared error type for the plot layer. Geom `build_from` validation stays panic-only: a wrong column variant or a channel name the geom doesn't declare is a programming error the runtime geom should never have to handle.
+
 ## Conventions
 
 - **Channel resolution flows through name binding.** A geom doesn't store its scales directly — it declares channel names and asks `GeomContext` (which carries a `ScaleResolver`) to resolve each name to a `Scale` at draw time. In production the resolver is the orchestrator's binding map + registry; in tests it's a hand-built `DirectScaleResolver`.

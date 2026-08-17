@@ -190,3 +190,248 @@ pub(crate) fn emit_decoration_rect<S: SceneBuilder + ?Sized>(
     let path = crate::primitives::rect(rect);
     scene.fill(FillRule::NonZero, transform, brush, None, &path, pick_id);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::text::FontFeatureSetting;
+    use parley::{FontWidth, PositionedLayoutItem};
+
+    const TEXT: &str = "Ag";
+
+    /// Shape `TEXT` through nothing but [`push_style_defaults`], so every
+    /// property observed on the layout came from `style`.
+    fn layout_for(style: &TextStyle, dpi: f64) -> parley::Layout<()> {
+        let fcx_mutex = super::super::font_context();
+        let mut fcx = fcx_mutex.lock().expect("font context poisoned");
+        let mut lcx: parley::LayoutContext<()> = parley::LayoutContext::new();
+        let mut builder = lcx.ranged_builder(&mut fcx, TEXT, 1.0, true);
+        push_style_defaults(&mut builder, style, dpi);
+        let mut layout: parley::Layout<()> = builder.build(TEXT);
+        layout.break_all_lines(None);
+        layout
+    }
+
+    fn first_run(layout: &parley::Layout<()>) -> parley::layout::Run<'_, ()> {
+        layout
+            .lines()
+            .flat_map(|line| line.runs())
+            .next()
+            .expect("shaped at least one run")
+    }
+
+    fn first_glyph_run_style(layout: &parley::Layout<()>) -> parley::layout::Style<()> {
+        layout
+            .lines()
+            .flat_map(|line| line.items())
+            .find_map(|item| match item {
+                PositionedLayoutItem::GlyphRun(gr) => Some(gr.style().clone()),
+                _ => None,
+            })
+            .expect("shaped at least one glyph run")
+    }
+
+    #[test]
+    fn point_size_converts_to_pixels_at_the_shaping_dpi() {
+        let style = TextStyle::new(12.0);
+        assert_eq!(first_run(&layout_for(&style, 72.0)).font_size(), 12.0);
+        assert_eq!(first_run(&layout_for(&style, 96.0)).font_size(), 16.0);
+        assert_eq!(first_run(&layout_for(&style, 144.0)).font_size(), 24.0);
+    }
+
+    #[test]
+    fn weight_width_and_slant_reach_the_shaper() {
+        let style = TextStyle::new(12.0)
+            .weight(700)
+            .width(0.75)
+            .style(FontStyleKind::Italic);
+        let layout = layout_for(&style, 96.0);
+        let attrs = *first_run(&layout).font_attrs();
+        assert_eq!(attrs.weight, parley::FontWeight::new(700.0));
+        assert_eq!(attrs.width, FontWidth::from_ratio(0.75));
+        assert_eq!(attrs.style, FontStyle::Italic);
+    }
+
+    #[test]
+    fn oblique_carries_its_slant_angle() {
+        let style = TextStyle::new(12.0).style(FontStyleKind::Oblique(14.0));
+        let layout = layout_for(&style, 96.0);
+        assert_eq!(
+            first_run(&layout).font_attrs().style,
+            FontStyle::Oblique(Some(14.0))
+        );
+    }
+
+    #[test]
+    fn a_default_style_shapes_upright_at_regular_weight() {
+        let layout = layout_for(&TextStyle::new(12.0), 96.0);
+        let attrs = *first_run(&layout).font_attrs();
+        assert_eq!(attrs.weight, parley::FontWeight::new(400.0));
+        assert_eq!(attrs.width, FontWidth::from_ratio(1.0));
+        assert_eq!(attrs.style, FontStyle::Normal);
+    }
+
+    #[test]
+    fn absolute_line_height_is_the_pixel_height_of_a_single_line() {
+        let style = TextStyle::new(12.0).line_height(LineHeight::Absolute(30.0));
+        let layout = layout_for(&style, 96.0);
+        // 30pt at 96dpi = 40px.
+        assert!((layout.height() - 40.0).abs() < 1e-3, "{}", layout.height());
+    }
+
+    #[test]
+    fn relative_line_height_scales_with_the_multiplier() {
+        let single = layout_for(
+            &TextStyle::new(12.0).line_height(LineHeight::Relative(1.0)),
+            96.0,
+        )
+        .height();
+        let doubled = layout_for(
+            &TextStyle::new(12.0).line_height(LineHeight::Relative(2.0)),
+            96.0,
+        )
+        .height();
+        assert!(
+            (doubled - 2.0 * single).abs() < 1e-3,
+            "{single} → {doubled}"
+        );
+    }
+
+    #[test]
+    fn letter_spacing_widens_the_run_by_its_pixel_equivalent() {
+        let plain = layout_for(&TextStyle::new(12.0), 96.0).width();
+        let tracked = layout_for(&TextStyle::new(12.0).letter_spacing_pt(9.0), 96.0).width();
+        // 9pt at 96dpi = 12px of extra advance per inter-glyph gap.
+        assert!(
+            tracked >= plain + 12.0,
+            "expected at least one 12px gap: {plain} → {tracked}"
+        );
+    }
+
+    #[test]
+    fn decorations_are_pushed_only_when_the_style_asks_for_them() {
+        let plain = first_glyph_run_style(&layout_for(&TextStyle::new(12.0), 96.0));
+        assert!(plain.underline.is_none());
+        assert!(plain.strikethrough.is_none());
+
+        let underlined =
+            first_glyph_run_style(&layout_for(&TextStyle::new(12.0).underline(true), 96.0));
+        assert!(underlined.underline.is_some());
+        assert!(underlined.strikethrough.is_none());
+
+        let struck =
+            first_glyph_run_style(&layout_for(&TextStyle::new(12.0).strikethrough(true), 96.0));
+        assert!(struck.strikethrough.is_some());
+        assert!(struck.underline.is_none());
+    }
+
+    #[test]
+    fn an_empty_family_chain_shapes_as_the_generic_sans_serif() {
+        let implicit = layout_for(&TextStyle::new(12.0), 96.0);
+        let explicit = layout_for(
+            &TextStyle::new(12.0).generic_family(GenericFamilyKind::SansSerif),
+            96.0,
+        );
+        assert_eq!(
+            first_run(&implicit).font().data.id(),
+            first_run(&explicit).font().data.id()
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_named_family_falls_through_to_the_next_chain_entry() {
+        // A multi-entry chain is pushed as a list, so a missing face
+        // hands the run to the next candidate rather than stranding it.
+        let chained = layout_for(
+            &TextStyle::new(12.0)
+                .families([FontFamilyEntry::Named("NoSuchFaceAnywhere".into())])
+                .generic_family(GenericFamilyKind::Mono),
+            96.0,
+        );
+        let mono = layout_for(
+            &TextStyle::new(12.0).generic_family(GenericFamilyKind::Mono),
+            96.0,
+        );
+        assert_eq!(
+            first_run(&chained).font().data.id(),
+            first_run(&mono).font().data.id()
+        );
+    }
+
+    // ── Translation helpers ────────────────────────────────────────
+
+    #[test]
+    fn generic_families_translate_to_their_parley_counterparts() {
+        assert_eq!(
+            generic_family_to_parley(GenericFamilyKind::Serif),
+            GenericFamily::Serif
+        );
+        assert_eq!(
+            generic_family_to_parley(GenericFamilyKind::SansSerif),
+            GenericFamily::SansSerif
+        );
+        assert_eq!(
+            generic_family_to_parley(GenericFamilyKind::Mono),
+            GenericFamily::Monospace
+        );
+        assert_eq!(
+            generic_family_to_parley(GenericFamilyKind::Cursive),
+            GenericFamily::Cursive
+        );
+        assert_eq!(
+            generic_family_to_parley(GenericFamilyKind::Fantasy),
+            GenericFamily::Fantasy
+        );
+        assert_eq!(
+            generic_family_to_parley(GenericFamilyKind::SystemUi),
+            GenericFamily::SystemUi
+        );
+    }
+
+    #[test]
+    fn generic_family_names_parse_with_their_aliases() {
+        assert_eq!(generic_family_from_str("serif"), Some(GenericFamily::Serif));
+        assert_eq!(
+            generic_family_from_str("SANS-SERIF"),
+            Some(GenericFamily::SansSerif)
+        );
+        assert_eq!(
+            generic_family_from_str("sans"),
+            Some(GenericFamily::SansSerif)
+        );
+        assert_eq!(
+            generic_family_from_str("mono"),
+            Some(GenericFamily::Monospace)
+        );
+        assert_eq!(
+            generic_family_from_str("Monospace"),
+            Some(GenericFamily::Monospace)
+        );
+        assert_eq!(generic_family_from_str("ui"), Some(GenericFamily::SystemUi));
+        assert_eq!(
+            generic_family_from_str("system-ui"),
+            Some(GenericFamily::SystemUi)
+        );
+        // A concrete family is not a generic one.
+        assert_eq!(generic_family_from_str("Helvetica"), None);
+    }
+
+    #[test]
+    fn feature_settings_keep_their_tag_and_value() {
+        let out = parley_features(&[
+            FontFeatureSetting {
+                tag: *b"liga",
+                value: 0,
+            },
+            FontFeatureSetting {
+                tag: *b"ss01",
+                value: 1,
+            },
+        ]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].tag, parley::setting::Tag::from_bytes(*b"liga"));
+        assert_eq!(out[0].value, 0);
+        assert_eq!(out[1].tag, parley::setting::Tag::from_bytes(*b"ss01"));
+        assert_eq!(out[1].value, 1);
+    }
+}

@@ -15,8 +15,8 @@ use super::{Scale, ScaleTypeKind, TemporalUnit};
 
 /// Continuous scale over a closed domain. `T` is anything that converts
 /// into a [`Value`] whose `as_number()` projection yields a finite f64 —
-/// `f64`, `f32`, `i32`, `i64`, and the temporal newtypes ([`Date`],
-/// [`DateTime`], [`Time`], [`Duration`]).
+/// `f64`, `f32`, `i32`, `i64`, and the temporal newtypes (`Date`,
+/// `DateTime`, `Time`, `Duration`).
 ///
 /// ```ignore
 /// scale::continuous(0.0 ..= 100.0)

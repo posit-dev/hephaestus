@@ -1,4 +1,4 @@
-//! Anchor points for positioning a [`RichTextRun`] within a target
+//! Anchor points for positioning a `RichTextRun` within a target
 //! region. Mirrors marquee's `hjust` / `vjust` vocabulary 1:1 — every
 //! anchor there has a direct equivalent here.
 //!

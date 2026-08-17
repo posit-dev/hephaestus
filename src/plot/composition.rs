@@ -70,7 +70,7 @@ struct CompositionTemplate {
     cols: usize,
     widths: Vec<Track>,
     heights: Vec<Track>,
-    aspect: Option<(f32, f32)>,
+    aspect: Option<(f64, f64)>,
     margin: Inset,
     padding: Inset,
     placements: Vec<PlacementTemplate>,
@@ -331,7 +331,7 @@ fn wire_merged_patch(
     // disagrees, skip the lock — the user is in an advanced
     // multi-projection layout and the orchestrator can't pick a
     // winner.
-    let aspects: Vec<(f32, f32)> = plots
+    let aspects: Vec<(f64, f64)> = plots
         .iter()
         .filter_map(|p| p.desired_panel_aspect(registry))
         .collect();
@@ -360,12 +360,12 @@ fn wire_merged_patch(
 /// every demand has the same `w/h` ratio (within a small epsilon).
 /// Returns the first demand if they all agree, `None` if any
 /// disagrees or the list is empty.
-fn unify_aspect(aspects: &[(f32, f32)]) -> Option<(f32, f32)> {
+fn unify_aspect(aspects: &[(f64, f64)]) -> Option<(f64, f64)> {
     let first = *aspects.first()?;
-    let ratio0 = (first.0 as f64) / (first.1 as f64);
+    let ratio0 = first.0 / first.1;
     const EPS: f64 = 1e-3;
     for &(w, h) in &aspects[1..] {
-        let r = (w as f64) / (h as f64);
+        let r = w / h;
         if (r - ratio0).abs() > EPS {
             return None;
         }
@@ -393,12 +393,16 @@ const AXIS_TITLE_SIDES: [AxisSide; 4] = [
 
 /// Composition legends sit in the composition's anatomical legend ring;
 /// there is no composition-owned panel rect to anchor against.
-fn reject_in_panel_legend(legend: &crate::plot::chrome::legend::Legend) {
+/// A composition's panel cell is filled by its facets, so there is no
+/// panel rect for an in-panel legend to anchor to.
+fn reject_in_panel_legend(
+    legend: &crate::plot::chrome::legend::Legend,
+) -> Result<(), crate::plot::plot::PlotError> {
     use crate::scales::chrome::LegendSide;
-    assert!(
-        !matches!(legend.side, LegendSide::InPanel { .. }),
-        "PlotComposition legends cannot use LegendSide::InPanel; the composition's panel cell is filled by its facets"
-    );
+    if matches!(legend.side, LegendSide::InPanel { .. }) {
+        return Err(crate::plot::plot::PlotError::InPanelLegendUnsupported);
+    }
+    Ok(())
 }
 
 /// Chrome owned by a composition rather than by one of its patches: a
@@ -429,11 +433,11 @@ impl CompositionChrome {
     /// so the chrome spans the whole facet grid.
     fn wire(&self, mut c: Composition, ctx: &RebuildCtx<'_>) -> Composition {
         use super::plot::{
-            axis_title_cell, cartesian_axis_title_slot, effective_text, legends_grouped_by_side,
-            text_cell_for_element, title_band_placement,
+            cartesian_axis_title_slot, legends_grouped_by_side, title_band_placement,
         };
         use crate::composition::Slot;
         use crate::layout::Cell;
+        use crate::plot::chrome::text::{axis_title_cell, effective_text, text_cell_for_element};
 
         let theme = ctx.theme;
         let root_pt = crate::plot::chrome::root_text_pt(theme);
@@ -513,12 +517,12 @@ impl CompositionChrome {
         dpi: f64,
         theme: &Theme,
     ) {
-        use super::plot::{
-            cartesian_axis_title_slot, draw_axis_title, draw_text_element_in_rect, effective_text,
-            legends_grouped_by_side,
-        };
+        use super::plot::{cartesian_axis_title_slot, legends_grouped_by_side};
         use crate::brush::Brush;
         use crate::composition::Slot;
+        use crate::plot::chrome::text::{
+            draw_axis_title, draw_text_element_in_rect, effective_text,
+        };
         use crate::plot::theme::text_concrete_defaults;
         use crate::text::TextRun;
 
@@ -570,9 +574,9 @@ impl CompositionChrome {
                 .angle
                 .or(text_defaults.angle)
                 .expect("text_concrete_defaults sets angle");
-            let style = super::plot::text_style_from(&el, root_pt);
+            let style = crate::plot::chrome::text::text_style_from(&el, root_pt);
             if matches!(el.markdown, Some(true)) {
-                super::plot::draw_axis_title_markdown(
+                crate::plot::chrome::text::draw_axis_title_markdown(
                     scene,
                     title,
                     &style,
@@ -587,7 +591,7 @@ impl CompositionChrome {
                 continue;
             }
             let run = TextRun::new(title, &style, dpi);
-            let outline = super::plot::text_outline_from(&el, &theme.palette, dpi);
+            let outline = crate::plot::chrome::text::text_outline_from(&el, &theme.palette, dpi);
             draw_axis_title(
                 scene,
                 &run,
@@ -889,12 +893,34 @@ impl PlotComposition {
         &mut self,
         legend: crate::plot::chrome::legend::Legend,
     ) -> crate::plot::chrome::legend::LegendId {
-        reject_in_panel_legend(&legend);
+        match self.try_push_legend(legend) {
+            Ok(id) => id,
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    /// [`Self::add_legend`] / [`Self::add_legend_separate`] without the
+    /// panic: reports [`PlotError::InPanelLegendUnsupported`] rather
+    /// than aborting when a legend asks for an in-panel anchor.
+    ///
+    /// [`PlotError::InPanelLegendUnsupported`]: crate::plot::plot::PlotError::InPanelLegendUnsupported
+    pub fn try_add_legend(
+        &mut self,
+        legend: crate::plot::chrome::legend::Legend,
+    ) -> Result<crate::plot::chrome::legend::LegendId, crate::plot::plot::PlotError> {
+        self.try_push_legend(legend)
+    }
+
+    fn try_push_legend(
+        &mut self,
+        legend: crate::plot::chrome::legend::Legend,
+    ) -> Result<crate::plot::chrome::legend::LegendId, crate::plot::plot::PlotError> {
+        reject_in_panel_legend(&legend)?;
         let chrome = self.root_chrome_mut();
         let id = crate::plot::chrome::legend::LegendId::new(chrome.next_legend_id);
         chrome.next_legend_id += 1;
         chrome.legends.push(legend);
-        id
+        Ok(id)
     }
 
     /// Borrow the composition's legends in insertion order.
@@ -1671,15 +1697,30 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "LegendSide::InPanel")]
     fn composition_rejects_in_panel_legends() {
         use crate::plot::chrome::legend::Legend;
+        use crate::plot::plot::PlotError;
         use crate::scales::chrome::{Anchor, LegendSide};
+        let in_panel = || {
+            Legend::new("cat").side(LegendSide::InPanel {
+                anchor: Anchor::TopRight,
+                inset_pt: 6.0,
+            })
+        };
         let mut view = view_two_plots();
-        view.add_legend(Legend::new("cat").side(LegendSide::InPanel {
-            anchor: Anchor::TopRight,
-            inset_pt: 6.0,
-        }));
+        assert_eq!(
+            view.try_add_legend(in_panel()),
+            Err(PlotError::InPanelLegendUnsupported)
+        );
+        assert!(
+            view.legends().is_empty(),
+            "a rejected legend must not be stored"
+        );
+
+        let mut view = view_two_plots();
+        let panicked =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| view.add_legend(in_panel())));
+        assert!(panicked.is_err(), "the convenience form still panics");
     }
 
     #[test]

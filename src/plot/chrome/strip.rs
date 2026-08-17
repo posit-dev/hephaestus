@@ -24,7 +24,7 @@ use crate::path::{FillRule, Path};
 use crate::pick::PickId;
 use crate::plot::chrome::axis::axis_side_to_channel_side;
 use crate::plot::chrome::linear_axis::{pt_to_px, stroke_from_rect_border};
-use crate::plot::plot::{draw_text_element_in_rect, text_style_from};
+use crate::plot::chrome::text::{draw_text_element_in_rect, rotated_bbox, text_style_from};
 use crate::plot::theme::{
     rect_concrete_defaults, text_concrete_defaults, RectElement, Rotation, TextElement, Theme,
 };
@@ -91,17 +91,6 @@ fn text_margin_px(el: &TextElement, root_pt: f64, dpi: f64) -> (f64, f64, f64, f
         pt_to_px(mb, dpi),
         pt_to_px(ml, dpi),
     )
-}
-
-/// Axis-aligned bbox dimensions of a single-line run rotated by
-/// `angle_deg`. `text_w` / `text_h` are the run's natural (unrotated)
-/// width / height in pixels.
-fn rotated_bbox(text_w: f64, text_h: f64, angle_deg: f32) -> (f64, f64) {
-    let theta = (angle_deg as f64).to_radians();
-    let (cos_t, sin_t) = (theta.cos().abs(), theta.sin().abs());
-    let rotated_w = text_w * cos_t + text_h * sin_t;
-    let rotated_h = text_w * sin_t + text_h * cos_t;
-    (rotated_w, rotated_h)
 }
 
 /// Layout measurement for a facet strip. Reports the strip's

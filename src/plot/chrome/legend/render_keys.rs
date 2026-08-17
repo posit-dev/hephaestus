@@ -7,6 +7,11 @@
 //! emitter. [`swatch_dim_for`] reports the minimum cell size each
 //! shape needs so the legend can size its cell to fit the worst
 //! contributor.
+//!
+//! The Point key marker mirrors the geom: same intrinsic shape-space
+//! radius as the builtin `circle`, same glyph bbox normalisation as
+//! `geom::point`. Both are sourced from the canonical definitions so
+//! legend and panel markers can't drift.
 
 use crate::brush::Brush;
 use crate::color::Color;

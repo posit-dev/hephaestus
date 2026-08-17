@@ -14,6 +14,7 @@ Geometry transforms (`round_corners`, `clip_polyline`, `offset_polygon`, `round_
 - **`polygon`** — closed polygon from one outer ring plus zero or more holes, with optional signed offset.
 - **`rect`**, **`rounded_rect`**, **`circle`**, **`ellipse`** — thin wrappers over the equivalent `kurbo` shapes that hide the path-approximation tolerance and the `kurbo::Shape` import.
 - **`segment`** — 2-point line shorthand.
+- **`polyline_path`**, **`polygon_path`**, **`append_polyline_to`** — the plain vertex-run constructors (no clipping, no offset). `append_polyline_to` writes a subpath into an existing `Path`, which is how multi-ring output is assembled. `shape.rs`'s builtin markers go through the same helpers.
 - **`regular_polygon`** — n-sided regular polygon. Use **`regular_polygon_vertices`** for the raw vertices when you want to feed them into another transform.
 - **`arc`** — open circular arc.
 - **`wedge`**, **`annular_wedge`** — closed pie / donut slices.
@@ -43,6 +44,14 @@ Geometry transforms (`round_corners`, `clip_polyline`, `offset_polygon`, `round_
 - **`RibbonOptions`** — configuration. Reuses [`crate::stroke::Cap`] / [`crate::stroke::Join`] (same three variants each — no need for ribbon-specific enums).
 
 If every vertex would share the same colour, a plain `stroke` / `fill` with a solid brush is cheaper than a ribbon mesh — the per-vertex colour is the whole point.
+
+## Shared internals
+
+Three private modules exist so the public constructors and transforms can't drift apart on shared decisions:
+
+- **`tolerance.rs`** — every numeric tolerance in the module family (curve-approximation, sampler flattening, arc-length accuracy, arc-fan chord error and step bounds, collinearity, degenerate length). Add new tolerances here rather than as a file-local `const`.
+- **`clipper.rs`** — point ⇄ `clipper2-rust` conversion plus the single precision constant both `offset.rs` and `clip.rs` pass to Clipper2.
+- **`corner_class.rs`** — the `Class` vocabulary (`Corner` / `Collinear` / `NonCorner` / `Endpoint`) and the angle predicate shared by `corner.rs` and `path_corner.rs`. The two rounding *algorithms* stay separate — only the classification is shared.
 
 ## Conventions
 

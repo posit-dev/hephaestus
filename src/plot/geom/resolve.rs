@@ -36,7 +36,7 @@ pub(crate) const MAX_PICK_ID: u32 = 0xFF_FFFF;
 /// channel bundles. Bundling halves the field count of per-geom
 /// `*DrawCtx` structs and gives the resolver helpers a natural pair to
 /// receive.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct ChannelBind<'a> {
     pub ch: Option<&'a Channel>,
     pub scale: Option<&'a Scale>,
@@ -65,6 +65,14 @@ impl<'a> ChannelBind<'a> {
 #[inline]
 pub(crate) fn pt_to_px(pt: f64, dpi: f64) -> f64 {
     pt * dpi / 72.0
+}
+
+/// A row's absolute pt offset converted to px, or zero when the channel
+/// is unbound.
+pub(crate) fn offset_px(ch: Option<&Channel>, scale: Option<&Scale>, row: usize, dpi: f64) -> f64 {
+    resolve_number_channel(ch, scale, row)
+        .map(|pt| pt_to_px(pt, dpi))
+        .unwrap_or(0.0)
 }
 
 /// Project a row's raw `Value` through an optional position scale to a
@@ -679,5 +687,206 @@ pub(crate) fn smallest_nonzero(a: f64, b: f64) -> f64 {
         (true, false) => a,
         (false, true) => b,
         (false, false) => 0.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plot::scale::{self, Direction};
+    use crate::plot::value::DataColumn;
+
+    fn cat(s: &str) -> Value {
+        Value::String(Arc::from(s))
+    }
+
+    // ── resolve_position ───────────────────────────────────────────
+
+    #[test]
+    fn resolve_position_without_a_scale_passes_the_raw_number_through() {
+        assert_eq!(resolve_position(Value::Number(0.25), None, 0.0), 0.25);
+        // Temporal variants project to their canonical f64.
+        assert_eq!(resolve_position(Value::Date(7), None, 0.0), 7.0);
+    }
+
+    #[test]
+    fn resolve_position_without_a_scale_ignores_the_band_offset() {
+        // "Band" is defined by a scale; with none bound there is nothing
+        // for the offset to be a fraction of.
+        assert_eq!(resolve_position(Value::Number(0.25), None, 0.5), 0.25);
+    }
+
+    #[test]
+    fn resolve_position_maps_through_a_bound_scale() {
+        let s = scale::continuous(0.0..=10.0);
+        assert_eq!(resolve_position(Value::Number(5.0), Some(&s), 0.0), 0.5);
+        assert_eq!(resolve_position(Value::Number(0.0), Some(&s), 0.0), 0.0);
+    }
+
+    #[test]
+    fn resolve_position_folds_a_band_offset_into_the_scaled_fraction() {
+        let s = scale::discrete([cat("a"), cat("b")]);
+        // Band centre of "a" is 0.25 over two bands; a +0.5 band offset
+        // walks half a band width (0.5) further along.
+        assert_eq!(resolve_position(cat("a"), Some(&s), 0.0), 0.25);
+        assert_eq!(resolve_position(cat("a"), Some(&s), 0.5), 0.5);
+    }
+
+    #[test]
+    fn resolve_position_is_nan_for_unmappable_input() {
+        // No scale, non-numeric value.
+        assert!(resolve_position(cat("nope"), None, 0.0).is_nan());
+        // Scale bound, but the value is outside the domain the scale can
+        // map (a category absent from a discrete domain maps to Null).
+        let s = scale::discrete([cat("a")]);
+        assert!(resolve_position(cat("zzz"), Some(&s), 0.0).is_nan());
+        // Scale bound, value has no numeric projection.
+        let c = scale::continuous(0.0..=1.0);
+        assert!(resolve_position(cat("a"), Some(&c), 0.0).is_nan());
+    }
+
+    // ── resolve_color_channel ──────────────────────────────────────
+
+    #[test]
+    fn resolve_color_channel_reads_constants_and_columns() {
+        let red = crate::color::rgb(1.0, 0.0, 0.0);
+        let blue = crate::color::rgb(0.0, 0.0, 1.0);
+        let konst = Channel::Constant(Value::Color(red));
+        assert_eq!(resolve_color_channel(Some(&konst), None, 3), Some(red));
+        let col = Channel::Data(DataColumn::Color(vec![red, blue]));
+        assert_eq!(resolve_color_channel(Some(&col), None, 1), Some(blue));
+    }
+
+    #[test]
+    fn resolve_color_channel_maps_categories_through_a_palette_scale() {
+        let red = crate::color::rgb(1.0, 0.0, 0.0);
+        let blue = crate::color::rgb(0.0, 0.0, 1.0);
+        let s = scale::discrete([cat("a"), cat("b")]).range_colors([red, blue]);
+        let col = Channel::Data(DataColumn::String(vec![Arc::from("b"), Arc::from("a")]));
+        assert_eq!(resolve_color_channel(Some(&col), Some(&s), 0), Some(blue));
+        assert_eq!(resolve_color_channel(Some(&col), Some(&s), 1), Some(red));
+    }
+
+    #[test]
+    fn resolve_color_channel_is_none_when_unset_or_not_a_color() {
+        assert_eq!(resolve_color_channel(None, None, 0), None);
+        let numeric = Channel::Constant(Value::Number(1.0));
+        assert_eq!(resolve_color_channel(Some(&numeric), None, 0), None);
+    }
+
+    // ── resolve_number_channel_or ──────────────────────────────────
+
+    #[test]
+    fn resolve_number_channel_or_falls_back_when_unset_or_non_numeric() {
+        assert_eq!(resolve_number_channel_or(None, None, 0, 4.5), 4.5);
+        let text = Channel::Constant(cat("big"));
+        assert_eq!(resolve_number_channel_or(Some(&text), None, 0, 4.5), 4.5);
+        let ok = Channel::Data(DataColumn::F64(vec![1.0, 2.0]));
+        assert_eq!(resolve_number_channel_or(Some(&ok), None, 1, 4.5), 2.0);
+    }
+
+    #[test]
+    fn resolve_number_channel_or_takes_the_scaled_output_not_the_raw_value() {
+        // A categorical column driving a size channel through an ordinal
+        // scale: the default must not win over the mapped value.
+        let s = scale::ordinal([cat("small"), cat("large")]).range_numbers([2.0, 20.0]);
+        let col = Channel::Data(DataColumn::String(vec![Arc::from("large")]));
+        assert_eq!(
+            resolve_number_channel_or(Some(&col), Some(&s), 0, 4.5),
+            20.0
+        );
+    }
+
+    // ── channel_varies_across ──────────────────────────────────────
+
+    #[test]
+    fn channel_varies_across_is_false_for_unset_and_constant_channels() {
+        assert!(!channel_varies_across(None, None, &[0, 1, 2]));
+        let konst = Channel::Constant(Value::Number(1.0));
+        assert!(!channel_varies_across(Some(&konst), None, &[0, 1, 2]));
+    }
+
+    #[test]
+    fn channel_varies_across_detects_differing_rows() {
+        let col = Channel::Data(DataColumn::F64(vec![1.0, 1.0, 2.0]));
+        assert!(channel_varies_across(Some(&col), None, &[0, 1, 2]));
+        // Only the rows asked about count.
+        assert!(!channel_varies_across(Some(&col), None, &[0, 1]));
+        assert!(!channel_varies_across(Some(&col), None, &[2]));
+        assert!(!channel_varies_across(Some(&col), None, &[]));
+    }
+
+    #[test]
+    fn channel_varies_across_is_false_when_the_scale_flattens_the_rows() {
+        // Distinct inputs collapsing onto one output is not variation —
+        // the ribbon-mode upgrade must stay off.
+        let flat = scale::continuous(0.0..=10.0).range_numbers([7.0]);
+        let col = Channel::Data(DataColumn::F64(vec![1.0, 5.0, 9.0]));
+        assert!(channel_varies_across(Some(&col), None, &[0, 1, 2]));
+        assert!(!channel_varies_across(Some(&col), Some(&flat), &[0, 1, 2]));
+    }
+
+    #[test]
+    fn channel_varies_across_compares_variants_not_numeric_projections() {
+        // `Date(1)` and `Number(1.0)` both project to 1.0 but are
+        // distinct keys, matching the diff machinery's equality.
+        let dates = Channel::Data(DataColumn::Date(vec![1, 1]));
+        assert!(!channel_varies_across(Some(&dates), None, &[0, 1]));
+        let mixed = Channel::Data(DataColumn::F64(vec![1.0, 1.0]));
+        assert!(!channel_varies_across(Some(&mixed), None, &[0, 1]));
+    }
+
+    // ── pt_to_px ───────────────────────────────────────────────────
+
+    #[test]
+    fn pt_to_px_scales_by_dpi_over_seventy_two() {
+        assert_eq!(pt_to_px(72.0, 96.0), 96.0);
+        assert_eq!(pt_to_px(12.0, 72.0), 12.0);
+        assert_eq!(pt_to_px(10.0, 144.0), 20.0);
+        assert_eq!(pt_to_px(0.0, 96.0), 0.0);
+    }
+
+    // ── Raw* channels ──────────────────────────────────────────────
+
+    #[test]
+    fn raw_constant_bypasses_a_bound_scale() {
+        let s = scale::continuous(0.0..=10.0);
+        let scaled = Channel::Constant(Value::Number(5.0));
+        let raw = Channel::RawConstant(Value::Number(5.0));
+        assert_eq!(
+            resolve_number_channel(Some(&scaled), Some(&s), 0),
+            Some(0.5)
+        );
+        assert_eq!(resolve_number_channel(Some(&raw), Some(&s), 0), Some(5.0));
+    }
+
+    #[test]
+    fn raw_data_bypasses_a_bound_scale() {
+        let red = crate::color::rgb(1.0, 0.0, 0.0);
+        let blue = crate::color::rgb(0.0, 0.0, 1.0);
+        let palette = scale::discrete([cat("a"), cat("b")]).range_colors([red, blue]);
+        // A raw column of colours ignores the palette bound to the name.
+        let raw = Channel::RawData(DataColumn::Color(vec![blue, red]));
+        assert_eq!(
+            resolve_color_channel(Some(&raw), Some(&palette), 0),
+            Some(blue)
+        );
+        let raw_positions = Channel::RawData(DataColumn::F64(vec![0.9]));
+        let s = scale::continuous(0.0..=10.0);
+        assert_eq!(
+            resolve_number_channel(Some(&raw_positions), Some(&s), 0),
+            Some(0.9)
+        );
+    }
+
+    #[test]
+    fn raw_channels_do_not_vary_when_their_rows_agree() {
+        // Variance detection runs on the post-bypass values, so a scale
+        // that would have spread the rows apart has no say.
+        let s = scale::continuous(0.0..=10.0).with_direction(Direction::Reversed);
+        let raw = Channel::RawData(DataColumn::F64(vec![0.3, 0.3]));
+        assert!(!channel_varies_across(Some(&raw), Some(&s), &[0, 1]));
+        let raw_varying = Channel::RawData(DataColumn::F64(vec![0.3, 0.7]));
+        assert!(channel_varies_across(Some(&raw_varying), Some(&s), &[0, 1]));
     }
 }

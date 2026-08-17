@@ -28,9 +28,9 @@
 //! pattern([dash(5.0), gap(3.0), marker("circle"), gap(5.0)]);
 //! ```
 //!
-//! [`draw_linetype_with_markers`] is the renderer for marker-bearing
+//! `draw_linetype_with_markers` is the renderer for marker-bearing
 //! patterns: it walks arc length along a set of
-//! [`PolylineSampler`](crate::primitives::PolylineSampler)s and stamps
+//! [`crate::primitives::PolylineSampler`]s and stamps
 //! shapes at the cursor positions the pattern dictates. Marker-free
 //! patterns go through kurbo's dash fast path instead — see
 //! [`is_marker_free`] and [`to_kurbo_dashes`].
@@ -110,14 +110,15 @@ pub fn is_marker_free(pattern: &[LinetypeStep]) -> bool {
 /// the pattern contains markers (call [`is_marker_free`] first) or if
 /// the alternation is malformed (use [`pattern`] / [`validate_pattern`]
 /// to construct).
-pub fn to_kurbo_dashes(pattern: &[LinetypeStep]) -> Vec<f64> {
+pub fn to_kurbo_dashes(pattern: &[LinetypeStep]) -> Option<Vec<f64>> {
     pattern
         .iter()
         .map(|step| match step {
-            LinetypeStep::Dash(l) | LinetypeStep::Gap(l) => *l,
-            LinetypeStep::Marker(_) => {
-                panic!("to_kurbo_dashes: pattern contains a Marker step; not representable as a kurbo dash pattern")
-            }
+            LinetypeStep::Dash(l) | LinetypeStep::Gap(l) => Some(*l),
+            // A marker stamps a shape rather than advancing a dash, so
+            // the pattern has no stroke-dash equivalent; the caller
+            // walks it with `draw_linetype_with_markers` instead.
+            LinetypeStep::Marker(_) => None,
         })
         .collect()
 }
@@ -586,14 +587,16 @@ mod tests {
     #[test]
     fn to_kurbo_dashes_round_trip() {
         let p = pattern([dash(5.0), gap(3.0)]);
-        assert_eq!(to_kurbo_dashes(&p), vec![5.0, 3.0]);
+        assert_eq!(to_kurbo_dashes(&p), Some(vec![5.0, 3.0]));
     }
 
     #[test]
-    #[should_panic(expected = "contains a Marker step")]
-    fn to_kurbo_dashes_panics_on_markers() {
+    fn to_kurbo_dashes_declines_markered_patterns() {
+        // A marker has no stroke-dash equivalent, so the caller has to
+        // fall back to the arc-length walk rather than get a pattern
+        // that silently drops the stamp.
         let p = pattern([marker("circle"), gap(5.0)]);
-        let _ = to_kurbo_dashes(&p);
+        assert_eq!(to_kurbo_dashes(&p), None);
     }
 
     #[test]

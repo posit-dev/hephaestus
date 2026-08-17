@@ -38,12 +38,14 @@ fn comp_shape() -> Composition {
 /// fully to the right (+x at θ=0°) and up (+y at θ=90°) but not far
 /// left or down, so the bbox is asymmetric around the math origin.
 fn partial_projection() -> Projection {
-    Projection::Polar(PolarProjection {
-        theta_start: -std::f64::consts::PI / 3.0,
-        theta_end: 3.0 * std::f64::consts::PI / 4.0,
-        inner_radius_frac: 0.2,
-        ..PolarProjection::full_circle()
-    })
+    Projection::Polar(
+        PolarProjection::full_circle()
+            .theta_range(
+                -std::f64::consts::PI / 3.0,
+                3.0 * std::f64::consts::PI / 4.0,
+            )
+            .inner_radius(0.2),
+    )
 }
 
 fn main() {

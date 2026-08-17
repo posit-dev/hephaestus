@@ -381,3 +381,6 @@ name = "theme_parity"
 
 [[test]]
 name = "module_boundaries"
+
+[[test]]
+name = "composition_public_paths"

@@ -20,6 +20,9 @@
 //!   over the equivalent `kurbo` shapes that hide the path-approximation
 //!   tolerance and the `kurbo::Shape` import.
 //! - [`segment`] — 2-point line shorthand.
+//! - [`polyline_path`], [`polygon_path`], [`append_polyline_to`] — the
+//!   plain vertex-run constructors the options-taking entry points and
+//!   [`crate::shape`]'s builtins share.
 //! - [`regular_polygon`] — n-sided regular polygon. Use
 //!   [`regular_polygon_vertices`] when you want the raw vertices for further
 //!   composition.
@@ -61,7 +64,7 @@
 //! [`boundaries`](https://github.com/thomasp85/boundaries) R package. Each
 //! eligible corner is replaced with a tangent-aware cubic Bezier — see
 //! [`round_corners`] for the math. Polygon offset is delegated to
-//! [`clipper2-rust`].
+//! `clipper2-rust`.
 
 use crate::geometry::Shape as _;
 use crate::geometry::{Point, Rect, Vec2};
@@ -69,11 +72,14 @@ use crate::path::{Path, PathEl};
 
 mod arc_length;
 mod clip;
+mod clipper;
 mod corner;
+mod corner_class;
 mod end_clip;
 mod offset;
 mod path_corner;
 mod ribbon;
+mod tolerance;
 
 pub use arc_length::{ArcLengthWalker, ArcSample, PolylineSampler, TrailingPolicy};
 pub use clip::{clip_polylines_to_polygon, intersect_polygons};
@@ -86,9 +92,7 @@ pub use ribbon::{
     polyline_ribbon_full, ribbon_band_mesh, RibbonOptions,
 };
 
-/// Path-approximation tolerance for curved primitives ([`circle`],
-/// [`ellipse`], [`rounded_rect`]). Smaller values produce more vertices.
-const CURVE_TOLERANCE: f64 = 0.1;
+use tolerance::CURVE_APPROX_TOLERANCE;
 
 /// Configuration for the adaptive corner-rounding pass.
 ///
@@ -166,7 +170,50 @@ pub fn polyline(points: &[Point], opts: PolylineOptions) -> Path {
     if pts.len() < 2 {
         return Path::new();
     }
-    end_clip::polyline_path(&pts)
+    polyline_path(&pts)
+}
+
+/// Append a vertex run to `path` as a fresh subpath: one `move_to`
+/// followed by a `line_to` per remaining vertex, plus a `close_path`
+/// when `closed`. Nothing is appended for fewer than two vertices.
+///
+/// Use this to assemble several rings into one `Path` without building
+/// an intermediate `Path` per ring.
+pub fn append_polyline_to(path: &mut Path, points: &[Point], closed: bool) {
+    if points.len() < 2 {
+        return;
+    }
+    path.move_to(points[0]);
+    for p in &points[1..] {
+        path.line_to(*p);
+    }
+    if closed {
+        path.close_path();
+    }
+}
+
+/// Build an open path through a vertex list — `move_to` plus one
+/// `line_to` per remaining vertex. Returns an empty path for fewer than
+/// two vertices.
+///
+/// This is the plain constructor without end clipping; use [`polyline`]
+/// when you want [`PolylineOptions`] applied first.
+pub fn polyline_path(points: &[Point]) -> Path {
+    let mut path = Path::new();
+    append_polyline_to(&mut path, points, false);
+    path
+}
+
+/// Build a closed path through a vertex list. The closing edge runs
+/// from the last vertex back to the first — do **not** repeat the first
+/// vertex. Returns an empty path for fewer than two vertices.
+///
+/// This is the single-ring constructor without offsetting; use
+/// [`polygon`] for holes or a signed offset.
+pub fn polygon_path(points: &[Point]) -> Path {
+    let mut path = Path::new();
+    append_polyline_to(&mut path, points, true);
+    path
 }
 
 /// Build a polygon path from one outer ring and zero or more holes.
@@ -203,22 +250,9 @@ pub fn polygon(rings: &[&[Point]], opts: PolygonOptions) -> Path {
         if ring.len() < 3 {
             continue;
         }
-        let sub = plain_polygon_path(ring);
-        for el in sub.iter() {
-            path.push(el);
-        }
+        append_polyline_to(&mut path, ring, true);
     }
     path
-}
-
-fn plain_polygon_path(ring: &[Point]) -> Path {
-    let mut p = Path::new();
-    p.move_to(ring[0]);
-    for v in &ring[1..] {
-        p.line_to(*v);
-    }
-    p.close_path();
-    p
 }
 
 /// Flatten any `Path` into one `Vec<Point>` per subpath, replacing every
@@ -260,25 +294,25 @@ pub fn path_to_rings(path: &Path, tolerance: f64) -> Vec<Vec<Point>> {
 /// Build a closed axis-aligned rectangle path. Pure line segments — no
 /// curve approximation.
 pub fn rect(r: Rect) -> Path {
-    r.to_path(CURVE_TOLERANCE)
+    r.to_path(CURVE_APPROX_TOLERANCE)
 }
 
 /// Build a closed rectangle with uniformly-rounded corners (SVG-style
 /// quarter-circle arcs at each corner). `radius` is clamped by `kurbo` to at
 /// most half the shorter rectangle side.
 pub fn rounded_rect(r: Rect, radius: f64) -> Path {
-    crate::geometry::RoundedRect::from_rect(r, radius).to_path(CURVE_TOLERANCE)
+    crate::geometry::RoundedRect::from_rect(r, radius).to_path(CURVE_APPROX_TOLERANCE)
 }
 
 /// Build a closed circle path approximated by cubic Beziers.
 pub fn circle(center: Point, radius: f64) -> Path {
-    crate::geometry::Circle::new(center, radius).to_path(CURVE_TOLERANCE)
+    crate::geometry::Circle::new(center, radius).to_path(CURVE_APPROX_TOLERANCE)
 }
 
 /// Build a closed axis-aligned ellipse path. `radii.x` is the x-half-axis,
 /// `radii.y` the y-half-axis.
 pub fn ellipse(center: Point, radii: Vec2) -> Path {
-    crate::geometry::Ellipse::new(center, radii, 0.0).to_path(CURVE_TOLERANCE)
+    crate::geometry::Ellipse::new(center, radii, 0.0).to_path(CURVE_APPROX_TOLERANCE)
 }
 
 /// A single line segment from `a` to `b`. Same as a 2-point [`polyline`] with
@@ -310,11 +344,7 @@ pub fn segment(a: Point, b: Point) -> Path {
 ///
 /// Returns an empty path when `n_sides < 3`.
 pub fn regular_polygon(center: Point, circumradius: f64, n_sides: usize) -> Path {
-    let verts = regular_polygon_vertices(center, circumradius, n_sides);
-    if verts.is_empty() {
-        return Path::new();
-    }
-    plain_polygon_path(&verts)
+    polygon_path(&regular_polygon_vertices(center, circumradius, n_sides))
 }
 
 /// Vertices of a regular n-sided polygon, in CCW order starting at the
@@ -360,7 +390,7 @@ pub fn arc(center: Point, radius: f64, start_angle: f64, sweep_angle: f64) -> Pa
         sweep_angle,
         0.0,
     );
-    arc.to_path(CURVE_TOLERANCE)
+    arc.to_path(CURVE_APPROX_TOLERANCE)
 }
 
 /// A **closed** circular wedge (pie slice): two radial segments from `center`
@@ -379,7 +409,7 @@ pub fn wedge(center: Point, radius: f64, start_angle: f64, sweep_angle: f64) -> 
         sweep_angle,
         0.0,
     );
-    for el in arc.append_iter(CURVE_TOLERANCE) {
+    for el in arc.append_iter(CURVE_APPROX_TOLERANCE) {
         path.push(el);
     }
     path.close_path();
@@ -408,7 +438,7 @@ pub fn annular_wedge(
         sweep_angle,
         0.0,
     );
-    for el in outer_arc.append_iter(CURVE_TOLERANCE) {
+    for el in outer_arc.append_iter(CURVE_APPROX_TOLERANCE) {
         path.push(el);
     }
     path.line_to(inner_end);
@@ -419,7 +449,7 @@ pub fn annular_wedge(
         -sweep_angle,
         0.0,
     );
-    for el in inner_arc.append_iter(CURVE_TOLERANCE) {
+    for el in inner_arc.append_iter(CURVE_APPROX_TOLERANCE) {
         path.push(el);
     }
     path.close_path();
@@ -603,6 +633,36 @@ mod tests {
         assert!((b.y0 - 15.0).abs() < 0.5);
         assert!((b.x1 - 15.0).abs() < 0.5);
         assert!((b.y1 - 25.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn polyline_path_is_open_and_polygon_path_is_closed() {
+        let pts = [pt(0.0, 0.0), pt(1.0, 0.0), pt(1.0, 1.0)];
+        let (m, l, _q, c) = count_elements(&polyline_path(&pts));
+        assert_eq!((m, l, c), (1, 2, 0));
+        let (m, l, _q, c) = count_elements(&polygon_path(&pts));
+        assert_eq!((m, l, c), (1, 2, 1));
+    }
+
+    #[test]
+    fn path_helpers_ignore_runs_shorter_than_two_vertices() {
+        assert_eq!(polyline_path(&[]).elements().len(), 0);
+        assert_eq!(polygon_path(&[pt(0.0, 0.0)]).elements().len(), 0);
+        let mut path = rect(Rect::new(0.0, 0.0, 1.0, 1.0));
+        let before = path.elements().len();
+        append_polyline_to(&mut path, &[pt(5.0, 5.0)], true);
+        assert_eq!(path.elements().len(), before);
+    }
+
+    #[test]
+    fn append_polyline_to_adds_one_subpath_per_ring() {
+        let a = [pt(0.0, 0.0), pt(1.0, 0.0), pt(1.0, 1.0)];
+        let b = [pt(5.0, 5.0), pt(6.0, 5.0), pt(6.0, 6.0)];
+        let mut path = Path::new();
+        append_polyline_to(&mut path, &a, true);
+        append_polyline_to(&mut path, &b, true);
+        let (m, l, _q, c) = count_elements(&path);
+        assert_eq!((m, l, c), (2, 4, 2));
     }
 
     #[test]

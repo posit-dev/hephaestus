@@ -43,6 +43,7 @@ pub(crate) mod marks;
 pub(crate) mod outline;
 pub mod point;
 pub mod polygon;
+pub(crate) mod project;
 pub mod rect;
 pub mod resolve;
 pub mod ribbon;

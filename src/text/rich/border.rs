@@ -62,17 +62,12 @@ pub(crate) fn emit_block_paint(
         // slices — no `Marker` steps. Compute the flat slice only for
         // marker-free patterns; markered patterns route through the
         // shared `draw_linetype_with_markers` primitive below.
-        let dashes_px: Option<Vec<f64>> =
-            border
-                .linetype_pt
-                .as_ref()
-                .filter(|_| !has_markers)
-                .map(|pattern| {
-                    crate::linetype::to_kurbo_dashes(pattern)
-                        .into_iter()
-                        .map(|pt| pt * dpi / 72.0)
-                        .collect()
-                });
+        let dashes_px: Option<Vec<f64>> = border
+            .linetype_pt
+            .as_ref()
+            .filter(|_| !has_markers)
+            .and_then(|pattern| crate::linetype::to_kurbo_dashes(pattern))
+            .map(|pts| pts.into_iter().map(|pt| pt * dpi / 72.0).collect());
         let border_stroke = |w_px: f32| {
             let s = crate::stroke::Stroke::new(w_px as f64)
                 .with_caps(crate::stroke::Cap::Butt)

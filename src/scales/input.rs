@@ -14,7 +14,7 @@
 
 use crate::scales::value::Value;
 
-/// The input range of a [`Scale`](super::Scale).
+/// The input range of a `Scale`.
 #[derive(Clone, Debug)]
 pub enum InputRange {
     /// Continuous numeric domain, inclusive of both endpoints. Temporal

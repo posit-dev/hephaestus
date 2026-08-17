@@ -7,7 +7,6 @@
 
 use crate::color::{lerp_color, Color, ColorSpace};
 use crate::geometry::{Point, Rect};
-use crate::path::Path;
 
 /// A shape used to clip a polyline endpoint. All variants are
 /// axis-aligned; rotated ellipses or arbitrary kurbo shapes are out of
@@ -234,20 +233,6 @@ fn trim_start_with_attrs(
         }
     }
     (Vec::new(), Vec::new(), Vec::new())
-}
-
-/// Construct a plain `move_to` + `line_to*` path from a vertex list. Used by
-/// callers that don't need corner rounding.
-pub(super) fn polyline_path(points: &[Point]) -> Path {
-    let mut path = Path::new();
-    if points.len() < 2 {
-        return path;
-    }
-    path.move_to(points[0]);
-    for p in &points[1..] {
-        path.line_to(*p);
-    }
-    path
 }
 
 #[cfg(test)]

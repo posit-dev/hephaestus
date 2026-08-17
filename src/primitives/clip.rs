@@ -20,15 +20,9 @@
 //! the visible panel rect and to clip graticule polylines against the
 //! resulting drawing surface.
 
+use super::clipper::{from_paths_d, to_path_d, to_paths_d, PRECISION};
 use crate::geometry::Point;
-use clipper2_rust::{
-    intersect_d, ClipType, ClipperD, FillRule, PathD, PathsD, Point as ClipperPoint,
-};
-
-/// Precision (decimal places retained internally by clipper2). Four is
-/// enough for sub-pixel accuracy at every render scale hephaestus
-/// produces and matches clipper2's default recommendation.
-const PRECISION: i32 = 4;
+use clipper2_rust::{intersect_d, ClipType, ClipperD, FillRule, PathsD};
 
 /// Intersect `subject` and `clip`, each treated as a multi-ring closed
 /// area under EvenOdd. Returns the boundary rings of the intersection —
@@ -46,7 +40,7 @@ pub fn intersect_polygons(subject: &[&[Point]], clip: &[&[Point]]) -> Vec<Vec<Po
     let subject_paths = to_paths_d(subject);
     let clip_paths = to_paths_d(clip);
     let solution = intersect_d(&subject_paths, &clip_paths, FillRule::EvenOdd, PRECISION);
-    paths_d_to_rings(&solution)
+    from_paths_d(&solution)
 }
 
 /// Intersect each open polyline with `polygon` (multi-ring closed area,
@@ -65,7 +59,7 @@ pub fn clip_polylines_to_polygon(polylines: &[&[Point]], polygon: &[&[Point]]) -
     let subjects: PathsD = polylines
         .iter()
         .filter(|line| line.len() >= 2)
-        .map(|line| points_to_path_d(line))
+        .map(|line| to_path_d(line, false))
         .collect();
     if subjects.is_empty() {
         return Vec::new();
@@ -85,37 +79,7 @@ pub fn clip_polylines_to_polygon(polylines: &[&[Point]], polygon: &[&[Point]]) -
     );
     // Open inputs yield open outputs; closed_out should be empty for
     // open-only subjects but we drop it anyway.
-    paths_d_to_rings(&open_out)
-}
-
-fn to_paths_d(rings: &[&[Point]]) -> PathsD {
-    rings
-        .iter()
-        .filter(|r| !r.is_empty())
-        .map(|r| points_to_path_d(r))
-        .collect()
-}
-
-fn points_to_path_d(points: &[Point]) -> PathD {
-    let mut path = PathD::with_capacity(points.len());
-    for p in points {
-        path.push(ClipperPoint::<f64>::new(p.x, p.y));
-    }
-    path
-}
-
-fn paths_d_to_rings(paths: &PathsD) -> Vec<Vec<Point>> {
-    let mut out = Vec::with_capacity(paths.len());
-    for path in paths {
-        let mut ring = Vec::with_capacity(path.len());
-        for pt in path {
-            ring.push(Point::new(pt.x, pt.y));
-        }
-        if !ring.is_empty() {
-            out.push(ring);
-        }
-    }
-    out
+    from_paths_d(&open_out)
 }
 
 #[cfg(test)]

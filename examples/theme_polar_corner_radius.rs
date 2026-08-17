@@ -20,12 +20,11 @@ fn main() {
 
     // Quarter-arc projection: a 90° wedge with a center hole. Four
     // line-to-arc corners — perfect for showcasing corner_radius.
-    let projection = Projection::Polar(PolarProjection {
-        theta_start: 0.0,
-        theta_end: std::f64::consts::FRAC_PI_2,
-        inner_radius_frac: 0.3,
-        ..PolarProjection::full_circle()
-    });
+    let projection = Projection::Polar(
+        PolarProjection::full_circle()
+            .theta_range(0.0, std::f64::consts::FRAC_PI_2)
+            .inner_radius(0.3),
+    );
 
     let n = 80;
     let theta: Vec<f64> = (0..n).map(|i| i as f64 / (n - 1) as f64).collect();

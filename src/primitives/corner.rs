@@ -23,29 +23,11 @@
 //!
 //! [`boundaries::poly_corner_cutting`]: https://github.com/thomasp85/boundaries/blob/main/src/corner_clip.cpp
 
+use super::corner_class::{angle_between_deg, classify_angle, Class};
+use super::tolerance::DEGENERATE_EPS;
 use crate::geometry::{Point, Vec2};
 use crate::path::Path;
 use crate::primitives::CornerRounding;
-
-const COLLINEAR_TOL_DEG: f64 = 1e-3;
-const DEGENERATE_EPS: f64 = 1e-12;
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Class {
-    /// Eligible corner: will be replaced by a `quad_to`.
-    Corner,
-    /// Within tolerance of 180° (or 0°) — walk passes through transparently
-    /// and the vertex is not emitted.
-    Collinear,
-    /// Real bend that's above `max_angle_deg` (too gentle to round). Walk
-    /// stops here using the halfway-share rule; vertex is emitted as a
-    /// `line_to`.
-    Other,
-    /// Polyline endpoint (only used for open polylines). Walk stops here
-    /// using full available distance (no neighbour to share with); vertex is
-    /// emitted as a `line_to` (the move_to / final line_to in emission).
-    Endpoint,
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StopKind {
@@ -100,28 +82,9 @@ fn classify(verts: &[Point], closed: bool, max_angle_deg: f64) -> Vec<Class> {
             let prev = verts[if i == 0 { n - 1 } else { i - 1 }];
             let curr = verts[i];
             let next = verts[if i + 1 == n { 0 } else { i + 1 }];
-            let angle = interior_angle_deg(prev, curr, next);
-            if angle >= 180.0 - COLLINEAR_TOL_DEG || angle <= COLLINEAR_TOL_DEG {
-                Class::Collinear
-            } else if angle <= max_angle_deg {
-                Class::Corner
-            } else {
-                Class::Other
-            }
+            classify_angle(angle_between_deg(prev - curr, next - curr), max_angle_deg)
         })
         .collect()
-}
-
-fn interior_angle_deg(prev: Point, curr: Point, next: Point) -> f64 {
-    let a = prev - curr;
-    let b = next - curr;
-    let a_len = a.hypot();
-    let b_len = b.hypot();
-    if a_len <= DEGENERATE_EPS || b_len <= DEGENERATE_EPS {
-        return 180.0;
-    }
-    let cos = (a.x * b.x + a.y * b.y) / (a_len * b_len);
-    cos.clamp(-1.0, 1.0).acos().to_degrees()
 }
 
 fn compute_cuts(
@@ -174,7 +137,7 @@ fn compute_cuts(
 }
 
 /// Walk back (or forward) from `start`, accumulating edge length and passing
-/// through `Collinear` vertices. Stops at the first `Corner` or `Other`
+/// through `Collinear` vertices. Stops at the first `Corner` or `NonCorner`
 /// vertex, or — for open polylines — at the polyline endpoint.
 fn walk_available(
     verts: &[Point],
@@ -195,7 +158,7 @@ fn walk_available(
         match classes[cur] {
             Class::Collinear => continue,
             Class::Corner => return (total, StopKind::Corner),
-            Class::Other => return (total, StopKind::Other),
+            Class::NonCorner => return (total, StopKind::Other),
             Class::Endpoint => return (total, StopKind::Endpoint),
         }
     }
@@ -361,7 +324,7 @@ fn emit(verts: &[Point], classes: &[Class], cuts: &[Option<Cut>], closed: bool) 
 
 fn emit_one(path: &mut Path, verts: &[Point], classes: &[Class], cuts: &[Option<Cut>], i: usize) {
     match classes[i] {
-        Class::Other | Class::Endpoint => {
+        Class::NonCorner | Class::Endpoint => {
             path.line_to(verts[i]);
         }
         Class::Collinear => {}
@@ -378,7 +341,7 @@ fn emit_one(path: &mut Path, verts: &[Point], classes: &[Class], cuts: &[Option<
 }
 
 fn pick_start(classes: &[Class]) -> usize {
-    if let Some(i) = classes.iter().position(|c| *c == Class::Other) {
+    if let Some(i) = classes.iter().position(|c| *c == Class::NonCorner) {
         return i;
     }
     if let Some(i) = classes.iter().position(|c| *c == Class::Corner) {
