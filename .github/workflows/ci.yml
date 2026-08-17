@@ -29,17 +29,18 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-host-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-cargo-host-
 
       # Mesa software rasteriser so the wgpu adapter request succeeds on
       # ubuntu-latest runners (no GPU available). Used by the `smoke` and
-      # `picking` integration tests.
-      - name: Install Mesa Vulkan drivers
+      # `picking` integration tests. fontconfig is the system font-discovery
+      # library parley/fontique links against on Linux.
+      - name: Install Mesa Vulkan drivers and fontconfig
         run: |
           sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools libfontconfig1-dev
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -52,3 +53,32 @@ jobs:
 
       - name: cargo test --all-features
         run: cargo test --all-features
+
+  # wasm32 is a supported target, so it gets its own job: it shares no compiled
+  # artifacts with the host build and needs none of the system libraries above
+  # (fontconfig and Vulkan are both gated to native targets). Catches
+  # GL-backend and dependency regressions that the host build misses.
+  wasm:
+    name: wasm32 check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry, git, and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-
+
+      - name: cargo check --target wasm32-unknown-unknown
+        run: cargo check --target wasm32-unknown-unknown
