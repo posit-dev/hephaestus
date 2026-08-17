@@ -2,8 +2,6 @@
 //! mixed feature types end-to-end through the full `PlotComposition`
 //! pipeline and confirm the resulting pixel buffer is non-empty.
 
-#![cfg(feature = "vello")]
-
 use std::sync::Arc;
 
 use hephaestus::backend::vello::VelloRenderer;
@@ -13,6 +11,7 @@ use hephaestus::geometry::Size;
 use hephaestus::plot::value::Value;
 use hephaestus::plot::{scale, GeometryGeom, Plot, PlotComposition};
 use hephaestus::scales::geometry::{Geometry, Polygon as GeoPolygon};
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 #[test]

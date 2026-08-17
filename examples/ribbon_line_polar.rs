@@ -27,6 +27,7 @@ use hephaestus::geometry::Size;
 use hephaestus::plot::projection::Projection;
 use hephaestus::plot::value::Value;
 use hephaestus::plot::{linetype, scale, LineGeom, Plot, PlotComposition};
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 fn cart_shape() -> Composition {

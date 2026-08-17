@@ -28,5 +28,5 @@ The trait deliberately consumes already-positioned glyphs — shaping and line-b
 
 - `backend/vello/` — the only `SceneBuilder` implementation that rasterises today. Pick scene is a parallel `vello::Scene` recorded alongside the display scene.
 - `pick.rs` — `PickId` variants and the RGB-channel encoding.
-- `text/` — produces `GlyphRun` values from shaped strings (gated on `text` feature).
+- `text/` — produces `GlyphRun` values from shaped strings.
 - `mesh.rs` — `Mesh` type consumed by `draw_mesh`.

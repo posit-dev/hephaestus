@@ -32,6 +32,7 @@ use hephaestus::plot::geom::linetype::{dashed, dotted, solid};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom};
 use hephaestus::scales::chrome::{Anchor, AxisSide, LegendSide};
 use hephaestus::scales::value::Value;
+use hephaestus::scene::SceneBuilder;
 use hephaestus::shape::ShapeRegistry;
 use hephaestus::text::{glyph_marker, TextStyle};
 use hephaestus::Renderer;

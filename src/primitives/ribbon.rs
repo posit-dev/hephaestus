@@ -39,7 +39,7 @@
 //! All distances are in **panel pixels**. Callers convert from pt at
 //! their own draw sites (`px = pt * dpi / 72.0`).
 
-use kurbo::Vec2;
+use crate::geometry::Vec2;
 
 use crate::color::Color;
 use crate::geometry::Point;

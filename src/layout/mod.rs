@@ -22,7 +22,7 @@ use std::ops::{Add, Div, Mul, Neg, Sub};
 
 mod solver;
 
-/// Identifies an axis (column or row) of a [`Grid`] for [`Length::TrackOf`]
+/// Identifies an axis (column or row) of a [`Grid`] for [`Extent::TrackOf`]
 /// references.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Axis {
@@ -39,21 +39,21 @@ pub enum Axis {
 /// size (which is only known after solve).
 ///
 /// Construct via the `px` / `mm` / `cm` / `inch` / `pt` / `percent`
-/// associated functions, [`Length::min`] / [`Length::max`], or
-/// [`Length::track_of`] / [`Length::tracks_of`]. Lengths compose with `+`,
+/// associated functions, [`Extent::min`] / [`Extent::max`], or
+/// [`Extent::track_of`] / [`Extent::tracks_of`]. Lengths compose with `+`,
 /// `-`, unary `-`, `* f64`, and `/ f64`; addition through `Min`/`Max`
 /// distributes exactly (`min(a, b) + c = min(a+c, b+c)`), so arithmetic
 /// stays closed without losing structure. `TrackOf` is opaque to arithmetic
 /// — it composes with `Min`/`Max` transparently but `+ / - / *` on a tree
 /// containing `TrackOf` panics. Reach a multi-segment sum via
-/// [`Length::tracks_of`]'s `span` parameter.
+/// [`Extent::tracks_of`]'s `span` parameter.
 ///
 /// Physical units (`mm`, `cm`, `inch`, `pt`) are resolved to pixels via the
 /// `dpi` passed to [`Grid::solve`]. `percent` is taken as a fraction of the
 /// relevant axis of the parent's grid cell area; the constructor argument is
-/// `0.0..=1.0` (so `Length::percent(0.5)` is "50%").
+/// `0.0..=1.0` (so `Extent::percent(0.5)` is "50%").
 #[derive(Clone, Debug, PartialEq)]
-pub enum Length {
+pub enum Extent {
     /// Linear combination: `px + inches * dpi + percent * axis`.
     Sum {
         /// DPI-independent pixel offset.
@@ -64,9 +64,9 @@ pub enum Length {
         percent: f64,
     },
     /// Pointwise minimum of two lengths, evaluated at resolution time.
-    Min(Box<Length>, Box<Length>),
+    Min(Box<Extent>, Box<Extent>),
     /// Pointwise maximum of two lengths, evaluated at resolution time.
-    Max(Box<Length>, Box<Length>),
+    Max(Box<Extent>, Box<Extent>),
     /// Resolves at solve time to the summed resolved size of `span`
     /// consecutive tracks starting at `track` (1-indexed) on the given
     /// `axis` of the [`Grid`] tagged with `id == grid`. For `span > 1`
@@ -91,9 +91,9 @@ pub enum Length {
     },
 }
 
-impl Length {
+impl Extent {
     /// The zero length.
-    pub const ZERO: Length = Length::Sum {
+    pub const ZERO: Extent = Extent::Sum {
         px: 0.0,
         inches: 0.0,
         percent: 0.0,
@@ -101,7 +101,7 @@ impl Length {
 
     /// Pure pixels (DPI-independent).
     pub const fn px(v: f64) -> Self {
-        Length::Sum {
+        Extent::Sum {
             px: v,
             inches: 0.0,
             percent: 0.0,
@@ -109,7 +109,7 @@ impl Length {
     }
     /// Millimeters — `v / 25.4` inches.
     pub const fn mm(v: f64) -> Self {
-        Length::Sum {
+        Extent::Sum {
             px: 0.0,
             inches: v / 25.4,
             percent: 0.0,
@@ -117,7 +117,7 @@ impl Length {
     }
     /// Centimeters — `v / 2.54` inches.
     pub const fn cm(v: f64) -> Self {
-        Length::Sum {
+        Extent::Sum {
             px: 0.0,
             inches: v / 2.54,
             percent: 0.0,
@@ -125,7 +125,7 @@ impl Length {
     }
     /// Inches.
     pub const fn inch(v: f64) -> Self {
-        Length::Sum {
+        Extent::Sum {
             px: 0.0,
             inches: v,
             percent: 0.0,
@@ -133,7 +133,7 @@ impl Length {
     }
     /// Points (1pt = 1/72 inch).
     pub const fn pt(v: f64) -> Self {
-        Length::Sum {
+        Extent::Sum {
             px: 0.0,
             inches: v / 72.0,
             percent: 0.0,
@@ -141,7 +141,7 @@ impl Length {
     }
     /// A fraction of the containing axis. `0.5` is 50%.
     pub const fn percent(v: f64) -> Self {
-        Length::Sum {
+        Extent::Sum {
             px: 0.0,
             inches: 0.0,
             percent: v,
@@ -149,18 +149,18 @@ impl Length {
     }
 
     /// Pointwise minimum of two lengths.
-    pub fn min(a: Length, b: Length) -> Self {
-        Length::Min(Box::new(a), Box::new(b))
+    pub fn min(a: Extent, b: Extent) -> Self {
+        Extent::Min(Box::new(a), Box::new(b))
     }
     /// Pointwise maximum of two lengths.
-    pub fn max(a: Length, b: Length) -> Self {
-        Length::Max(Box::new(a), Box::new(b))
+    pub fn max(a: Extent, b: Extent) -> Self {
+        Extent::Max(Box::new(a), Box::new(b))
     }
 
     /// Reference the resolved size of a single track in a tagged grid.
-    /// `track` is 1-indexed. See [`Length::TrackOf`].
+    /// `track` is 1-indexed. See [`Extent::TrackOf`].
     pub const fn track_of(grid: CellId, axis: Axis, track: u16) -> Self {
-        Length::TrackOf {
+        Extent::TrackOf {
             grid,
             axis,
             track,
@@ -170,9 +170,9 @@ impl Length {
 
     /// Reference the resolved summed size of `span` consecutive tracks in
     /// a tagged grid, starting at `start` (1-indexed). Gaps between
-    /// tracks are included. See [`Length::TrackOf`].
+    /// tracks are included. See [`Extent::TrackOf`].
     pub const fn tracks_of(grid: CellId, axis: Axis, start: u16, span: u16) -> Self {
-        Length::TrackOf {
+        Extent::TrackOf {
             grid,
             axis,
             track: start,
@@ -181,22 +181,22 @@ impl Length {
     }
 
     /// True if this length has no `percent` term anywhere in its tree and
-    /// no [`Length::TrackOf`] reference (whose value isn't known without
+    /// no [`Extent::TrackOf`] reference (whose value isn't known without
     /// a prior solve pass). Lengths that are absolute can be resolved to
     /// pixels without an axis size or prior resolved tracks (used for
     /// intrinsic-size computation in `Track::Auto`).
     pub fn is_absolute(&self) -> bool {
         match self {
-            Length::Sum { percent, .. } => *percent == 0.0,
-            Length::Min(a, b) | Length::Max(a, b) => a.is_absolute() && b.is_absolute(),
-            Length::TrackOf { .. } => false,
+            Extent::Sum { percent, .. } => *percent == 0.0,
+            Extent::Min(a, b) | Extent::Max(a, b) => a.is_absolute() && b.is_absolute(),
+            Extent::TrackOf { .. } => false,
         }
     }
 }
 
-impl Default for Length {
+impl Default for Extent {
     fn default() -> Self {
-        Length::ZERO
+        Extent::ZERO
     }
 }
 
@@ -207,117 +207,117 @@ impl Default for Length {
 // (`min(a, b) + c = min(a + c, b + c)`). The tree can grow under repeated
 // arithmetic, but for any well-formed expression the growth is bounded.
 
-impl Add for Length {
-    type Output = Length;
-    fn add(self, rhs: Length) -> Length {
+impl Add for Extent {
+    type Output = Extent;
+    fn add(self, rhs: Extent) -> Extent {
         match (self, rhs) {
             (
-                Length::Sum {
+                Extent::Sum {
                     px: a,
                     inches: b,
                     percent: c,
                 },
-                Length::Sum {
+                Extent::Sum {
                     px: x,
                     inches: y,
                     percent: z,
                 },
-            ) => Length::Sum {
+            ) => Extent::Sum {
                 px: a + x,
                 inches: b + y,
                 percent: c + z,
             },
-            (Length::Min(a, b), other) => {
+            (Extent::Min(a, b), other) => {
                 let other_clone = other.clone();
-                Length::Min(Box::new(*a + other), Box::new(*b + other_clone))
+                Extent::Min(Box::new(*a + other), Box::new(*b + other_clone))
             }
-            (other, Length::Min(a, b)) => {
+            (other, Extent::Min(a, b)) => {
                 let other_clone = other.clone();
-                Length::Min(Box::new(other + *a), Box::new(other_clone + *b))
+                Extent::Min(Box::new(other + *a), Box::new(other_clone + *b))
             }
-            (Length::Max(a, b), other) => {
+            (Extent::Max(a, b), other) => {
                 let other_clone = other.clone();
-                Length::Max(Box::new(*a + other), Box::new(*b + other_clone))
+                Extent::Max(Box::new(*a + other), Box::new(*b + other_clone))
             }
-            (other, Length::Max(a, b)) => {
+            (other, Extent::Max(a, b)) => {
                 let other_clone = other.clone();
-                Length::Max(Box::new(other + *a), Box::new(other_clone + *b))
+                Extent::Max(Box::new(other + *a), Box::new(other_clone + *b))
             }
-            (Length::TrackOf { .. }, _) | (_, Length::TrackOf { .. }) => panic!(
-                "Length::TrackOf cannot participate in +/-/*; \
-                 use Length::tracks_of(.., span = N) for consecutive tracks, \
-                 or compose via Length::min / Length::max"
+            (Extent::TrackOf { .. }, _) | (_, Extent::TrackOf { .. }) => panic!(
+                "Extent::TrackOf cannot participate in +/-/*; \
+                 use Extent::tracks_of(.., span = N) for consecutive tracks, \
+                 or compose via Extent::min / Extent::max"
             ),
         }
     }
 }
 
-impl Neg for Length {
-    type Output = Length;
-    fn neg(self) -> Length {
+impl Neg for Extent {
+    type Output = Extent;
+    fn neg(self) -> Extent {
         match self {
-            Length::Sum {
+            Extent::Sum {
                 px,
                 inches,
                 percent,
-            } => Length::Sum {
+            } => Extent::Sum {
                 px: -px,
                 inches: -inches,
                 percent: -percent,
             },
             // Negating swaps Min/Max: -min(a,b) = max(-a, -b).
-            Length::Min(a, b) => Length::Max(Box::new(-*a), Box::new(-*b)),
-            Length::Max(a, b) => Length::Min(Box::new(-*a), Box::new(-*b)),
-            Length::TrackOf { .. } => panic!(
-                "Length::TrackOf cannot be negated; use Length::min / Length::max for composition"
+            Extent::Min(a, b) => Extent::Max(Box::new(-*a), Box::new(-*b)),
+            Extent::Max(a, b) => Extent::Min(Box::new(-*a), Box::new(-*b)),
+            Extent::TrackOf { .. } => panic!(
+                "Extent::TrackOf cannot be negated; use Extent::min / Extent::max for composition"
             ),
         }
     }
 }
 
-impl Sub for Length {
-    type Output = Length;
-    fn sub(self, rhs: Length) -> Length {
+impl Sub for Extent {
+    type Output = Extent;
+    fn sub(self, rhs: Extent) -> Extent {
         self + (-rhs)
     }
 }
 
-impl Mul<f64> for Length {
-    type Output = Length;
-    fn mul(self, k: f64) -> Length {
+impl Mul<f64> for Extent {
+    type Output = Extent;
+    fn mul(self, k: f64) -> Extent {
         match self {
-            Length::Sum {
+            Extent::Sum {
                 px,
                 inches,
                 percent,
-            } => Length::Sum {
+            } => Extent::Sum {
                 px: px * k,
                 inches: inches * k,
                 percent: percent * k,
             },
             // Distribute. Note: a negative scalar swaps Min/Max in the
             // resulting tree (same reasoning as Neg).
-            Length::Min(a, b) if k >= 0.0 => Length::Min(Box::new(*a * k), Box::new(*b * k)),
-            Length::Min(a, b) => Length::Max(Box::new(*a * k), Box::new(*b * k)),
-            Length::Max(a, b) if k >= 0.0 => Length::Max(Box::new(*a * k), Box::new(*b * k)),
-            Length::Max(a, b) => Length::Min(Box::new(*a * k), Box::new(*b * k)),
-            Length::TrackOf { .. } => panic!(
-                "Length::TrackOf cannot be scaled by f64; use Length::min / Length::max for composition"
+            Extent::Min(a, b) if k >= 0.0 => Extent::Min(Box::new(*a * k), Box::new(*b * k)),
+            Extent::Min(a, b) => Extent::Max(Box::new(*a * k), Box::new(*b * k)),
+            Extent::Max(a, b) if k >= 0.0 => Extent::Max(Box::new(*a * k), Box::new(*b * k)),
+            Extent::Max(a, b) => Extent::Min(Box::new(*a * k), Box::new(*b * k)),
+            Extent::TrackOf { .. } => panic!(
+                "Extent::TrackOf cannot be scaled by f64; use Extent::min / Extent::max for composition"
             ),
         }
     }
 }
 
-impl Mul<Length> for f64 {
-    type Output = Length;
-    fn mul(self, l: Length) -> Length {
+impl Mul<Extent> for f64 {
+    type Output = Extent;
+    fn mul(self, l: Extent) -> Extent {
         l * self
     }
 }
 
-impl Div<f64> for Length {
-    type Output = Length;
-    fn div(self, k: f64) -> Length {
+impl Div<f64> for Extent {
+    type Output = Extent;
+    fn div(self, k: f64) -> Extent {
         self * (1.0 / k)
     }
 }
@@ -326,7 +326,7 @@ impl Div<f64> for Length {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Track {
     /// Fixed extent.
-    Fixed(Length),
+    Fixed(Extent),
     /// Fractional share of remaining space (CSS `fr` / R grid's "null" unit).
     Fr(f32),
     /// Size to fit content via the [`Track::Auto`] min-broadcast protocol;
@@ -543,7 +543,7 @@ pub struct Grid {
 pub struct GridNode {
     pub(crate) cols: Vec<Track>,
     pub(crate) rows: Vec<Track>,
-    pub(crate) gap: (Length, Length),
+    pub(crate) gap: (Extent, Extent),
     pub(crate) respect: Respect,
     pub(crate) id: Option<CellId>,
     pub(crate) children: Vec<(Placement, Node)>,
@@ -604,7 +604,7 @@ impl Grid {
             node: GridNode {
                 cols: cols.into_iter().collect(),
                 rows: rows.into_iter().collect(),
-                gap: (Length::ZERO, Length::ZERO),
+                gap: (Extent::ZERO, Extent::ZERO),
                 respect: Respect::None,
                 id: None,
                 children: Vec::new(),
@@ -683,7 +683,7 @@ impl Grid {
     }
 
     /// Gap between columns / rows.
-    pub fn gap(mut self, col: Length, row: Length) -> Self {
+    pub fn gap(mut self, col: Extent, row: Extent) -> Self {
         self.node.gap = (col, row);
         self
     }
@@ -763,42 +763,51 @@ impl Placement {
 /// dimension wins and the trailing edge (right/bottom) is ignored.
 #[derive(Clone, Debug, Default)]
 pub struct Inset {
-    pub left: Option<Length>,
-    pub right: Option<Length>,
-    pub top: Option<Length>,
-    pub bottom: Option<Length>,
-    pub width: Option<Length>,
-    pub height: Option<Length>,
+    pub left: Option<Extent>,
+    pub right: Option<Extent>,
+    pub top: Option<Extent>,
+    pub bottom: Option<Extent>,
+    pub width: Option<Extent>,
+    pub height: Option<Extent>,
 }
 
 impl Inset {
+    /// The same offset on all four edges.
+    pub fn all(extent: Extent) -> Self {
+        Self::default()
+            .left(extent.clone())
+            .right(extent.clone())
+            .top(extent.clone())
+            .bottom(extent)
+    }
+
     /// Set the left edge offset from the cell area.
-    pub fn left(mut self, l: Length) -> Self {
+    pub fn left(mut self, l: Extent) -> Self {
         self.left = Some(l);
         self
     }
     /// Set the right edge offset from the cell area.
-    pub fn right(mut self, l: Length) -> Self {
+    pub fn right(mut self, l: Extent) -> Self {
         self.right = Some(l);
         self
     }
     /// Set the top edge offset from the cell area.
-    pub fn top(mut self, l: Length) -> Self {
+    pub fn top(mut self, l: Extent) -> Self {
         self.top = Some(l);
         self
     }
     /// Set the bottom edge offset from the cell area.
-    pub fn bottom(mut self, l: Length) -> Self {
+    pub fn bottom(mut self, l: Extent) -> Self {
         self.bottom = Some(l);
         self
     }
     /// Set an explicit width; the unset horizontal edge anchors the child.
-    pub fn width(mut self, l: Length) -> Self {
+    pub fn width(mut self, l: Extent) -> Self {
         self.width = Some(l);
         self
     }
     /// Set an explicit height; the unset vertical edge anchors the child.
-    pub fn height(mut self, l: Length) -> Self {
+    pub fn height(mut self, l: Extent) -> Self {
         self.height = Some(l);
         self
     }
@@ -882,8 +891,8 @@ mod tests {
         root.place(
             Placement::at(2, 3).span(1, 3).inset(
                 Inset::default()
-                    .left(Length::cm(1.0))
-                    .right(Length::percent(0.25)),
+                    .left(Extent::cm(1.0))
+                    .right(Extent::percent(0.25)),
             ),
             inner,
         );
@@ -972,8 +981,8 @@ mod tests {
         root.place(
             Placement::at(1, 1).inset(
                 Inset::default()
-                    .right(Length::px(0.0))
-                    .width(Length::cm(2.0)),
+                    .right(Extent::px(0.0))
+                    .width(Extent::cm(2.0)),
             ),
             Grid::cell().id(CellId(7)),
         );
@@ -991,7 +1000,7 @@ mod tests {
         // width set, no edges: child anchors to the left edge of the cell.
         let mut root = Grid::new([Track::Fr(1.0)], [Track::Fr(1.0)]);
         root.place(
-            Placement::at(1, 1).inset(Inset::default().width(Length::cm(2.0))),
+            Placement::at(1, 1).inset(Inset::default().width(Extent::cm(2.0))),
             Grid::cell().id(CellId(7)),
         );
         let layout = root.solve(Size::new(400.0, 200.0), 96.0);
@@ -1008,8 +1017,8 @@ mod tests {
         root.place(
             Placement::at(1, 1).inset(
                 Inset::default()
-                    .left(Length::cm(1.0))
-                    .width(Length::cm(2.0)),
+                    .left(Extent::cm(1.0))
+                    .width(Extent::cm(2.0)),
             ),
             Grid::cell().id(CellId(7)),
         );
@@ -1027,7 +1036,7 @@ mod tests {
         // width via Inset, so the auto col resolves to 100.
         let mut root = Grid::new([Track::Auto], [Track::Fr(1.0)]).id(CellId(0));
         root.place(
-            Placement::at(1, 1).inset(Inset::default().width(Length::px(100.0))),
+            Placement::at(1, 1).inset(Inset::default().width(Extent::px(100.0))),
             Grid::cell().id(CellId(1)),
         );
         let layout = root.solve(Size::new(400.0, 200.0), 96.0);
@@ -1041,7 +1050,7 @@ mod tests {
         // Outer rows are [Auto, Fr(1)]. The child in row 1 is itself a grid
         // with a single fixed 30px row → outer row 1 resolves to 30,
         // outer row 2 takes the remainder.
-        let inner = Grid::new([Track::Fr(1.0)], [Track::Fixed(Length::px(30.0))]).id(CellId(11));
+        let inner = Grid::new([Track::Fr(1.0)], [Track::Fixed(Extent::px(30.0))]).id(CellId(11));
         let mut root = Grid::new([Track::Fr(1.0)], [Track::Auto, Track::Fr(1.0)]);
         root.place(Placement::at(1, 1), inner);
         root.place(Placement::at(2, 1), Grid::cell().id(CellId(22)));
@@ -1059,13 +1068,13 @@ mod tests {
     fn auto_includes_absolute_insets() {
         // Auto col, child placed with 1cm left + 1cm right insets, child grid
         // has a 3cm fixed col → auto col = 5cm.
-        let inner = Grid::new([Track::Fixed(Length::cm(3.0))], [Track::Fr(1.0)]);
+        let inner = Grid::new([Track::Fixed(Extent::cm(3.0))], [Track::Fr(1.0)]);
         let mut root = Grid::new([Track::Auto], [Track::Fr(1.0)]).id(CellId(0));
         root.place(
             Placement::at(1, 1).inset(
                 Inset::default()
-                    .left(Length::cm(1.0))
-                    .right(Length::cm(1.0)),
+                    .left(Extent::cm(1.0))
+                    .right(Extent::cm(1.0)),
             ),
             inner,
         );
@@ -1084,10 +1093,10 @@ mod tests {
     fn auto_with_explicit_width_inset() {
         // Auto col, child placed with Inset.width(2cm) but containing a
         // 10cm-wide cell → auto col = 2cm (explicit inset wins).
-        let huge = Grid::new([Track::Fixed(Length::cm(10.0))], [Track::Fr(1.0)]);
+        let huge = Grid::new([Track::Fixed(Extent::cm(10.0))], [Track::Fr(1.0)]);
         let mut root = Grid::new([Track::Auto], [Track::Fr(1.0)]).id(CellId(0));
         root.place(
-            Placement::at(1, 1).inset(Inset::default().width(Length::cm(2.0))),
+            Placement::at(1, 1).inset(Inset::default().width(Extent::cm(2.0))),
             huge,
         );
         let layout = root.solve(Size::new(800.0, 200.0), 96.0);
@@ -1102,15 +1111,15 @@ mod tests {
         // (120 px) wins.
         let mut root = Grid::new([Track::Auto], vec![Track::Fr(1.0); 3]).id(CellId(0));
         root.place(
-            Placement::at(1, 1).inset(Inset::default().width(Length::px(50.0))),
+            Placement::at(1, 1).inset(Inset::default().width(Extent::px(50.0))),
             Grid::cell(),
         );
         root.place(
-            Placement::at(2, 1).inset(Inset::default().width(Length::px(120.0))),
+            Placement::at(2, 1).inset(Inset::default().width(Extent::px(120.0))),
             Grid::cell(),
         );
         root.place(
-            Placement::at(3, 1).inset(Inset::default().width(Length::px(80.0))),
+            Placement::at(3, 1).inset(Inset::default().width(Extent::px(80.0))),
             Grid::cell(),
         );
         let layout = root.solve(Size::new(800.0, 300.0), 96.0);
@@ -1126,7 +1135,7 @@ mod tests {
         root.place(
             Placement::at(1, 1)
                 .span(1, 2)
-                .inset(Inset::default().width(Length::px(100.0))),
+                .inset(Inset::default().width(Extent::px(100.0))),
             Grid::cell(),
         );
         let layout = root.solve(Size::new(400.0, 100.0), 96.0);
@@ -1140,7 +1149,7 @@ mod tests {
         // col 2 = 170.
         let mut root = Grid::new([Track::Auto, Track::Fr(1.0)], [Track::Fr(1.0)]);
         root.place(
-            Placement::at(1, 1).inset(Inset::default().width(Length::px(30.0))),
+            Placement::at(1, 1).inset(Inset::default().width(Extent::px(30.0))),
             Grid::cell().id(CellId(1)),
         );
         root.place(Placement::at(1, 2), Grid::cell().id(CellId(2)));
@@ -1159,7 +1168,7 @@ mod tests {
         // `cm(5) * 2` in a 1cm-wide track produces a 10cm width.
         let mut root = Grid::new([Track::Fr(1.0)], [Track::Fr(1.0)]);
         root.place(
-            Placement::at(1, 1).inset(Inset::default().width(Length::cm(5.0) * 2.0)),
+            Placement::at(1, 1).inset(Inset::default().width(Extent::cm(5.0) * 2.0)),
             Grid::cell().id(CellId(1)),
         );
         let layout = root.solve(Size::new(800.0, 200.0), 96.0);
@@ -1176,7 +1185,7 @@ mod tests {
         let mut root = Grid::new([Track::Fr(1.0)], [Track::Fr(1.0)]);
         root.place(
             Placement::at(1, 1)
-                .inset(Inset::default().width(Length::percent(0.5) - Length::mm(5.0))),
+                .inset(Inset::default().width(Extent::percent(0.5) - Extent::mm(5.0))),
             Grid::cell().id(CellId(1)),
         );
         let layout = root.solve(Size::new(400.0, 100.0), 96.0);
@@ -1194,7 +1203,7 @@ mod tests {
             let mut root = Grid::new([Track::Fr(1.0)], [Track::Fr(1.0)]);
             root.place(
                 Placement::at(1, 1).inset(
-                    Inset::default().width(Length::min(Length::cm(2.0), Length::percent(0.25))),
+                    Inset::default().width(Extent::min(Extent::cm(2.0), Extent::percent(0.25))),
                 ),
                 Grid::cell().id(CellId(1)),
             );
@@ -1217,7 +1226,7 @@ mod tests {
         // viewport 200px: cm(2) ≈ 75.59, percent(0.1) + cm(1) ≈ 20 + 37.80 ≈ 57.80
         //   → min ≈ 57.80.
         let mut root = Grid::new([Track::Fr(1.0)], [Track::Fr(1.0)]);
-        let expr = Length::min(Length::cm(1.0), Length::percent(0.1)) + Length::cm(1.0);
+        let expr = Extent::min(Extent::cm(1.0), Extent::percent(0.1)) + Extent::cm(1.0);
         root.place(
             Placement::at(1, 1).inset(Inset::default().width(expr)),
             Grid::cell().id(CellId(1)),
@@ -1233,13 +1242,13 @@ mod tests {
 
     #[test]
     fn length_is_absolute() {
-        assert!(Length::cm(5.0).is_absolute());
-        assert!(Length::px(10.0).is_absolute());
-        assert!(!Length::percent(0.5).is_absolute());
-        assert!((Length::cm(1.0) + Length::px(3.0)).is_absolute());
-        assert!(!(Length::cm(1.0) + Length::percent(0.5)).is_absolute());
-        assert!(Length::min(Length::cm(1.0), Length::px(2.0)).is_absolute());
-        assert!(!Length::max(Length::cm(1.0), Length::percent(0.5)).is_absolute());
+        assert!(Extent::cm(5.0).is_absolute());
+        assert!(Extent::px(10.0).is_absolute());
+        assert!(!Extent::percent(0.5).is_absolute());
+        assert!((Extent::cm(1.0) + Extent::px(3.0)).is_absolute());
+        assert!(!(Extent::cm(1.0) + Extent::percent(0.5)).is_absolute());
+        assert!(Extent::min(Extent::cm(1.0), Extent::px(2.0)).is_absolute());
+        assert!(!Extent::max(Extent::cm(1.0), Extent::percent(0.5)).is_absolute());
     }
 
     // ─── Measure / Content fixtures ──────────────────────────────────────
@@ -1341,7 +1350,7 @@ mod tests {
         // 200-wide fixed col, Auto row containing an AspectContent (factor 0.5).
         // Expected: row height = 200 × 0.5 = 100.
         let mut root = Grid::new(
-            [Track::Fixed(Length::px(200.0))],
+            [Track::Fixed(Extent::px(200.0))],
             [Track::Auto, Track::Fr(1.0)],
         );
         root.place(
@@ -1359,7 +1368,7 @@ mod tests {
         // 200 wide column, Auto row, text of 600 width and line height 20.
         //   600 / 200 = 3 lines → 60 px.
         let mut root_wide = Grid::new(
-            [Track::Fixed(Length::px(200.0))],
+            [Track::Fixed(Extent::px(200.0))],
             [Track::Auto, Track::Fr(1.0)],
         );
         root_wide.place(
@@ -1376,7 +1385,7 @@ mod tests {
 
         // 100 wide column → 6 lines → 120 px.
         let mut root_narrow = Grid::new(
-            [Track::Fixed(Length::px(100.0))],
+            [Track::Fixed(Extent::px(100.0))],
             [Track::Auto, Track::Fr(1.0)],
         );
         root_narrow.place(
@@ -1575,11 +1584,11 @@ mod tests {
         // absorbs the remaining 500 - 250 = 250 width.
         let mut g = Grid::new(
             [
-                Track::Fixed(Length::px(100.0)),
+                Track::Fixed(Extent::px(100.0)),
                 Track::Fr(1.0),
                 Track::Fr(1.0),
             ],
-            [Track::Fixed(Length::px(50.0)), Track::Fr(1.0)],
+            [Track::Fixed(Extent::px(50.0)), Track::Fr(1.0)],
         )
         .respect_at(1, 1);
         g.place(Placement::at(2, 2), Grid::cell().id(CellId(1)));
@@ -1735,13 +1744,13 @@ mod tests {
         // of inner's first column → after the iteration loop, col 2 is 50 px.
         let inner_grid_id = CellId(101);
         let mut inner =
-            Grid::new([Track::Fixed(Length::px(50.0))], [Track::Fr(1.0)]).id(inner_grid_id);
+            Grid::new([Track::Fixed(Extent::px(50.0))], [Track::Fr(1.0)]).id(inner_grid_id);
         inner.place(Placement::at(1, 1), Grid::cell().id(CellId(1)));
 
         let mut root = Grid::new(
             [
-                Track::Fixed(Length::px(100.0)),
-                Track::Fixed(Length::track_of(inner_grid_id, Axis::Width, 1)),
+                Track::Fixed(Extent::px(100.0)),
+                Track::Fixed(Extent::track_of(inner_grid_id, Axis::Width, 1)),
             ],
             [Track::Fr(1.0)],
         );
@@ -1762,8 +1771,8 @@ mod tests {
         let mut inner = Grid::new(
             [Track::Fr(1.0)],
             [
-                Track::Fixed(Length::px(40.0)),
-                Track::Fixed(Length::px(40.0)),
+                Track::Fixed(Extent::px(40.0)),
+                Track::Fixed(Extent::px(40.0)),
             ],
         )
         .id(inner_id);
@@ -1773,7 +1782,7 @@ mod tests {
             [Track::Fr(1.0)],
             [
                 Track::Fr(1.0),
-                Track::Fixed(Length::tracks_of(inner_id, Axis::Height, 1, 2)),
+                Track::Fixed(Extent::tracks_of(inner_id, Axis::Height, 1, 2)),
             ],
         );
         root.place(Placement::at(1, 1), inner);
@@ -1796,8 +1805,8 @@ mod tests {
         let bogus = CellId(999);
         let mut root = Grid::new(
             [
-                Track::Fixed(Length::px(100.0)),
-                Track::Fixed(Length::track_of(bogus, Axis::Width, 1)),
+                Track::Fixed(Extent::px(100.0)),
+                Track::Fixed(Extent::track_of(bogus, Axis::Width, 1)),
             ],
             [Track::Fr(1.0)],
         );

@@ -274,8 +274,19 @@ pub fn log_pretty_breaks(min: f64, max: f64, n_target: usize, base: f64) -> Vec<
     let lo_decade = log_min.floor() as i32;
     let hi_decade = log_max.ceil() as i32;
 
+    // A domain spanning hundreds of decades would otherwise emit a break
+    // per decade. Stepping keeps the count near `n_target`; the walk runs
+    // downward from the top so the largest decade is always represented.
+    let span_decades = (hi_decade - lo_decade).max(0) as usize;
+    let decade_step = if n_target == 0 {
+        1
+    } else {
+        span_decades.div_ceil(n_target).max(1) as i32
+    };
+
     let mut result = Vec::new();
-    for d in lo_decade..=hi_decade {
+    let mut d = hi_decade;
+    while d >= lo_decade {
         let base_d = base.powi(d);
         for m in mults {
             let v = m * base_d;
@@ -283,10 +294,26 @@ pub fn log_pretty_breaks(min: f64, max: f64, n_target: usize, base: f64) -> Vec<
                 result.push(v);
             }
         }
+        d -= decade_step;
     }
     result.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     result.dedup_by(|a, b| (*a - *b).abs() < (*b).abs() * 1e-9);
     result
+}
+
+/// Lower magnitude bound for one branch of a symlog domain whose largest
+/// magnitude is `hi`. The branch spans just enough decades to carry
+/// `n_target` breaks, so a domain that touches or straddles zero produces
+/// a bounded tick set instead of enumerating every decade down to the
+/// smallest representable float.
+fn symlog_branch_floor(hi: f64, n_target: usize, base: f64) -> f64 {
+    let decades = n_target.max(2) - 1;
+    let floor = hi / base.powi(decades as i32);
+    if floor.is_finite() && floor > 0.0 {
+        floor
+    } else {
+        f64::MIN_POSITIVE
+    }
 }
 
 /// Geometric minor breaks between consecutive powers of `base`. Emits
@@ -360,7 +387,11 @@ pub fn symlog_breaks(min: f64, max: f64, n: usize, base: f64) -> Vec<f64> {
 
     if min >= 0.0 {
         // All non-negative.
-        let lo = if min == 0.0 { f64::MIN_POSITIVE } else { min };
+        let lo = if min == 0.0 {
+            symlog_branch_floor(max, n, base)
+        } else {
+            min
+        };
         let mut out = log_pretty_breaks(lo, max, n, base);
         if min == 0.0 {
             out.insert(0, 0.0);
@@ -369,7 +400,11 @@ pub fn symlog_breaks(min: f64, max: f64, n: usize, base: f64) -> Vec<f64> {
     }
     if max <= 0.0 {
         // All non-positive: mirror the positive branch.
-        let lo = if max == 0.0 { f64::MIN_POSITIVE } else { -max };
+        let lo = if max == 0.0 {
+            symlog_branch_floor(-min, n, base)
+        } else {
+            -max
+        };
         let mut pos = log_pretty_breaks(lo, -min, n, base);
         // pos is ascending in magnitude; reverse so that negating
         // produces an ascending sequence in the negative branch.
@@ -382,13 +417,18 @@ pub fn symlog_breaks(min: f64, max: f64, n: usize, base: f64) -> Vec<f64> {
     }
     // Straddles zero.
     let n_each = (n / 2).max(2);
-    let neg = log_pretty_breaks(f64::MIN_POSITIVE, -min, n_each, base);
-    let pos = log_pretty_breaks(f64::MIN_POSITIVE, max, n_each, base);
+    let neg = log_pretty_breaks(symlog_branch_floor(-min, n_each, base), -min, n_each, base);
+    let pos = log_pretty_breaks(symlog_branch_floor(max, n_each, base), max, n_each, base);
     let mut out: Vec<f64> = neg.into_iter().rev().map(|v| -v).collect();
     out.push(0.0);
     out.extend(pos);
     out
 }
+
+/// Break budget each branch is sized against when a symlog domain
+/// touches zero and no tick target is available. Chosen to cover the
+/// decade span a typical major-break target produces.
+const MINOR_BRANCH_BREAKS: usize = 5;
 
 /// Minor breaks for a symmetric-log-like transform. Mirrors
 /// [`log_minor_breaks`] on each branch and stitches.
@@ -397,18 +437,34 @@ pub fn symlog_minor_breaks(min: f64, max: f64, base: f64) -> Vec<f64> {
         return Vec::new();
     }
     if min >= 0.0 {
-        let lo = if min == 0.0 { f64::MIN_POSITIVE } else { min };
+        let lo = if min == 0.0 {
+            symlog_branch_floor(max, MINOR_BRANCH_BREAKS, base)
+        } else {
+            min
+        };
         return log_minor_breaks(lo, max, base);
     }
     if max <= 0.0 {
-        let lo = if max == 0.0 { f64::MIN_POSITIVE } else { -max };
+        let lo = if max == 0.0 {
+            symlog_branch_floor(-min, MINOR_BRANCH_BREAKS, base)
+        } else {
+            -max
+        };
         let pos = log_minor_breaks(lo, -min, base);
         // pos ascends in magnitude; reverse + negate to ascend in
         // negative-branch values.
         return pos.into_iter().rev().map(|v| -v).collect();
     }
-    let neg = log_minor_breaks(f64::MIN_POSITIVE, -min, base);
-    let pos = log_minor_breaks(f64::MIN_POSITIVE, max, base);
+    let neg = log_minor_breaks(
+        symlog_branch_floor(-min, MINOR_BRANCH_BREAKS, base),
+        -min,
+        base,
+    );
+    let pos = log_minor_breaks(
+        symlog_branch_floor(max, MINOR_BRANCH_BREAKS, base),
+        max,
+        base,
+    );
     let mut out: Vec<f64> = neg.into_iter().rev().map(|v| -v).collect();
     out.extend(pos);
     out
@@ -453,8 +509,8 @@ pub fn linear_minor_breaks_between(majors: &[f64], n_per_interval: usize) -> Vec
 //   (which tags the data *kind*: Date / DateTime / Time / Duration).
 //   ggsql calls our `CalendarUnit` `TemporalUnit` — when this code is
 //   lifted into a shared crate one of the two names will need to win.
-// - Time uses microseconds since midnight, matching our Time(i64); ggsql
-//   uses nanoseconds. The algorithm is otherwise identical.
+// - Time uses nanoseconds since midnight, matching our `Time(i64)` and
+//   ggsql's own storage.
 // - No chrono dep: arithmetic uses our `Date::add_months / start_of_*`
 //   helpers (which use the same proleptic Gregorian rules chrono does).
 //
@@ -1461,6 +1517,36 @@ mod tests {
         assert!(b.contains(&0.0), "{b:?} missing 0");
         assert!(b.iter().any(|v| *v < 0.0), "{b:?} missing negative");
         assert!(b.iter().any(|v| *v > 0.0), "{b:?} missing positive");
+        // Each branch is bounded by a data-derived floor, so the tick
+        // count stays in axis territory rather than running down to the
+        // smallest representable float.
+        assert!(b.len() <= 24, "{} breaks is not an axis: {b:?}", b.len());
+        let smallest = b
+            .iter()
+            .copied()
+            .filter(|v| *v != 0.0)
+            .fold(f64::INFINITY, |a, v| a.min(v.abs()));
+        assert!(smallest >= 1e-3, "{b:?} reaches absurdly small magnitudes");
+    }
+
+    #[test]
+    fn symlog_touching_zero_is_bounded() {
+        for (min, max) in [(0.0, 100.0), (-100.0, 0.0)] {
+            let b = symlog_breaks(min, max, 5, 10.0);
+            assert!(b.contains(&0.0), "{b:?} missing 0");
+            assert!(b.len() <= 24, "{} breaks for {min}..{max}: {b:?}", b.len());
+        }
+        let m = symlog_minor_breaks(-100.0, 100.0, 10.0);
+        assert!(m.len() <= 100, "{} minor breaks: {m:?}", m.len());
+    }
+
+    #[test]
+    fn log_pretty_steps_decades_on_enormous_spans() {
+        // Hundreds of decades must not become hundreds of ticks.
+        let b = log_pretty_breaks(1e-300, 1e2, 6, 10.0);
+        assert!(b.len() <= 12, "{} breaks: {b:?}", b.len());
+        // The top of the range is always represented.
+        assert!(b.iter().any(|v| *v >= 1.0), "{b:?} dropped the top decade");
     }
 
     #[test]

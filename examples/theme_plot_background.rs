@@ -12,6 +12,7 @@ use hephaestus::plot::chrome::legend::{Legend, LegendKeySpec};
 use hephaestus::plot::theme::{Element, Length, Margin, RectElement, Theme, ThemeColor};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom};
 use hephaestus::scales::chrome::{AxisSide, LegendSide};
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 fn main() {

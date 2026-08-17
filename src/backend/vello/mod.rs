@@ -5,7 +5,7 @@ mod convert;
 
 use std::num::NonZeroUsize;
 
-use kurbo::Shape;
+use crate::geometry::Shape as _;
 use vello::{AaConfig, AaSupport, RenderParams, Renderer as VRenderer, RendererOptions, Scene};
 
 use crate::backend::{BackendError, Renderer, WgpuRenderer};
@@ -63,14 +63,6 @@ impl VelloScene {
     pub(crate) fn raw_pick(&self) -> Option<&Scene> {
         self.pick.as_ref()
     }
-
-    /// Clear both the display scene and (if present) the pick scene.
-    pub fn clear(&mut self) {
-        self.inner.reset();
-        if let Some(p) = &mut self.pick {
-            p.reset();
-        }
-    }
 }
 
 impl Default for VelloScene {
@@ -80,6 +72,15 @@ impl Default for VelloScene {
 }
 
 impl SceneBuilder for VelloScene {
+    /// Clears both the display scene and, when picking is enabled, the
+    /// parallel pick scene.
+    fn clear(&mut self) {
+        self.inner.reset();
+        if let Some(p) = &mut self.pick {
+            p.reset();
+        }
+    }
+
     fn fill(
         &mut self,
         rule: FillRule,
@@ -145,8 +146,9 @@ impl SceneBuilder for VelloScene {
         if let Some(pick) = &mut self.pick {
             if let Some(id) = pick::raw_id(pick_id) {
                 let pick_brush = Brush::Solid(pick::id_to_color(id));
-                let bounds = kurbo::Rect::new(0.0, 0.0, image.width as f64, image.height as f64)
-                    .to_path(0.1);
+                let bounds =
+                    crate::geometry::Rect::new(0.0, 0.0, image.width as f64, image.height as f64)
+                        .to_path(0.1);
                 pick.fill(peniko::Fill::NonZero, transform, &pick_brush, None, &bounds);
             }
         }
@@ -157,16 +159,15 @@ impl SceneBuilder for VelloScene {
             Some(stroke) => peniko::StyleRef::from(stroke),
             None => peniko::StyleRef::from(peniko::Fill::NonZero),
         };
-        let mut builder = self
+        let builder = self
             .inner
-            .draw_glyphs(&run.font.0)
+            .draw_glyphs(run.font.data())
             .font_size(run.font_size)
             .transform(run.transform)
             .glyph_transform(run.glyph_transform)
             .brush(run.brush)
             .brush_alpha(run.brush_alpha)
             .hint(run.hint);
-        let _ = &mut builder; // silence unused if hint() ever returns ()
         builder.draw(
             style,
             run.glyphs.iter().map(|g| vello::Glyph {
@@ -183,15 +184,14 @@ impl SceneBuilder for VelloScene {
                     Some(stroke) => peniko::StyleRef::from(stroke),
                     None => peniko::StyleRef::from(peniko::Fill::NonZero),
                 };
-                let mut pick_builder = pick
-                    .draw_glyphs(&run.font.0)
+                let pick_builder = pick
+                    .draw_glyphs(run.font.data())
                     .font_size(run.font_size)
                     .transform(run.transform)
                     .glyph_transform(run.glyph_transform)
                     .brush(&pick_brush)
                     .brush_alpha(1.0)
                     .hint(run.hint);
-                let _ = &mut pick_builder;
                 pick_builder.draw(
                     pick_style,
                     run.glyphs.iter().map(|g| vello::Glyph {
@@ -399,7 +399,7 @@ pub struct VelloRenderer {
     pick_target: Option<HeadlessTarget>,
     /// Tightly-packed RGBA8 bytes of the most-recent pick render, viewable as
     /// `&[u32]` via bytemuck. `None` until the first picking-enabled render.
-    hitmap: Option<Vec<u8>>,
+    hitmap: Option<Vec<u32>>,
     hitmap_dims: Option<(u32, u32)>,
 }
 
@@ -441,7 +441,13 @@ impl VelloRenderer {
 
     async fn new_async(picking: bool) -> Result<Self, BackendError> {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
-        desc.backends = wgpu::Backends::PRIMARY;
+        // GL is included alongside PRIMARY so the GLES / WebGL backends
+        // compiled in for unix and wasm are actually reachable: a browser
+        // without WebGPU, or a Linux host without Vulkan, falls back to
+        // GL rather than finding no adapter at all. `WGPU_BACKENDS`
+        // overrides the choice when a host needs to pin one.
+        desc.backends =
+            wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY | wgpu::Backends::GL);
         let instance = wgpu::Instance::new(desc);
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -605,17 +611,19 @@ impl VelloRenderer {
         }
 
         let row_bytes = (width as usize) * 4;
-        let total_bytes = (width as usize) * (height as usize) * 4;
+        let row_px = width as usize;
+        let total_px = (width as usize) * (height as usize);
         let hitmap = self.hitmap.get_or_insert_with(Vec::new);
-        if hitmap.len() != total_bytes {
-            hitmap.resize(total_bytes, 0);
+        if hitmap.len() != total_px {
+            hitmap.resize(total_px, 0);
         }
         {
             let data = pick_slice.get_mapped_range();
             let padded = pick_target.padded_bytes_per_row as usize;
             for y in 0..height as usize {
                 let src = &data[y * padded..y * padded + row_bytes];
-                let dst = &mut hitmap[y * row_bytes..y * row_bytes + row_bytes];
+                let dst: &mut [u8] =
+                    bytemuck::cast_slice_mut(&mut hitmap[y * row_px..y * row_px + row_px]);
                 dst.copy_from_slice(src);
             }
         }
@@ -636,8 +644,7 @@ impl VelloRenderer {
         if x >= w || y >= h {
             return None;
         }
-        let bytes = self.hitmap.as_deref()?;
-        let map: &[u32] = bytemuck::cast_slice(bytes);
+        let map = self.hitmap.as_deref()?;
         pick::decode(map[(y * w + x) as usize])
     }
 
@@ -645,7 +652,7 @@ impl VelloRenderer {
     /// laid out row-major. Useful for bulk queries (marquee selection etc.).
     /// Returns `None` if picking is disabled or no render has been performed.
     pub fn hitmap(&self) -> Option<&[u32]> {
-        self.hitmap.as_deref().map(bytemuck::cast_slice)
+        self.hitmap.as_deref()
     }
 }
 
@@ -821,10 +828,11 @@ impl Renderer for VelloRenderer {
 
         if picking {
             let pick_target = self.pick_target.as_ref().unwrap();
-            let total_bytes = (width as usize) * (height as usize) * 4;
+            let row_px = width as usize;
+            let total_px = (width as usize) * (height as usize);
             let hitmap = self.hitmap.get_or_insert_with(Vec::new);
-            if hitmap.len() != total_bytes {
-                hitmap.resize(total_bytes, 0);
+            if hitmap.len() != total_px {
+                hitmap.resize(total_px, 0);
             }
             let pick_slice = pick_target.readback.slice(..);
             {
@@ -832,7 +840,8 @@ impl Renderer for VelloRenderer {
                 let padded = pick_target.padded_bytes_per_row as usize;
                 for y in 0..height as usize {
                     let src = &data[y * padded..y * padded + row_bytes];
-                    let dst = &mut hitmap[y * row_bytes..y * row_bytes + row_bytes];
+                    let dst: &mut [u8] =
+                        bytemuck::cast_slice_mut(&mut hitmap[y * row_px..y * row_px + row_px]);
                     dst.copy_from_slice(src);
                 }
             }
@@ -946,8 +955,8 @@ fn triangle_gradient_brush(pts: &[Point; 3], colors: &[Color; 3]) -> Brush {
         if perp_len < 1e-12 {
             // Degenerate back-edge: A and B coincide. Fall back to a
             // straight A → tip gradient.
-            let gradient =
-                peniko::Gradient::new_linear(pts[a], pts[t]).with_stops([colors[a], colors[t]]);
+            let gradient = crate::brush::Gradient::new_linear(pts[a], pts[t])
+                .with_stops([colors[a], colors[t]]);
             return Brush::Gradient(gradient);
         }
         // Perpendicular to AB (90° CCW). Either sign is fine — we
@@ -960,9 +969,11 @@ fn triangle_gradient_brush(pts: &[Point; 3], colors: &[Color; 3]) -> Brush {
         let d_signed = dx * perp_x + dy * perp_y;
         let end_x = start_x + perp_x * d_signed;
         let end_y = start_y + perp_y * d_signed;
-        let gradient =
-            peniko::Gradient::new_linear(Point::new(start_x, start_y), Point::new(end_x, end_y))
-                .with_stops([colors[a], colors[t]]);
+        let gradient = crate::brush::Gradient::new_linear(
+            Point::new(start_x, start_y),
+            Point::new(end_x, end_y),
+        )
+        .with_stops([colors[a], colors[t]]);
         return Brush::Gradient(gradient);
     }
 
@@ -977,7 +988,7 @@ fn triangle_gradient_brush(pts: &[Point; 3], colors: &[Color; 3]) -> Brush {
     } else {
         (2, 0)
     };
-    let gradient = peniko::Gradient::new_linear(pts[a_idx], pts[b_idx])
+    let gradient = crate::brush::Gradient::new_linear(pts[a_idx], pts[b_idx])
         .with_stops([colors[a_idx], colors[b_idx]]);
     Brush::Gradient(gradient)
 }
@@ -1098,7 +1109,8 @@ fn quad_gradient_brush(pts: &[Point; 4], colors: &[Color; 4]) -> Brush {
     if pair01 && pair23 {
         let start = Point::new(0.5 * (pts[0].x + pts[1].x), 0.5 * (pts[0].y + pts[1].y));
         let end = Point::new(0.5 * (pts[2].x + pts[3].x), 0.5 * (pts[2].y + pts[3].y));
-        let gradient = peniko::Gradient::new_linear(start, end).with_stops([colors[0], colors[2]]);
+        let gradient =
+            crate::brush::Gradient::new_linear(start, end).with_stops([colors[0], colors[2]]);
         return Brush::Gradient(gradient);
     }
     // Other pairings (12, 30): rotate the gradient axis accordingly.
@@ -1107,7 +1119,8 @@ fn quad_gradient_brush(pts: &[Point; 4], colors: &[Color; 4]) -> Brush {
     if pair12 && pair30 {
         let start = Point::new(0.5 * (pts[1].x + pts[2].x), 0.5 * (pts[1].y + pts[2].y));
         let end = Point::new(0.5 * (pts[3].x + pts[0].x), 0.5 * (pts[3].y + pts[0].y));
-        let gradient = peniko::Gradient::new_linear(start, end).with_stops([colors[1], colors[3]]);
+        let gradient =
+            crate::brush::Gradient::new_linear(start, end).with_stops([colors[1], colors[3]]);
         return Brush::Gradient(gradient);
     }
     // Fallback: pick the max-distance pair across the four vertices.
@@ -1120,7 +1133,7 @@ fn quad_gradient_brush(pts: &[Point; 4], colors: &[Color; 4]) -> Brush {
             }
         }
     }
-    let gradient = peniko::Gradient::new_linear(pts[best.0], pts[best.1])
+    let gradient = crate::brush::Gradient::new_linear(pts[best.0], pts[best.1])
         .with_stops([colors[best.0], colors[best.1]]);
     Brush::Gradient(gradient)
 }

@@ -4,7 +4,9 @@
 //! mark identity: rows sharing a key value belong to the same line.
 //! Unique key values, in first-appearance order, define the marks.
 //! Within a mark, rows are connected in source order; the geom does not
-//! sort. Non-finite vertices (NaN x or y) are skipped — no segment break.
+//! sort. A vertex whose `x` or `y` doesn't resolve to a finite position
+//! breaks the line: the run in progress ends and the next one starts
+//! after the gap.
 //!
 //! Channels consumed:
 //!
@@ -1303,7 +1305,7 @@ mod tests {
 
     #[test]
     fn within_mark_linewidth_divergence_upgrades_to_mesh() {
-        // Phase E.5: variance in `linewidth` triggers a per-vertex
+        // Variance in `linewidth` triggers a per-vertex
         // ribbon-mesh upgrade. The stroke fast-path is bypassed; one
         // DrawMesh op carries the per-vertex half-widths.
         let mut g = LineGeom::builder()
@@ -1568,7 +1570,7 @@ mod tests {
     fn linetype_marker_glyph_shape_emits_draw_glyphs() {
         // A glyph-shape linetype marker should walk the polyline and
         // emit a DrawGlyphs op per stamp (instead of a Fill op).
-        let blob = peniko::Blob::new(std::sync::Arc::new(Vec::<u8>::new()));
+        let blob = crate::brush::Blob::new(std::sync::Arc::new(Vec::<u8>::new()));
         let font = crate::scene::Font::new(blob, 0);
         let em_bbox = crate::geometry::Rect::new(0.0, 0.0, 1.0, 1.0);
         let em_origin = crate::geometry::Point::new(0.0, 0.8);
@@ -2029,7 +2031,7 @@ mod tests {
         path.elements()
             .iter()
             .filter_map(|el| match el {
-                kurbo::PathEl::MoveTo(p) | kurbo::PathEl::LineTo(p) => Some(*p),
+                crate::path::PathEl::MoveTo(p) | crate::path::PathEl::LineTo(p) => Some(*p),
                 _ => None,
             })
             .collect()
@@ -2038,7 +2040,7 @@ mod tests {
     fn count_curves(path: &crate::path::Path) -> usize {
         path.elements()
             .iter()
-            .filter(|el| matches!(el, kurbo::PathEl::CurveTo(_, _, _)))
+            .filter(|el| matches!(el, crate::path::PathEl::CurveTo(_, _, _)))
             .count()
     }
 
@@ -2152,7 +2154,7 @@ mod tests {
         let path = stroke_path(&scene).expect("stroke");
         // First element is MoveTo at the trim point.
         match path.elements().first() {
-            Some(kurbo::PathEl::MoveTo(p)) => {
+            Some(crate::path::PathEl::MoveTo(p)) => {
                 let expected = 20.0 * 96.0 / 72.0;
                 assert!((p.x - expected).abs() < 1e-6, "start.x = {}", p.x);
             }
@@ -2160,7 +2162,7 @@ mod tests {
         }
     }
 
-    // ── Endpoint markers (Phase C.5) ──
+    // ── Endpoint markers ──
 
     fn horizontal_line_with(
         extra: impl FnOnce(&mut crate::plot::geom::GeomBuilder<LineGeom>),
@@ -2495,7 +2497,7 @@ mod tests {
         assert_eq!(strokes, 0);
     }
 
-    // ─── Phase E.5: ribbon-mode dispatch tests ────────────────────────────
+    // ─── Ribbon-mode dispatch tests ─────────────────────────────────────
 
     fn mesh_ops(scene: &RecordingScene) -> Vec<&crate::mesh::Mesh> {
         scene

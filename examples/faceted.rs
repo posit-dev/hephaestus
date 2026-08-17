@@ -34,15 +34,12 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{beside, grid, Composition, Element, Patch};
 use hephaestus::geometry::Size;
-#[cfg(feature = "text")]
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
-#[cfg(feature = "text")]
 use hephaestus::plot::chrome::legend::{Legend, LegendKeySpec};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom};
-#[cfg(feature = "text")]
 use hephaestus::scales::chrome::{AxisSide, LegendSide};
-#[cfg(feature = "text")]
 use hephaestus::scales::value::Value;
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 fn comp_shape(aspect: Option<(f32, f32)>) -> Composition {
@@ -95,7 +92,6 @@ fn main() {
         // composition rather than on any single plot. The legend reads
         // its rows from the "series" scale's domain; no plot needs to
         // bind that scale for the legend to resolve it.
-        #[cfg(feature = "text")]
         let mut view = {
             let series: Vec<Value> = datasets.iter().map(|(id, _, _)| Value::from(*id)).collect();
             let colors: Vec<Color> = datasets.iter().map(|(_, _, c)| *c).collect();
@@ -184,7 +180,6 @@ fn attach_all(view: &mut PlotComposition, xs: &[f64], datasets: &[(&str, Vec<f64
                 .set("size", 4.0_f64)
                 .build(),
         );
-        #[cfg(feature = "text")]
         {
             p.add_axis(Axis::rail(
                 "time",

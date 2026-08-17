@@ -13,12 +13,11 @@
 //! outside its box, blocks stacked in the wrong order) without
 //! breaking on a font update.
 
-#![cfg(feature = "text")]
-
 use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::geometry::Affine;
 use hephaestus::pick::PickId;
+use hephaestus::scene::SceneBuilder;
 use hephaestus::style_vocab::{HAlign, Palette};
 use hephaestus::text::rich::{
     draw_rich_text, parse, reduce, BlockKind, BuiltRuns, InlineRun, ResolvedStyle, RichAnchor,

@@ -1160,7 +1160,12 @@ mod tests {
             return path
                 .elements()
                 .iter()
-                .filter(|el| matches!(el, kurbo::PathEl::MoveTo(_) | kurbo::PathEl::LineTo(_)))
+                .filter(|el| {
+                    matches!(
+                        el,
+                        crate::path::PathEl::MoveTo(_) | crate::path::PathEl::LineTo(_)
+                    )
+                })
                 .count();
         }
         panic!("no matching path op emitted");

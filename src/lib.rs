@@ -31,28 +31,32 @@ pub mod style_vocab;
 #[cfg(feature = "png")]
 pub mod png;
 
-#[cfg(feature = "text")]
 pub mod text;
 
-// Curated re-exports of the most commonly used types.
+// Curated re-exports: the types a caller touches writing a
+// hello-world against either API level. Anything more specialised is
+// reached through its own module path.
 pub use blend::{BlendMode, Compose, Mix};
 pub use brush::{Brush, Sampling};
-pub use color::{Color, ColorSpace};
+pub use color::{lerp_color, rgb, rgb8, rgba, Color, ColorSpace};
 pub use geometry::{Affine, Point, Rect, Size, Vec2};
 pub use layout::{
-    Cell, CellId, Grid, Inset, Layout, Length, Measure, Node, Placement, Track, WidthHint,
+    Axis, Cell, CellId, Extent, Grid, Inset, Layout, Measure, Placement, Respect, Track, WidthHint,
 };
+pub use linetype::LinetypeStep;
 pub use mesh::Mesh;
 pub use path::{FillRule, Path};
 pub use pick::PickId;
 pub use primitives::{
     annular_wedge, arc, circle, clip_polyline, ellipse, offset_polygon, path_to_rings, polygon,
     polyline, rect, regular_polygon, regular_polygon_vertices, round_corners, round_path_corners,
-    rounded_rect, segment, wedge, CornerRounding, EndClip, PolygonOptions, PolylineOptions,
+    rounded_rect, segment, wedge, ArcLengthWalker, ArcSample, CornerRounding, EndClip,
+    PolygonOptions, PolylineOptions, PolylineSampler, RibbonOptions, TrailingPolicy,
 };
-pub use scene::SceneBuilder;
+pub use scene::{Font, Glyph, GlyphRun, SceneBuilder};
 pub use shape::{Shape, ShapeRegistry, ShapeStyle};
 pub use stroke::Stroke;
+pub use style_vocab::{HAlign, Length, Margin, Palette, ThemeColor, VAlign};
 
 pub use backend::{BackendError, Renderer};
 

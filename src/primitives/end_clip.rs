@@ -60,7 +60,7 @@ impl EndClip {
     }
 }
 
-fn exit_circle(p0: Point, d: kurbo::Vec2, center: Point, radius: f64) -> Option<f64> {
+fn exit_circle(p0: Point, d: crate::geometry::Vec2, center: Point, radius: f64) -> Option<f64> {
     let f = p0 - center;
     let a = d.dot(d);
     if a == 0.0 {
@@ -82,7 +82,7 @@ fn exit_circle(p0: Point, d: kurbo::Vec2, center: Point, radius: f64) -> Option<
     }
 }
 
-fn exit_rect(p0: Point, d: kurbo::Vec2, r: Rect) -> Option<f64> {
+fn exit_rect(p0: Point, d: crate::geometry::Vec2, r: Rect) -> Option<f64> {
     let mut t_exit = f64::INFINITY;
     if d.x > 0.0 {
         t_exit = t_exit.min((r.x1 - p0.x) / d.x);

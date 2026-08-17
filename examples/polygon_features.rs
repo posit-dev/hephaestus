@@ -25,6 +25,7 @@ use hephaestus::plot::value::Value;
 use hephaestus::plot::{
     EllipseGeom, Plot, PlotComposition, PolygonGeom, Raw, RectGeom, TextGeom, WedgeGeom,
 };
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 /// Generate `n`-pointed star vertices in panel-fraction space, anchored

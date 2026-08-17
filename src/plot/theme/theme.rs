@@ -136,10 +136,6 @@ pub struct Theme {
     /// slot uses the same defaults for `strong` / `em` / headings /
     /// list items / etc.
     ///
-    /// Gated on the `text` feature (which gates
-    /// [`crate::text::rich::RichTextStyleSheet`] and every callsite
-    /// that consumes it).
-    #[cfg(feature = "text")]
     pub rich_text: std::sync::Arc<crate::text::rich::RichTextStyleSheet>,
 }
 
@@ -300,7 +296,6 @@ impl Default for Theme {
             strip_padding: Margin::all(Length::Abs(HALF_LINE_PT)),
             geom: GeomTheme::default(),
             locale: Locale::default(),
-            #[cfg(feature = "text")]
             rich_text: std::sync::Arc::new(crate::text::rich::RichTextStyleSheet::new()),
         }
     }
@@ -350,6 +345,14 @@ impl Theme {
         let mut out = self.clone();
         part.apply(&mut out);
         out
+    }
+
+    /// Resolve the axis chrome for `(channel, side)`, continuing the
+    /// text cascade into this theme's root `text` element. Chrome
+    /// should reach for this rather than `theme.axis.resolve`, so a
+    /// figure-wide font reaches axis titles and tick labels.
+    pub fn resolved_axis(&self, ch: u8, side: u8) -> crate::plot::theme::ResolvedAxis {
+        self.axis.resolve_with_root(ch, side, Some(&self.text))
     }
 
     /// Resolve the [`LegendTheme`] for a legend that opted into the
@@ -430,8 +433,6 @@ pub struct ThemePart {
     /// sheet). Chrome slots and text geoms that opt into markdown
     /// resolve their selectors through it.
     ///
-    /// Gated on the `text` feature, like [`Theme::rich_text`].
-    #[cfg(feature = "text")]
     pub rich_text: Option<std::sync::Arc<crate::text::rich::RichTextStyleSheet>>,
 }
 
@@ -470,7 +471,6 @@ impl ThemePart {
         set_field!(strip_padding);
         set_field!(geom);
         set_field!(locale);
-        #[cfg(feature = "text")]
         set_field!(rich_text);
         for (k, v) in &self.legend_variants {
             theme.legend_variants.insert(k.clone(), v.clone());

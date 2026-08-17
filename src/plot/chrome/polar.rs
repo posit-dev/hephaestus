@@ -14,7 +14,7 @@ use crate::geometry::{Affine, Point, Rect, Vec2};
 use crate::layout::{Measure, WidthHint};
 use crate::pick::PickId;
 use crate::plot::chrome::linear_axis::{
-    axis_ink, draw_axis_label, draw_linear_axis_at, AxisChromeStyle, AxisLabelAt,
+    draw_axis_label, draw_linear_axis_at, AxisChromeStyle, AxisLabelAt,
 };
 use crate::plot::projection::PolarProjection;
 use crate::plot::scale::Scale;
@@ -74,8 +74,13 @@ pub fn draw_radius_axis(
     let end = Point::new(g.cx + g.r_outer * ux, g.cy - g.r_outer * uy);
     let tick_direction = radius_axis_tick_direction(polar, theta_frac);
     // Polar radius axis = channel 1, primary spoke (side 0).
-    let resolved = theme.axis.resolve(1, 0);
-    let style = AxisChromeStyle::from_resolved(&resolved, &theme.palette, dpi);
+    let resolved = theme.resolved_axis(1, 0);
+    let style = AxisChromeStyle::from_resolved(
+        &resolved,
+        &theme.palette,
+        dpi,
+        crate::plot::chrome::root_text_pt(theme),
+    );
     draw_linear_axis_at(
         scene,
         start,
@@ -121,6 +126,7 @@ pub fn draw_radius_axis(
                 style.gap_px,
                 style.title_gap_px,
                 dpi,
+                crate::plot::chrome::root_text_pt(theme),
             );
         }
     }
@@ -168,8 +174,13 @@ pub fn draw_angular_axis(
         AngularRing::Outer => 0_u8,
         AngularRing::Inner => 1_u8,
     };
-    let resolved = theme.axis.resolve(0, side_idx);
-    let chrome_style = AxisChromeStyle::from_resolved(&resolved, &theme.palette, dpi);
+    let resolved = theme.resolved_axis(0, side_idx);
+    let chrome_style = AxisChromeStyle::from_resolved(
+        &resolved,
+        &theme.palette,
+        dpi,
+        crate::plot::chrome::root_text_pt(theme),
+    );
     let tick_px = chrome_style.tick_length_px;
     let minor_tick_px = chrome_style.minor_tick_length_px;
     let label_gap_px = chrome_style.gap_px;
@@ -290,6 +301,7 @@ pub fn draw_angular_axis(
                         chrome_style.gap_px,
                         chrome_style.title_gap_px,
                         dpi,
+                        crate::plot::chrome::root_text_pt(theme),
                     );
                 }
                 AngularRing::Inner => {
@@ -321,7 +333,7 @@ pub enum AngularRing {
 /// bleed for axis-aligned labels and over-reserve slightly for
 /// diagonal ones.
 #[derive(Clone, Debug)]
-pub struct PolarBleed {
+pub(crate) struct PolarBleed {
     pub top_px: f64,
     pub right_px: f64,
     pub bottom_px: f64,
@@ -345,7 +357,7 @@ impl PolarBleed {
 /// principal axis (width for Left/Right, height for Top/Bottom) and
 /// zero on the cross axis — matching how the cartesian axis
 /// measure reports its chrome thickness.
-pub struct PolarBleedMeasure {
+pub(crate) struct PolarBleedMeasure {
     pub side: AxisSide,
     pub bleed: PolarBleed,
 }
@@ -393,14 +405,15 @@ impl Measure for PolarBleedMeasure {
 /// midpoint, curving along an arc; their radial extent past `r_outer`
 /// is `tick + gap + label_max + title_gap + title_h` and is
 /// distributed to cardinal sides by the midpoint direction.
-pub fn compute_polar_bleed(axes: &[BleedAxis], dpi: f64, theme: &Theme) -> PolarBleed {
+pub(crate) fn compute_polar_bleed(axes: &[BleedAxis], dpi: f64, theme: &Theme) -> PolarBleed {
     // Resolve each polar axis-type's chrome style once; pick per-label
     // by `BleedLabelKind`. Angular labels (outer ring) live on
     // channel 0 / side 0; radius labels live on channel 1 / side 0.
+    let root_pt = crate::plot::chrome::root_text_pt(theme);
     let angular_style =
-        AxisChromeStyle::from_resolved(&theme.axis.resolve(0, 0), &theme.palette, dpi);
+        AxisChromeStyle::from_resolved(&theme.resolved_axis(0, 0), &theme.palette, dpi, root_pt);
     let radial_style =
-        AxisChromeStyle::from_resolved(&theme.axis.resolve(1, 0), &theme.palette, dpi);
+        AxisChromeStyle::from_resolved(&theme.resolved_axis(1, 0), &theme.palette, dpi, root_pt);
     let title_style_for = |kind: &BleedLabelKind| match kind {
         BleedLabelKind::Radius => &radial_style,
         _ => &angular_style,
@@ -488,9 +501,10 @@ pub fn compute_polar_bleed(axes: &[BleedAxis], dpi: f64, theme: &Theme) -> Polar
                     // gap / title_gap) so measured bleed matches the
                     // draw helper exactly. `Blank` short-circuits:
                     // no draw → no bleed reservation.
-                    let Some(title_text_style) =
-                        angular_title_text_style(&theme.axis.resolve(0, 0))
-                    else {
+                    let Some(title_text_style) = angular_title_text_style(
+                        &theme.resolved_axis(0, 0),
+                        crate::plot::chrome::root_text_pt(theme),
+                    ) else {
                         continue;
                     };
                     let run = TextRun::new(&title.text, &title_text_style, dpi);
@@ -537,7 +551,7 @@ pub fn compute_polar_bleed(axes: &[BleedAxis], dpi: f64, theme: &Theme) -> Polar
 }
 
 /// One axis's labels (and optional title) for the bleed computer.
-pub struct BleedAxis {
+pub(crate) struct BleedAxis {
     pub labels: Vec<BleedLabel>,
     /// Title contribution to the bleed, if the axis has one. Drives
     /// the title-past-the-label-rail reservation; only outer angular
@@ -546,14 +560,14 @@ pub struct BleedAxis {
 }
 
 /// One axis title's contribution to the bleed.
-pub struct BleedTitle {
+pub(crate) struct BleedTitle {
     pub text: String,
     pub kind: BleedTitleKind,
 }
 
 /// How an axis title is placed relative to the polar geometry.
 #[derive(Clone, Copy, Debug)]
-pub enum BleedTitleKind {
+pub(crate) enum BleedTitleKind {
     /// Outer angular axis title — curves along an arc just past the
     /// label rail, centred at the arc midpoint.
     OuterAngular {
@@ -574,7 +588,7 @@ pub enum BleedTitleKind {
 /// `draw_axis_label` uses): a radius label at a horizontal bottom
 /// spoke has direction `(0, 1)`, pushing the entire label below the
 /// anchor.
-pub struct BleedLabel {
+pub(crate) struct BleedLabel {
     pub text: String,
     pub kind: BleedLabelKind,
     pub direction: (f64, f64),
@@ -583,7 +597,7 @@ pub struct BleedLabel {
 /// How a label is placed relative to the polar geometry; drives
 /// whether it can bleed past the panel and by how much.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum BleedLabelKind {
+pub(crate) enum BleedLabelKind {
     /// Outer angular axis label — anchored at near edge past
     /// `r_outer + tick + gap` in the direction of `theta`.
     OuterAngular,
@@ -622,11 +636,14 @@ const ANGULAR_TITLE_ARC_SEGMENTS: usize = 32;
 /// `ResolvedAxis`. `None` when the title element is `Blank` — both
 /// the bleed measure and the draw site short-circuit instead of
 /// reserving / drawing nothing.
-fn angular_title_text_style(resolved: &crate::plot::theme::ResolvedAxis) -> Option<TextStyle> {
+fn angular_title_text_style(
+    resolved: &crate::plot::theme::ResolvedAxis,
+    root_pt: f64,
+) -> Option<TextStyle> {
     resolved
         .title
         .as_ref()
-        .map(|el| crate::plot::plot::text_style_from(el, 10.0))
+        .map(|el| crate::plot::plot::text_style_from(el, root_pt))
 }
 
 /// Render a radius axis title past the outer end of the tick labels,
@@ -653,6 +670,7 @@ fn draw_radius_title(
     label_gap_px: f64,
     title_gap_px: f64,
     dpi: f64,
+    root_pt: f64,
 ) {
     let g = polar.geometry(panel);
     if g.r_outer <= 0.0 {
@@ -667,7 +685,6 @@ fn draw_radius_title(
     // Rotation angle (screen coords, y-down).
     let mut theta_spoke = sy.atan2(sx);
 
-    let root_pt = crate::plot::theme::DEFAULT_TEXT_SIZE_PT;
     let style = crate::plot::plot::text_style_from(title_el, root_pt);
     let run = crate::text::TextRun::new(title, &style, dpi);
     let title_w = run.natural_width();
@@ -722,8 +739,9 @@ fn draw_radius_title(
     let title_color = title_el
         .color
         .clone()
-        .map(|c| c.resolve(palette))
-        .unwrap_or_else(axis_ink);
+        .or_else(|| crate::plot::theme::text_concrete_defaults().color)
+        .expect("text_concrete_defaults sets color")
+        .resolve(palette);
     let brush = Brush::Solid(title_color);
     let outline = crate::plot::plot::text_outline_from(title_el, palette, dpi);
     for g_glyph in &glyphs {
@@ -787,12 +805,12 @@ fn draw_angular_title(
     label_gap_px: f64,
     title_gap_px: f64,
     dpi: f64,
+    root_pt: f64,
 ) {
     let g = polar.geometry(panel);
     if g.r_outer <= 0.0 {
         return;
     }
-    let root_pt = crate::plot::theme::DEFAULT_TEXT_SIZE_PT;
     let style = crate::plot::plot::text_style_from(title_el, root_pt);
     let run = crate::text::TextRun::new(title, &style, dpi);
     let text_w = run.natural_width();
@@ -890,8 +908,9 @@ fn draw_angular_title(
     let title_color = title_el
         .color
         .clone()
-        .map(|c| c.resolve(palette))
-        .unwrap_or_else(axis_ink);
+        .or_else(|| crate::plot::theme::text_concrete_defaults().color)
+        .expect("text_concrete_defaults sets color")
+        .resolve(palette);
     let brush = Brush::Solid(title_color);
     let outline = crate::plot::plot::text_outline_from(title_el, palette, dpi);
     for gph in &glyphs {

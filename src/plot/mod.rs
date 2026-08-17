@@ -22,7 +22,6 @@
 //! [`ScaleRegistry`]. See `Plot::wire` / `Plot::draw_chrome_into` /
 //! `Plot::draw_panel_into`.
 
-#[cfg(feature = "text")]
 pub mod chrome;
 pub mod composition;
 pub mod diff;
@@ -34,6 +33,8 @@ pub mod scale;
 pub mod theme;
 pub mod value;
 
+pub use chrome::axis::{Axis, AxisId, AxisPlacement, PolarRing};
+pub use chrome::legend::{Legend, LegendId, LegendKeySpec};
 pub use composition::{PlotComposition, ValidationIssue};
 pub use diff::{diff_columns, diff_positional, KeyIndex};
 pub use geom::{
@@ -41,7 +42,6 @@ pub use geom::{
     GeomBuilder, GeomContext, GeometryGeom, Keys, LineGeom, PointGeom, PolygonGeom, Raw, RectGeom,
     RibbonBSplineGeom, RibbonGeom, ScaleResolver, SegmentGeom, WedgeGeom,
 };
-#[cfg(feature = "text")]
 pub use geom::{TextFitGeom, TextGeom, TextPathGeom};
 pub use plot::{AspectMode, GeomId, Plot};
 pub use projection::{ChromeStrategy, CustomProjection, Projection};

@@ -38,7 +38,7 @@
 //! - `"offset"` — pt offset along the path where the text layout starts
 //!   (optional; default `0.0`; per mark). Positive values shift text
 //!   forward along the path.
-//! - `"hjust"` — fraction in `[0, 1]` of the available whitespace
+//! - `"justify_x"` — fraction in `[0, 1]` of the available whitespace
 //!   (`path_length - text_width`) to pad at the start of the text
 //!   (optional; default `0.0`; per mark). `0.0` = text starts at the
 //!   offset point, `0.5` = centred, `1.0` = text ends at the offset
@@ -48,14 +48,18 @@
 //!   true, the layout checks whether the majority of glyph tangents
 //!   point into the left half-plane (i.e., the text would render
 //!   upside-down as a whole). If so, the entire text is laid out
-//!   against the *reversed* path with `hjust` inverted — every glyph
+//!   against the *reversed* path with `justify_x` inverted — every glyph
 //!   then reads right-side-up and reading direction along the path
 //!   reverses. This is a per-mark decision (the whole text flips
 //!   together or not at all); no mid-text orientation changes.
 //!   Matches ggplot2 `geomtextpath::geom_textpath(upright = TRUE)`.
-//! - `"vjust"` — perpendicular offset in pt from the curve (optional;
-//!   default `0.0`; per mark). `0` = glyph baseline on the curve,
-//!   negative = above (screen-space), positive = below.
+//! - `"anchor_y"` — vertical anchor as a fraction of the text's own
+//!   height (optional; default `0.5`; per mark). `0` puts the text's
+//!   top edge on the curve so the body hangs off the right-of-motion
+//!   side, `0.5` centres the body on the curve, `1` puts the bottom
+//!   edge on it. Same fraction-of-own-height convention as
+//!   [`TextGeom`](super::TextGeom)'s `"anchor_y"`; values outside
+//!   `[0, 1]` push the text clear of the curve.
 //! - `"angle"` — additional per-mark rotation in radians, mathematical
 //!   CCW (optional; default `0.0`). Applied on top of the per-glyph
 //!   tangent rotation.
@@ -108,9 +112,9 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("fill", ExpectedOutput::Colors),
     ("fill_opacity", ExpectedOutput::Numbers),
     ("offset", ExpectedOutput::Numbers),
-    ("hjust", ExpectedOutput::Numbers),
+    ("justify_x", ExpectedOutput::Numbers),
     ("upright", ExpectedOutput::Any),
-    ("vjust", ExpectedOutput::Numbers),
+    ("anchor_y", ExpectedOutput::Numbers),
     ("angle", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
 ];
@@ -260,9 +264,9 @@ impl Geom for TextPathGeom {
         let fill_scale = ctx.scale_for("fill");
         let fill_opacity_scale = ctx.scale_for("fill_opacity");
         let offset_scale = ctx.scale_for("offset");
-        let hjust_scale = ctx.scale_for("hjust");
+        let hjust_scale = ctx.scale_for("justify_x");
         let upright_scale = ctx.scale_for("upright");
-        let vjust_scale = ctx.scale_for("vjust");
+        let anchor_y_scale = ctx.scale_for("anchor_y");
         let angle_scale = ctx.scale_for("angle");
         let pick_id_scale = ctx.scale_for("pick_id");
 
@@ -295,9 +299,9 @@ impl Geom for TextPathGeom {
         let fill_ch = channels.get("fill");
         let fill_opacity_ch = channels.get("fill_opacity");
         let offset_ch = channels.get("offset");
-        let hjust_ch = channels.get("hjust");
+        let hjust_ch = channels.get("justify_x");
         let upright_ch = channels.get("upright");
-        let vjust_ch = channels.get("vjust");
+        let anchor_y_ch = channels.get("anchor_y");
         let angle_ch = channels.get("angle");
         let pick_id_ch = channels.get("pick_id");
 
@@ -379,9 +383,9 @@ impl Geom for TextPathGeom {
             .unwrap_or_else(default_fill);
 
             let offset_pt = resolve_number_channel_or(offset_ch, offset_scale, i0, 0.0);
-            let hjust = resolve_number_channel_or(hjust_ch, hjust_scale, i0, 0.0);
+            let justify_x = resolve_number_channel_or(hjust_ch, hjust_scale, i0, 0.0);
             let upright = resolve_bool_channel_or(upright_ch, upright_scale, i0, false);
-            let vjust_pt = resolve_number_channel_or(vjust_ch, vjust_scale, i0, 0.0);
+            let anchor_y = resolve_number_channel_or(anchor_y_ch, anchor_y_scale, i0, 0.5);
             let angle_user = resolve_angle_channel(angle_ch, angle_scale, i0);
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i0);
 
@@ -453,7 +457,7 @@ impl Geom for TextPathGeom {
                 continue;
             }
             // Parley's `g.y` includes the line's baseline offset from the
-            // layout's top. For text-on-path we want `vjust = 0` to mean
+            // layout's top. For text-on-path we want `offset_perp = 0` to mean
             // "glyph baseline sits on the curve", so subtract the line
             // baseline (taken from the first glyph; with single-line
             // single-style text every glyph's y matches).
@@ -467,14 +471,18 @@ impl Geom for TextPathGeom {
 
             // ── Compute global shifts. ──
             let offset_px = pt_to_px(offset_pt, ctx.dpi);
-            let vjust_px = pt_to_px(vjust_pt, ctx.dpi);
+            // `anchor_y` is a fraction of the text's own height, like
+            // `TextGeom`'s: 0 puts the top edge on the curve, 1 the
+            // bottom. The baseline shift that produces is measured from
+            // the curve along the right-of-motion normal.
+            let body_h_px = ascent_px + descent_px;
 
             // ── Upright detection (per-mark, not per-glyph). ──
             //
             // ggplot2's geomtextpath: lay the text out in the natural
             // path direction; if the majority of glyph tangents point
             // into the left half-plane, the text is upside-down → flip
-            // the WHOLE TEXT by reversing the path and inverting hjust.
+            // the WHOLE TEXT by reversing the path and inverting justify_x.
             // Re-layout against the reversed path. Reading direction
             // along the path is reversed, but every glyph reads
             // right-side-up and the text remains contiguous.
@@ -483,7 +491,7 @@ impl Geom for TextPathGeom {
             // arc-length distance (`d_orig = path_length - d`) and
             // negating the tangent — no second sampler needed.
             let flipped = if upright {
-                let natural_shift = hjust * (path_length - text_w);
+                let natural_shift = justify_x * (path_length - text_w);
                 let mut upside_down = 0usize;
                 let mut counted = 0usize;
                 for g in &glyphs {
@@ -506,9 +514,9 @@ impl Geom for TextPathGeom {
             };
 
             let hjust_shift = if flipped {
-                (1.0 - hjust) * (path_length - text_w)
+                (1.0 - justify_x) * (path_length - text_w)
             } else {
-                hjust * (path_length - text_w)
+                justify_x * (path_length - text_w)
             };
             // When the whole text is reversed for the upright flip,
             // two perpendicular effects need compensation so the
@@ -516,7 +524,7 @@ impl Geom for TextPathGeom {
             // unflipped case:
             //
             // 1. The right-of-motion normal flips with the reading
-            //    direction — `vjust` is in that normal's direction,
+            //    direction — `offset_perp` is in that normal's direction,
             //    so negate it to keep the baseline on the same world
             //    side of the curve.
             // 2. Rendered upside-down, the body extends "downward"
@@ -527,12 +535,14 @@ impl Geom for TextPathGeom {
             //    the baseline by `(ascent - descent)` toward the
             //    region the upside-down body would occupy.
             //
-            // The combined adjustment is
-            // `effective = -vjust + (ascent - descent)`.
-            let effective_vjust_px = if flipped {
-                -vjust_px + (ascent_px - descent_px)
+            // Rendered upside-down, the glyph body's top and bottom
+            // swap in world space, so the anchor fraction mirrors to
+            // `1 - anchor_y` — which is what the second form below
+            // expands to.
+            let perp_px = if flipped {
+                anchor_y * body_h_px - descent_px
             } else {
-                vjust_px
+                ascent_px - anchor_y * body_h_px
             };
 
             let brush = Brush::Solid(fill_color);
@@ -571,10 +581,7 @@ impl Geom for TextPathGeom {
                 let y_above_baseline = g.y as f64 - baseline_ref;
                 let xform = Affine::translate(Vec2::new(sample.point.x, sample.point.y))
                     * Affine::rotate(theta)
-                    * Affine::translate(Vec2::new(
-                        -half_advance,
-                        effective_vjust_px + y_above_baseline,
-                    ));
+                    * Affine::translate(Vec2::new(-half_advance, perp_px + y_above_baseline));
 
                 let glyph = Glyph {
                     id: g.id,
@@ -770,7 +777,7 @@ mod tests {
     #[test]
     fn single_glyph_anchor_on_horizontal_path() {
         // Path runs from (100, 200) to (300, 200) — horizontal, length
-        // 200 px. Single-char text with hjust = 0: glyph's CENTRE lands
+        // 200 px. Single-char text with justify_x = 0: glyph's CENTRE lands
         // at offset + half_advance (the glyph is centred on its
         // arc-length sample point). The composite affine's translation
         // is the glyph's LEFT-baseline position, which therefore equals
@@ -784,14 +791,16 @@ mod tests {
         // a = cos(theta), b = sin(theta), c = -sin(theta), d = cos(theta)
         assert!(coeffs[0] > 0.99, "cos(theta) = {}", coeffs[0]);
         assert!(coeffs[1].abs() < 0.01, "sin(theta) = {}", coeffs[1]);
-        // Translation y component = baseline at sample point (200 px).
+        // The default `anchor_y = 0.5` centres the glyph body on the
+        // path rather than putting the baseline on it, so the baseline
+        // sits below by half the body height (descenders excepted).
         let ty = coeffs[5];
         assert!(
-            (ty - 200.0).abs() < 1.0,
-            "expected baseline y ~= 200, got {ty}"
+            ty > 200.0 && ty < 200.0 + 20.0 * 96.0 / 72.0,
+            "expected the baseline just below the path at y = 200, got {ty}"
         );
         // Translation x component = left edge of glyph = sample.point.x
-        // - half_advance. For glyph-0 with hjust=0, offset=0:
+        // - half_advance. For glyph-0 with justify_x=0, offset=0:
         // sample.point.x = 100 + half_advance, so tx ≈ 100.
         let tx = coeffs[4];
         assert!(
@@ -823,7 +832,7 @@ mod tests {
 
     #[test]
     fn hjust_zero_packs_text_to_start() {
-        // Multi-char text on a long horizontal path with hjust = 0. The
+        // Multi-char text on a long horizontal path with justify_x = 0. The
         // first glyph's transform x component should sit close to the
         // path's start (100 px) plus its own half-advance.
         let g = horizontal_path_geom("hello");
@@ -842,13 +851,13 @@ mod tests {
 
     #[test]
     fn hjust_half_centers_text() {
-        // hjust = 0.5 should centre the text around the path midpoint.
+        // justify_x = 0.5 should centre the text around the path midpoint.
         let mut g = TextPathGeom::builder()
             .set("x", Raw(vec![0.25_f64, 0.75]))
             .set("y", Raw(vec![0.5_f64, 0.5]))
             .set("text", "centerme")
             .set("size", 20.0_f64)
-            .set("hjust", 0.5_f64)
+            .set("justify_x", 0.5_f64)
             .build();
         g.rebuild_diff_against_previous();
         let scene = drained(&g);
@@ -866,13 +875,13 @@ mod tests {
 
     #[test]
     fn hjust_one_packs_text_to_end() {
-        // hjust = 1.0 should place the LAST glyph near the path end (x ~= 300).
+        // justify_x = 1.0 should place the LAST glyph near the path end (x ~= 300).
         let mut g = TextPathGeom::builder()
             .set("x", Raw(vec![0.25_f64, 0.75]))
             .set("y", Raw(vec![0.5_f64, 0.5]))
             .set("text", "abc")
             .set("size", 20.0_f64)
-            .set("hjust", 1.0_f64)
+            .set("justify_x", 1.0_f64)
             .build();
         g.rebuild_diff_against_previous();
         let scene = drained(&g);
@@ -911,24 +920,37 @@ mod tests {
     }
 
     #[test]
-    fn vjust_shifts_perpendicular_to_path() {
-        // vjust = 10 pt = 13.33 px below the horizontal path → baseline
-        // should sit at y = 200 + 13.33 ≈ 213.33.
-        let mut g = TextPathGeom::builder()
-            .set("x", Raw(vec![0.25_f64, 0.75]))
-            .set("y", Raw(vec![0.5_f64, 0.5]))
-            .set("text", "X")
-            .set("size", 20.0_f64)
-            .set("vjust", 10.0_f64)
-            .build();
-        g.rebuild_diff_against_previous();
-        let scene = drained(&g);
-        let coeffs = glyph_ops(&scene)[0].transform.as_coeffs();
-        let expected_y = 200.0 + 10.0 * 96.0 / 72.0;
+    fn anchor_y_moves_the_text_across_the_path_by_its_own_height() {
+        // `anchor_y` is a fraction of the text's height, so 0 (top edge
+        // on the curve) and 1 (bottom edge on it) must straddle the
+        // path, and the gap between the two baselines is exactly the
+        // text's height.
+        let baseline_at = |anchor: f64| {
+            let mut g = TextPathGeom::builder()
+                .set("x", Raw(vec![0.25_f64, 0.75]))
+                .set("y", Raw(vec![0.5_f64, 0.5]))
+                .set("text", "X")
+                .set("size", 20.0_f64)
+                .set("anchor_y", anchor)
+                .build();
+            g.rebuild_diff_against_previous();
+            let scene = drained(&g);
+            glyph_ops(&scene)[0].transform.as_coeffs()[5]
+        };
+        let top = baseline_at(0.0);
+        let mid = baseline_at(0.5);
+        let bottom = baseline_at(1.0);
+        // Path sits at y = 200. Anchoring the top edge on it pushes the
+        // baseline below; anchoring the bottom edge lifts it above.
+        assert!(top > 200.0, "top-anchored baseline {top} should sit below");
         assert!(
-            (coeffs[5] - expected_y).abs() < 1.0,
-            "baseline y = {}, expected {expected_y}",
-            coeffs[5]
+            bottom < 200.0,
+            "bottom-anchored baseline {bottom} should sit above"
+        );
+        // The centred case is the midpoint of the two extremes.
+        assert!(
+            (mid - 0.5 * (top + bottom)).abs() < 0.5,
+            "centred baseline {mid} should be midway between {top} and {bottom}"
         );
     }
 
@@ -939,8 +961,8 @@ mod tests {
         // START of the path (rightmost, x≈300) and reads upside-down
         // because the tangent points left. With upright on, the whole
         // text is laid out against the REVERSED path: the text still
-        // occupies the same physical arc-length region (since hjust=0
-        // is preserved as 1-hjust=1 on the reversed walk, which
+        // occupies the same physical arc-length region (since justify_x=0
+        // is preserved as 1-justify_x=1 on the reversed walk, which
         // brings the text back to the same physical span), but
         // reading direction reverses. Glyph 0 now sits at what was
         // the FAR END of the natural text region (around x≈250 for a
@@ -1140,7 +1162,7 @@ mod tests {
             .set("x", Raw(vec![0.0_f64, 1.0]))
             .set("y", Raw(vec![0.0_f64, 1.0]))
             .set("text", "x")
-            .set("hjust", 0.0_f64)
+            .set("justify_x", 0.0_f64)
             .set("upright", false)
             .build();
         let names: Vec<&str> = g.declared_channels().iter().map(|d| d.name).collect();
@@ -1148,7 +1170,7 @@ mod tests {
         sorted.sort();
         assert_eq!(names, sorted);
         assert!(names.contains(&"text"));
-        assert!(names.contains(&"hjust"));
+        assert!(names.contains(&"justify_x"));
         assert!(names.contains(&"upright"));
     }
 }

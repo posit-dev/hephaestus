@@ -382,21 +382,38 @@ impl Geom for TextFitGeom {
                 s
             };
 
-            let mut lo = min_pt_f32;
-            let mut hi = max_pt_f32;
-            let mut best: Option<(TextRun, f64, f64, f32)> = None;
-            for _ in 0..MAX_ITERS {
-                let mid = 0.5 * (lo + hi);
-                let style = make_style(mid);
+            let measure = |size_pt: f32| {
+                let style = make_style(size_pt);
                 let run = TextRun::new(&text, &style, ctx.dpi);
                 run.set_max_width(rect_w as f32, justify_x);
                 let w = run.content_width();
                 let h = run.current_height();
-                if w <= rect_w && h <= rect_h {
-                    lo = mid;
-                    best = Some((run, w, h, mid));
+                (run, w, h)
+            };
+
+            // The maximum is tried first. The midpoint of a half-open
+            // search never reaches its upper bound, so this is what makes
+            // `max_font_size` itself attainable — and text that already
+            // fits at full size skips the search entirely.
+            let (run_at_max, w_at_max, h_at_max) = measure(max_pt_f32);
+            let mut best: Option<(TextRun, f64, f64, f32)> =
+                if w_at_max <= rect_w && h_at_max <= rect_h {
+                    Some((run_at_max, w_at_max, h_at_max, max_pt_f32))
                 } else {
-                    hi = mid;
+                    None
+                };
+            if best.is_none() {
+                let mut lo = min_pt_f32;
+                let mut hi = max_pt_f32;
+                for _ in 0..MAX_ITERS {
+                    let mid = 0.5 * (lo + hi);
+                    let (run, w, h) = measure(mid);
+                    if w <= rect_w && h <= rect_h {
+                        lo = mid;
+                        best = Some((run, w, h, mid));
+                    } else {
+                        hi = mid;
+                    }
                 }
             }
 

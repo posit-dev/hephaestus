@@ -81,8 +81,8 @@ fn main() {
     // as the flex chain. `Composition::beside` extends an existing 1-row
     // composition by appending a cell — all five end up as direct
     // siblings of the same outer grid, sharing one panel row.
-    let composed =
-        beside(fixed_square("fixed_l", "1:1"), flex_chain).beside(fixed_square("fixed_r", "1:1"));
+    let composed = beside(fixed_square("fixed_l", "1:1"), flex_chain)
+        .append_col(fixed_square("fixed_r", "1:1"));
 
     let layout = composed.solve(hephaestus::Size::new(w as f64, h as f64), dpi);
 

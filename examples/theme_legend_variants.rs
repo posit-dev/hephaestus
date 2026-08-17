@@ -15,6 +15,7 @@ use hephaestus::plot::theme::{Element, LegendTheme, Length, RectElement, Theme, 
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom};
 use hephaestus::scales::chrome::{AxisSide, LegendSide};
 use hephaestus::scales::value::Value;
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 fn comp() -> Composition {

@@ -1,12 +1,13 @@
 //! End-to-end visual sanity for `TextPathGeom`. Three renders:
 //!
 //! - `text_path_1_sine.png` — three sine waves with the same label,
-//!   demonstrating `hjust = 0`, `0.5`, `1.0` packing along the path.
+//!   demonstrating `justify_x = 0`, `0.5`, `1.0` packing along the path.
 //! - `text_path_2_upright.png` — circular paths with `upright = false`
 //!   (text upside-down on the bottom half) vs. `upright = true` (each
 //!   glyph always reads right-side-up).
-//! - `text_path_3_vjust.png` — straight horizontal paths with
-//!   `vjust = -10pt`, `0pt`, `+10pt` showing perpendicular offset
+//! - `text_path_3_anchor_y.png` — straight horizontal paths with
+//!   `anchor_y = 1`, `0.5`, `0` showing how the anchor fraction moves
+//!   the text across the curve
 //!   relative to the curve.
 
 use hephaestus::backend::vello::VelloRenderer;
@@ -16,6 +17,7 @@ use hephaestus::geometry::Size;
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::{scale, LineGeom, Plot, PlotComposition, TextPathGeom};
 use hephaestus::scales::chrome::AxisSide;
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 fn main() {
@@ -25,10 +27,10 @@ fn main() {
     let mut renderer = VelloRenderer::new().expect("vello renderer init");
     let bg: Color = rgb8(248, 248, 252);
 
-    // ── Render 1: hjust along a sine wave ────────────────────────────
+    // ── Render 1: justify_x along a sine wave ────────────────────────────
     //
     // Three stacked sine waves; each carries the same label, rendered
-    // at different hjust values to show start / centre / end packing.
+    // at different justify_x values to show start / centre / end packing.
     {
         let n = 80usize;
         let xs: Vec<f64> = (0..n)
@@ -46,14 +48,14 @@ fn main() {
         let sine_mid = make_sine(50.0, 8.0);
         let sine_low = make_sine(20.0, 8.0);
 
-        // Per-key xs / ys / label / hjust columns. Three marks total.
+        // Per-key xs / ys / label / justify_x columns. Three marks total.
         let keys = ["start", "centre", "end"];
         let mut all_x: Vec<f64> = Vec::new();
         let mut all_y: Vec<f64> = Vec::new();
         let mut all_keys: Vec<&'static str> = Vec::new();
         let mut text_per_row: Vec<&'static str> = Vec::new();
-        let mut hjust_per_row: Vec<f64> = Vec::new();
-        for (key, (ys, hjust)) in
+        let mut justify_per_row: Vec<f64> = Vec::new();
+        for (key, (ys, justify_x)) in
             keys.iter()
                 .zip([(&sine_high, 0.0_f64), (&sine_mid, 0.5), (&sine_low, 1.0)])
         {
@@ -62,7 +64,7 @@ fn main() {
                 all_y.push(*y);
                 all_keys.push(*key);
                 text_per_row.push("hello world");
-                hjust_per_row.push(hjust);
+                justify_per_row.push(justify_x);
             }
         }
 
@@ -88,11 +90,11 @@ fn main() {
                 .set("x", all_x)
                 .set("y", all_y)
                 .set("text", text_per_row)
-                .set("hjust", hjust_per_row)
+                .set("justify_x", justify_per_row)
                 .set("size", 20.0_f64)
                 .set("weight", 600.0_f64)
                 .set("fill", rgb8(30, 40, 70))
-                .set("vjust", -3.0_f64) // sit slightly above the line
+                .set("anchor_y", 1.0_f64) // bottom edge on the line, text above
                 .build(),
         );
 
@@ -168,7 +170,7 @@ fn main() {
                     .set("weight", 600.0_f64)
                     .set("fill", rgb8(30, 40, 70))
                     .set("upright", upright)
-                    .set("vjust", -3.0_f64)
+                    .set("anchor_y", 1.0_f64)
                     .build(),
             );
             plot.add_axis(Axis::rail(
@@ -208,11 +210,12 @@ fn main() {
         );
     }
 
-    // ── Render 3: vjust perpendicular offset ─────────────────────────
+    // ── Render 3: anchor_y across the curve ────────────────────────────────
     //
-    // Three horizontal paths at distinct y values, each with the same
-    // label at a different `vjust` (in pt). Negative `vjust` lifts the
-    // text above the curve (screen-space −y); positive sinks it below.
+    // Three horizontal paths at distinct y values, each carrying the
+    // same label at a different `anchor_y`. The fraction is of the
+    // text's own height: 1 puts its bottom edge on the curve (text
+    // sits above), 0.5 centres it, 0 puts its top edge on the curve.
     {
         let n = 50usize;
         let xs: Vec<f64> = (0..n)
@@ -223,23 +226,23 @@ fn main() {
         let ys_low: Vec<f64> = vec![25.0; n];
 
         let keys = ["above", "on", "below"];
-        let vjust_values = [-10.0_f64, 0.0, 10.0];
+        let anchor_values = [1.0_f64, 0.5, 0.0];
         let mut all_x: Vec<f64> = Vec::new();
         let mut all_y: Vec<f64> = Vec::new();
         let mut all_keys: Vec<&'static str> = Vec::new();
         let mut text_per_row: Vec<String> = Vec::new();
-        let mut vjust_per_row: Vec<f64> = Vec::new();
-        for ((key, ys), vjust) in keys
+        let mut anchor_per_row: Vec<f64> = Vec::new();
+        for ((key, ys), anchor_y) in keys
             .iter()
             .zip([&ys_top, &ys_mid, &ys_low])
-            .zip(vjust_values)
+            .zip(anchor_values)
         {
             for (x, y) in xs.iter().zip(ys.iter()) {
                 all_x.push(*x);
                 all_y.push(*y);
                 all_keys.push(*key);
-                text_per_row.push(format!("vjust = {vjust:+}pt"));
-                vjust_per_row.push(vjust);
+                text_per_row.push(format!("anchor_y = {anchor_y}"));
+                anchor_per_row.push(anchor_y);
             }
         }
 
@@ -264,8 +267,8 @@ fn main() {
                 .set("x", all_x)
                 .set("y", all_y)
                 .set("text", text_per_row)
-                .set("vjust", vjust_per_row)
-                .set("hjust", 0.5_f64)
+                .set("anchor_y", anchor_per_row)
+                .set("justify_x", 0.5_f64)
                 .set("size", 18.0_f64)
                 .set("weight", 600.0_f64)
                 .set("fill", rgb8(30, 40, 70))
@@ -292,7 +295,7 @@ fn main() {
             h,
             dpi,
             bg,
-            "examples/text_path_3_vjust.png",
+            "examples/text_path_3_anchor_y.png",
         );
     }
 }

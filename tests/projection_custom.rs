@@ -4,14 +4,13 @@
 //! The detailed visual checks live in `examples/projection_custom.rs`;
 //! this test only asserts that the integration points line up at all.
 
-#![cfg(all(feature = "vello", feature = "text"))]
-
 use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{Composition, Patch, Span};
 use hephaestus::geometry::Size;
 use hephaestus::plot::{scale, CustomProjection, GeometryGeom, Plot, PlotComposition, Projection};
 use hephaestus::scales::geometry::{Geometry, Polygon as GeoPolygon};
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 #[test]

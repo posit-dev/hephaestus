@@ -30,6 +30,7 @@ use hephaestus::plot::chrome::axis::{Axis, AxisPlacement, PolarRing};
 use hephaestus::plot::projection::Projection;
 use hephaestus::plot::{scale, Plot, PlotComposition, RibbonGeom};
 use hephaestus::scales::chrome::AxisSide;
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 fn cell_comp() -> Composition {

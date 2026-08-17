@@ -22,6 +22,7 @@ use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::theme::{Element, Length, TextElement, Theme, ThemeColor};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom, TextGeom};
 use hephaestus::scales::chrome::AxisSide;
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 /// A theme whose titles and axis titles are drawn as knocked-out white

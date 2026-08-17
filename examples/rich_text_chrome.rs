@@ -19,6 +19,7 @@ use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::theme::{Element, TextElement, Theme};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom};
 use hephaestus::scales::chrome::AxisSide;
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 /// A theme where every text slot opts into markdown shaping.

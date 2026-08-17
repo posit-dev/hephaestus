@@ -29,6 +29,7 @@ use hephaestus::plot::chrome::axis::{Axis, AxisPlacement, PolarRing};
 use hephaestus::plot::projection::Projection;
 use hephaestus::plot::{scale, AspectMode, Plot, PlotComposition, PointGeom};
 use hephaestus::scales::chrome::AxisSide;
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 fn comp_shape() -> Composition {

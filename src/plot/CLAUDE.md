@@ -12,8 +12,8 @@ For tests and one-off renders, `Plot` is independently usable with a hand-built 
 
 ## Subdirectories
 
-- **`geom/`** — vectorised drawing primitives (`PointGeom`, `LineGeom`, `PolygonGeom`, `RectGeom`, `EllipseGeom`, `SegmentGeom`, `WedgeGeom`, plus `TextGeom` / `TextFitGeom` / `TextPathGeom` when the `text` feature is on). See `src/plot/geom/CLAUDE.md`.
-- **`chrome/`** — axis and legend rendering. Feature-gated on `text`. The scale layer (in `crate::scales`) defines what to draw; this module draws it against `SceneBuilder`.
+- **`geom/`** — vectorised drawing primitives (`PointGeom`, `LineGeom`, `PolygonGeom`, `RectGeom`, `EllipseGeom`, `SegmentGeom`, `WedgeGeom`, plus `TextGeom` / `TextFitGeom` / `TextPathGeom`). See `src/plot/geom/CLAUDE.md`.
+- **`chrome/`** — axis and legend rendering. The scale layer (in `crate::scales`) defines what to draw; this module draws it against `SceneBuilder`.
 
 ## Scale bundle and re-export shims
 
@@ -40,7 +40,7 @@ The algorithms `Scale` delegates to live in [`crate::scales`]; see `src/scales/C
 - **Deterministic.** `enter` and `update` come back in next-iteration order; `exit` in prev-iteration order. NaN canonicalises to a single hash + equality class.
 - **Each prev row matches at most one next row.** Duplicate next keys: the first occurrence pairs with the matching prev row; later duplicates fall to `enter` (D3-style "keys should be unique"; degrade gracefully).
 - **Positional fast path** (`diff_positional`) is used when no user key column is supplied — matches rows by position.
-- **v1 ignores the triples** (geoms snap to current state). v1.5+ will interpolate along the `update` edges for animation.
+- **Opt-in.** `Plot::track_identity(true)` turns the per-draw rebuild on; it's off by default because nothing in the draw path consumes the triples yet (geoms snap to the current state) and building them costs a hash index plus a key-column snapshot per geom per frame. Animation will interpolate along the `update` edges.
 
 ## Why two "composition" modules
 
@@ -66,7 +66,6 @@ Chrome belongs to whichever thing owns the space it sits in: a patch's title goe
 - **Two plots sharing a scale name share the same `Scale`.** This is by design and is the only way to share axis configuration across plots.
 - **`Raw(...)` bypasses scales.** Wrapping a channel value in `Raw(...)` produces `Channel::RawConstant` / `Channel::RawData`, which the per-row resolver passes through untouched. Used when a value is already in the geom's output space (panel fraction, `Color`, pt size).
 - **Temporal values project to f64 before entering a continuous scale.** Dates → days, DateTimes → microseconds, etc. Tick labels reverse the projection.
-- **Chrome (axes, legends, text) is feature-gated on `text`.** The orchestrator's full `wire` and the renderers in `chrome/` (`axis.rs`, `linear_axis.rs`, `polar.rs`, `strip.rs`, `legend/`) require `text`; `wire_panel` is always available so the panel rect still appears in the layout for `draw_panel_into`.
 - **Chrome text is measured at the width it will be drawn at.** A measure that lays its run out unconstrained while the draw pass wraps reserves one line for an N-line block, and the surplus lines get clipped. Text that wraps at draw time either goes through `Cell::measured(run)` (the solver re-breaks via `Measure::height_at`) or re-breaks inside its own `Measure` at the same width, minus the same padding and text margin, that the draw pass uses — `chrome::strip::StripMeasure` is the worked example, including `WidthHint::NeedsHeight` for the rotated case where the thickness depends on the strip's length. Text that draws on one line (tick labels, rotated axis titles) anchors on `TextRun::content_width`, never on `Measure::width_hint` — the hint is the longest unbreakable cluster, a wrap lower bound that undershoots any label containing a space.
 - **Rotated text wraps against the edge it runs along.** `plot::rotated_wrap_width` projects the target rect onto the text's advance direction, so a quarter-turned block breaks at the rect's height rather than its (narrow) screen width.
 - **Legend collapse runs per render, not on attach.** `add_legend` / `add_legend_separate` (on both `Plot` and `PlotComposition`) only store the legend and hand back an id; `chrome::legend::collapse_legends` folds compatible legends together inside `wire` and `draw_chrome_into`, which must call it with the same registry + locale so measured space matches what's drawn. Compatibility compares the *scales* the two legends resolve to (`Scale::legend_equivalent_to`: same family, transform, domain, breaks and labels) rather than the scale names, so two separately configured scales trained to the same values share one legend. Colorbars collapse under a stricter condition: since the surviving bar has to stand in for both, the bodies must agree on step mode, sample count and every aesthetic binding, and the scales behind those bindings must be `Scale::visual_equivalent_to` (legend-equivalent *plus* the same output range). `add_legend_separate` sets `Legend::merge = false` to opt a legend out of being folded into an earlier one.

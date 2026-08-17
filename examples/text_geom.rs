@@ -17,6 +17,7 @@ use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::value::Value;
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom, TextGeom};
 use hephaestus::scales::chrome::AxisSide;
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 fn main() {

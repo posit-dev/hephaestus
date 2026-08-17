@@ -19,7 +19,7 @@
 //! a leaf's background lands on top of its enclosing container's.
 //! Emitted in outermost → innermost order.
 
-use kurbo::Rect;
+use crate::geometry::Rect;
 
 use super::length::swap_lr;
 use super::run::{BlockLayout, RichTextRun};

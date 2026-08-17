@@ -28,6 +28,7 @@ use hephaestus::plot::projection::Projection;
 use hephaestus::plot::value::LinetypeStep;
 use hephaestus::plot::{scale, Plot, PlotComposition, RibbonBSplineGeom};
 use hephaestus::scales::chrome::AxisSide;
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 use std::sync::Arc;
 

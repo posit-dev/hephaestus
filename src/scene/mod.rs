@@ -18,6 +18,11 @@ pub mod recording;
 /// Implementations may rasterize immediately (e.g. Vello, Blend2D) or record
 /// the calls for later replay (e.g. SVG, PDF).
 pub trait SceneBuilder {
+    /// Drop everything recorded so far, leaving the builder ready for a
+    /// new frame. Part of the frame lifecycle, so generic code written
+    /// against the trait can start one.
+    fn clear(&mut self);
+
     /// Fill `path` with `brush`. `transform` applies to the path; `brush_transform`
     /// optionally transforms the brush coordinates (e.g. to rotate a gradient).
     ///
@@ -86,9 +91,22 @@ pub trait SceneBuilder {
 
 /// Opaque font handle. Wraps `peniko::FontData` (an Arc-backed font blob + index).
 #[derive(Debug, Clone)]
-pub struct Font(pub peniko::FontData);
+pub struct Font(peniko::FontData);
 
 impl Font {
+    /// Wrap an already-resolved backend font. Crate-internal: the
+    /// public way in is [`Self::new`].
+    pub(crate) fn from_data(data: peniko::FontData) -> Self {
+        Self(data)
+    }
+
+    /// Borrow the backend font blob. Crate-internal so the handle
+    /// stays opaque on the public surface.
+    #[cfg_attr(not(feature = "vello"), allow(dead_code))]
+    pub(crate) fn data(&self) -> &peniko::FontData {
+        &self.0
+    }
+
     /// Wrap a font blob and face index. `data` is an Arc-backed byte
     /// buffer carrying the font file; `index` selects a face within a
     /// TrueType / OpenType collection (0 for the common single-face case).

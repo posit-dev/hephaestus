@@ -23,9 +23,9 @@
 //! inside (parley layout, [`FontContext`] caching) is implementation
 //! detail.
 
-#[cfg(feature = "text-google-fonts")]
+#[cfg(feature = "google-fonts")]
 pub mod google_fonts;
-#[cfg(feature = "text-google-fonts")]
+#[cfg(feature = "google-fonts")]
 pub use google_fonts::{fetch_google_font, google_font_cache_dir, GoogleFontError};
 
 pub mod rich;
@@ -387,6 +387,20 @@ pub struct TextRun {
     last_break_width: RefCell<Option<f32>>,
 }
 
+thread_local! {
+    /// Parley's shaping scratch space, reused across every plain
+    /// `TextRun`. `LayoutContext::new` allocates several caches, and a
+    /// dense plot shapes hundreds of labels a frame, so a fresh context
+    /// per run threw that work away every time.
+    ///
+    /// Held per thread rather than globally because it's borrowed `&mut`
+    /// for the whole build; it pairs with the process-global
+    /// [`font_context`] mutex, which is taken first and released after
+    /// the layout is built. Mirrors `text::rich::shape`'s context.
+    static PLAIN_LAYOUT_CONTEXT: RefCell<LayoutContext<B>> =
+        RefCell::new(LayoutContext::new());
+}
+
 impl TextRun {
     /// Shape `text` with `style` at `dpi` (typically 96 for screen output).
     /// The point-size on `style` is converted to pixels via
@@ -396,21 +410,24 @@ impl TextRun {
     pub fn new(text: &str, style: &TextStyle, dpi: f64) -> Self {
         let fcx_mutex = font_context();
         let mut fcx = fcx_mutex.lock().expect("font context poisoned");
-        let mut lcx = LayoutContext::<B>::new();
-        let mut builder = lcx.ranged_builder(&mut fcx, text, 1.0, true);
+        let (layout, widths, natural_height) = PLAIN_LAYOUT_CONTEXT.with(|lcx| {
+            let mut lcx = lcx.borrow_mut();
+            let mut builder = lcx.ranged_builder(&mut fcx, text, 1.0, true);
 
-        shape_common::push_style_defaults(&mut builder, style, dpi);
+            shape_common::push_style_defaults(&mut builder, style, dpi);
 
-        let mut layout: parley::Layout<B> = builder.build(text);
-        // Initial unconstrained break — gives us valid line data so
-        // `calculate_content_widths` returns meaningful numbers and `lines()`
-        // works for callers that draw without solving a composition first.
-        layout.break_all_lines(None);
-        layout.align(Alignment::Start, AlignmentOptions::default());
-        let widths = layout.calculate_content_widths();
-        // The unconstrained natural height — typically the single-line
-        // height for one paragraph of text.
-        let natural_height = layout.height();
+            let mut layout: parley::Layout<B> = builder.build(text);
+            // Initial unconstrained break — gives us valid line data so
+            // `calculate_content_widths` returns meaningful numbers and `lines()`
+            // works for callers that draw without solving a composition first.
+            layout.break_all_lines(None);
+            layout.align(Alignment::Start, AlignmentOptions::default());
+            let widths = layout.calculate_content_widths();
+            // The unconstrained natural height — typically the single-line
+            // height for one paragraph of text.
+            let natural_height = layout.height();
+            (layout, widths, natural_height)
+        });
 
         Self {
             layout: RefCell::new(layout),
@@ -633,7 +650,7 @@ pub fn run_layout_glyphs(run: &TextRun) -> Vec<LaidGlyph> {
                 continue;
             };
             let prun = gr.run();
-            let font = Font(prun.font().clone());
+            let font = Font::from_data(prun.font().clone());
             let font_size = prun.font_size();
             for g in gr.positioned_glyphs() {
                 out.push(LaidGlyph {
@@ -772,7 +789,7 @@ pub fn draw_text<S: SceneBuilder + ?Sized>(
                 continue; // inline boxes — unsupported
             };
             let prun = gr.run();
-            let font = Font(prun.font().clone());
+            let font = Font::from_data(prun.font().clone());
             let glyphs: Vec<Glyph> = gr
                 .positioned_glyphs()
                 .map(|g| Glyph {
@@ -875,7 +892,7 @@ pub fn draw_text_outline<S: SceneBuilder + ?Sized>(
                 continue;
             };
             let prun = gr.run();
-            let font = Font(prun.font().clone());
+            let font = Font::from_data(prun.font().clone());
             let glyphs: Vec<Glyph> = gr
                 .positioned_glyphs()
                 .map(|g| Glyph {
@@ -930,7 +947,7 @@ fn emit_decoration_rect<S: SceneBuilder + ?Sized>(
         return;
     }
     let rect = Rect::new(x0 as f64, top as f64, x1 as f64, (top + thickness) as f64);
-    let path: crate::path::Path = kurbo::Shape::to_path(&rect, 0.1);
+    let path: crate::path::Path = crate::geometry::Shape::to_path(&rect, 0.1);
     scene.fill(
         crate::path::FillRule::NonZero,
         transform,

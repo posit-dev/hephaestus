@@ -192,35 +192,6 @@ impl Slot {
             Slot::Caption => (14, PLOT_LEFT, 1, PLOT_COL_SPAN),
         }
     }
-
-    /// True if this slot's anatomical column falls in the left chrome (cols
-    /// strictly less than `PANEL_COL` and outside the margin/padding tracks).
-    #[allow(dead_code)] // used by the flattener once it lands
-    pub(crate) const fn is_left_chrome(self) -> bool {
-        let c = self.placement().1;
-        c < PANEL_COL && c > PADDING_LEFT_COL
-    }
-    /// True if this slot's anatomical column falls in the right chrome.
-    #[allow(dead_code)]
-    pub(crate) const fn is_right_chrome(self) -> bool {
-        let (_, c, _, cs) = self.placement();
-        let end = c + cs - 1;
-        end > PANEL_COL && c > PANEL_COL && end < PADDING_RIGHT_COL
-    }
-    /// True if this slot's anatomical row falls in the top chrome.
-    #[allow(dead_code)]
-    pub(crate) const fn is_top_chrome(self) -> bool {
-        let (r, _, rs, _) = self.placement();
-        let end = r + rs - 1;
-        end < PANEL_ROW && r > PADDING_TOP_ROW
-    }
-    /// True if this slot's anatomical row falls in the bottom chrome.
-    #[allow(dead_code)]
-    pub(crate) const fn is_bottom_chrome(self) -> bool {
-        let (r, _, rs, _) = self.placement();
-        let end = r + rs - 1;
-        r > PANEL_ROW && end < PADDING_BOTTOM_ROW
-    }
 }
 
 #[cfg(test)]
@@ -291,28 +262,5 @@ mod tests {
         assert_eq!(c, PADDING_LEFT_COL);
         assert_eq!(r + rs - 1, PADDING_BOTTOM_ROW);
         assert_eq!(c + cs - 1, PADDING_RIGHT_COL);
-    }
-
-    #[test]
-    fn chrome_side_classification() {
-        // Top chrome.
-        assert!(Slot::Title.is_top_chrome());
-        assert!(Slot::AxisTop.is_top_chrome());
-        assert!(Slot::LegendTop.is_top_chrome());
-        assert!(!Slot::Panel.is_top_chrome());
-        assert!(!Slot::AxisBottom.is_top_chrome());
-
-        // Bottom chrome.
-        assert!(Slot::Caption.is_bottom_chrome());
-        assert!(Slot::AxisBottom.is_bottom_chrome());
-        assert!(Slot::LegendBottom.is_bottom_chrome());
-        assert!(!Slot::Panel.is_bottom_chrome());
-
-        // Left/right chrome.
-        assert!(Slot::AxisLeft.is_left_chrome());
-        assert!(Slot::AxisLeftTitle.is_left_chrome());
-        assert!(!Slot::Panel.is_left_chrome());
-        assert!(Slot::AxisRight.is_right_chrome());
-        assert!(!Slot::Panel.is_right_chrome());
     }
 }

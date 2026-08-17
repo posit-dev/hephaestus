@@ -22,6 +22,7 @@ use hephaestus::geometry::Size;
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::{linetype, scale, LineGeom, Plot, PlotComposition, PointGeom, Value};
 use hephaestus::scales::chrome::AxisSide;
+use hephaestus::scene::SceneBuilder;
 use hephaestus::shape::ShapeRegistry;
 use hephaestus::text::{glyph_marker, TextStyle};
 use hephaestus::Renderer;

@@ -465,11 +465,11 @@ mod tests {
 
     use crate::color::Color;
     use crate::geometry::Rect as GeomRect;
+    use crate::geometry::Shape as _;
     use crate::plot::geom::{linetype, DirectScaleResolver, Raw};
     use crate::plot::scale;
     use crate::plot::value::Value;
     use crate::scene::recording::{Op, RecordingScene};
-    use kurbo::Shape;
 
     fn shapes() -> crate::shape::ShapeRegistry {
         crate::shape::ShapeRegistry::with_builtins()
@@ -701,7 +701,7 @@ mod tests {
                 Op::Fill { path, .. } => Some(path.elements().iter().any(|el| {
                     matches!(
                         el,
-                        kurbo::PathEl::CurveTo(_, _, _) | kurbo::PathEl::QuadTo(_, _)
+                        crate::path::PathEl::CurveTo(_, _, _) | crate::path::PathEl::QuadTo(_, _)
                     )
                 })),
                 _ => None,
@@ -849,7 +849,7 @@ mod tests {
 
     #[test]
     fn expand_grows_rect_on_all_sides() {
-        use kurbo::Shape;
+        use crate::geometry::Shape as _;
         // Rect from (20, 20) → (80, 80) in panel-fraction Raw, so
         // pixel bbox is 20..80 = 60 wide. expand = 3pt = 4 px → bbox
         // 16..84 = 68 wide.
@@ -884,7 +884,7 @@ mod tests {
 
     #[test]
     fn negative_expand_shrinks_rect() {
-        use kurbo::Shape;
+        use crate::geometry::Shape as _;
         let g = RectGeom::builder()
             .set("x", Raw(vec![0.2_f64]))
             .set("y", Raw(vec![0.2_f64]))

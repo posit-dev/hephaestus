@@ -2,11 +2,6 @@
 //! reports their dimensions as a [`Measure`] for the composition solver,
 //! and strokes the tick marks + labels at draw time.
 //!
-//! Gated behind `feature = "text"` — axes need a shaper to size and draw
-//! labels. Without the feature the [`AxisSide`] enum still exists (in
-//! [`chrome`](super::chrome)) but [`Scale::axis_measure`] /
-//! [`Scale::draw_axis`] are unavailable.
-//!
 //! Conventions:
 //!
 //! - All tick labels are horizontal (no rotation). Wide labels on a
@@ -28,7 +23,6 @@ use crate::scales::breaks::DEFAULT_BREAK_COUNT;
 use crate::scales::value::Value;
 use crate::scene::SceneBuilder;
 use crate::text::{Alignment, TextRun};
-use kurbo::Shape;
 
 use crate::scales::chrome::AxisSide;
 
@@ -36,7 +30,19 @@ use crate::scales::chrome::AxisSide;
 
 /// Stable identifier returned by [`crate::plot::Plot::add_axis`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct AxisId(pub u32);
+pub struct AxisId(u32);
+
+impl AxisId {
+    pub(crate) fn new(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// The raw handle value. Opaque — useful only as a key, and not
+    /// comparable across plots.
+    pub fn raw(self) -> u32 {
+        self.0
+    }
+}
 
 /// One axis attached to a [`Plot`](crate::plot::Plot). Built
 /// manually by the caller — `Plot` doesn't infer any default axes
@@ -219,8 +225,13 @@ impl Scale {
     /// emits at draw time.
     pub fn axis_measure(&self, side: AxisSide, dpi: f64, theme: &Theme) -> Box<dyn Measure> {
         let (ch, side_idx) = axis_side_to_channel_side(side);
-        let resolved = theme.axis.resolve(ch, side_idx);
-        let chrome_style = AxisChromeStyle::from_resolved(&resolved, &theme.palette, dpi);
+        let resolved = theme.resolved_axis(ch, side_idx);
+        let chrome_style = AxisChromeStyle::from_resolved(
+            &resolved,
+            &theme.palette,
+            dpi,
+            crate::plot::chrome::root_text_pt(theme),
+        );
         Box::new(AxisMeasure::new(
             self,
             side,
@@ -313,8 +324,13 @@ impl Scale {
         // Side 0 / 1 within the channel selects between the two
         // possible axes for that channel.
         let (ch, side_idx) = axis_side_to_channel_side(side);
-        let resolved = theme.axis.resolve(ch, side_idx);
-        let style = AxisChromeStyle::from_resolved(&resolved, &theme.palette, dpi);
+        let resolved = theme.resolved_axis(ch, side_idx);
+        let style = AxisChromeStyle::from_resolved(
+            &resolved,
+            &theme.palette,
+            dpi,
+            crate::plot::chrome::root_text_pt(theme),
+        );
         draw_linear_axis_at(
             scene,
             start,
@@ -342,13 +358,6 @@ pub(crate) fn axis_side_to_channel_side(side: AxisSide) -> (u8, u8) {
         AxisSide::Left => (1, 0),
         AxisSide::Right => (1, 1),
     }
-}
-
-// Make sure `kurbo::Shape` is in scope for any future `to_path` calls on
-// Rect (matches the layout module's conventions).
-#[allow(dead_code)]
-fn _shape_in_scope() {
-    let _ = Rect::new(0.0, 0.0, 1.0, 1.0).to_path(0.1);
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -507,7 +516,7 @@ mod tests {
 
     #[test]
     fn binned_axis_ticks_sit_on_their_own_bin_edges() {
-        use kurbo::Shape;
+        use crate::geometry::Shape as _;
 
         let edges = vec![2500.0, 3500.0, 4500.0, 5500.0, 6500.0];
         let s = scale::binned(2500.0..=6500.0, edges.clone());

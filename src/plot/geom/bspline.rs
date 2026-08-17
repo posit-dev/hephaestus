@@ -68,6 +68,12 @@
 //!   itself defaults to the stroke colour).
 //! - `"start_marker_invert"` / `"end_marker_invert"` — flip the
 //!   outward direction (per-mark; default `false`).
+//! - `"angle"` — rotation in **radians** around the curve's centroid
+//!   (mean of the flattened sample positions in panel space),
+//!   mathematical CCW. Per-mark; default `0.0`. Applied after the
+//!   spline is flattened, so clipping and endpoint markers are
+//!   resolved in the unrotated frame and the whole curve then turns as
+//!   a rigid body. Same convention as LineGeom.
 //! - `"pick_id"` — per-mark pick id (resolved at the mark's first row).
 //!
 //! Per-mark channels resolve once per curve (first-row-of-mark, like
@@ -92,11 +98,11 @@ use super::marks::{build_marks_from_column, unique_values_at_first_rows, MarkSlo
 use super::outline::{draw_curve_outline, EndpointMarker, OutlineSpec};
 use super::resolve::{
     apply_per_row_offsets, auto_endpoint_clip_pt, channel_color_space, channel_varies_across,
-    emit_endpoint_marker, endpoint_outward, override_alpha, pt_to_px, resolve_bool_channel_or,
-    resolve_cap_channel, resolve_color_channel, resolve_color_channel_or_theme,
-    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position, resolve_str_channel_or,
-    ChannelBind,
+    emit_endpoint_marker, endpoint_outward, override_alpha, pt_to_px, resolve_angle_channel,
+    resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel,
+    resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
+    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
+    resolve_str_channel_or, ChannelBind,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
@@ -133,6 +139,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("join", ExpectedOutput::Strings),
     ("clip_start_radius", ExpectedOutput::Numbers),
     ("clip_end_radius", ExpectedOutput::Numbers),
+    ("angle", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
     ("start_marker", ExpectedOutput::Strings),
     ("end_marker", ExpectedOutput::Strings),
@@ -212,6 +219,7 @@ struct BSplineDrawCtx<'a> {
     join: ChannelBind<'a>,
     clip_start_radius: ChannelBind<'a>,
     clip_end_radius: ChannelBind<'a>,
+    angle: ChannelBind<'a>,
     pick_id: ChannelBind<'a>,
     start_marker: ChannelBind<'a>,
     end_marker: ChannelBind<'a>,
@@ -263,6 +271,7 @@ impl<'a> BSplineDrawCtx<'a> {
             join: b("join"),
             clip_start_radius: b("clip_start_radius"),
             clip_end_radius: b("clip_end_radius"),
+            angle: b("angle"),
             pick_id: b("pick_id"),
             start_marker: b("start_marker"),
             end_marker: b("end_marker"),
@@ -456,6 +465,10 @@ fn draw_one_bspline_mark(
                 ch: clip_end_radius_ch,
                 scale: clip_end_radius_scale,
             },
+        angle: ChannelBind {
+            ch: angle_ch,
+            scale: angle_scale,
+        },
         pick_id:
             ChannelBind {
                 ch: pick_id_ch,
@@ -556,9 +569,9 @@ fn draw_one_bspline_mark(
 
     // ── Control polygon in channel-fraction space. ──
     //
-    // Non-finite rows are dropped silently (matches LineGeom /
-    // PolygonGeom): the spline closes around what's left rather
-    // than splitting.
+    // Non-finite rows are dropped silently (matches PolygonGeom, and
+    // unlike LineGeom, which splits the mark): the spline is fitted to
+    // what's left rather than breaking at the gap.
     let mut ctrl_frac: Vec<Point> = Vec::with_capacity(mark.rows.len());
     let mut ctrl_rows: Vec<usize> = Vec::with_capacity(mark.rows.len());
     for &i in &mark.rows {
@@ -682,6 +695,20 @@ fn draw_one_bspline_mark(
         ctx.dpi,
     );
 
+    // Per-mark rotation about the flattened curve's centroid. Resolved
+    // after flattening and offsets so clipping and endpoint markers are
+    // computed in the unrotated frame; the whole curve then turns as a
+    // rigid body, matching LineGeom.
+    let angle = resolve_angle_channel(angle_ch, angle_scale, i0);
+    let xform = if angle == 0.0 || sample_points.is_empty() {
+        Affine::IDENTITY
+    } else {
+        let n = sample_points.len() as f64;
+        let cx = sample_points.iter().map(|p| p.x).sum::<f64>() / n;
+        let cy = sample_points.iter().map(|p| p.y).sum::<f64>() / n;
+        Affine::rotate_about(-angle, Point::new(cx, cy))
+    };
+
     if ribbon_mode {
         // ── Ribbon-mode path: per-vertex tessellated mesh. Clip threads
         // widths / colors through so the post-clip mesh stays
@@ -761,7 +788,7 @@ fn draw_one_bspline_mark(
             Some(&clipped_half_widths),
             &opts,
         );
-        scene.draw_mesh(&mesh, Affine::IDENTITY, pick);
+        scene.draw_mesh(&mesh, xform, pick);
 
         if !end_name.is_empty() {
             let size_px = pt_to_px(end_marker_size_pt, ctx.dpi);
@@ -819,7 +846,7 @@ fn draw_one_bspline_mark(
             invert: end_invert,
         },
         pick,
-        xform: Affine::IDENTITY,
+        xform,
         corner_rounding: None,
     };
     draw_curve_outline(

@@ -15,14 +15,13 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{Composition, Patch, Span};
 use hephaestus::geometry::Size;
-#[cfg(feature = "text")]
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::{
     linetype, scale, EllipseGeom, Plot, PlotComposition, PolygonGeom, Raw, RectGeom, Value,
     WedgeGeom,
 };
-#[cfg(feature = "text")]
 use hephaestus::scales::chrome::AxisSide;
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 fn main() {
@@ -61,7 +60,6 @@ fn main() {
             .set("linetype", Value::Linetype(pat.clone()))
             .build(),
     );
-    #[cfg(feature = "text")]
     {
         rect_plot.add_axis(Axis::rail("xs", AxisPlacement::Cartesian(AxisSide::Bottom)));
         rect_plot.add_axis(Axis::rail("ys", AxisPlacement::Cartesian(AxisSide::Left)));
@@ -85,7 +83,6 @@ fn main() {
             .set("linetype", Value::Linetype(pat.clone()))
             .build(),
     );
-    #[cfg(feature = "text")]
     {
         ellipse_plot.add_axis(Axis::rail("xs", AxisPlacement::Cartesian(AxisSide::Bottom)));
         ellipse_plot.add_axis(Axis::rail("ys", AxisPlacement::Cartesian(AxisSide::Left)));
@@ -106,7 +103,6 @@ fn main() {
             .set("linetype", Value::Linetype(pat.clone()))
             .build(),
     );
-    #[cfg(feature = "text")]
     {
         wedge_plot.add_axis(Axis::rail("xs", AxisPlacement::Cartesian(AxisSide::Bottom)));
         wedge_plot.add_axis(Axis::rail("ys", AxisPlacement::Cartesian(AxisSide::Left)));
@@ -128,7 +124,6 @@ fn main() {
             .set("linetype", Value::Linetype(pat))
             .build(),
     );
-    #[cfg(feature = "text")]
     {
         poly_plot.add_axis(Axis::rail("xs", AxisPlacement::Cartesian(AxisSide::Bottom)));
         poly_plot.add_axis(Axis::rail("ys", AxisPlacement::Cartesian(AxisSide::Left)));

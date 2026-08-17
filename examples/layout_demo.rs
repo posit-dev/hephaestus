@@ -7,7 +7,7 @@
 
 use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
-use hephaestus::layout::{CellId, Grid, Inset, Length, Placement, Track};
+use hephaestus::layout::{CellId, Extent, Grid, Inset, Placement, Track};
 use hephaestus::stroke::Stroke;
 use hephaestus::{Affine, Brush, FillRule, Path, PickId, Renderer, SceneBuilder};
 use kurbo::Shape;
@@ -44,8 +44,8 @@ fn main() {
     root.place(
         Placement::at(2, 3).span(1, 3).inset(
             Inset::default()
-                .left(Length::cm(1.0))
-                .right(Length::percent(0.25)),
+                .left(Extent::cm(1.0))
+                .right(Extent::percent(0.25)),
         ),
         inner,
     );

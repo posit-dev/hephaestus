@@ -257,7 +257,7 @@ fn strikethrough_sits_above_baseline() {
         .ops
         .iter()
         .find_map(|op| match op {
-            Op::Fill { path, .. } => Some(kurbo::Shape::bounding_box(path).y0 as f32),
+            Op::Fill { path, .. } => Some(crate::geometry::Shape::bounding_box(path).y0 as f32),
             _ => None,
         })
         .expect("strikethrough fill");
@@ -300,7 +300,7 @@ fn underline_sits_below_baseline() {
         .ops
         .iter()
         .find_map(|op| match op {
-            Op::Fill { path, .. } => Some(kurbo::Shape::bounding_box(path).y0 as f32),
+            Op::Fill { path, .. } => Some(crate::geometry::Shape::bounding_box(path).y0 as f32),
             _ => None,
         })
         .expect("underline fill");

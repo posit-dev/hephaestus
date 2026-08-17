@@ -25,7 +25,7 @@ use crate::shape::{ShapeKind, ShapeRegistry, ShapeStyle};
 use crate::stroke::{Cap, Join, Stroke};
 use crate::text::{draw_text, draw_text_outline, Alignment, TextRun, TextStyle};
 
-use kurbo::Shape;
+use crate::geometry::Shape as _;
 use std::sync::Arc;
 
 use super::{EndpointMarkerKey, LegendKey, ResolvedKey};
@@ -1503,10 +1503,12 @@ mod tests {
         let theme = Theme::default();
         render_rect(&key, cell(), &mut scene, DPI, &theme.geom, &theme.palette);
         let curved = scene.ops.iter().any(|op| match op {
-            Op::Fill { path, .. } => path
-                .elements()
-                .iter()
-                .any(|el| matches!(el, kurbo::PathEl::CurveTo(..) | kurbo::PathEl::QuadTo(..))),
+            Op::Fill { path, .. } => path.elements().iter().any(|el| {
+                matches!(
+                    el,
+                    crate::path::PathEl::CurveTo(..) | crate::path::PathEl::QuadTo(..)
+                )
+            }),
             _ => false,
         });
         assert!(curved, "a corner radius should round the swatch");

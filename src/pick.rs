@@ -20,7 +20,6 @@
 //! SrcOver and avoids decoding ambiguity, at the cost of a known mismatch
 //! between visual appearance and hit behaviour for translucent overlays.
 
-#[cfg(feature = "vello")]
 use crate::color::Color;
 
 /// Per-draw-call hitmap directive.
@@ -46,30 +45,28 @@ pub enum PickId {
 /// `(R = id & 0xFF, G = (id>>8) & 0xFF, B = (id>>16) & 0xFF, A = 255)`, so a
 /// `u32` lifted off the little-endian readback buffer equals
 /// `(0xFF << 24) | (id & 0x00FF_FFFF)`.
-#[cfg(feature = "vello")]
-pub(crate) fn id_to_color(id: u32) -> Color {
+pub fn id_to_color(id: u32) -> Color {
     let r = (id & 0xFF) as f32 / 255.0;
     let g = ((id >> 8) & 0xFF) as f32 / 255.0;
     let b = ((id >> 16) & 0xFF) as f32 / 255.0;
     Color::new([r, g, b, 1.0])
 }
 
-/// Decode a u32 pixel sampled from the hitmap into the originating id, or
-/// `None` for the no-hit sentinel. The alpha byte is discarded; only the
-/// low 24 bits carry id payload.
 /// Decode a u32 pixel sampled from the hitmap into the originating id,
 /// or `None` for the no-hit sentinel (`id == 0`). The alpha byte is
 /// discarded; only the low 24 bits carry the id payload.
-#[cfg(feature = "vello")]
-pub(crate) fn decode(px: u32) -> Option<u32> {
+///
+/// Public because a caller doing bulk queries over
+/// [`VelloRenderer::hitmap`](crate::backend::vello::VelloRenderer::hitmap)
+/// reads raw pixels and needs this to interpret them.
+pub fn decode(px: u32) -> Option<u32> {
     let id = px & 0x00FF_FFFF;
     (id != 0).then_some(id)
 }
 
 /// Resolve a [`PickId`] to the raw id that should land in the hitmap, or
 /// `None` if the call should not be recorded at all.
-#[cfg(feature = "vello")]
-pub(crate) fn raw_id(pick: PickId) -> Option<u32> {
+pub fn raw_id(pick: PickId) -> Option<u32> {
     match pick {
         PickId::Skip => None,
         PickId::Block => Some(0),

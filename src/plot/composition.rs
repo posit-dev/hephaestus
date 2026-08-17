@@ -37,7 +37,6 @@ use super::plot::Plot;
 use super::scale::{Scale, ScaleRegistry};
 use super::theme::Theme;
 
-#[cfg(feature = "text")]
 use super::scale::AxisSide;
 
 /// Id given to the root composition when the caller didn't name it with
@@ -171,14 +170,13 @@ struct RebuildCtx<'a> {
     chrome: &'a HashMap<String, CompositionChrome>,
     /// Registry the composition's own legend keys size their markers
     /// against — the same one their draw step resolves shapes through.
-    #[cfg(feature = "text")]
     shapes: &'a ShapeRegistry,
 }
 
 impl ElementTemplate {
     fn capture(e: &Element) -> Self {
         match e {
-            Element::Patch(p) => match p.id() {
+            Element::Patch(p) => match p.patch_id() {
                 Some(id) => ElementTemplate::NamedPatch(id.to_string()),
                 None => ElementTemplate::Spacer,
             },
@@ -216,7 +214,6 @@ fn wire_into_patch(
     comp_theme: &Theme,
 ) -> Patch {
     let plot_list = plots.get(id);
-    #[cfg(feature = "text")]
     {
         if let Some(list) = plot_list {
             if !list.is_empty() {
@@ -250,30 +247,26 @@ fn wire_into_patch(
 ///   no-ops via the `as_set()` short-circuit.
 fn apply_plot_chrome(patch: Patch, theme: &Theme) -> Patch {
     use crate::composition::Slot;
-    use crate::layout::{Cell, Inset, Length as LayoutLength};
-    let root_pt = theme
-        .text
-        .size_pt
-        .map(|l| l.resolve(crate::plot::theme::DEFAULT_TEXT_SIZE_PT))
-        .unwrap_or(crate::plot::theme::DEFAULT_TEXT_SIZE_PT);
+    use crate::layout::{Cell, Extent, Inset};
+    let root_pt = crate::plot::chrome::root_text_pt(theme);
     let margin_inset = {
         let (mt, mr, mb, ml) = theme.plot_margin.resolve(root_pt);
         (mt != 0.0 || mr != 0.0 || mb != 0.0 || ml != 0.0).then(|| {
             Inset::default()
-                .top(LayoutLength::pt(mt))
-                .right(LayoutLength::pt(mr))
-                .bottom(LayoutLength::pt(mb))
-                .left(LayoutLength::pt(ml))
+                .top(Extent::pt(mt))
+                .right(Extent::pt(mr))
+                .bottom(Extent::pt(mb))
+                .left(Extent::pt(ml))
         })
     };
     let padding_inset = {
         let (pt, pr, pb, pl) = theme.plot_padding.resolve(root_pt);
         (pt != 0.0 || pr != 0.0 || pb != 0.0 || pl != 0.0).then(|| {
             Inset::default()
-                .top(LayoutLength::pt(pt))
-                .right(LayoutLength::pt(pr))
-                .bottom(LayoutLength::pt(pb))
-                .left(LayoutLength::pt(pl))
+                .top(Extent::pt(pt))
+                .right(Extent::pt(pr))
+                .bottom(Extent::pt(pb))
+                .left(Extent::pt(pl))
         })
     };
     let mut patch = patch;
@@ -292,7 +285,6 @@ fn apply_plot_chrome(patch: Patch, theme: &Theme) -> Patch {
 /// Per-plot harvest + max-merge. Each plot wires into its own
 /// fresh patch; we then group the resulting placements by region
 /// across plots, max-merging the underlying [`Measure`]s.
-#[cfg(feature = "text")]
 fn wire_merged_patch(
     id: &str,
     plots: &[Plot],
@@ -368,7 +360,6 @@ fn wire_merged_patch(
 /// every demand has the same `w/h` ratio (within a small epsilon).
 /// Returns the first demand if they all agree, `None` if any
 /// disagrees or the list is empty.
-#[cfg(feature = "text")]
 fn unify_aspect(aspects: &[(f32, f32)]) -> Option<(f32, f32)> {
     let first = *aspects.first()?;
     let ratio0 = (first.0 as f64) / (first.1 as f64);
@@ -393,7 +384,6 @@ fn pl_wire_panel_fallback(p: Patch) -> Patch {
 // ─── Composition-level chrome ────────────────────────────────────────────────
 
 /// The four cartesian sides, in `axis_side_index` order.
-#[cfg(feature = "text")]
 const AXIS_TITLE_SIDES: [AxisSide; 4] = [
     AxisSide::Top,
     AxisSide::Right,
@@ -403,7 +393,6 @@ const AXIS_TITLE_SIDES: [AxisSide; 4] = [
 
 /// Composition legends sit in the composition's anatomical legend ring;
 /// there is no composition-owned panel rect to anchor against.
-#[cfg(feature = "text")]
 fn reject_in_panel_legend(legend: &crate::plot::chrome::legend::Legend) {
     use crate::scales::chrome::LegendSide;
     assert!(
@@ -427,13 +416,10 @@ struct CompositionChrome {
     caption: Option<String>,
     /// Axis titles by side, indexed as by
     /// [`axis_side_index`](crate::plot::plot::axis_side_index).
-    #[cfg(feature = "text")]
     axis_titles: [Option<String>; 4],
     /// Legends attached to the composition. Same opt-in model as
     /// [`Plot`]: nothing is inferred from the plots' bindings.
-    #[cfg(feature = "text")]
     legends: Vec<crate::plot::chrome::legend::Legend>,
-    #[cfg(feature = "text")]
     next_legend_id: u32,
 }
 
@@ -441,7 +427,6 @@ impl CompositionChrome {
     /// Drop this chrome's cells into `c`'s composition-level slots.
     /// Populating any slot wraps the facets in a canonical 13×16 block,
     /// so the chrome spans the whole facet grid.
-    #[cfg(feature = "text")]
     fn wire(&self, mut c: Composition, ctx: &RebuildCtx<'_>) -> Composition {
         use super::plot::{
             axis_title_cell, cartesian_axis_title_slot, effective_text, legends_grouped_by_side,
@@ -451,11 +436,7 @@ impl CompositionChrome {
         use crate::layout::Cell;
 
         let theme = ctx.theme;
-        let root_pt = theme
-            .text
-            .size_pt
-            .map(|l| l.resolve(crate::plot::theme::DEFAULT_TEXT_SIZE_PT))
-            .unwrap_or(crate::plot::theme::DEFAULT_TEXT_SIZE_PT);
+        let root_pt = crate::plot::chrome::root_text_pt(theme);
 
         // Title / subtitle / caption — `theme.plot_text_align_to`
         // chooses between spanning the whole composition interior and
@@ -515,21 +496,12 @@ impl CompositionChrome {
         c
     }
 
-    /// Non-text builds have no shaper, so composition chrome reserves
-    /// no space — mirrors `Plot::wire_panel` standing in for `wire`.
-    #[cfg(not(feature = "text"))]
-    fn wire(&self, c: Composition, _ctx: &RebuildCtx<'_>) -> Composition {
-        c
-    }
-
     /// Read the axis title installed for `side`, if any.
-    #[cfg(feature = "text")]
     fn axis_title_at(&self, side: AxisSide) -> Option<&str> {
         self.axis_titles[super::plot::axis_side_index(side)].as_deref()
     }
 
     /// Render this chrome into the rects solved for `comp_id`.
-    #[cfg(feature = "text")]
     #[allow(clippy::too_many_arguments)]
     fn draw_into(
         &self,
@@ -550,11 +522,7 @@ impl CompositionChrome {
         use crate::plot::theme::text_concrete_defaults;
         use crate::text::TextRun;
 
-        let root_pt = theme
-            .text
-            .size_pt
-            .map(|l| l.resolve(crate::plot::theme::DEFAULT_TEXT_SIZE_PT))
-            .unwrap_or(crate::plot::theme::DEFAULT_TEXT_SIZE_PT);
+        let root_pt = crate::plot::chrome::root_text_pt(theme);
 
         for (slot, text_opt, theme_slot) in [
             (Slot::Title, self.title.as_ref(), &theme.plot_title),
@@ -587,7 +555,7 @@ impl CompositionChrome {
                 continue;
             };
             let (ch, side_idx) = crate::plot::chrome::axis::axis_side_to_channel_side(side);
-            let Some(el) = theme.axis.resolve(ch, side_idx).title else {
+            let Some(el) = theme.resolved_axis(ch, side_idx).title else {
                 continue;
             };
             let Some(rect) = layout.get(comp_id, cartesian_axis_title_slot(side)) else {
@@ -689,10 +657,18 @@ pub struct PlotComposition {
     /// earlier ones (the user controls draw order via attach
     /// order).
     plots: HashMap<String, Vec<Plot>>,
+    /// Patch ids in first-attach order. Every render phase walks this
+    /// rather than `plots`, so draw order — and therefore z-order where
+    /// patches overlap or an unclipped plot spills — is what the caller
+    /// set up rather than whatever the hash seed produced this run.
+    plot_order: Vec<String>,
     /// Composition-level chrome by composition id. The root's entry is
     /// keyed on `root_id`; the builder / mutator methods on this type
     /// all target that entry.
     chrome: HashMap<String, CompositionChrome>,
+    /// Composition ids in first-use order, for the same reason as
+    /// [`Self::plot_order`].
+    chrome_order: Vec<String>,
     /// Id of the root composition — the caller's [`Composition::id`] if
     /// they set one, otherwise [`ROOT_COMPOSITION_ID`].
     root_id: String,
@@ -730,7 +706,9 @@ impl PlotComposition {
             scales: ScaleRegistry::new(),
             theme: Arc::new(Theme::default()),
             plots: HashMap::new(),
+            plot_order: Vec::new(),
             chrome: HashMap::new(),
+            chrome_order: Vec::new(),
             root_id,
             shapes: ShapeRegistry::with_builtins(),
             plot_dirty: HashMap::new(),
@@ -745,7 +723,7 @@ impl PlotComposition {
     // ── Theme ─────────────────────────────────────────────────────────
 
     /// Install a [`Theme`] on this composition. Chainable builder form
-    /// of [`Self::set_theme`]. Replaces any previously installed
+    /// of [`Self::set_theme`]. Replaces any installed
     /// theme; flags the layout dirty.
     pub fn theme(mut self, theme: Theme) -> Self {
         self.set_theme(theme);
@@ -776,12 +754,23 @@ impl PlotComposition {
 
     /// Compute the effective theme for a specific plot — the
     /// composition's theme with the plot's `ThemePart` override
-    /// (if any) applied on top.
-    fn effective_theme_for(&self, plot: &Plot) -> Theme {
+    /// (if any) applied on top. A plot without an override shares the
+    /// composition's `Arc` rather than deep-copying it.
+    fn effective_theme_for(&self, plot: &Plot) -> Arc<Theme> {
         match plot.theme_override_ref() {
-            Some(part) => self.theme.merge(part),
-            None => (*self.theme).clone(),
+            Some(part) => Arc::new(self.theme.merge(part)),
+            None => Arc::clone(&self.theme),
         }
+    }
+
+    /// Every attached plot, in patch attach order and then per-patch
+    /// attach order. Every render phase walks this, so the phases agree
+    /// on order and the caller's attach order decides z-order.
+    fn plots_in_order(&self) -> impl Iterator<Item = &Plot> {
+        self.plot_order
+            .iter()
+            .filter_map(|id| self.plots.get(id))
+            .flat_map(|list| list.iter())
     }
 
     // ── Composition-level chrome ──────────────────────────────────────
@@ -789,6 +778,9 @@ impl PlotComposition {
     /// Borrow the root composition's chrome, creating it on first use.
     fn root_chrome_mut(&mut self) -> &mut CompositionChrome {
         self.layout_dirty = true;
+        if !self.chrome.contains_key(&self.root_id) {
+            self.chrome_order.push(self.root_id.clone());
+        }
         self.chrome.entry(self.root_id.clone()).or_default()
     }
 
@@ -838,7 +830,6 @@ impl PlotComposition {
     /// The title always takes the outer chrome slot: a composition has
     /// no panel of its own, so `TitleLocation::Inside` has nothing to
     /// sit against.
-    #[cfg(feature = "text")]
     pub fn axis_title(mut self, side: AxisSide, text: impl Into<String>) -> Self {
         self.set_axis_title(side, Some(text.into()));
         self
@@ -846,14 +837,12 @@ impl PlotComposition {
 
     /// Install or clear the shared axis title for `side`. `None`
     /// removes it, releasing the slot. Flags the layout dirty.
-    #[cfg(feature = "text")]
     pub fn set_axis_title(&mut self, side: AxisSide, text: Option<String>) {
         let idx = super::plot::axis_side_index(side);
         self.root_chrome_mut().axis_titles[idx] = text;
     }
 
     /// Read the shared axis title for `side`, if any.
-    #[cfg(feature = "text")]
     pub fn axis_title_at(&self, side: AxisSide) -> Option<&str> {
         self.chrome
             .get(&self.root_id)
@@ -874,7 +863,6 @@ impl PlotComposition {
     /// its facets.
     ///
     /// [`LegendSide::InPanel`]: crate::scales::chrome::LegendSide::InPanel
-    #[cfg(feature = "text")]
     pub fn add_legend(
         &mut self,
         legend: crate::plot::chrome::legend::Legend,
@@ -889,7 +877,6 @@ impl PlotComposition {
     /// Panics on [`LegendSide::InPanel`], as [`Self::add_legend`] does.
     ///
     /// [`LegendSide::InPanel`]: crate::scales::chrome::LegendSide::InPanel
-    #[cfg(feature = "text")]
     pub fn add_legend_separate(
         &mut self,
         mut legend: crate::plot::chrome::legend::Legend,
@@ -898,21 +885,19 @@ impl PlotComposition {
         self.push_legend(legend)
     }
 
-    #[cfg(feature = "text")]
     fn push_legend(
         &mut self,
         legend: crate::plot::chrome::legend::Legend,
     ) -> crate::plot::chrome::legend::LegendId {
         reject_in_panel_legend(&legend);
         let chrome = self.root_chrome_mut();
-        let id = crate::plot::chrome::legend::LegendId(chrome.next_legend_id);
+        let id = crate::plot::chrome::legend::LegendId::new(chrome.next_legend_id);
         chrome.next_legend_id += 1;
         chrome.legends.push(legend);
         id
     }
 
     /// Borrow the composition's legends in insertion order.
-    #[cfg(feature = "text")]
     pub fn legends(&self) -> &[crate::plot::chrome::legend::Legend] {
         self.chrome
             .get(&self.root_id)
@@ -922,7 +907,6 @@ impl PlotComposition {
 
     /// Remove every legend attached to the composition. Flags the
     /// layout dirty.
-    #[cfg(feature = "text")]
     pub fn clear_legends(&mut self) {
         self.root_chrome_mut().legends.clear();
     }
@@ -1009,6 +993,9 @@ impl PlotComposition {
     pub fn attach_plot(&mut self, plot: Plot) {
         let id = plot.patch_id().to_string();
         self.plot_dirty.insert(id.clone(), true);
+        if !self.plots.contains_key(&id) {
+            self.plot_order.push(id.clone());
+        }
         self.plots.entry(id).or_default().push(plot);
         self.layout_dirty = true;
     }
@@ -1017,6 +1004,7 @@ impl PlotComposition {
     /// list in attach order. Flips the layout's dirty flag.
     pub fn detach_plot(&mut self, patch_id: &str) -> Vec<Plot> {
         let removed = self.plots.remove(patch_id).unwrap_or_default();
+        self.plot_order.retain(|id| id != patch_id);
         if !removed.is_empty() {
             self.plot_dirty.insert(patch_id.to_string(), true);
             self.layout_dirty = true;
@@ -1040,12 +1028,15 @@ impl PlotComposition {
     }
 
     /// Iterate over `(patch_id, plot)` pairs across every plot in
-    /// every patch. Order is HashMap-iteration for patch ids and
-    /// attach order within a patch.
+    /// every patch, in attach order — the same order the render phases
+    /// draw in.
     pub fn plots(&self) -> impl Iterator<Item = (&str, &Plot)> + '_ {
-        self.plots
-            .iter()
-            .flat_map(|(k, v)| v.iter().map(move |p| (k.as_str(), p)))
+        self.plot_order.iter().flat_map(|id| {
+            self.plots
+                .get(id)
+                .into_iter()
+                .flat_map(move |list| list.iter().map(move |p| (id.as_str(), p)))
+        })
     }
 
     /// Mutate the **first** plot at `patch_id` through a closure.
@@ -1084,7 +1075,7 @@ impl PlotComposition {
     /// Re-solves the layout when needed; reuses the cached solve
     /// otherwise.
     ///
-    /// Render order: all plots' chrome first (under the `text` feature),
+    /// Render order: all plots' chrome first,
     /// then all plots' panels. This preserves "chrome under panel"
     /// occlusion: a geom that extends past its panel rect is clipped by
     /// the push_layer in `draw_panel_into`, so it can't visually escape
@@ -1107,7 +1098,6 @@ impl PlotComposition {
                 dpi,
                 theme: &self.theme,
                 chrome: &self.chrome,
-                #[cfg(feature = "text")]
                 shapes: &self.shapes,
             });
             self.last_layout = Some(comp.solve(size, dpi));
@@ -1127,11 +1117,16 @@ impl PlotComposition {
         // sized via `theme.plot_margin` — the patch anatomy
         // automatically gives the margin space without any manual
         // translation.
-        for list in self.plots.values() {
-            for plot in list {
-                let effective = self.effective_theme_for(plot);
-                plot.draw_patch_background_into(scene, layout, &effective, dpi);
-            }
+        // Each plot's effective theme is resolved once here and shared
+        // by all four plot phases — a `Theme` is a deep, allocation-heavy
+        // clone, and re-deriving it per phase paid for it four times.
+        let plot_themes: Vec<Arc<Theme>> = self
+            .plots_in_order()
+            .map(|plot| self.effective_theme_for(plot))
+            .collect();
+
+        for (plot, effective) in self.plots_in_order().zip(&plot_themes) {
+            plot.draw_patch_background_into(scene, layout, effective, dpi);
         }
 
         // Phase 2: panel chromes. Every plot paints its projection
@@ -1139,11 +1134,8 @@ impl PlotComposition {
         // any geoms means a `clip = false` plot's geoms that spill
         // into a neighbouring panel don't get overpainted by that
         // neighbour's panel chrome in a later step.
-        for list in self.plots.values() {
-            for plot in list {
-                let effective = self.effective_theme_for(plot);
-                plot.draw_panel_chrome_into(scene, layout, &self.scales, dpi, &effective);
-            }
+        for (plot, effective) in self.plots_in_order().zip(&plot_themes) {
+            plot.draw_panel_chrome_into(scene, layout, &self.scales, dpi, effective);
         }
 
         // Phase 3: geoms. Each plot installs its own clip (if
@@ -1152,23 +1144,19 @@ impl PlotComposition {
         // `"pick_id"` channel; the orchestrator does no ticket
         // allocation.
         //
-        // The borrow checker prevents a single read of
-        // `self.effective_theme_for(plot)` here (which borrows
-        // `&self.theme`) while we also need `&mut plot`. Resolve the
-        // theme into an owned `Theme` first, then mutate.
-        let plot_themes: Vec<Theme> = self
-            .plots
-            .values()
-            .flat_map(|list| list.iter())
-            .map(|plot| self.effective_theme_for(plot))
-            .collect();
-        let mut theme_iter = plot_themes.into_iter();
-        for list in self.plots.values_mut() {
-            for plot in list {
-                let effective = theme_iter
-                    .next()
-                    .expect("plot/theme iteration must stay in sync");
-                plot.draw_geoms_into(scene, layout, &self.scales, dpi, &effective);
+        // Geoms need `&mut plot`, so this phase walks `plot_order`
+        // directly rather than through `plots_in_order`. Both visit the
+        // same plots in the same order, which is what keeps the index
+        // into `plot_themes` aligned.
+        let mut theme_idx = 0usize;
+        for id in &self.plot_order {
+            let Some(list) = self.plots.get_mut(id) else {
+                continue;
+            };
+            for plot in list.iter_mut() {
+                let effective = &plot_themes[theme_idx];
+                theme_idx += 1;
+                plot.draw_geoms_into(scene, layout, &self.scales, dpi, effective);
             }
         }
 
@@ -1177,12 +1165,8 @@ impl PlotComposition {
         // render inside the panel area (without the panel clip),
         // letting labels bleed beyond the inscribed disk and the
         // axis lines paint over the panel background.
-        #[cfg(feature = "text")]
-        for list in self.plots.values() {
-            for plot in list {
-                let effective = self.effective_theme_for(plot);
-                plot.draw_chrome_into(scene, layout, &self.scales, dpi, &effective);
-            }
+        for (plot, effective) in self.plots_in_order().zip(&plot_themes) {
+            plot.draw_chrome_into(scene, layout, &self.scales, dpi, effective);
         }
 
         // Phase 5: composition-level chrome. Drawn last so a shared
@@ -1190,8 +1174,11 @@ impl PlotComposition {
         // shares with the border facets' own chrome (see
         // `build_wrapped_composition`: both resolve to the same
         // anatomical row, the composition's spanning the full width).
-        #[cfg(feature = "text")]
-        for (comp_id, chrome) in &self.chrome {
+        for (comp_id, chrome) in self
+            .chrome_order
+            .iter()
+            .filter_map(|id| self.chrome.get(id).map(|c| (id, c)))
+        {
             chrome.draw_into(
                 comp_id,
                 scene,
@@ -1216,29 +1203,13 @@ impl PlotComposition {
     ///   bound to scales whose output range doesn't match.
     pub fn validate(&self) -> Vec<ValidationIssue> {
         let mut out = Vec::new();
-        for (plot_id, plot) in self
-            .plots
-            .iter()
-            .flat_map(|(k, v)| v.iter().map(move |p| (k, p)))
-        {
-            // Walk declared channels (drives expected_output checks).
-            let decls: HashMap<&str, &super::geom::ChannelDecl> = plot
-                .geom_ids()
-                .flat_map(|_| {
-                    // Each geom contributes its declared channels; we
-                    // need access to the geom itself. Plot doesn't
-                    // expose geoms by reference, so iterate via the
-                    // declared-channels accessor we already have.
-                    std::iter::empty()
-                })
-                .collect();
-            let _ = decls;
+        for (plot_id, plot) in self.plots() {
             // Cross-check every binding against the registry.
             for (channel, scale_name) in plot.bindings() {
                 let scale = self.scales.get(scale_name);
                 if scale.is_none() {
                     out.push(ValidationIssue::MissingScale {
-                        plot_id: plot_id.clone(),
+                        plot_id: plot_id.to_string(),
                         channel: channel.to_string(),
                         scale_name: scale_name.to_string(),
                     });
@@ -1257,7 +1228,7 @@ impl PlotComposition {
                     if let Some(found) = output_type_name(s) {
                         if !matches_expected(expected, found) {
                             out.push(ValidationIssue::OutputTypeMismatch {
-                                plot_id: plot_id.clone(),
+                                plot_id: plot_id.to_string(),
                                 channel: channel.to_string(),
                                 scale_name: scale_name.to_string(),
                                 expected,
@@ -1276,11 +1247,10 @@ impl PlotComposition {
     /// repaint can target only affected plots once partial-repaint
     /// heuristics consume the dirty bits.
     fn flag_plots_referencing(&mut self, scale_name: &str) {
-        let target: Arc<str> = Arc::from(scale_name);
         for (pid, list) in &self.plots {
             let referenced = list
                 .iter()
-                .any(|plot| plot.bindings().any(|(_, sn)| sn == &*target));
+                .any(|plot| plot.bindings().any(|(_, sn)| sn == scale_name));
             if referenced {
                 self.plot_dirty.insert(pid.clone(), true);
             }
@@ -1475,7 +1445,6 @@ mod tests {
 
     /// Two plots side by side, each with a panel, so composition chrome
     /// has facets to span.
-    #[cfg(feature = "text")]
     fn view_two_plots() -> PlotComposition {
         PlotComposition::new(&comp_two())
             .with_plot(crate::plot::Plot::new(&comp_two(), "a"))
@@ -1484,11 +1453,11 @@ mod tests {
 
     #[test]
     fn capture_preserves_composition_geometry() {
-        use crate::layout::{Inset, Length};
+        use crate::layout::{Extent, Inset};
         let comp = comp_two()
             .id("outer")
             .aspect(1.0, 1.0)
-            .margin(Inset::default().left(Length::pt(7.0)));
+            .margin(Inset::default().left(Extent::pt(7.0)));
         let view = PlotComposition::new(&comp);
         assert_eq!(view.template.id.as_deref(), Some("outer"));
         assert_eq!(view.template.aspect, Some((1.0, 1.0)));
@@ -1502,7 +1471,6 @@ mod tests {
         assert_eq!(view.root_id, ROOT_COMPOSITION_ID);
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn composition_title_spans_every_facet() {
         let mut view = view_two_plots().title("Fuel economy");
@@ -1528,7 +1496,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn composition_title_is_drawn() {
         let mut bare = view_two_plots();
@@ -1551,7 +1518,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn composition_chrome_uses_the_caller_id() {
         let mut view = PlotComposition::new(&comp_two().id("outer"))
@@ -1568,7 +1534,6 @@ mod tests {
             .is_none());
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn composition_axis_title_spans_every_facet() {
         let mut view = view_two_plots().axis_title(AxisSide::Bottom, "Displacement (l)");
@@ -1592,7 +1557,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn composition_legend_reserves_the_ring_once() {
         use crate::plot::chrome::legend::{Legend, LegendKeySpec};
@@ -1635,7 +1599,6 @@ mod tests {
         assert_eq!(view.legends().len(), 1);
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn composition_collapses_compatible_keys_at_render_time() {
         use crate::plot::chrome::legend::{collapse_legends, Legend, LegendBody, LegendKeySpec};
@@ -1664,7 +1627,6 @@ mod tests {
         assert_eq!(stack.keys.len(), 2);
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn composition_collapses_scales_trained_alike_after_attach() {
         use crate::plot::chrome::legend::{collapse_legends, Legend, LegendKeySpec};
@@ -1708,7 +1670,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "text")]
     #[test]
     #[should_panic(expected = "LegendSide::InPanel")]
     fn composition_rejects_in_panel_legends() {
@@ -1721,7 +1682,6 @@ mod tests {
         }));
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn clearing_composition_chrome_releases_its_band() {
         let mut view = view_two_plots().title("Fuel economy");
@@ -1748,7 +1708,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn composition_aspect_survives_alongside_chrome() {
         // A chrome-bearing composition still cascades its aspect lock to

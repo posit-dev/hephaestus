@@ -18,6 +18,7 @@ use hephaestus::plot::chrome::legend::Legend;
 use hephaestus::plot::theme::{AlignTo, Element, HAlign, Theme};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom};
 use hephaestus::scales::chrome::{AxisSide, LegendSide};
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 fn main() {

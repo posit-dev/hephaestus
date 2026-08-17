@@ -17,6 +17,7 @@
 //! shared across all projections.
 
 use crate::brush::Brush;
+use crate::geometry::Shape as _;
 use crate::geometry::{Affine, Point, Rect};
 use crate::path::{FillRule, Path};
 use crate::pick::PickId;
@@ -30,7 +31,6 @@ use crate::primitives::{
 use crate::scales::breaks::DEFAULT_BREAK_COUNT;
 use crate::scales::value::Value;
 use crate::scene::SceneBuilder;
-use kurbo::Shape;
 
 // ─── Entry point ────────────────────────────────────────────────────────────
 
@@ -38,7 +38,7 @@ use kurbo::Shape;
 /// Cartesian, theta for Polar; channel 1 is y / radius. Passed in as
 /// the scales bound to each channel — either may be `None`, in which
 /// case the corresponding grid set is skipped.
-pub struct PanelScales<'a> {
+pub(crate) struct PanelScales<'a> {
     pub channel_0: Option<&'a Scale>,
     pub channel_1: Option<&'a Scale>,
 }
@@ -47,7 +47,7 @@ pub struct PanelScales<'a> {
 /// lines for each channel, panel outline stroke. Drawn before the
 /// geoms so they paint on top. Every visual element is sourced from
 /// `theme` — `Element::Blank` skips that piece of chrome entirely.
-pub fn draw_panel_chrome(
+pub(crate) fn draw_panel_chrome(
     scene: &mut dyn SceneBuilder,
     projection: &Projection,
     panel: Rect,
@@ -364,7 +364,7 @@ fn draw_custom_graticules(
 /// the visible panel rect. Other projections ignore them; passing
 /// `None` for both is the right call when no resolver is available
 /// (Cartesian / Polar fall back to their fixed-shape outlines).
-pub fn panel_outline_path(
+pub(crate) fn panel_outline_path(
     projection: &Projection,
     panel: Rect,
     corner_radius_px: f64,
@@ -437,7 +437,7 @@ fn custom_panel_outline(
 /// Resolve the panel's corner radius from `theme.panel_background`'s
 /// `corner_radius` (falling through to the rect concrete defaults
 /// when None). Returns 0 for `Element::Blank` or sharp corners.
-pub fn panel_corner_radius_px(theme: &Theme, dpi: f64) -> f64 {
+pub(crate) fn panel_corner_radius_px(theme: &Theme, dpi: f64) -> f64 {
     use crate::plot::theme::rect_concrete_defaults;
     let Some(bg) = theme.panel_background.as_set() else {
         return 0.0;
@@ -455,7 +455,7 @@ pub fn panel_corner_radius_px(theme: &Theme, dpi: f64) -> f64 {
 /// Returns `None` when the grid line should be omitted (e.g., the
 /// full-circle duplicate at `theta_frac == 1`, or a degenerate
 /// zero-radius ring).
-pub fn channel_grid_path(
+pub(crate) fn channel_grid_path(
     projection: &Projection,
     panel: Rect,
     channel: usize,

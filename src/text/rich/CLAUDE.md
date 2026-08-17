@@ -1,6 +1,6 @@
 # src/text/rich/CLAUDE.md
 
-Marquee-flavoured rich text: markdown source in, positioned glyph runs and block paints out. Gated on the `text` feature alongside the rest of `src/text/`.
+Marquee-flavoured rich text: markdown source in, positioned glyph runs and block paints out. Lives alongside the rest of `src/text/`.
 
 Modelled on the R package [marquee](https://marquee.r-lib.org). Where this module deviates, the deviation is deliberate and noted below.
 

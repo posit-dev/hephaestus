@@ -9,7 +9,7 @@
 //! now consult the **width-aware** `height_at(width)` queries on children,
 //! using the widths from pass 1.
 //!
-//! Both passes resolve [`Length::TrackOf`] references against the previous
+//! Both passes resolve [`Extent::TrackOf`] references against the previous
 //! iteration's results — on iteration 0 the reference evaluates to 0, on
 //! later iterations it returns the cumulative size of the named tracks
 //! from the previous pass. Combined with the existing fixed-point loop
@@ -17,7 +17,7 @@
 //! converges in 1–2 iterations for forward references and tolerates
 //! mild cycles up to `MAX_ITER`.
 //!
-//! If any cell signalled `WidthHint::NeedsHeight` or any Length::TrackOf
+//! If any cell signalled `WidthHint::NeedsHeight` or any Extent::TrackOf
 //! reference is in the tree, the two passes are wrapped in a damped
 //! fixed-point iteration capped at `MAX_ITER` rounds. Convergence is not
 //! guaranteed (rotated wrapped text genuinely oscillates); the cap is a
@@ -25,7 +25,7 @@
 
 use std::collections::HashMap;
 
-use super::{Axis, CellId, GridNode, Inset, Layout, Length, Node, Placement, Track, WidthHint};
+use super::{Axis, CellId, Extent, GridNode, Inset, Layout, Node, Placement, Track, WidthHint};
 use crate::geometry::{Rect, Size};
 
 /// Maximum iterations for cells with `WidthHint::NeedsHeight`.
@@ -41,7 +41,7 @@ const DAMPING: f64 = 0.5;
 /// Solve `root` against a `viewport`-sized cell at `dpi`. Runs the
 /// width-major two-pass solver, wrapped in a damped fixed-point
 /// iteration when any cell signals [`WidthHint::NeedsHeight`] or any
-/// [`Length::TrackOf`] reference exists in the tree. See the module
+/// [`Extent::TrackOf`] reference exists in the tree. See the module
 /// docs for the convergence properties.
 pub(super) fn solve(root: &GridNode, viewport: Size, dpi: f64) -> Layout {
     let root_cell = Rect::new(0.0, 0.0, viewport.width, viewport.height);
@@ -52,7 +52,7 @@ pub(super) fn solve(root: &GridNode, viewport: Size, dpi: f64) -> Layout {
     collect_iterative_paths(root, &mut Vec::new(), dpi, &mut seeds);
 
     // Pre-compute CellId → tree path for every tagged grid. Used by
-    // `Length::TrackOf` reference resolution.
+    // `Extent::TrackOf` reference resolution.
     let mut grid_paths: HashMap<CellId, Vec<usize>> = HashMap::new();
     collect_grid_paths(root, &mut Vec::new(), &mut grid_paths);
 
@@ -145,7 +145,7 @@ pub(super) fn solve(root: &GridNode, viewport: Size, dpi: f64) -> Layout {
 
 // ─── Reference resolution ────────────────────────────────────────────────────
 
-/// Carries the data needed to resolve [`Length::TrackOf`] references during
+/// Carries the data needed to resolve [`Extent::TrackOf`] references during
 /// a width or height pass: the tagged-grid path map, plus optionally the
 /// previous iteration's width and height results.
 struct Resolved<'a> {
@@ -199,7 +199,7 @@ impl<'a> Resolved<'a> {
 }
 
 /// Walk the tree once, recording the path for every grid tagged via
-/// [`super::Grid::id`]. The map is consulted by `Length::TrackOf`
+/// [`super::Grid::id`]. The map is consulted by `Extent::TrackOf`
 /// resolution during the width/height passes.
 fn collect_grid_paths(
     node: &GridNode,
@@ -241,7 +241,7 @@ fn tree_has_respect_with_auto_rows(node: &GridNode) -> bool {
     false
 }
 
-/// Returns `true` if any `Length` in the tree contains a `TrackOf`
+/// Returns `true` if any `Extent` in the tree contains a `TrackOf`
 /// variant — triggers the fixed-point iteration loop.
 fn tree_has_track_refs(node: &GridNode) -> bool {
     if any_track_ref_in_track(&node.gap.0) || any_track_ref_in_track(&node.gap.1) {
@@ -267,15 +267,15 @@ fn tree_has_track_refs(node: &GridNode) -> bool {
     false
 }
 
-fn any_track_ref_in_track(l: &Length) -> bool {
+fn any_track_ref_in_track(l: &Extent) -> bool {
     length_has_track_ref(l)
 }
 
-fn length_has_track_ref(l: &Length) -> bool {
+fn length_has_track_ref(l: &Extent) -> bool {
     match l {
-        Length::Sum { .. } => false,
-        Length::Min(a, b) | Length::Max(a, b) => length_has_track_ref(a) || length_has_track_ref(b),
-        Length::TrackOf { .. } => true,
+        Extent::Sum { .. } => false,
+        Extent::Min(a, b) | Extent::Max(a, b) => length_has_track_ref(a) || length_has_track_ref(b),
+        Extent::TrackOf { .. } => true,
     }
 }
 
@@ -362,7 +362,7 @@ struct HeightResults {
 struct GridHeights {
     y0: f64,
     y1: f64,
-    /// Resolved per-row sizes. Used by `Length::TrackOf { axis: Height, .. }`
+    /// Resolved per-row sizes. Used by `Extent::TrackOf { axis: Height, .. }`
     /// reference resolution on the next iteration.
     rows: Vec<f64>,
     row_gap: f64,
@@ -1203,9 +1203,9 @@ fn track_end(sizes: &[f64], gap: f64, idx: usize) -> f64 {
 fn resolve_axis(
     origin: f64,
     avail: f64,
-    leading: Option<&Length>,
-    trailing: Option<&Length>,
-    size: Option<&Length>,
+    leading: Option<&Extent>,
+    trailing: Option<&Extent>,
+    size: Option<&Extent>,
     dpi: f64,
     resolved: &Resolved,
 ) -> (f64, f64) {
@@ -1232,20 +1232,20 @@ fn resolve_axis(
     }
 }
 
-fn length_to_px(l: &Length, dpi: f64, axis_size: f64, resolved: &Resolved) -> f64 {
+fn length_to_px(l: &Extent, dpi: f64, axis_size: f64, resolved: &Resolved) -> f64 {
     match l {
-        Length::Sum {
+        Extent::Sum {
             px,
             inches,
             percent,
         } => px + inches * dpi + percent * axis_size,
-        Length::Min(a, b) => {
+        Extent::Min(a, b) => {
             length_to_px(a, dpi, axis_size, resolved).min(length_to_px(b, dpi, axis_size, resolved))
         }
-        Length::Max(a, b) => {
+        Extent::Max(a, b) => {
             length_to_px(a, dpi, axis_size, resolved).max(length_to_px(b, dpi, axis_size, resolved))
         }
-        Length::TrackOf {
+        Extent::TrackOf {
             grid,
             axis,
             track,
@@ -1256,16 +1256,16 @@ fn length_to_px(l: &Length, dpi: f64, axis_size: f64, resolved: &Resolved) -> f6
     }
 }
 
-fn length_to_px_abs(l: &Length, dpi: f64, resolved: &Resolved) -> f64 {
+fn length_to_px_abs(l: &Extent, dpi: f64, resolved: &Resolved) -> f64 {
     match l {
-        Length::Sum { px, inches, .. } => px + inches * dpi,
-        Length::Min(a, b) => {
+        Extent::Sum { px, inches, .. } => px + inches * dpi,
+        Extent::Min(a, b) => {
             length_to_px_abs(a, dpi, resolved).min(length_to_px_abs(b, dpi, resolved))
         }
-        Length::Max(a, b) => {
+        Extent::Max(a, b) => {
             length_to_px_abs(a, dpi, resolved).max(length_to_px_abs(b, dpi, resolved))
         }
-        Length::TrackOf {
+        Extent::TrackOf {
             grid,
             axis,
             track,

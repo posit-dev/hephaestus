@@ -24,7 +24,7 @@ use build::{
 };
 
 use crate::geometry::{Rect, Size};
-use crate::layout::{Cell, CellId, Inset, Layout, Length, Placement, Track};
+use crate::layout::{Cell, CellId, Extent, Inset, Layout, Placement, Track};
 use std::collections::HashMap;
 
 pub(crate) const TABLE_COLS_U16: u16 = TABLE_COLS as u16;
@@ -77,11 +77,6 @@ impl Patch {
         }
     }
 
-    /// The patch's id, or `None` for anonymous spacers.
-    pub fn id(&self) -> Option<&str> {
-        self.id.as_deref()
-    }
-
     /// Create an anonymous patch — used internally by [`spacer`]. Not
     /// addressable in [`CompositionLayout::get`].
     fn anonymous() -> Self {
@@ -123,7 +118,7 @@ impl Patch {
         self.placements
     }
 
-    /// Borrow this patch's id, if any.
+    /// The patch's id, or `None` for anonymous spacers.
     pub fn patch_id(&self) -> Option<&str> {
         self.id.as_deref()
     }
@@ -181,14 +176,8 @@ impl Patch {
     }
 
     /// Convenience: identical margin on every side.
-    pub fn margin_all(self, length: Length) -> Self {
-        self.margin(
-            Inset::default()
-                .left(length.clone())
-                .right(length.clone())
-                .top(length.clone())
-                .bottom(length),
-        )
+    pub fn margin_all(self, length: Extent) -> Self {
+        self.margin(Inset::all(length))
     }
 
     /// Per-side inner padding. Sizes the second-from-outer-ring tracks
@@ -203,14 +192,8 @@ impl Patch {
     }
 
     /// Convenience: identical padding on every side.
-    pub fn padding_all(self, length: Length) -> Self {
-        self.padding(
-            Inset::default()
-                .left(length.clone())
-                .right(length.clone())
-                .top(length.clone())
-                .bottom(length),
-        )
+    pub fn padding_all(self, length: Extent) -> Self {
+        self.padding(Inset::all(length))
     }
 
     /// Solve this patch standalone in a `size`-sized viewport.
@@ -300,7 +283,7 @@ struct CompositionPlacement {
 
 /// Either a [`Patch`] or a (nested) [`Composition`].
 //
-// `Patch` carries the per-side margin + padding `Inset`s (6 `Option<Length>`
+// `Patch` carries the per-side margin + padding `Inset`s (6 `Option<Extent>`
 // each), so the `Patch` variant is ~ 400 bytes heavier than `Composition`.
 // Acceptable given the small number of `Element` values typically
 // constructed (one per patch in a composition); boxing margin/padding inside
@@ -405,50 +388,40 @@ impl Composition {
         self
     }
 
-    /// Lock the simplified plot's panel cell (which contains the
-    /// facets) to an aspect ratio. Same semantics as [`Patch::aspect`].
-    /// Only takes effect when the composition has chrome.
+    /// Lock every descendant's panel to an aspect ratio. The ratio
+    /// cascades depth-first into patches and nested compositions that
+    /// don't carry one of their own; a descendant with its own aspect
+    /// keeps it and blocks propagation past that node. Same per-patch
+    /// semantics as [`Patch::aspect`].
     pub fn aspect(mut self, w: f32, h: f32) -> Self {
         self.aspect = Some((w, h));
         self
     }
 
-    /// Per-side outer margin for the simplified canonical block. Same
-    /// semantics as [`Patch::margin`]. Only takes effect when the
-    /// composition has chrome.
+    /// Per-side outer margin around the whole composition. Setting it
+    /// wraps the facets in a canonical block to carry the ring. Same
+    /// semantics as [`Patch::margin`].
     pub fn margin(mut self, inset: Inset) -> Self {
         self.margin = inset;
         self
     }
 
     /// Convenience: identical margin on every side.
-    pub fn margin_all(self, length: Length) -> Self {
-        self.margin(
-            Inset::default()
-                .left(length.clone())
-                .right(length.clone())
-                .top(length.clone())
-                .bottom(length),
-        )
+    pub fn margin_all(self, length: Extent) -> Self {
+        self.margin(Inset::all(length))
     }
 
-    /// Per-side inner padding for the simplified canonical block. Same
-    /// semantics as [`Patch::padding`]. Only takes effect when the
-    /// composition has chrome.
+    /// Per-side inner padding between the composition's background edge
+    /// and its chrome. Setting it wraps the facets in a canonical block
+    /// to carry the ring. Same semantics as [`Patch::padding`].
     pub fn padding(mut self, inset: Inset) -> Self {
         self.padding = inset;
         self
     }
 
     /// Convenience: identical padding on every side.
-    pub fn padding_all(self, length: Length) -> Self {
-        self.padding(
-            Inset::default()
-                .left(length.clone())
-                .right(length.clone())
-                .top(length.clone())
-                .bottom(length),
-        )
+    pub fn padding_all(self, length: Extent) -> Self {
+        self.padding(Inset::all(length))
     }
 
     /// The composition's id, if set with [`Self::id`]. Composition-level
@@ -473,12 +446,13 @@ impl Composition {
         &self.padding
     }
 
-    /// Has any composition-level chrome been added?
+    /// Does this composition need wrapping in a canonical block? True
+    /// when it carries anything that block would hold: chrome cells, or
+    /// a margin / padding ring. An aspect is not among them — it
+    /// cascades into the descendants rather than locking a cell of the
+    /// composition's own.
     fn has_chrome(&self) -> bool {
-        !self.chrome.is_empty()
-            || self.aspect.is_some()
-            || !inset_is_zero(&self.margin)
-            || !inset_is_zero(&self.padding)
+        !self.chrome.is_empty() || !inset_is_zero(&self.margin) || !inset_is_zero(&self.padding)
     }
 
     /// Place an element at 1-indexed `(row, col)` covering `span.rows ×
@@ -546,14 +520,14 @@ impl Composition {
         self.rows
     }
 
-    /// Per-column tracks (panel column sizing). Length always equals
+    /// Per-column tracks (panel column sizing). Extent always equals
     /// [`Self::cols`]. Default `Fr(1.0)` per column unless the user set
     /// [`Self::widths`].
     pub fn widths_slice(&self) -> &[Track] {
         &self.widths
     }
 
-    /// Per-row tracks (panel row sizing). Length always equals
+    /// Per-row tracks (panel row sizing). Extent always equals
     /// [`Self::rows`].
     pub fn heights_slice(&self) -> &[Track] {
         &self.heights
@@ -568,10 +542,13 @@ impl Composition {
             .map(|p| (p.row, p.col, p.span, &p.element))
     }
 
-    /// Append a new column with `other` placed in the single row at position
-    /// `(1, cols + 1)`. Requires `self.rows == 1`. For multi-row appends use
-    /// [`Self::empty`] + [`Self::place`].
-    pub fn beside(mut self, other: impl Into<Element>) -> Self {
+    /// Append a new column with `other` placed in the single row at
+    /// position `(1, cols + 1)`. Requires `self.rows == 1`. For
+    /// multi-row appends use [`Self::empty`] + [`Self::place`].
+    ///
+    /// Distinct from the free [`beside`] function, which builds a fresh
+    /// 1×2 composition rather than growing this one.
+    pub fn append_col(mut self, other: impl Into<Element>) -> Self {
         assert_eq!(
             self.rows, 1,
             "Composition::beside requires a single-row composition; use empty() + place() instead"
@@ -587,9 +564,12 @@ impl Composition {
         self
     }
 
-    /// Append a new row with `other` placed in the single column at position
-    /// `(rows + 1, 1)`. Requires `self.cols == 1`.
-    pub fn stack(mut self, other: impl Into<Element>) -> Self {
+    /// Append a new row with `other` placed in the single column at
+    /// position `(rows + 1, 1)`. Requires `self.cols == 1`.
+    ///
+    /// Distinct from the free [`stack`] function, which builds a fresh
+    /// 2×1 composition rather than growing this one.
+    pub fn append_row(mut self, other: impl Into<Element>) -> Self {
         assert_eq!(
             self.cols, 1,
             "Composition::stack requires a single-column composition; use empty() + place() instead"
@@ -709,24 +689,24 @@ pub fn wrap(id: impl Into<String>, cell: Cell) -> Patch {
 /// and anatomical region.
 pub struct CompositionLayout {
     layout: Layout,
-    regions: HashMap<(String, String), CellId>,
+    regions: HashMap<String, HashMap<Box<str>, CellId>>,
 }
 
 impl CompositionLayout {
     /// Look up the resolved rect for a `(patch_id, region)` pair. The region
     /// can be a typed [`Slot`] or a raw `&str` (e.g. for `place_at` regions).
     pub fn get(&self, patch_id: &str, region: impl Region) -> Option<Rect> {
-        let key = (patch_id.to_string(), region.name().to_string());
-        let id = self.regions.get(&key)?;
+        let id = self.regions.get(patch_id)?.get(region.name())?;
         self.layout.rect(*id)
     }
 
     /// Iterate every `(patch_id, region, rect)` triple.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str, Rect)> + '_ {
-        self.regions.iter().filter_map(|((id, region), cell_id)| {
-            self.layout
-                .rect(*cell_id)
-                .map(|r| (id.as_str(), region.as_str(), r))
+        let layout = &self.layout;
+        self.regions.iter().flat_map(move |(id, by_region)| {
+            by_region.iter().filter_map(move |(region, cell_id)| {
+                layout.rect(*cell_id).map(|r| (id.as_str(), &**region, r))
+            })
         })
     }
 
@@ -779,7 +759,7 @@ impl Region for &String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::{Length, Measure, WidthHint};
+    use crate::layout::{Extent, Measure, WidthHint};
 
     fn approx_eq(a: f64, b: f64, tol: f64, msg: &str) {
         assert!((a - b).abs() <= tol, "{msg}: {a} ≠ {b} (tol {tol})");
@@ -1200,8 +1180,8 @@ mod tests {
         let p1 = Patch::new("p1").slot(Slot::Panel, Cell::empty());
         let p2 = Patch::new("p2").slot(Slot::Panel, Cell::empty());
         let comp = beside(p1, p2).widths(vec![
-            Track::Fixed(Length::px(120.0)),
-            Track::Fixed(Length::px(60.0)),
+            Track::Fixed(Extent::px(120.0)),
+            Track::Fixed(Extent::px(60.0)),
         ]);
         let layout = comp.solve(Size::new(800.0, 200.0), 96.0);
         let panel1 = layout.get("p1", Slot::Panel).unwrap();
@@ -1214,7 +1194,7 @@ mod tests {
     fn widths_mixed_fixed_and_fr() {
         let p1 = Patch::new("p1").slot(Slot::Panel, Cell::empty());
         let p2 = Patch::new("p2").slot(Slot::Panel, Cell::empty());
-        let comp = beside(p1, p2).widths(vec![Track::Fixed(Length::px(120.0)), Track::Fr(1.0)]);
+        let comp = beside(p1, p2).widths(vec![Track::Fixed(Extent::px(120.0)), Track::Fr(1.0)]);
         let layout = comp.solve(Size::new(800.0, 200.0), 96.0);
         let panel1 = layout.get("p1", Slot::Panel).unwrap();
         let panel2 = layout.get("p2", Slot::Panel).unwrap();
@@ -1258,7 +1238,7 @@ mod tests {
         // on each axis.
         let p = Patch::new("p")
             .slot(Slot::Panel, Cell::empty())
-            .margin_all(Length::pt(10.0));
+            .margin_all(Extent::pt(10.0));
         let layout = p.solve(Size::new(200.0, 200.0), 96.0);
         let panel = layout.get("p", Slot::Panel).unwrap();
         let margin_px = 10.0 * 96.0 / 72.0;
@@ -1286,7 +1266,7 @@ mod tests {
         // (verified in a separate test).
         let p = Patch::new("p")
             .slot(Slot::Panel, Cell::empty())
-            .padding_all(Length::pt(6.0));
+            .padding_all(Extent::pt(6.0));
         let layout = p.solve(Size::new(200.0, 200.0), 96.0);
         let panel = layout.get("p", Slot::Panel).unwrap();
         let padding_px = 6.0 * 96.0 / 72.0;
@@ -1304,8 +1284,8 @@ mod tests {
         // margin = 5pt, padding = 3pt → chrome offset = 8pt on each side.
         let p = Patch::new("p")
             .slot(Slot::Panel, Cell::empty())
-            .margin_all(Length::pt(5.0))
-            .padding_all(Length::pt(3.0));
+            .margin_all(Extent::pt(5.0))
+            .padding_all(Extent::pt(3.0));
         let layout = p.solve(Size::new(200.0, 200.0), 96.0);
         let panel = layout.get("p", Slot::Panel).unwrap();
         let combined_px = (5.0 + 3.0) * 96.0 / 72.0;
@@ -1331,8 +1311,8 @@ mod tests {
         let p = Patch::new("p")
             .slot(Slot::Background, sized(0.0, 0.0)) // bg present, intrinsic 0
             .slot(Slot::Panel, Cell::empty())
-            .margin_all(Length::pt(5.0))
-            .padding_all(Length::pt(3.0));
+            .margin_all(Extent::pt(5.0))
+            .padding_all(Extent::pt(3.0));
         let layout = p.solve(Size::new(200.0, 200.0), 96.0);
         let bg = layout.get("p", Slot::Background).unwrap();
         let margin_px = 5.0 * 96.0 / 72.0;
@@ -1368,11 +1348,11 @@ mod tests {
         let p1 = Patch::new("p1")
             .slot(Slot::Background, sized(0.0, 0.0))
             .slot(Slot::Panel, Cell::empty())
-            .margin_all(Length::pt(4.0));
+            .margin_all(Extent::pt(4.0));
         let p2 = Patch::new("p2")
             .slot(Slot::Background, sized(0.0, 0.0))
             .slot(Slot::Panel, Cell::empty())
-            .margin_all(Length::pt(4.0));
+            .margin_all(Extent::pt(4.0));
         let comp = beside(p1, p2);
         let layout = comp.solve(Size::new(400.0, 200.0), 96.0);
         let bg1 = layout.get("p1", Slot::Background).unwrap();
@@ -1391,10 +1371,10 @@ mod tests {
         // Different margin on each side — verify each is applied independently.
         let p = Patch::new("p").slot(Slot::Panel, Cell::empty()).margin(
             Inset::default()
-                .left(Length::pt(2.0))
-                .right(Length::pt(8.0))
-                .top(Length::pt(3.0))
-                .bottom(Length::pt(6.0)),
+                .left(Extent::pt(2.0))
+                .right(Extent::pt(8.0))
+                .top(Extent::pt(3.0))
+                .bottom(Extent::pt(6.0)),
         );
         let layout = p.solve(Size::new(200.0, 200.0), 96.0);
         let panel = layout.get("p", Slot::Panel).unwrap();
@@ -1670,6 +1650,35 @@ mod tests {
         );
         assert!(l1.x1 - l1.x0 > 0.0, "l1 panel has positive width");
         assert!(l2.x1 - l2.x0 > 0.0, "l2 panel has positive width");
+    }
+
+    #[test]
+    fn aspect_only_composition_cascades_without_wrapping() {
+        // An aspect is not chrome: it cascades into the descendants
+        // rather than locking a cell of the composition's own, so
+        // setting it on the parent resolves identically to setting it
+        // on each leaf.
+        let leaf = |id: &str| {
+            Patch::new(id)
+                .slot(Slot::Background, Cell::empty())
+                .slot(Slot::Panel, Cell::empty())
+        };
+        let size = Size::new(800.0, 500.0);
+
+        let cascaded = beside(leaf("a"), leaf("b")).aspect(1.0, 1.0);
+        let cascaded = cascaded.solve(size, 96.0);
+
+        let per_leaf = beside(leaf("a").aspect(1.0, 1.0), leaf("b").aspect(1.0, 1.0));
+        let per_leaf = per_leaf.solve(size, 96.0);
+
+        for id in ["a", "b"] {
+            let c = cascaded.get(id, Slot::Panel).unwrap();
+            let p = per_leaf.get(id, Slot::Panel).unwrap();
+            approx_eq(c.x1 - c.x0, c.y1 - c.y0, 0.5, &format!("{id} panel square"));
+            approx_eq(c.x0, p.x0, 0.5, &format!("{id} x0 matches per-leaf"));
+            approx_eq(c.y0, p.y0, 0.5, &format!("{id} y0 matches per-leaf"));
+            approx_eq(c.x1, p.x1, 0.5, &format!("{id} x1 matches per-leaf"));
+        }
     }
 
     #[test]

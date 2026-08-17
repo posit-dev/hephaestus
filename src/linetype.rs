@@ -51,7 +51,9 @@ use crate::scene::{Glyph, GlyphRun, SceneBuilder};
 use crate::shape::{Shape, ShapeKind, ShapeRegistry, ShapeStyle};
 use crate::stroke::Stroke;
 
-pub use crate::scales::value::LinetypeStep;
+// ─── Linetype steps ──────────────────────────────────────────────────────────
+
+pub use crate::style_vocab::LinetypeStep;
 
 /// Arc-length tolerance below which two cursor positions count as
 /// coincident.
@@ -104,7 +106,7 @@ pub fn is_marker_free(pattern: &[LinetypeStep]) -> bool {
 }
 
 /// Project a marker-free pattern to the flat `[dash, gap, dash, gap,
-/// ...]` f64 slice that `kurbo::Stroke::with_dashes` expects. Panics if
+/// ...]` f64 slice that [`Stroke::with_dashes`](crate::stroke::Stroke) expects. Panics if
 /// the pattern contains markers (call [`is_marker_free`] first) or if
 /// the alternation is malformed (use [`pattern`] / [`validate_pattern`]
 /// to construct).

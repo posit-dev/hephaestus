@@ -479,11 +479,11 @@ mod tests {
 
     use crate::color::Color;
     use crate::geometry::Rect as GeomRect;
+    use crate::geometry::Shape as _;
     use crate::plot::geom::{linetype, DirectScaleResolver, Raw};
     use crate::plot::scale;
     use crate::plot::value::Value;
     use crate::scene::recording::{Op, RecordingScene};
-    use kurbo::Shape;
 
     fn shapes() -> crate::shape::ShapeRegistry {
         crate::shape::ShapeRegistry::with_builtins()
@@ -540,7 +540,9 @@ mod tests {
 
     // ── Drawing ──
 
-    fn stroke_endpoints(scene: &RecordingScene) -> Option<(kurbo::Point, kurbo::Point)> {
+    fn stroke_endpoints(
+        scene: &RecordingScene,
+    ) -> Option<(crate::geometry::Point, crate::geometry::Point)> {
         for op in &scene.ops {
             if let Op::Stroke { path, .. } = op {
                 let elems: Vec<_> = path.elements().iter().collect();
@@ -548,11 +550,11 @@ mod tests {
                     return None;
                 }
                 let start = match elems[0] {
-                    kurbo::PathEl::MoveTo(p) => *p,
+                    crate::path::PathEl::MoveTo(p) => *p,
                     _ => return None,
                 };
                 let end = match elems[1] {
-                    kurbo::PathEl::LineTo(p) => *p,
+                    crate::path::PathEl::LineTo(p) => *p,
                     _ => return None,
                 };
                 return Some((start, end));
@@ -863,7 +865,7 @@ mod tests {
         );
         let path = first_stroke_path(&scene).expect("stroke");
         match path.elements().first() {
-            Some(kurbo::PathEl::MoveTo(p)) => {
+            Some(crate::path::PathEl::MoveTo(p)) => {
                 let expected = 15.0 * 96.0 / 72.0;
                 assert!((p.x - expected).abs() < 1e-6, "start.x = {}", p.x);
             }
@@ -895,7 +897,7 @@ mod tests {
             .iter()
             .rev()
             .find_map(|el| match el {
-                kurbo::PathEl::LineTo(p) => Some(*p),
+                crate::path::PathEl::LineTo(p) => Some(*p),
                 _ => None,
             })
             .expect("LineTo");
@@ -958,7 +960,7 @@ mod tests {
         scene
     }
 
-    fn fills_after_strokes(scene: &RecordingScene) -> Vec<kurbo::Affine> {
+    fn fills_after_strokes(scene: &RecordingScene) -> Vec<crate::geometry::Affine> {
         let mut found_stroke = false;
         let mut out = Vec::new();
         for op in &scene.ops {
@@ -971,7 +973,7 @@ mod tests {
         out
     }
 
-    fn fills_before_strokes(scene: &RecordingScene) -> Vec<kurbo::Affine> {
+    fn fills_before_strokes(scene: &RecordingScene) -> Vec<crate::geometry::Affine> {
         let mut out = Vec::new();
         for op in &scene.ops {
             match op {
@@ -1023,7 +1025,7 @@ mod tests {
         let xforms = fills_after_strokes(&scene);
         assert!(!xforms.is_empty(), "expected an end-marker fill");
         let xf = xforms[0];
-        let anchor = xf * kurbo::Point::new(-1.0, 0.0);
+        let anchor = xf * crate::geometry::Point::new(-1.0, 0.0);
         let size_px = 10.0 * 96.0 / 72.0;
         assert!(
             (anchor.x - (100.0 - size_px)).abs() < 1e-6,
@@ -1045,7 +1047,7 @@ mod tests {
         });
         let scene = draw_into_scene(&g);
         let xforms = fills_after_strokes(&scene);
-        let tip = xforms[0] * kurbo::Point::new(0.0, 0.0);
+        let tip = xforms[0] * crate::geometry::Point::new(0.0, 0.0);
         assert!(
             (tip.x - 100.0).abs() < 1e-6,
             "tip.x = {} (expected 100)",
@@ -1068,7 +1070,7 @@ mod tests {
         let xforms = fills_before_strokes(&scene);
         assert!(!xforms.is_empty(), "expected a start-marker fill");
         let xf = xforms[0];
-        let anchor = xf * kurbo::Point::new(-1.0, 0.0);
+        let anchor = xf * crate::geometry::Point::new(-1.0, 0.0);
         let size_px = 10.0 * 96.0 / 72.0;
         assert!(
             (anchor.x - size_px).abs() < 1e-6,
@@ -1077,7 +1079,7 @@ mod tests {
             size_px
         );
         assert!((anchor.y - 50.0).abs() < 1e-6, "anchor.y = {}", anchor.y);
-        let tip = xf * kurbo::Point::new(0.0, 0.0);
+        let tip = xf * crate::geometry::Point::new(0.0, 0.0);
         assert!((tip.x - 0.0).abs() < 1e-6, "tip.x = {} (expected 0)", tip.x);
     }
 
@@ -1132,7 +1134,7 @@ mod tests {
         });
         let scene = draw_into_scene(&g);
         let xf = fills_before_strokes(&scene)[0];
-        let anchor = xf * kurbo::Point::new(-1.0, 0.0);
+        let anchor = xf * crate::geometry::Point::new(-1.0, 0.0);
         let user_clip_px = 15.0 * 96.0 / 72.0;
         let auto_clip_px = 10.0 * 96.0 / 72.0;
         let expected_anchor_x = user_clip_px + auto_clip_px;
@@ -1142,7 +1144,7 @@ mod tests {
             anchor.x,
             expected_anchor_x
         );
-        let tip = xf * kurbo::Point::new(0.0, 0.0);
+        let tip = xf * crate::geometry::Point::new(0.0, 0.0);
         assert!(
             (tip.x - user_clip_px).abs() < 1e-6,
             "tip.x = {} (expected user clip boundary {})",
@@ -1268,7 +1270,7 @@ mod tests {
         });
         let scene = draw_into_scene(&g);
         let xf = fills_after_strokes(&scene)[0];
-        let tip = xf * kurbo::Point::new(0.0, 0.0);
+        let tip = xf * crate::geometry::Point::new(0.0, 0.0);
         let size_px = 10.0 * 96.0 / 72.0;
         // Inverted: tip should land at (100 - size_px, 50), pointing inward.
         assert!(

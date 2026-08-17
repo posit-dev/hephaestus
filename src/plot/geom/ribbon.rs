@@ -63,7 +63,7 @@
 //!
 //! - Axis-aligned (horizontal / vertical) **and** linear projection —
 //!   linear gradient brush along the shared axis with one
-//!   [`peniko::ColorStop`] per row. The fast path.
+//!   [`crate::brush::ColorStop`] per row. The fast path.
 //! - Free orientation, **or** any orientation under a non-linear
 //!   projection (e.g. polar) — quad-strip mesh between curve A and
 //!   curve B with per-vertex colours, so the colour follows the
@@ -785,8 +785,7 @@ fn draw_one_ribbon_mark(
                 build_gradient_brush(
                     orientation,
                     &curve_a_pts,
-                    &row_for_vertex,
-                    curve_a_pts.len() - row_for_vertex.len(),
+                    &vertex_origins,
                     fill_ch,
                     fill_scale,
                     fill_opacity_ch,
@@ -851,98 +850,44 @@ fn draw_one_ribbon_mark(
 fn build_gradient_brush(
     orientation: Orientation,
     curve_a_pts: &[Point],
-    row_for_vertex: &[usize],
-    _interior_count: usize,
+    vertex_origins: &[VertexOrigin],
     fill_ch: Option<&Channel>,
     fill_scale: Option<&crate::plot::scale::Scale>,
     fill_opacity_ch: Option<&Channel>,
     fill_opacity_scale: Option<&crate::plot::scale::Scale>,
     fallback: Color,
-) -> Option<peniko::Gradient> {
-    // Indices of curve_a_pts that correspond to real per-row vertices
-    // (not densified interior). Walk curve_a_pts in order and pick out
-    // every point whose forward position in the curve matches the next
-    // expected row vertex. The simplest correct mapping: the real
-    // vertices are emitted *after* each densified interior batch, so we
-    // can identify them as the points at the cumulative positions that
-    // correspond to where rows land. Easier: since `row_for_vertex` has
-    // one entry per surviving row and curve_a_pts has those rows
-    // interleaved with interior points appended in row order, the real
-    // vertices are exactly the last points of each "run" — i.e. the
-    // indices N - row_for_vertex.len() through N-1 are NOT correct under
-    // densification. To make this robust, we scan from the back:
-    // densified points are inserted *before* each successive row vertex,
-    // so the last point is row N-1's vertex, the next-back is row
-    // (N-2)'s vertex (after stepping back through that row's interior
-    // points), and so on.
-    //
-    // Simpler approach: walk curve_a_pts with a parallel counter that
-    // increments only when we land on a real vertex. We don't track
-    // interior vs real explicitly during the build loop, so we identify
-    // real vertices here by selecting the LAST point of each
-    // interpolate_segment-extended row. This works because each row
-    // appends (interior_batch ++ [real_vertex]) in order.
-    //
-    // The walk: real vertices are at indices where the cumulative
-    // (interior + 1) counts roll over. We need either the interior count
-    // per row (not tracked) or a per-vertex flag. Since the densified
-    // points are *strictly between* two real vertices, the simplest
-    // robust extraction is to assume curve_a_pts ends with the last real
-    // vertex and step backwards by 1 + interior_count_for_row[i]. We
-    // don't have per-row interior counts handy. Fallback: degrade
-    // gradient stops to the row's projected position by walking
-    // curve_a_pts and picking the LAST point per row marker.
-    //
-    // Implementation: emit stops only from indices that we know are real
-    // vertices. To get that without tracking interior batches, we accept
-    // the simplification that under linear projection (no interior
-    // points) curve_a_pts.len() == row_for_vertex.len() — gradient
-    // stops align trivially. Under polar, gradient brushes on bands are
-    // a documented v1 limitation; we still produce a brush but stops
-    // map to the last `row_for_vertex.len()` indices, which yields the
-    // correct stops *for the row vertices* (other points use the
-    // gradient evaluated at their projected position along the brush
-    // line, which is what we want anyway).
-    let n = row_for_vertex.len();
+) -> Option<crate::brush::Gradient> {
+    // Free orientation has no single axis for a linear gradient to run
+    // along; the caller routes that case through the mesh path.
+    if matches!(orientation, Orientation::Free) {
+        return None;
+    }
+
+    // Only real per-row vertices carry a fill value, and `VertexOrigin`
+    // marks them by `prev_row == next_row`. Densified interior vertices
+    // bracket two rows and contribute no stop — the gradient already
+    // covers them, since a brush is evaluated at each point's projected
+    // position rather than per vertex.
+    let real: Vec<(usize, Point)> = vertex_origins
+        .iter()
+        .zip(curve_a_pts)
+        .filter(|(o, _)| o.prev_row == o.next_row)
+        .map(|(o, p)| (o.prev_row, *p))
+        .collect();
+    let n = real.len();
     if n < 2 {
         return None;
     }
 
-    // Compute shared-axis range in panel pixels using only the real
-    // per-row vertices. Under polar this isn't strictly an axis but the
-    // gradient is still anchored screen-aligned by the band's pixel-space
-    // extent along the corresponding axis. Free orientation is dispatched
-    // to the mesh path elsewhere; if it ever reaches here, decline by
-    // returning `None` so the caller falls back to a solid fill.
+    // Shared-axis range in panel pixels. Under polar this isn't strictly
+    // an axis, but the gradient is still anchored screen-aligned by the
+    // band's pixel-space extent along the corresponding axis.
     let pick_coord = |p: &Point| match orientation {
         Orientation::Horizontal => p.x,
         Orientation::Vertical => p.y,
         Orientation::Free => 0.0,
     };
-    if matches!(orientation, Orientation::Free) {
-        return None;
-    }
-    let real_pts: Vec<Point> = if curve_a_pts.len() == n {
-        curve_a_pts.to_vec()
-    } else {
-        // Densified path: real vertices are the last point of each row's
-        // emitted batch. Each row appends interior_batch ++ [real]; the
-        // interior_batch length depends on the projection. We can recover
-        // real vertices by counting from the END: the final point IS the
-        // last row's vertex; for earlier rows we don't have a clean
-        // boundary. Practical fallback: subsample curve_a_pts uniformly
-        // into n points. This is imperfect under heavy polar
-        // densification but documented as a v1 limitation.
-        let m = curve_a_pts.len();
-        (0..n)
-            .map(|k| {
-                let idx = (k * (m - 1)) / (n - 1);
-                curve_a_pts[idx]
-            })
-            .collect()
-    };
-
-    let coords: Vec<f64> = real_pts.iter().map(pick_coord).collect();
+    let coords: Vec<f64> = real.iter().map(|(_, p)| pick_coord(p)).collect();
     let min_c = coords.iter().cloned().fold(f64::INFINITY, f64::min);
     let max_c = coords.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let span = max_c - min_c;
@@ -952,11 +897,11 @@ fn build_gradient_brush(
 
     let (start, end) = match orientation {
         Orientation::Horizontal => {
-            let mid_y = (real_pts[0].y + real_pts[n - 1].y) * 0.5;
+            let mid_y = (real[0].1.y + real[n - 1].1.y) * 0.5;
             (Point::new(min_c, mid_y), Point::new(max_c, mid_y))
         }
         Orientation::Vertical => {
-            let mid_x = (real_pts[0].x + real_pts[n - 1].x) * 0.5;
+            let mid_x = (real[0].1.x + real[n - 1].1.x) * 0.5;
             (Point::new(mid_x, min_c), Point::new(mid_x, max_c))
         }
         Orientation::Free => return None,
@@ -967,7 +912,7 @@ fn build_gradient_brush(
     // row order under cartesian (y axis is flipped) or under non-linear
     // projections in general — sort before deduping.
     let mut pairs: Vec<(f64, Color)> = Vec::with_capacity(n);
-    for (k, &i) in row_for_vertex.iter().enumerate() {
+    for (k, &(i, _)) in real.iter().enumerate() {
         let offset = ((coords[k] - min_c) / span).clamp(0.0, 1.0);
         let row_color = override_alpha(
             resolve_color_channel(fill_ch, fill_scale, i),
@@ -978,13 +923,13 @@ fn build_gradient_brush(
     }
     pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-    let mut stops: Vec<peniko::ColorStop> = Vec::with_capacity(pairs.len());
+    let mut stops: Vec<crate::brush::ColorStop> = Vec::with_capacity(pairs.len());
     let mut last_offset = f64::NEG_INFINITY;
     for (offset, color) in pairs {
         if offset <= last_offset {
             continue;
         }
-        stops.push(peniko::ColorStop {
+        stops.push(crate::brush::ColorStop {
             offset: offset as f32,
             color: color.into(),
         });
@@ -993,7 +938,7 @@ fn build_gradient_brush(
     if stops.len() < 2 {
         return None;
     }
-    Some(peniko::Gradient::new_linear(start, end).with_stops(stops.as_slice()))
+    Some(crate::brush::Gradient::new_linear(start, end).with_stops(stops.as_slice()))
 }
 
 /// Bracketing-row identity for a single emitted curve vertex. Real
@@ -1436,8 +1381,10 @@ mod tests {
             } = op
             {
                 // Linear horizontal gradient: start and end share a y.
-                if let peniko::GradientKind::Linear(peniko::LinearGradientPosition { start, end }) =
-                    g.kind
+                if let crate::brush::GradientKind::Linear(crate::brush::LinearGradientPosition {
+                    start,
+                    end,
+                }) = g.kind
                 {
                     assert!((start.y - end.y).abs() < f64::EPSILON);
                     assert!(start.x < end.x);
@@ -1467,8 +1414,10 @@ mod tests {
             } = op
             {
                 // Linear vertical gradient: start and end share an x.
-                if let peniko::GradientKind::Linear(peniko::LinearGradientPosition { start, end }) =
-                    g.kind
+                if let crate::brush::GradientKind::Linear(crate::brush::LinearGradientPosition {
+                    start,
+                    end,
+                }) = g.kind
                 {
                     assert!((start.x - end.x).abs() < f64::EPSILON);
                     assert!(start.y < end.y);
@@ -1607,7 +1556,7 @@ mod tests {
                     .elements()
                     .iter()
                     .find_map(|el| match el {
-                        kurbo::PathEl::MoveTo(p) => Some(p.x),
+                        crate::path::PathEl::MoveTo(p) => Some(p.x),
                         _ => None,
                     })
                     .unwrap();
@@ -1727,7 +1676,7 @@ mod tests {
                 let closes = path
                     .elements()
                     .iter()
-                    .filter(|el| matches!(el, kurbo::PathEl::ClosePath))
+                    .filter(|el| matches!(el, crate::path::PathEl::ClosePath))
                     .count();
                 assert_eq!(closes, 1);
                 return;
@@ -1753,7 +1702,7 @@ mod tests {
                 // First element is MoveTo at curve-A start. Last LineTo
                 // before close is curve-B end (=row 0 in reversed order).
                 let elements: Vec<_> = path.elements().iter().collect();
-                if let kurbo::PathEl::MoveTo(start) = &elements[0] {
+                if let crate::path::PathEl::MoveTo(start) = &elements[0] {
                     // y=0.8 on a 100×100 panel under default cartesian
                     // projection projects to y_px = panel.y1 - 0.8 * h =
                     // 100 - 80 = 20.
@@ -1824,7 +1773,7 @@ mod tests {
                 let line_count = path
                     .elements()
                     .iter()
-                    .filter(|el| matches!(el, kurbo::PathEl::LineTo(_)))
+                    .filter(|el| matches!(el, crate::path::PathEl::LineTo(_)))
                     .count();
                 assert!(
                     line_count > 6,
@@ -1872,11 +1821,11 @@ mod tests {
         // their bracketing curve endpoints.
         for op in &scene.ops {
             if let Op::Fill { path, .. } = op {
-                let lines: Vec<kurbo::Point> = path
+                let lines: Vec<crate::geometry::Point> = path
                     .elements()
                     .iter()
                     .filter_map(|el| match el {
-                        kurbo::PathEl::LineTo(p) => Some(*p),
+                        crate::path::PathEl::LineTo(p) => Some(*p),
                         _ => None,
                     })
                     .collect();
@@ -1884,7 +1833,7 @@ mod tests {
                     .elements()
                     .iter()
                     .find_map(|el| match el {
-                        kurbo::PathEl::MoveTo(p) => Some(*p),
+                        crate::path::PathEl::MoveTo(p) => Some(*p),
                         _ => None,
                     })
                     .expect("expected a MoveTo");

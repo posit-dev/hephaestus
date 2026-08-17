@@ -32,6 +32,7 @@ use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::{scale, AspectMode, LineGeom, Plot, PlotComposition, PointGeom};
 use hephaestus::scales::chrome::AxisSide;
 use hephaestus::scales::TransformKind;
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 fn comp_shape() -> Composition {

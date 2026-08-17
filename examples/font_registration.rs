@@ -20,6 +20,7 @@ use hephaestus::geometry::Size;
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom, TextGeom};
 use hephaestus::scales::chrome::AxisSide;
+use hephaestus::scene::SceneBuilder;
 use hephaestus::text::{register_font_path, TextStyle};
 use hephaestus::Renderer;
 

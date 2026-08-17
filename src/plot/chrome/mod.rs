@@ -2,18 +2,27 @@
 //!
 //! Scales are pure value mappers that live in [`crate::scales`]; this
 //! module provides their visual rendering against
-//! [`SceneBuilder`](crate::scene::SceneBuilder). Gated on `feature =
-//! "text"` because the renderers consume `TextRun`.
+//! [`SceneBuilder`](crate::scene::SceneBuilder).
 
-#[cfg(feature = "text")]
 pub mod axis;
-#[cfg(feature = "text")]
 pub mod legend;
-#[cfg(feature = "text")]
 pub(crate) mod linear_axis;
-#[cfg(feature = "text")]
 pub mod panel;
-#[cfg(feature = "text")]
 pub mod polar;
-#[cfg(feature = "text")]
 pub mod strip;
+
+/// The font size a chrome slot's `Length::Rel` text size resolves
+/// against — `theme.text.size_pt`, or the crate default when the theme
+/// leaves it unset.
+///
+/// Every text-bearing chrome slot has to resolve its relative size
+/// against the same parent, otherwise raising `theme.text.size_pt`
+/// scales some slots and pins others.
+pub(crate) fn root_text_pt(theme: &crate::plot::theme::Theme) -> f64 {
+    use crate::plot::theme::DEFAULT_TEXT_SIZE_PT;
+    theme
+        .text
+        .size_pt
+        .map(|l| l.resolve(DEFAULT_TEXT_SIZE_PT))
+        .unwrap_or(DEFAULT_TEXT_SIZE_PT)
+}

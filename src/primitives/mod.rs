@@ -63,9 +63,9 @@
 //! [`round_corners`] for the math. Polygon offset is delegated to
 //! [`clipper2-rust`].
 
+use crate::geometry::Shape as _;
 use crate::geometry::{Point, Rect, Vec2};
 use crate::path::{Path, PathEl};
-use kurbo::Shape;
 
 mod arc_length;
 mod clip;
@@ -238,7 +238,7 @@ fn plain_polygon_path(ring: &[Point]) -> Path {
 pub fn path_to_rings(path: &Path, tolerance: f64) -> Vec<Vec<Point>> {
     let mut rings: Vec<Vec<Point>> = Vec::new();
     let mut cur: Vec<Point> = Vec::new();
-    kurbo::flatten(path.iter(), tolerance, |el| match el {
+    crate::geometry::flatten(path.iter(), tolerance, |el| match el {
         PathEl::MoveTo(p) if !cur.is_empty() => {
             rings.push(std::mem::take(&mut cur));
             cur.push(p);
@@ -248,7 +248,7 @@ pub fn path_to_rings(path: &Path, tolerance: f64) -> Vec<Vec<Point>> {
         PathEl::ClosePath if !cur.is_empty() => {
             rings.push(std::mem::take(&mut cur));
         }
-        // kurbo::flatten only emits MoveTo / LineTo / ClosePath.
+        // crate::geometry::flatten only emits MoveTo / LineTo / ClosePath.
         _ => {}
     });
     if !cur.is_empty() {
@@ -267,18 +267,18 @@ pub fn rect(r: Rect) -> Path {
 /// quarter-circle arcs at each corner). `radius` is clamped by `kurbo` to at
 /// most half the shorter rectangle side.
 pub fn rounded_rect(r: Rect, radius: f64) -> Path {
-    kurbo::RoundedRect::from_rect(r, radius).to_path(CURVE_TOLERANCE)
+    crate::geometry::RoundedRect::from_rect(r, radius).to_path(CURVE_TOLERANCE)
 }
 
 /// Build a closed circle path approximated by cubic Beziers.
 pub fn circle(center: Point, radius: f64) -> Path {
-    kurbo::Circle::new(center, radius).to_path(CURVE_TOLERANCE)
+    crate::geometry::Circle::new(center, radius).to_path(CURVE_TOLERANCE)
 }
 
 /// Build a closed axis-aligned ellipse path. `radii.x` is the x-half-axis,
 /// `radii.y` the y-half-axis.
 pub fn ellipse(center: Point, radii: Vec2) -> Path {
-    kurbo::Ellipse::new(center, radii, 0.0).to_path(CURVE_TOLERANCE)
+    crate::geometry::Ellipse::new(center, radii, 0.0).to_path(CURVE_TOLERANCE)
 }
 
 /// A single line segment from `a` to `b`. Same as a 2-point [`polyline`] with
@@ -353,7 +353,7 @@ fn point_on_circle(center: Point, radius: f64, angle: f64) -> Point {
 /// screen coordinates with Y pointing down). Negative `sweep_angle` reverses
 /// the arc direction.
 pub fn arc(center: Point, radius: f64, start_angle: f64, sweep_angle: f64) -> Path {
-    let arc = kurbo::Arc::new(
+    let arc = crate::geometry::Arc::new(
         center,
         Vec2::new(radius, radius),
         start_angle,
@@ -372,7 +372,7 @@ pub fn wedge(center: Point, radius: f64, start_angle: f64, sweep_angle: f64) -> 
     let mut path = Path::new();
     path.move_to(center);
     path.line_to(arc_start);
-    let arc = kurbo::Arc::new(
+    let arc = crate::geometry::Arc::new(
         center,
         Vec2::new(radius, radius),
         start_angle,
@@ -401,7 +401,7 @@ pub fn annular_wedge(
     let inner_end = point_on_circle(center, inner_radius, start_angle + sweep_angle);
     let mut path = Path::new();
     path.move_to(outer_start);
-    let outer_arc = kurbo::Arc::new(
+    let outer_arc = crate::geometry::Arc::new(
         center,
         Vec2::new(outer_radius, outer_radius),
         start_angle,
@@ -412,7 +412,7 @@ pub fn annular_wedge(
         path.push(el);
     }
     path.line_to(inner_end);
-    let inner_arc = kurbo::Arc::new(
+    let inner_arc = crate::geometry::Arc::new(
         center,
         Vec2::new(inner_radius, inner_radius),
         start_angle + sweep_angle,
@@ -588,7 +588,7 @@ mod tests {
     fn rect_bounds_match_input() {
         let r = Rect::new(1.0, 2.0, 10.0, 8.0);
         let p = rect(r);
-        let b = kurbo::Shape::bounding_box(&p);
+        let b = crate::geometry::Shape::bounding_box(&p);
         assert!((b.x0 - 1.0).abs() < 1e-9);
         assert!((b.y0 - 2.0).abs() < 1e-9);
         assert!((b.x1 - 10.0).abs() < 1e-9);
@@ -598,7 +598,7 @@ mod tests {
     #[test]
     fn circle_bounds_match_input() {
         let p = circle(Point::new(10.0, 20.0), 5.0);
-        let b = kurbo::Shape::bounding_box(&p);
+        let b = crate::geometry::Shape::bounding_box(&p);
         assert!((b.x0 - 5.0).abs() < 0.5);
         assert!((b.y0 - 15.0).abs() < 0.5);
         assert!((b.x1 - 15.0).abs() < 0.5);
@@ -678,8 +678,8 @@ mod tests {
     fn annular_wedge_zero_inner_matches_wedge_bounds() {
         let aw = annular_wedge(Point::ORIGIN, 0.0, 5.0, 0.0, std::f64::consts::PI / 2.0);
         let w = wedge(Point::ORIGIN, 5.0, 0.0, std::f64::consts::PI / 2.0);
-        let a = kurbo::Shape::bounding_box(&aw);
-        let b = kurbo::Shape::bounding_box(&w);
+        let a = crate::geometry::Shape::bounding_box(&aw);
+        let b = crate::geometry::Shape::bounding_box(&w);
         assert!((a.x0 - b.x0).abs() < 0.1);
         assert!((a.y0 - b.y0).abs() < 0.1);
         assert!((a.x1 - b.x1).abs() < 0.1);
@@ -689,7 +689,7 @@ mod tests {
     #[test]
     fn full_arc_bounds_match_circle() {
         let a = arc(Point::new(0.0, 0.0), 5.0, 0.0, std::f64::consts::TAU);
-        let b = kurbo::Shape::bounding_box(&a);
+        let b = crate::geometry::Shape::bounding_box(&a);
         assert!((b.x0 - (-5.0)).abs() < 0.5);
         assert!((b.x1 - 5.0).abs() < 0.5);
         assert!((b.y0 - (-5.0)).abs() < 0.5);

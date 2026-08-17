@@ -1009,13 +1009,13 @@ mod tests {
                 let close_count = path
                     .elements()
                     .iter()
-                    .filter(|el| matches!(el, kurbo::PathEl::ClosePath))
+                    .filter(|el| matches!(el, crate::path::PathEl::ClosePath))
                     .count();
                 assert_eq!(close_count, 2);
                 let move_count = path
                     .elements()
                     .iter()
-                    .filter(|el| matches!(el, kurbo::PathEl::MoveTo(_)))
+                    .filter(|el| matches!(el, crate::path::PathEl::MoveTo(_)))
                     .count();
                 assert_eq!(move_count, 2);
                 return;
@@ -1075,7 +1075,12 @@ mod tests {
                 let vertices = path
                     .elements()
                     .iter()
-                    .filter(|el| matches!(el, kurbo::PathEl::MoveTo(_) | kurbo::PathEl::LineTo(_)))
+                    .filter(|el| {
+                        matches!(
+                            el,
+                            crate::path::PathEl::MoveTo(_) | crate::path::PathEl::LineTo(_)
+                        )
+                    })
                     .count();
                 assert_eq!(vertices, 5, "ring should hold only its own vertices");
                 return;
@@ -1107,7 +1112,7 @@ mod tests {
                 let close_count = path
                     .elements()
                     .iter()
-                    .filter(|el| matches!(el, kurbo::PathEl::ClosePath))
+                    .filter(|el| matches!(el, crate::path::PathEl::ClosePath))
                     .count();
                 assert_eq!(close_count, 1, "only outer ring should render");
                 return;
@@ -1299,7 +1304,7 @@ mod tests {
         let curves = path
             .elements()
             .iter()
-            .filter(|el| matches!(el, kurbo::PathEl::CurveTo(_, _, _)))
+            .filter(|el| matches!(el, crate::path::PathEl::CurveTo(_, _, _)))
             .count();
         assert_eq!(curves, 4);
     }
@@ -1309,7 +1314,7 @@ mod tests {
         // Square 60×60 at panel fractions 0.2..0.8 → 20..80 px on a
         // 100-px panel, so bbox is 60 wide. expand = 5pt (≈ 6.67px at
         // 96 dpi) grows each side outward → bbox 60 + 2*6.67 ≈ 73.33.
-        use kurbo::Shape;
+        use crate::geometry::Shape as _;
         let mut g = PolygonGeom::builder()
             .set("x", Raw(vec![0.2_f64, 0.8, 0.8, 0.2]))
             .set("y", Raw(vec![0.2_f64, 0.2, 0.8, 0.8]))
@@ -1341,7 +1346,7 @@ mod tests {
         // outline. The test just verifies the combination doesn't
         // panic and the output has curves (from rounding) plus a
         // bbox at least as large as the un-expanded original.
-        use kurbo::Shape;
+        use crate::geometry::Shape as _;
         let mut g = PolygonGeom::builder()
             .set("x", Raw(vec![0.2_f64, 0.8, 0.8, 0.2]))
             .set("y", Raw(vec![0.2_f64, 0.2, 0.8, 0.8]))
@@ -1361,7 +1366,7 @@ mod tests {
         let curves = path
             .elements()
             .iter()
-            .filter(|el| matches!(el, kurbo::PathEl::CurveTo(_, _, _)))
+            .filter(|el| matches!(el, crate::path::PathEl::CurveTo(_, _, _)))
             .count();
         assert!(
             curves >= 4,

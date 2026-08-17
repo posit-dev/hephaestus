@@ -39,6 +39,12 @@ Concretely:
 
 When tempted to add a feature only one backend supports: don't. If it's genuinely necessary, the alternative is a backend-specific extension trait — not a method on `SceneBuilder`.
 
+## Thread-safety: `Scale` is shareable, `Plot` is not
+
+`Scale` and `ScaleRegistry` are `Send + Sync` — `LabelFormatter` carries a `Send + Sync` bound and the generation counter is a plain `u64`. A registry can be built on a worker thread and shared.
+
+`Plot` and `PlotComposition` are deliberately **neither**. Geoms memoize shaped text behind `RefCell` (`RichShapeCache`, and the per-run break memo inside `RichTextRun`), which is what keeps interactive redraws off the shaper. Making them `Send` would mean putting locks on that path to buy thread mobility nothing in the render model asks for — rendering is single-threaded by design, and the host owns presentation. Build plots on the thread that draws them; share configuration through the registry.
+
 ## Picking model
 
 Picking is **opt-in per renderer**, not a CPU-side post-pass. `VelloRenderer::with_picking()` enables it; `VelloRenderer::new()` allocates nothing in the pick path. When enabled, the renderer rasterises a parallel "pick scene" into a second `HeadlessTarget`, reads it back to CPU once per render, and answers point queries via `pick_at(x, y) -> Option<u32>`.
@@ -71,11 +77,11 @@ Folders (each with its own CLAUDE.md):
 - `scene/` — `SceneBuilder` trait, glyph types, recording backend.
 - `backend/` — `Renderer` trait, error type, and backend implementations.
 - `layout/` — grid layout solver. Recursive grids, fr / auto tracks, `respect()`, `Measure` protocol.
-- `composition/` — patchwork-style plot composition. 13-col × 16-row anatomical grid; chrome alignment across nested compositions via `Length::TrackOf`.
+- `composition/` — patchwork-style plot composition. 13-col × 16-row anatomical grid; chrome alignment across nested compositions via `Extent::TrackOf`.
 - `primitives/` — compound 2D primitives: path constructors (rect / circle / wedge / polyline / polygon / arc), composable vertex transforms (clip / offset / round corners), arc-length sampling, ribbon tessellation.
 - `plot/` — high-level plot API: `Plot`, `PlotComposition` orchestrator, key-based diff for identity-preserving animation. Geoms in `plot/geom/`; axis / legend rendering in `plot/chrome/`. Scales and values themselves live in [`crate::scales`] (see below).
 - `scales/` — leaf module: `Value`, `DataColumn`, `Scale`, scale types, transforms, break / tick algorithms. Backend-agnostic and plot-agnostic; nothing inside imports from `src/plot/`, `src/scene/`, etc. Intended to be lifted into its own crate once the API settles. Hephaestus's own `Scale` bundle, `ScaleRegistry` and the ggplot-style constructors live in `plot/scale/` (which also re-exports `crate::scales::*`, so `hephaestus::plot::scale::*` reaches both); `plot/value.rs` is a pure re-export shim over `crate::scales::value`.
-- `text/` — parley-backed text shaping and layout. Gated on the `text` feature. A host crate may swap in its own shaper behind the `TextRun` / `draw_text` surface, but the parley path is the committed default. `text/rich/` layers marquee-flavoured markdown on top of it (see `src/text/rich/CLAUDE.md`).
+- `text/` — parley-backed text shaping and layout. A host crate may swap in its own shaper behind the `TextRun` / `draw_text` surface, but the parley path is the committed default. `text/rich/` layers marquee-flavoured markdown on top of it (see `src/text/rich/CLAUDE.md`).
 
 Single-file modules (no CLAUDE.md, one-line descriptions here):
 
@@ -83,11 +89,11 @@ Single-file modules (no CLAUDE.md, one-line descriptions here):
 - `brush.rs` — `Brush`, `Image`, `Sampling` (Nearest / Bilinear).
 - `color.rs` — re-exports peniko `Color`; owns `ColorSpace` (Oklab / Srgb) and `lerp_color`, the one place two colors get blended. Every blend names its space; `ColorSpace::default()` is Oklab.
 - `geometry.rs` — re-exports kurbo `Affine`, `Point`, `Rect`, `Size`, `Vec2`.
-- `linetype.rs` — the linetype pattern vocabulary (`Dash` / `Gap` / `Marker` sequences, the named `solid` / `dashed` / `dotted` / `dashdot` constructors) plus `draw_linetype_with_markers`, the arc-length walk that stamps marker shapes along a polyline. At the crate root rather than under `plot/geom/` because rich-text block borders express their strokes as linetypes too, and `text/` must not depend on `plot/`; `plot::geom::linetype` re-exports it.
+- `linetype.rs` — the named `solid` / `dashed` / `dotted` / `dashdot` constructors plus `draw_linetype_with_markers`, the arc-length walk that stamps marker shapes along a polyline. At the crate root rather than under `plot/geom/` because rich-text block borders express their strokes as linetypes too, and `text/` must not depend on `plot/`; `plot::geom::linetype` re-exports it. The `LinetypeStep` enum itself lives in `style_vocab.rs` — it's shared vocabulary like `Color`, so `scales` can carry a column of dash patterns without depending on the renderer that walks them.
 - `mesh.rs` — `Mesh`: flat 2D triangle list with per-vertex colour. Used by `primitives::ribbon` and consumed by `SceneBuilder::draw_mesh`.
 - `path.rs` — `Path` (kurbo `BezPath` wrapper) and `FillRule` (intersection enum).
 - `pick.rs` — `PickId` and the authoritative encoding into `Rgba8Unorm` RGB.
 - `png.rs` — gated PNG writer (`png` feature).
 - `shape.rs` — `Shape` / `ShapeRegistry` / `ShapeStyle`: named glyphs / paths for scatterplot markers and line endpoint terminators.
 - `stroke.rs` — re-exports kurbo `Stroke`, `Cap`, `Join`. Stroke alignment and variable-width strokes are not in scope.
-- `style_vocab.rs` — the styling vocabulary shared by the plot theme and the text layer: `Length` / `Margin` (absolute-or-relative measurements), `Palette` / `ThemeColor` (semantic colour anchors and references into them), `HAlign` / `VAlign`. Lives at the crate root for the same reason `linetype.rs` does — `text::rich` resolves palette colours and relative sizes while shaping. `plot::theme` re-exports every item, so plot-side code addresses them through the theme.
+- `style_vocab.rs` — the styling vocabulary shared by the plot theme, the text layer and `scales`: `Length` / `Margin` (absolute-or-relative measurements), `LinetypeStep` (one step of a dash pattern), `Palette` / `ThemeColor` (semantic colour anchors and references into them), `HAlign` / `VAlign`. Lives at the crate root for the same reason `linetype.rs` does — `text::rich` resolves palette colours and relative sizes while shaping. `plot::theme` re-exports every item, so plot-side code addresses them through the theme.

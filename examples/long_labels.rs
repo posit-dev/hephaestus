@@ -24,6 +24,7 @@ use hephaestus::plot::theme::{pt, Length, Margin, RectElement, Sided, Theme, The
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom};
 use hephaestus::scales::chrome::AxisSide;
 use hephaestus::scales::value::Value;
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 fn comp_shape() -> Composition {

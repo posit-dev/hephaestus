@@ -249,7 +249,6 @@ fn direction_auto_resolves_from_side() {
     );
 }
 
-#[cfg(feature = "text")]
 #[test]
 fn themed_grid_dash_pattern_reaches_stroke() {
     // theme.panel_grid_major with a dashed linetype produces a

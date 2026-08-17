@@ -15,12 +15,11 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{Composition, Patch, Span};
 use hephaestus::geometry::Size;
-#[cfg(feature = "text")]
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::value::Value;
 use hephaestus::plot::{scale, Plot, PlotComposition, RectGeom};
-#[cfg(feature = "text")]
 use hephaestus::scales::chrome::AxisSide;
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 fn main() {
@@ -51,7 +50,6 @@ fn main() {
                 .set("fill", rgb8(180, 90, 70))
                 .build(),
         );
-        #[cfg(feature = "text")]
         {
             plot.add_axis(Axis::rail(
                 "category",
@@ -120,7 +118,6 @@ fn main() {
                 .set("fill", group_col)
                 .build(),
         );
-        #[cfg(feature = "text")]
         {
             plot.add_axis(Axis::rail(
                 "category",
@@ -193,7 +190,6 @@ fn main() {
                 .set("corner_radius", 3.0_f64)
                 .build(),
         );
-        #[cfg(feature = "text")]
         {
             plot.add_axis(Axis::rail(
                 "x_axis",

@@ -25,6 +25,7 @@ use hephaestus::composition::{Composition, Patch, Span};
 use hephaestus::geometry::Size;
 use hephaestus::plot::{scale, CustomProjection, GeometryGeom, Plot, PlotComposition, Projection};
 use hephaestus::scales::geometry::{Geometry, Polygon as GeoPolygon};
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 fn main() {

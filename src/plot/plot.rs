@@ -10,7 +10,7 @@
 //! - The shape registry.
 //!
 //! Plot is the lower-level surface; the canonical user-facing surface
-//! is the (Phase 7) `PlotComposition` orchestrator that owns a
+//! is the `PlotComposition` orchestrator that owns a
 //! [`ScaleRegistry`] and a `HashMap<String, Plot>` and drives the full
 //! `wire → solve → draw_chrome → draw_panel` flow with dirty tracking.
 //! Stand-alone Plot use is supported for tests and one-off renders.
@@ -29,11 +29,8 @@ use super::geom::{Geom, GeomContext, ScaleResolver};
 use super::scale::{Scale, ScaleRegistry};
 use crate::scales::input::InputRange;
 
-#[cfg(feature = "text")]
 use super::scale::AxisSide;
-#[cfg(feature = "text")]
 use crate::composition::Patch;
-#[cfg(feature = "text")]
 use crate::layout::Cell;
 
 // ─── Identifiers ─────────────────────────────────────────────────────────────
@@ -42,7 +39,19 @@ use crate::layout::Cell;
 /// [`Plot::update_geom`] / [`Plot::remove_geom`] to address a specific
 /// geom later. Internal; the value isn't user-meaningful.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GeomId(pub u32);
+pub struct GeomId(u32);
+
+impl GeomId {
+    pub(crate) fn new(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// The raw handle value. Opaque — useful only as a key, and not
+    /// comparable across plots.
+    pub fn raw(self) -> u32 {
+        self.0
+    }
+}
 
 /// How the plot's fixed-aspect constraint is enforced. Applies to
 /// every projection family, with per-family interpretation:
@@ -72,15 +81,12 @@ pub enum AspectMode {
     Range,
 }
 
-// ─── Always-available chrome helpers ─────────────────────────────────────────
-
 impl Plot {
-    /// Add just the `Slot::Panel` cell to `patch`. Always available —
-    /// does not require the `text` feature. The full
-    /// [`Self::wire`] (text-feature only) calls this internally; the
-    /// orchestrator's render flow calls this when chrome is unavailable
-    /// (`text` feature off) so the panel rect still appears in the
-    /// solved layout for [`Self::draw_panel_into`] to find.
+    /// Add just the `Slot::Panel` cell to `patch`, leaving every
+    /// chrome slot empty. [`Self::wire`] calls this internally; a
+    /// caller that lays out its own chrome can call it directly to get
+    /// the panel rect into the solved layout for
+    /// [`Self::draw_panel_into`] to find.
     pub fn wire_panel(&self, patch: crate::composition::Patch) -> crate::composition::Patch {
         patch.slot(Slot::Panel, crate::layout::Cell::empty())
     }
@@ -107,20 +113,14 @@ pub struct Plot {
     /// Axes attached to this plot. Composed explicitly via
     /// [`Self::add_axis`]; no axis is rendered unless the caller
     /// adds one. Same opt-in model as legends.
-    #[cfg(feature = "text")]
     axes: Vec<crate::plot::chrome::axis::Axis>,
-    #[cfg(feature = "text")]
     next_axis_id: u32,
 
     /// Legends attached to this plot. Composed explicitly by the
     /// caller via [`Self::add_legend`] / [`Self::add_legend_separate`].
-    /// Nothing is inferred from `bindings`. Gated on `feature = "text"`
-    /// because `Legend` references types from the text-gated chrome
-    /// module.
-    #[cfg(feature = "text")]
+    /// Nothing is inferred from `bindings`.
     legends: Vec<crate::plot::chrome::legend::Legend>,
     /// Next [`LegendId`] to hand out from `add_legend*`.
-    #[cfg(feature = "text")]
     next_legend_id: u32,
 
     /// Coordinate projection. v1 ships `Cartesian` only — geom output
@@ -137,14 +137,17 @@ pub struct Plot {
     /// projections.
     clip: bool,
 
-    /// Patch-wide background fill — covers panel + axes + titles +
-    /// padding, but not the outer margin. `None` by default (no
-    /// fill; the canvas colour shows through). Painted in the
-    /// orchestrator's first render pass across all plots, before
-    /// any panel chrome / geom is drawn.
+    /// Whether every draw rebuilds each geom's enter / update / exit
+    /// sets. Off by default: the triples describe how a frame's rows
+    /// relate to the previous frame's, which nothing consumes yet, and
+    /// building them costs a hash index plus a key-column snapshot per
+    /// geom per frame.
+    track_identity: bool,
 
-    /// Tracked for the orchestrator's partial-repaint heuristics; not
-    /// currently consulted by the draw path.
+    /// Set on mutation, cleared after a draw. Plumbed for the
+    /// orchestrator's partial-repaint heuristics — the consumer this
+    /// and `PlotComposition`'s per-plot / per-scale bits exist for;
+    /// the current render redraws every plot.
     #[allow(dead_code)]
     dirty: bool,
 
@@ -176,14 +179,12 @@ pub struct Plot {
     /// `Some(text)` reserves the matching `StripTop` / `StripRight` /
     /// `StripBottom` / `StripLeft` slot and renders against the
     /// theme's `strip_background` / `strip_text` / `strip_padding`.
-    #[cfg(feature = "text")]
     strips: [Option<String>; 4],
 }
 
 /// Index into [`Plot::strips`] for the given [`AxisSide`]. Order is
 /// Top / Right / Bottom / Left so iteration follows the same
 /// clockwise convention used for wire / draw passes.
-#[cfg(feature = "text")]
 pub(crate) fn axis_side_index(side: AxisSide) -> usize {
     match side {
         AxisSide::Top => 0,
@@ -196,7 +197,6 @@ pub(crate) fn axis_side_index(side: AxisSide) -> usize {
 /// Iteration order over all four `AxisSide` variants — used by the
 /// strip wire / draw passes so the per-side loops match
 /// [`axis_side_index`].
-#[cfg(feature = "text")]
 pub(crate) const STRIP_SIDES: [AxisSide; 4] = [
     AxisSide::Top,
     AxisSide::Right,
@@ -223,21 +223,17 @@ impl Plot {
             subtitle: None,
             caption: None,
             shapes: ShapeRegistry::with_builtins(),
-            #[cfg(feature = "text")]
             axes: Vec::new(),
-            #[cfg(feature = "text")]
             next_axis_id: 0,
-            #[cfg(feature = "text")]
             legends: Vec::new(),
-            #[cfg(feature = "text")]
             next_legend_id: 0,
             projection: crate::plot::projection::Projection::Cartesian,
             clip: true,
+            track_identity: false,
             dirty: true,
             cartesian_aspect_ratio: None,
             aspect_mode: AspectMode::default(),
             theme_override: None,
-            #[cfg(feature = "text")]
             strips: [None, None, None, None],
         }
     }
@@ -306,6 +302,19 @@ impl Plot {
     /// past the panel boundary.
     pub fn clip(mut self, clip: bool) -> Self {
         self.clip = clip;
+        self
+    }
+
+    /// Rebuild each geom's key-based enter / update / exit sets on
+    /// every draw (default `false`).
+    ///
+    /// The diff answers "which rows are the same mark as last frame",
+    /// which is what identity-preserving animation interpolates along.
+    /// Nothing in the draw path reads it yet — geoms snap to the
+    /// current state — so it's opt-in rather than a per-frame tax on
+    /// every plot.
+    pub fn track_identity(mut self, track: bool) -> Self {
+        self.track_identity = track;
         self
     }
 
@@ -443,10 +452,7 @@ impl Plot {
     /// strip; calling again with the same side replaces the previous
     /// label. Rendered in the matching `StripTop` / `StripRight` /
     /// `StripBottom` / `StripLeft` slot against the theme's
-    /// `strip_background` / `strip_text` / `strip_padding`. Available
-    /// only with the `text` feature, because the strip's label needs
-    /// the shaper.
-    #[cfg(feature = "text")]
+    /// `strip_background` / `strip_text` / `strip_padding`.
     pub fn strip(mut self, side: AxisSide, text: impl Into<String>) -> Self {
         self.strips[axis_side_index(side)] = Some(text.into());
         self
@@ -455,7 +461,6 @@ impl Plot {
     /// Install or clear the facet-strip label for `side`. `None`
     /// removes the strip (no slot reserved); `Some` installs the
     /// label. Flips the plot's dirty flag.
-    #[cfg(feature = "text")]
     pub fn set_strip(&mut self, side: AxisSide, text: Option<String>) {
         let idx = axis_side_index(side);
         if self.strips[idx] != text {
@@ -465,7 +470,6 @@ impl Plot {
     }
 
     /// Read the facet-strip label for `side`, if any.
-    #[cfg(feature = "text")]
     pub fn strip_at(&self, side: AxisSide) -> Option<&str> {
         self.strips[axis_side_index(side)].as_deref()
     }
@@ -533,7 +537,7 @@ impl Plot {
     /// [`GeomId`] for later [`Self::update_geom`] / [`Self::remove_geom`]
     /// calls.
     pub fn add_geom<G: Geom>(&mut self, geom: G) -> GeomId {
-        let id = GeomId(self.next_geom_id);
+        let id = GeomId::new(self.next_geom_id);
         self.next_geom_id = self.next_geom_id.wrapping_add(1);
         self.geoms.push((id, Box::new(geom)));
         self.dirty = true;
@@ -735,12 +739,7 @@ fn expand_within_domain(
     (lo, hi)
 }
 
-// ─── Wire / draw — feature-gated on `text` ───────────────────────────────────
-//
-// Wiring chrome cells and drawing axis chrome both depend on the `text`
-// feature (axis labels are shaped via `TextRun`). The panel-side draw
-// stays available regardless: geoms only need the scale registry +
-// panel rect.
+// ─── Wire / draw ─────────────────────────────────────────────────────────────
 
 impl Plot {
     /// Paint this plot's [`Slot::Background`] from
@@ -770,7 +769,7 @@ impl Plot {
         if rect.x1 <= rect.x0 || rect.y1 <= rect.y0 {
             return;
         }
-        use kurbo::Shape;
+        use crate::geometry::Shape as _;
         let radius_pt = bg
             .corner_radius
             .or(defaults.corner_radius)
@@ -838,7 +837,6 @@ impl Plot {
         if panel.x1 <= panel.x0 || panel.y1 <= panel.y0 {
             return;
         }
-        #[cfg(feature = "text")]
         {
             let overlay = self.build_aspect_overlay(panel, registry);
             let lookup = |name: &str| -> Option<&Scale> {
@@ -862,9 +860,6 @@ impl Plot {
                 theme,
             );
         }
-        // Suppress unused-vars under no-text.
-        #[cfg(not(feature = "text"))]
-        let _ = (scene, panel, registry, dpi, theme);
     }
 
     /// Draw geoms into the panel slot. Installs a clip layer using
@@ -883,7 +878,6 @@ impl Plot {
         dpi: f64,
         theme: &crate::plot::theme::Theme,
     ) {
-        let _ = theme; // Consumed by task #4 geom-defaults / chrome migration.
         let panel = match layout.get(&self.patch_id, Slot::Panel) {
             Some(r) => r,
             None => return,
@@ -892,9 +886,10 @@ impl Plot {
             return;
         }
 
-        // Rebuild diff state on every dirty geom before drawing.
-        for (_, geom) in self.geoms.iter_mut() {
-            geom.rebuild_diff_against_previous();
+        if self.track_identity {
+            for (_, geom) in self.geoms.iter_mut() {
+                geom.rebuild_diff_against_previous();
+            }
         }
 
         let overrides = self.build_aspect_overlay(panel, registry);
@@ -908,7 +903,6 @@ impl Plot {
                 .with_theme(theme);
 
         let clip_path: Option<crate::path::Path> = if self.clip {
-            #[cfg(feature = "text")]
             {
                 let radius_px = crate::plot::chrome::panel::panel_corner_radius_px(theme, dpi);
                 // For Custom, the panel outline is resolved through the
@@ -924,10 +918,6 @@ impl Plot {
                     x_scale,
                     y_scale,
                 ))
-            }
-            #[cfg(not(feature = "text"))]
-            {
-                Some(rect_to_path(panel))
             }
         } else {
             None
@@ -967,15 +957,8 @@ impl Plot {
     }
 }
 
-#[allow(dead_code)]
-fn rect_to_path(r: Rect) -> crate::path::Path {
-    use kurbo::Shape;
-    r.to_path(0.0)
-}
-
 // ── Chrome wiring + draw (text-feature only) ─────────────────────────────────
 
-#[cfg(feature = "text")]
 impl Plot {
     /// Attach an axis to this plot. Validates the placement against
     /// the active projection — cartesian axes require a Cartesian
@@ -994,7 +977,7 @@ impl Plot {
                 "Plot::add_axis: placement {placement:?} is incompatible with projection {projection:?}"
             ),
         }
-        let id = crate::plot::chrome::axis::AxisId(self.next_axis_id);
+        let id = crate::plot::chrome::axis::AxisId::new(self.next_axis_id);
         self.next_axis_id += 1;
         self.axes.push(axis);
         id
@@ -1038,7 +1021,7 @@ impl Plot {
         &mut self,
         legend: crate::plot::chrome::legend::Legend,
     ) -> crate::plot::chrome::legend::LegendId {
-        let id = crate::plot::chrome::legend::LegendId(self.next_legend_id);
+        let id = crate::plot::chrome::legend::LegendId::new(self.next_legend_id);
         self.next_legend_id += 1;
         self.legends.push(legend);
         id
@@ -1067,7 +1050,7 @@ impl Plot {
     ///
     /// Unbound channels (e.g. no `"x"` binding) skip their slot.
     /// Unknown scale names also skip — `wire` is lenient by design;
-    /// `PlotComposition::validate()` (Phase 7) surfaces such mismatches.
+    /// `PlotComposition::validate()` surfaces such mismatches.
     pub fn wire(
         &self,
         mut patch: Patch,
@@ -1096,11 +1079,7 @@ impl Plot {
         // sits directly above / below the panel, regardless of how
         // wide the side chrome (axes, legends, strips) grew. Same
         // semantic as ggplot2's `plot.title.position`.
-        let root_pt = theme
-            .text
-            .size_pt
-            .map(|l| l.resolve(crate::plot::theme::DEFAULT_TEXT_SIZE_PT))
-            .unwrap_or(crate::plot::theme::DEFAULT_TEXT_SIZE_PT);
+        let root_pt = crate::plot::chrome::root_text_pt(theme);
         for (slot, text_opt, theme_slot) in [
             (Slot::Title, self.title.as_ref(), &theme.plot_title),
             (Slot::Subtitle, self.subtitle.as_ref(), &theme.plot_subtitle),
@@ -1195,7 +1174,7 @@ impl Plot {
                     if let Some(title) = &axis.title {
                         let (ch, side_idx) =
                             crate::plot::chrome::axis::axis_side_to_channel_side(side);
-                        let resolved = theme.axis.resolve(ch, side_idx);
+                        let resolved = theme.resolved_axis(ch, side_idx);
                         if matches!(
                             resolved.title_location,
                             crate::plot::theme::TitleLocation::Outside
@@ -1244,7 +1223,7 @@ impl Plot {
         };
         use crate::scales::breaks::DEFAULT_BREAK_COUNT;
         use crate::scales::value::Value;
-        use crate::text::{Alignment, TextRun, TextStyle};
+        use crate::text::{Alignment, TextRun};
 
         // Polar projection's angle/sweep — needed to convert a
         // scale's break (as a `theta_frac`) into the math angle the
@@ -1264,7 +1243,22 @@ impl Plot {
             -1.0_f64
         };
 
-        let label_style = TextStyle::new(crate::plot::chrome::linear_axis::LABEL_FONT_SIZE_PT);
+        // Bleed reserves the space the polar labels will paint into, so
+        // it has to measure them through the styles the draw pass uses.
+        // Same channel / side convention as `compute_polar_bleed`:
+        // angular labels resolve on channel 0, radius labels on 1.
+        let root_pt = crate::plot::chrome::root_text_pt(theme);
+        let axis_label_style = |ch: u8| {
+            crate::plot::chrome::linear_axis::AxisChromeStyle::from_resolved(
+                &theme.resolved_axis(ch, 0),
+                &theme.palette,
+                dpi,
+                root_pt,
+            )
+            .text_style
+        };
+        let angular_label_style = axis_label_style(0);
+        let radius_label_style = axis_label_style(1);
 
         let mut axes: Vec<BleedAxis> = Vec::new();
         for axis in &self.axes {
@@ -1279,6 +1273,10 @@ impl Plot {
             };
             let Some(scale) = registry.get(scale_name) else {
                 continue;
+            };
+            let label_style = match kind {
+                BleedLabelKind::Radius => &radius_label_style,
+                _ => &angular_label_style,
             };
             let mut labels = Vec::new();
             // Track the largest label dimension for use in title
@@ -1297,7 +1295,7 @@ impl Plot {
                             continue;
                         }
                         let text = scale.format(&v, &theme.locale);
-                        let run = TextRun::new(&text, &label_style, dpi);
+                        let run = TextRun::new(&text, label_style, dpi);
                         let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
                         let w = run.natural_width();
                         max_label_w = max_label_w.max(w);
@@ -1326,7 +1324,7 @@ impl Plot {
                         }
                         let theta = polar.theta_for_frac(frac);
                         let text = scale.format(&v, &theme.locale);
-                        let run = TextRun::new(&text, &label_style, dpi);
+                        let run = TextRun::new(&text, label_style, dpi);
                         let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
                         let w = run.natural_width();
                         max_label_w = max_label_w.max(w);
@@ -1608,11 +1606,7 @@ impl Plot {
 
         // Plot-level text slots — title / subtitle / caption. Style
         // and ink come from the theme.
-        let root_pt = theme
-            .text
-            .size_pt
-            .map(|l| l.resolve(crate::plot::theme::DEFAULT_TEXT_SIZE_PT))
-            .unwrap_or(crate::plot::theme::DEFAULT_TEXT_SIZE_PT);
+        let root_pt = crate::plot::chrome::root_text_pt(theme);
         let entries: [(
             Slot,
             Option<&String>,
@@ -1660,7 +1654,7 @@ impl Plot {
                 continue;
             };
             let (ch, side_idx) = axis_side_to_channel_side(side);
-            let resolved = theme.axis.resolve(ch, side_idx);
+            let resolved = theme.resolved_axis(ch, side_idx);
             let Some(el) = resolved.title else { continue };
             let style = text_style_from(&el, root_pt);
             let color = el
@@ -1799,7 +1793,6 @@ impl Plot {
 /// run **and** the element's margin. The slot the layout solver
 /// reserves is therefore sized to text + margin; the draw helper
 /// then insets back to position the text inside.
-#[cfg(feature = "text")]
 pub(crate) fn text_cell_for_element(
     s: &str,
     el: &crate::plot::theme::TextElement,
@@ -1828,7 +1821,6 @@ pub(crate) fn text_cell_for_element(
 /// the size it renders at. A markdown slot measures through
 /// [`crate::text::rich::RichTextRun`]; anything else through
 /// [`crate::text::TextRun`].
-#[cfg(feature = "text")]
 pub(crate) fn measure_for_element(
     s: &str,
     el: &crate::plot::theme::TextElement,
@@ -1863,7 +1855,6 @@ pub(crate) fn measure_for_element(
 /// style (italic / oblique angle), OpenType feature toggles, and
 /// variable-font axis assignments. Empty / `None` `FontSpec` fields
 /// leave the corresponding `TextStyle` field at its default.
-#[cfg(feature = "text")]
 pub(crate) fn text_style_from(
     el: &crate::plot::theme::TextElement,
     parent_pt: f64,
@@ -1975,7 +1966,6 @@ pub(crate) fn text_style_from(
 
 /// A resolved per-glyph outline for chrome text — palette and dpi
 /// already applied, ready for [`crate::text::draw_text_outline`].
-#[cfg(feature = "text")]
 #[derive(Debug, Clone)]
 pub(crate) struct TextOutline {
     /// Brush the outline pass paints with.
@@ -1992,7 +1982,6 @@ pub(crate) struct TextOutline {
 /// `text_linewidth_pt` resolves against
 /// [`DEFAULT_LINEWIDTH_PT`](crate::plot::theme::DEFAULT_LINEWIDTH_PT),
 /// so no text-size parent needs threading here.
-#[cfg(feature = "text")]
 pub(crate) fn text_outline_from(
     el: &crate::plot::theme::TextElement,
     palette: &crate::plot::theme::Palette,
@@ -2020,7 +2009,6 @@ pub(crate) fn text_outline_from(
 /// identical `x`, `y` and `transform` so the outline registers behind
 /// the fill. The fill pass owns picking, so this pass records
 /// [`PickId::Skip`](crate::pick::PickId::Skip).
-#[cfg(feature = "text")]
 pub(crate) fn draw_text_outline_pass(
     scene: &mut dyn SceneBuilder,
     outline: Option<&TextOutline>,
@@ -2053,7 +2041,6 @@ pub(crate) fn draw_text_outline_pass(
 /// [`text_concrete_defaults`](crate::plot::theme::text_concrete_defaults)
 /// for any field left `None` (typically by passing the resolved
 /// element to [`text_style_from`], which handles the fallback).
-#[cfg(feature = "text")]
 pub(crate) fn effective_text(
     slot: &crate::plot::theme::Element<crate::plot::theme::TextElement>,
     root: &crate::plot::theme::TextElement,
@@ -2070,7 +2057,6 @@ pub(crate) fn effective_text(
 /// so the slot's column width reflects the rotated text's footprint
 /// (one font line height) rather than the natural string width.
 /// Horizontal sides reuse the unrotated `TextRun` measure directly.
-#[cfg(feature = "text")]
 pub(crate) fn axis_title_cell(
     title: &str,
     side: AxisSide,
@@ -2078,12 +2064,8 @@ pub(crate) fn axis_title_cell(
     dpi: f64,
 ) -> Cell {
     let (ch, side_idx) = crate::plot::chrome::axis::axis_side_to_channel_side(side);
-    let resolved = theme.axis.resolve(ch, side_idx);
-    let root_pt = theme
-        .text
-        .size_pt
-        .map(|l| l.resolve(crate::plot::theme::DEFAULT_TEXT_SIZE_PT))
-        .unwrap_or(crate::plot::theme::DEFAULT_TEXT_SIZE_PT);
+    let resolved = theme.resolved_axis(ch, side_idx);
+    let root_pt = crate::plot::chrome::root_text_pt(theme);
     let Some(el) = resolved.title else {
         return Cell::empty();
     };
@@ -2102,12 +2084,10 @@ pub(crate) fn axis_title_cell(
 /// column. The slot's horizontal contribution is the font's line
 /// height (post-rotation width); the vertical extent is panel-driven,
 /// so the cell reports no row contribution.
-#[cfg(feature = "text")]
 struct RotatedAxisTitleMeasure {
     rotated_w: f64,
 }
 
-#[cfg(feature = "text")]
 impl crate::layout::Measure for RotatedAxisTitleMeasure {
     fn width_hint(&self, _dpi: f64) -> crate::layout::WidthHint {
         crate::layout::WidthHint::Min(self.rotated_w)
@@ -2127,19 +2107,10 @@ impl crate::layout::Measure for RotatedAxisTitleMeasure {
 /// Unrotated text wraps at `w` and quarter-turned text at `h`, so a
 /// rotated block breaks against the edge it actually runs along
 /// rather than the one that happens to be horizontal on screen.
-#[cfg(feature = "text")]
 pub(crate) fn rotated_wrap_width(w: f64, h: f64, angle_rad: f64) -> f64 {
     w * angle_rad.cos().abs() + h * angle_rad.sin().abs()
 }
 
-/// Centre a cartesian axis title inside `rect`. Horizontal sides
-/// (Bottom/Top) layout the run at the slot's full width with
-/// [`crate::text::Alignment::Center`] so the line balances across
-/// the panel column. Vertical sides (Left/Right) rotate the run 90°
-/// — CCW for Left (text reads bottom-to-top), CW for Right — and
-/// drop the rotated centre at the slot rect's centre so it parallels
-/// the axis it labels.
-#[cfg(feature = "text")]
 /// Render `text` styled by `el` inside `rect`, honoring every
 /// layout-affecting field on the [`TextElement`]: `margin` insets the
 /// rect before wrapping, `align` controls justification along the
@@ -2156,7 +2127,6 @@ pub(crate) fn rotated_wrap_width(w: f64, h: f64, angle_rad: f64) -> f64 {
 /// and stacking axes rather than against screen width and height: a
 /// quarter-turned label centres along the edge it runs down, and its
 /// `valign` moves it across that edge's thickness.
-#[cfg(feature = "text")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_text_element_in_rect(
     scene: &mut dyn SceneBuilder,
@@ -2373,7 +2343,6 @@ pub(crate) fn draw_text_element_in_rect(
 ///
 /// `outline`, when present, is emitted as a stroke-only pass behind
 /// the fill.
-#[cfg(feature = "text")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_axis_title(
     scene: &mut dyn SceneBuilder,
@@ -2420,7 +2389,6 @@ pub(crate) fn draw_axis_title(
 /// `TextElement` is not applied here — set `text_stroke` on the
 /// sheet's `paragraph` class if a haloed markdown axis title is
 /// needed.
-#[cfg(feature = "text")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_axis_title_markdown(
     scene: &mut dyn SceneBuilder,
@@ -2489,17 +2457,14 @@ pub(crate) fn draw_axis_title_markdown(
 // `Cell::measured` takes `impl Measure + 'static`. The Scale axis path
 // returns `Box<dyn Measure>`. Bridge it through a thin wrapper.
 
-#[cfg(feature = "text")]
 struct BoxMeasure(Box<dyn crate::layout::Measure>);
 
-#[cfg(feature = "text")]
 impl BoxMeasure {
     fn new(inner: Box<dyn crate::layout::Measure>) -> Self {
         Self(inner)
     }
 }
 
-#[cfg(feature = "text")]
 impl crate::layout::Measure for BoxMeasure {
     fn width_hint(&self, dpi: f64) -> crate::layout::WidthHint {
         self.0.width_hint(dpi)
@@ -2514,19 +2479,12 @@ impl crate::layout::Measure for BoxMeasure {
     }
 }
 
-/// Bucket the plot's attached legends by `LegendSide`. Returns one
-/// `(side, slot, members)` triple per side in a stable order (Right,
-/// Left, Top, Bottom) so the layout solver and the draw loop iterate
-/// in lockstep. Empty sides are still yielded — the caller checks
-/// `members.is_empty()` to skip.
-#[cfg(feature = "text")]
 /// Pick the `(row, col, row_span, col_span)` placement for a plot-
 /// level text slot (Title / Subtitle / Caption) based on the
 /// theme's [`crate::plot::theme::AlignTo`] setting. `Plot` uses the
 /// canonical anatomical span (PLOT_LEFT..=PLOT_RIGHT); `Panel`
 /// narrows the column span to just the panel column so chrome text
 /// aligns against the panel rather than the full plot interior.
-#[cfg(feature = "text")]
 pub(crate) fn title_band_placement(
     slot: Slot,
     align_to: crate::plot::theme::AlignTo,
@@ -2538,7 +2496,6 @@ pub(crate) fn title_band_placement(
     }
 }
 
-#[cfg(feature = "text")]
 fn cartesian_axis_slot(side: AxisSide) -> Slot {
     match side {
         AxisSide::Left => Slot::AxisLeft,
@@ -2548,7 +2505,6 @@ fn cartesian_axis_slot(side: AxisSide) -> Slot {
     }
 }
 
-#[cfg(feature = "text")]
 pub(crate) fn cartesian_axis_title_slot(side: AxisSide) -> Slot {
     match side {
         AxisSide::Left => Slot::AxisLeftTitle,
@@ -2558,7 +2514,11 @@ pub(crate) fn cartesian_axis_title_slot(side: AxisSide) -> Slot {
     }
 }
 
-#[cfg(feature = "text")]
+/// Bucket the plot's attached legends by `LegendSide`. Returns one
+/// `(side, slot, members)` triple per side in a stable order (Right,
+/// Left, Top, Bottom) so the layout solver and the draw loop iterate
+/// in lockstep. Empty sides are still yielded — the caller checks
+/// `members.is_empty()` to skip.
 pub(crate) fn legends_grouped_by_side(
     legends: &[crate::plot::chrome::legend::Legend],
 ) -> Vec<(
@@ -2591,7 +2551,6 @@ pub(crate) fn legends_grouped_by_side(
 /// and `inset_pt` so each anchor's group is rendered as a single
 /// in-panel stack. Only in-panel legends appear; the four
 /// anatomical-side variants are skipped (see [`legends_grouped_by_side`]).
-#[cfg(feature = "text")]
 fn legends_grouped_in_panel(
     legends: &[crate::plot::chrome::legend::Legend],
 ) -> Vec<(
@@ -2628,7 +2587,6 @@ mod tests {
     use super::*;
     use crate::composition::{beside, Patch as CompPatch};
     use crate::plot::geom::PointGeom;
-    #[cfg(feature = "text")]
     use crate::plot::scale;
     use crate::plot::theme::Theme;
 
@@ -2640,7 +2598,6 @@ mod tests {
         beside(CompPatch::new("a"), CompPatch::new("b"))
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn text_style_from_propagates_full_font_spec() {
         use crate::plot::theme::{
@@ -2697,7 +2654,6 @@ mod tests {
         assert_eq!(s2.style, FontStyleKind::Normal);
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn text_style_from_propagates_lineheight() {
         use crate::plot::theme::{Length, TextElement};
@@ -2722,7 +2678,6 @@ mod tests {
 
     // ─── Chrome text outlines ────────────────────────────────────────
 
-    #[cfg(feature = "text")]
     #[test]
     fn text_outline_from_is_none_without_a_stroke_color() {
         use crate::plot::theme::{Length, Palette, TextElement};
@@ -2733,7 +2688,6 @@ mod tests {
         assert!(text_outline_from(&el, &Palette::default(), 96.0).is_none());
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn text_outline_from_resolves_palette_and_dpi() {
         use crate::plot::theme::{Length, Palette, TextElement, ThemeColor};
@@ -2749,7 +2703,6 @@ mod tests {
         assert_eq!(o.brush, crate::brush::Brush::Solid(palette.accent));
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn text_outline_from_is_none_for_zero_width() {
         use crate::plot::theme::{Length, Palette, TextElement, ThemeColor};
@@ -2765,7 +2718,6 @@ mod tests {
 
     /// Every recorded glyph run, split into (stroked, filled) passes in
     /// emission order.
-    #[cfg(feature = "text")]
     fn glyph_passes(
         scene: &crate::scene::recording::RecordingScene,
     ) -> (
@@ -2786,7 +2738,6 @@ mod tests {
         (stroked, filled)
     }
 
-    #[cfg(feature = "text")]
     fn outlined_text_element(
         angle: Option<crate::plot::theme::Rotation>,
     ) -> crate::plot::theme::TextElement {
@@ -2799,7 +2750,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "text")]
     fn record_text_element(
         el: &crate::plot::theme::TextElement,
     ) -> crate::scene::recording::RecordingScene {
@@ -2819,7 +2769,6 @@ mod tests {
         scene
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn chrome_text_emits_the_outline_pass_before_the_fill() {
         use crate::scene::recording::Op;
@@ -2851,7 +2800,6 @@ mod tests {
         assert_eq!(stroked[0].glyphs.len(), filled[0].glyphs.len());
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn chrome_text_without_a_stroke_color_emits_no_outline_pass() {
         use crate::plot::theme::TextElement;
@@ -2864,7 +2812,6 @@ mod tests {
         assert!(!filled.is_empty(), "expected a filled pass");
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn chrome_text_markdown_bold_produces_extra_glyph_weight_variance() {
         // A chrome slot with `markdown = Some(true)` and a `**bold**`
@@ -2906,7 +2853,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn chrome_text_markdown_false_uses_plain_path() {
         // When `markdown = Some(false)`, `**` markers are rendered as
@@ -2943,7 +2889,6 @@ mod tests {
         assert_eq!(sizes.len(), 1, "plain path should use one font size");
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn rotated_chrome_text_outlines_under_the_same_transform() {
         use crate::plot::theme::Rotation;
@@ -2986,7 +2931,6 @@ mod tests {
         assert_eq!(p.binding("y"), Some("price"));
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn cartesian_aspect_ratio_propagates_extents() {
         let c = comp_with_two();
@@ -3004,7 +2948,6 @@ mod tests {
         assert!((h - 5.0).abs() < 1e-4, "h = {h}");
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn cartesian_aspect_ratio_default_is_none() {
         let c = comp_with_two();
@@ -3013,7 +2956,6 @@ mod tests {
         assert!(p.desired_panel_aspect(&reg).is_none());
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn cartesian_aspect_ratio_needs_continuous_extents() {
         // Discrete scales have no `extent()` — should fall back to
@@ -3032,7 +2974,6 @@ mod tests {
         assert!(p.desired_panel_aspect(&reg).is_none());
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn range_mode_skips_panel_lock() {
         // Range mode honors the ratio at draw time by expanding scale
@@ -3049,7 +2990,6 @@ mod tests {
         assert!(p.desired_panel_aspect(&reg).is_none());
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn range_mode_expands_x_when_panel_is_wide() {
         // ratio=1, x=[0,10], y=[0,10], panel 200×100.
@@ -3077,7 +3017,6 @@ mod tests {
         assert!(!overlay.contains_key("y"), "y should be untouched");
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn range_mode_expands_y_when_panel_is_tall() {
         // ratio=1, x=[0,10], y=[0,10], panel 100×200.
@@ -3105,7 +3044,6 @@ mod tests {
         assert!(!overlay.contains_key("x"), "x should be untouched");
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn range_mode_expands_in_transformed_space() {
         // Sqrt x over [0, 100] has transformed extent sqrt(100) = 10;
@@ -3143,7 +3081,6 @@ mod tests {
         assert!(!overlay.contains_key("y"), "y should be untouched");
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn range_mode_panel_mode_skips_overlay() {
         // Default Panel mode → overlay is always empty even with a
@@ -3161,7 +3098,6 @@ mod tests {
         assert!(overlay.is_empty());
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn range_mode_polar_drops_bbox_lock() {
         // Default-polar Panel mode locks the patch to the bbox aspect
@@ -3184,7 +3120,6 @@ mod tests {
         assert!(range_mode.desired_panel_aspect(&reg).is_none());
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn range_mode_polar_skips_overlay() {
         // Polar projections never produce a scale overlay — Range mode
@@ -3205,7 +3140,6 @@ mod tests {
         assert!(p.build_aspect_overlay(panel, &reg).is_empty());
     }
 
-    #[cfg(feature = "text")]
     #[test]
     fn range_mode_custom_projection_uses_custom_bindings() {
         use crate::plot::projection::{CustomProjection, Projection};
@@ -3343,7 +3277,6 @@ mod tests {
     }
 
     // Text-feature-only tests below.
-    #[cfg(feature = "text")]
     mod text {
         use super::*;
         use crate::composition::Patch as CompPatch;

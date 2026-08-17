@@ -18,6 +18,7 @@ use hephaestus::geometry::Size;
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement, PolarRing};
 use hephaestus::plot::projection::{PolarProjection, Projection};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom, RectGeom, SegmentGeom};
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 fn comp_shape() -> Composition {

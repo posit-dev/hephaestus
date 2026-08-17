@@ -1,4 +1,4 @@
-//! Google Fonts auto-lookup. Gated behind the `text-google-fonts` feature.
+//! Google Fonts auto-lookup. Gated behind the `google-fonts` feature.
 //!
 //! On cache miss, hits the Google Fonts CSS2 API, downloads each
 //! face's TTF blob, writes the blobs to the platform cache directory,
@@ -207,7 +207,7 @@ mod tests {
 
     /// Live network test against the actual Google Fonts CSS2 API.
     /// Hits the network — `#[ignore]`d by default. Run with
-    /// `cargo test --features text-google-fonts -- --ignored
+    /// `cargo test --features google-fonts -- --ignored
     /// google_fonts::tests::live_fetch_inter`.
     #[test]
     #[ignore]

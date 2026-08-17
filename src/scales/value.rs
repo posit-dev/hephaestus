@@ -15,7 +15,7 @@
 //! - [`Date`]     = days since 1970-01-01 (Arrow Date32).
 //! - [`DateTime`] = microseconds since 1970-01-01T00:00:00Z (Arrow
 //!   Timestamp(Microsecond, UTC)).
-//! - [`Time`]     = microseconds since midnight (Arrow Time64(Microsecond)).
+//! - [`Time`]     = nanoseconds since midnight (Arrow Time64(Nanosecond)).
 //! - [`Duration`] = signed microseconds (Arrow Duration(Microsecond)).
 //!
 //! The temporal newtypes are `repr(transparent)` so a `Vec<Date>` and a
@@ -265,38 +265,10 @@ impl Duration {
     }
 }
 
-// ─── Linetype steps ──────────────────────────────────────────────────────────
-
-/// One step in a linetype pattern.
-///
-/// Patterns are even-length sequences where even-indexed entries are
-/// `Dash` or `Marker` (something to draw at the cursor) and odd-indexed
-/// entries are `Gap` (an unconditional advance). See
-/// [`crate::plot::geom::linetype`] for constructors that enforce the
-/// alternation.
-///
-/// `PartialEq` follows f64's IEEE semantics for `Dash` / `Gap`
-/// (NaN ≠ NaN); use [`Value::key_eq`] / `key_hash` for the canonicalised
-/// diff-friendly comparison.
-#[derive(Clone, Debug, PartialEq)]
-pub enum LinetypeStep {
-    /// Stroke a segment of this length (in pt) along the line, then
-    /// advance the cursor by the same amount.
-    Dash(f64),
-    /// Stamp the named shape at the current cursor. The marker is
-    /// assumed to occupy `linewidth` pt of arc length so the next gap
-    /// measures clear space starting from the marker's trailing edge.
-    Marker(Arc<str>),
-    /// Advance the cursor by this many pt without drawing.
-    Gap(f64),
-}
-
-impl LinetypeStep {
-    /// `true` if this is a `Marker` step.
-    pub fn is_marker(&self) -> bool {
-        matches!(self, LinetypeStep::Marker(_))
-    }
-}
+// `LinetypeStep` is shared styling vocabulary, like `Color` — it lives
+// in `crate::style_vocab` so both this layer and the renderer that walks
+// the pattern can name it without either depending on the other.
+pub use crate::style_vocab::LinetypeStep;
 
 // ─── Value ───────────────────────────────────────────────────────────────────
 
@@ -360,7 +332,7 @@ impl Value {
     /// Project numeric and temporal variants to `f64`. Temporal projections:
     /// - `Date`     → days as f64
     /// - `DateTime` → microseconds as f64
-    /// - `Time`     → microseconds as f64
+    /// - `Time`     → nanoseconds as f64
     /// - `Duration` → microseconds as f64
     ///
     /// Returns `None` for non-numeric, non-temporal variants.
@@ -369,7 +341,7 @@ impl Value {
             Value::Number(n) => Some(n),
             Value::Date(d) => Some(d as f64),
             Value::DateTime(us) => Some(us as f64),
-            Value::Time(us) => Some(us as f64),
+            Value::Time(ns) => Some(ns as f64),
             Value::Duration(us) => Some(us as f64),
             _ => None,
         }

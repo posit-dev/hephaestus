@@ -617,7 +617,7 @@ mod tests {
     }
 
     fn synthetic_glyph_shape() -> crate::shape::Shape {
-        let blob = peniko::Blob::new(std::sync::Arc::new(Vec::<u8>::new()));
+        let blob = crate::brush::Blob::new(std::sync::Arc::new(Vec::<u8>::new()));
         let font = crate::scene::Font::new(blob, 0);
         let em_bbox = crate::geometry::Rect::new(0.0, 0.0, 0.6, 1.0);
         let em_origin = crate::geometry::Point::new(0.05, 0.8);

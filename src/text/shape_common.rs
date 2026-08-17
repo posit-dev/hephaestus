@@ -185,7 +185,8 @@ pub(crate) fn emit_decoration_rect<S: SceneBuilder + ?Sized>(
     if !thickness.is_finite() || thickness <= 0.0 || x1 <= x0 {
         return;
     }
-    let rect = kurbo::Rect::new(x0 as f64, top as f64, x1 as f64, (top + thickness) as f64);
+    let rect =
+        crate::geometry::Rect::new(x0 as f64, top as f64, x1 as f64, (top + thickness) as f64);
     let path = crate::primitives::rect(rect);
     scene.fill(FillRule::NonZero, transform, brush, None, &path, pick_id);
 }

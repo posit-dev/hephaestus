@@ -92,7 +92,7 @@
 //! - `"clip_start_radius"` / `"clip_start_radius2"`,
 //!   `"clip_end_radius"` / `"clip_end_radius2"` — endpoint clip in pt.
 //! - `"start_marker"` / `"start_marker2"`, `"end_marker"` /
-//!   `"end_marker2"` — shape names (Phase C.5).
+//!   `"end_marker2"` — shape names.
 //! - `"start_marker_size"` / `"start_marker_size2"`,
 //!   `"end_marker_size"` / `"end_marker_size2"` — marker size in pt
 //!   (default `3 × linewidth`).
@@ -1131,7 +1131,7 @@ mod tests {
         let scene = draw_and_record(g);
         for op in &scene.ops {
             if let Op::Fill { path, .. } = op {
-                if let Some(kurbo::PathEl::MoveTo(start)) = path.elements().first() {
+                if let Some(crate::path::PathEl::MoveTo(start)) = path.elements().first() {
                     // y=0.8 on a 200×200 panel under Cartesian projects
                     // to y_px = panel.y1 - 0.8 * h = 200 - 160 = 40.
                     assert!((start.x - 20.0).abs() < 1.0);
@@ -1162,7 +1162,7 @@ mod tests {
                 let lines = path
                     .elements()
                     .iter()
-                    .filter(|el| matches!(el, kurbo::PathEl::LineTo(_)))
+                    .filter(|el| matches!(el, crate::path::PathEl::LineTo(_)))
                     .count();
                 // Each curve contributes 2 points → 1 LineTo from
                 // MoveTo (curve A: 1 line-to) + curve B (2 line-tos in
@@ -1263,10 +1263,12 @@ mod tests {
         // (curved) vertex — that's the cap densification samples.
         for op in &scene.ops {
             if let Op::Fill { path, .. } = op {
-                let mut all_pts: Vec<kurbo::Point> = Vec::new();
+                let mut all_pts: Vec<crate::geometry::Point> = Vec::new();
                 for el in path.elements().iter() {
                     match el {
-                        kurbo::PathEl::MoveTo(p) | kurbo::PathEl::LineTo(p) => all_pts.push(*p),
+                        crate::path::PathEl::MoveTo(p) | crate::path::PathEl::LineTo(p) => {
+                            all_pts.push(*p)
+                        }
                         _ => {}
                     }
                 }

@@ -208,12 +208,12 @@ pub(crate) struct BlockLayout {
 impl BlockLayout {
     /// Outer rect (including own padding) in RichTextRun local coords.
     /// Used by the paint pass to draw backgrounds / borders.
-    pub(crate) fn outer_rect(&self) -> kurbo::Rect {
+    pub(crate) fn outer_rect(&self) -> crate::geometry::Rect {
         let x0 = self.left_px - self.padding_left_px;
         let y0 = self.y_px - self.padding_top_px;
         let x1 = self.left_px + self.shape_width_px + self.padding_right_px;
         let y1 = self.y_px + self.height_px + self.padding_bottom_px;
-        kurbo::Rect::new(x0 as f64, y0 as f64, x1 as f64, y1 as f64)
+        crate::geometry::Rect::new(x0 as f64, y0 as f64, x1 as f64, y1 as f64)
     }
 }
 

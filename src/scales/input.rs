@@ -4,7 +4,8 @@
 //! explicit list of [`Value`]s, typically string categories).
 //!
 //! Temporal data flows through `Continuous { min, max }` after projection
-//! to f64 (Date → days, DateTime/Time/Duration → microseconds — see the
+//! to f64 (Date → days, DateTime/Duration → microseconds, Time →
+//! nanoseconds — see the
 //! [`Value`](crate::scales::value::Value) docs). The `Scale` exposes
 //! ergonomic constructors that build the f64 domain from
 //! [`Date`](crate::scales::value::Date) /

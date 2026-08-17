@@ -20,7 +20,7 @@ pub(crate) fn emit_block_paint(
     dpi: f64,
     pick_id: PickId,
 ) {
-    let rect = kurbo::Rect::new(
+    let rect = crate::geometry::Rect::new(
         paint.outer_rect.x0 - offsets.ref_x as f64,
         paint.outer_rect.y0 - offsets.ref_y as f64,
         paint.outer_rect.x1 - offsets.ref_x as f64,
@@ -125,10 +125,10 @@ pub(crate) fn emit_block_paint(
             let widths = border.widths_px;
             let (x0, y0, x1, y1) = (rect.x0, rect.y0, rect.x1, rect.y1);
             let corners = [
-                kurbo::Point::new(x0, y0),
-                kurbo::Point::new(x1, y0),
-                kurbo::Point::new(x1, y1),
-                kurbo::Point::new(x0, y1),
+                crate::geometry::Point::new(x0, y0),
+                crate::geometry::Point::new(x1, y0),
+                crate::geometry::Point::new(x1, y1),
+                crate::geometry::Point::new(x0, y1),
             ];
             for chain in group_border_sides_cw(widths, corners) {
                 if has_markers {
@@ -159,7 +159,7 @@ pub(crate) fn emit_block_paint(
                     );
                     continue;
                 }
-                let mut path = kurbo::BezPath::new();
+                let mut path = crate::path::Path::new();
                 let mut pts = chain.points.iter();
                 if let Some(&p) = pts.next() {
                     path.move_to(p);
@@ -190,7 +190,7 @@ pub(crate) fn emit_block_paint(
 fn stroke_markered_perimeter(
     scene: &mut dyn SceneBuilder,
     pick_id: PickId,
-    rect: &kurbo::Rect,
+    rect: &crate::geometry::Rect,
     width_px: f32,
     color: Color,
     pattern_pt: &[crate::scales::value::LinetypeStep],
@@ -198,11 +198,11 @@ fn stroke_markered_perimeter(
     dpi: f64,
 ) {
     let corners = [
-        kurbo::Point::new(rect.x0, rect.y0),
-        kurbo::Point::new(rect.x1, rect.y0),
-        kurbo::Point::new(rect.x1, rect.y1),
-        kurbo::Point::new(rect.x0, rect.y1),
-        kurbo::Point::new(rect.x0, rect.y0),
+        crate::geometry::Point::new(rect.x0, rect.y0),
+        crate::geometry::Point::new(rect.x1, rect.y0),
+        crate::geometry::Point::new(rect.x1, rect.y1),
+        crate::geometry::Point::new(rect.x0, rect.y1),
+        crate::geometry::Point::new(rect.x0, rect.y0),
     ];
     let sampler = crate::primitives::PolylineSampler::from_polyline(&corners);
     let solid = crate::stroke::Stroke::new(width_px as f64)
@@ -233,7 +233,7 @@ fn stroke_markered_perimeter(
 /// abutting endpoints.
 struct BorderChain {
     /// Chain vertices in traversal order. `len >= 2`.
-    points: Vec<kurbo::Point>,
+    points: Vec<crate::geometry::Point>,
     /// Uniform stroke width for the chain (px).
     width: f32,
 }
@@ -248,13 +248,18 @@ struct BorderChain {
 /// The uniform-width path in `emit_block_paint` handles the
 /// all-four-sides-same case; this helper is only reached when at
 /// least one side is zero or widths differ across sides.
-fn group_border_sides_cw(widths: [f32; 4], corners: [kurbo::Point; 4]) -> Vec<BorderChain> {
+fn group_border_sides_cw(
+    widths: [f32; 4],
+    corners: [crate::geometry::Point; 4],
+) -> Vec<BorderChain> {
     // Sides in cyclic CW order:
     //   0=T: corner[0] → corner[1]
     //   1=R: corner[1] → corner[2]
     //   2=B: corner[2] → corner[3]
     //   3=L: corner[3] → corner[0]
-    let side = |i: usize| -> (kurbo::Point, kurbo::Point) { (corners[i], corners[(i + 1) % 4]) };
+    let side = |i: usize| -> (crate::geometry::Point, crate::geometry::Point) {
+        (corners[i], corners[(i + 1) % 4])
+    };
     let present = |i: usize| widths[i] > 0.0;
     let same_width = |i: usize, j: usize| (widths[i] - widths[j]).abs() < 1e-3;
     // Pick a start index whose predecessor either isn't present or
@@ -267,7 +272,7 @@ fn group_border_sides_cw(widths: [f32; 4], corners: [kurbo::Point; 4]) -> Vec<Bo
     });
     let Some(start) = start else {
         // All four present with same width. Emit as a closed loop.
-        let mut points: Vec<kurbo::Point> = corners.to_vec();
+        let mut points: Vec<crate::geometry::Point> = corners.to_vec();
         points.push(corners[0]);
         return vec![BorderChain {
             points,
@@ -275,7 +280,7 @@ fn group_border_sides_cw(widths: [f32; 4], corners: [kurbo::Point; 4]) -> Vec<Bo
         }];
     };
     let mut chains: Vec<BorderChain> = Vec::new();
-    let mut cur: Vec<kurbo::Point> = Vec::new();
+    let mut cur: Vec<crate::geometry::Point> = Vec::new();
     let mut cur_w = 0.0f32;
     for step in 0..4 {
         let idx = (start + step) % 4;

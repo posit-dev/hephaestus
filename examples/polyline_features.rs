@@ -21,6 +21,7 @@ use hephaestus::color::{rgb8, rgba, Color};
 use hephaestus::composition::{Composition, Patch, Span};
 use hephaestus::geometry::Size;
 use hephaestus::plot::{LineGeom, Plot, PlotComposition, PointGeom, Raw, SegmentGeom, TextGeom};
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 fn main() {

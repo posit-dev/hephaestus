@@ -183,7 +183,7 @@ fn emit_line_glyphs(
             continue;
         };
         let prun = gr.run();
-        let font = Font(prun.font().clone());
+        let font = Font::from_data(prun.font().clone());
         let brush_color = gr.style().brush.0;
         let brush = Brush::Solid(brush_color);
         let run_range = prun.text_range();
@@ -284,7 +284,7 @@ fn emit_line_glyphs(
                 let y0_paint = y_base - metrics.ascent - t_pad;
                 let y1_paint = y_base + metrics.descent + b_pad;
                 if x1_paint > x0_paint && y1_paint > y0_paint {
-                    let rect = kurbo::Rect::new(
+                    let rect = crate::geometry::Rect::new(
                         x0_paint as f64,
                         y0_paint as f64,
                         x1_paint as f64,

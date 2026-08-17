@@ -87,15 +87,12 @@ pub(crate) fn stroke_from_rect_border(el: &RectElement, dpi: f64) -> Stroke {
 // defaults built into the theme.
 pub(crate) use crate::plot::theme::{
     DEFAULT_LINEWIDTH_PT as STROKE_WIDTH_PT, DEFAULT_MINOR_TICK_LENGTH_PT as MINOR_TICK_LENGTH_PT,
-    DEFAULT_TEXT_SIZE_PT, DEFAULT_TICK_GAP_PT as LABEL_GAP_PT,
-    DEFAULT_TICK_LENGTH_PT as TICK_LENGTH_PT, DEFAULT_TITLE_GAP_PT as TITLE_GAP_PT,
+    DEFAULT_TICK_GAP_PT as LABEL_GAP_PT, DEFAULT_TICK_LENGTH_PT as TICK_LENGTH_PT,
+    DEFAULT_TITLE_GAP_PT as TITLE_GAP_PT,
 };
-/// Default tick label font size, pt (f32 alias for shaper inputs).
-pub(crate) const LABEL_FONT_SIZE_PT: f32 = DEFAULT_TEXT_SIZE_PT as f32;
-
-/// Black ink for axis chrome — used as a fallback when no theme
-/// is available (legacy `axis_measure` codepaths).
-pub(crate) fn axis_ink() -> Color {
+/// Ink for an axis whose text element resolves to `Blank`. Labels
+/// aren't drawn in that case, so the brush only has to be well-formed.
+fn axis_ink() -> Color {
     rgb(0.0, 0.0, 0.0)
 }
 
@@ -134,9 +131,15 @@ fn resolve_line_color(el: &LineElement, defaults: &LineElement) -> crate::plot::
 }
 
 impl AxisChromeStyle {
-    /// Construct from a `ResolvedAxis` against the theme's palette
-    /// at the given dpi.
-    pub fn from_resolved(resolved: &ResolvedAxis, palette: &Palette, dpi: f64) -> Self {
+    /// Construct from a `ResolvedAxis` against the theme's palette at
+    /// the given dpi. `root_pt` is the parent size relative text sizes
+    /// resolve against — see [`crate::plot::chrome::root_text_pt`].
+    pub fn from_resolved(
+        resolved: &ResolvedAxis,
+        palette: &Palette,
+        dpi: f64,
+        root_pt: f64,
+    ) -> Self {
         use crate::plot::theme::{line_concrete_defaults, text_concrete_defaults};
         let fallback_stroke = || Stroke::new(pt_to_px(STROKE_WIDTH_PT, dpi));
         let mk_brush = |c: Color| Brush::Solid(c);
@@ -170,11 +173,6 @@ impl AxisChromeStyle {
 
         let (text_style, text_brush, text_outline, draw_labels) = match &resolved.text {
             Some(el) => {
-                let size_pt = el
-                    .size_pt
-                    .or(text_defaults.size_pt)
-                    .expect("text size_pt default")
-                    .resolve(LABEL_FONT_SIZE_PT as f64) as f32;
                 let color = el
                     .color
                     .clone()
@@ -182,14 +180,18 @@ impl AxisChromeStyle {
                     .expect("text color default")
                     .resolve(palette);
                 (
-                    TextStyle::new(size_pt),
+                    // The whole element, not just its size: family,
+                    // weight, width, style, features, variations, line
+                    // height, letter spacing and decorations are all
+                    // themeable on tick labels.
+                    crate::plot::plot::text_style_from(el, root_pt),
                     mk_brush(color),
                     crate::plot::plot::text_outline_from(el, palette, dpi),
                     true,
                 )
             }
             None => (
-                TextStyle::new(LABEL_FONT_SIZE_PT),
+                TextStyle::new(root_pt as f32),
                 mk_brush(axis_ink()),
                 None,
                 false,

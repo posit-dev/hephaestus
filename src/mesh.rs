@@ -7,7 +7,7 @@
 //! passed to [`SceneBuilder::draw_mesh`](crate::scene::SceneBuilder)
 //! applies to vertex positions but not to colours.
 //!
-//! The mesh op is the foundation for Phase C's ribbon primitive (and
+//! The mesh op is what the ribbon primitive builds on (and
 //! any future Voronoi / surface / heightmap rendering). No backend
 //! currently has a native indexed-mesh primitive — every backend
 //! decomposes a `Mesh` into its native draw ops (e.g. Vello emits one
@@ -92,9 +92,9 @@ impl Mesh {
 
     /// Axis-aligned bounding box of every vertex position. Returns
     /// `Rect::ZERO` when the mesh is empty.
-    pub fn bounding_box(&self) -> kurbo::Rect {
+    pub fn bounding_box(&self) -> crate::geometry::Rect {
         if self.vertices.is_empty() {
-            return kurbo::Rect::ZERO;
+            return crate::geometry::Rect::ZERO;
         }
         let mut x0 = f64::INFINITY;
         let mut x1 = f64::NEG_INFINITY;
@@ -114,7 +114,7 @@ impl Mesh {
                 y1 = p.y;
             }
         }
-        kurbo::Rect::new(x0, y0, x1, y1)
+        crate::geometry::Rect::new(x0, y0, x1, y1)
     }
 
     /// Iterate over triangles, yielding `([p0, p1, p2], [c0, c1, c2])`
@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn empty_mesh_bounding_box_is_zero() {
         let m = Mesh::new(Vec::new(), Vec::new(), Vec::new());
-        assert_eq!(m.bounding_box(), kurbo::Rect::ZERO);
+        assert_eq!(m.bounding_box(), crate::geometry::Rect::ZERO);
         assert!(m.is_empty());
         assert_eq!(m.triangle_count(), 0);
     }

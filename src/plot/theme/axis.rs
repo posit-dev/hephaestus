@@ -97,7 +97,7 @@ pub const DEFAULT_AXIS_TITLE_SIZE_PT: f64 = super::element::DEFAULT_TEXT_SIZE_PT
 /// tick labels at `rel(0.8)`, grey20 tick marks, axis title at the
 /// root text size rotated along the axis. Used as the safety net for
 /// any field still `None` after the three-layer cascade.
-pub fn axis_concrete_defaults() -> AxisTheme {
+fn build_axis_concrete_defaults() -> AxisTheme {
     let line = super::element::line_concrete_defaults();
     AxisTheme {
         // Axis titles read along the axis baseline — `Along` lets
@@ -170,13 +170,29 @@ impl PerAxis {
     /// concrete values. Walks `by_channel_side[ch][side]` →
     /// `by_channel[ch]` → `all` → [`axis_concrete_defaults`],
     /// per-field.
+    ///
+    /// Use [`Self::resolve_with_root`] to continue the text cascade
+    /// into a theme-wide root text element.
     pub fn resolve(&self, ch: u8, side: u8) -> ResolvedAxis {
+        self.resolve_with_root(ch, side, None)
+    }
+
+    /// [`Self::resolve`] with `root_text` as the final parent of both
+    /// text-shaped slots — the theme's own `text` element, so a
+    /// figure-wide font or line height reaches axis titles and tick
+    /// labels like it reaches every other text slot.
+    pub fn resolve_with_root(
+        &self,
+        ch: u8,
+        side: u8,
+        root_text: Option<&TextElement>,
+    ) -> ResolvedAxis {
         let ci = ch as usize;
         let si = side as usize;
         debug_assert!(ci < 2 && si < 2, "channel/side out of range: {ch}, {side}");
 
         let defaults = axis_concrete_defaults();
-        let root_text = self.all.text.as_set();
+        let axis_root_text = self.all.text.as_set();
         let root_line = self.all.line.as_set();
 
         let by_ch = &self.by_channel[ci];
@@ -185,12 +201,12 @@ impl PerAxis {
         let title = cascade_element_chain(
             [&by_cs.title, &by_ch.title, &self.all.title],
             defaults.title.as_set(),
-            root_text,
+            &[axis_root_text, root_text],
         );
         let text = cascade_element_chain(
             [&by_cs.text, &by_ch.text, &self.all.text],
             defaults.text.as_set(),
-            None,
+            &[root_text],
         );
         let line = cascade_line_chain(
             [&by_cs.line, &by_ch.line, &self.all.line],
@@ -316,7 +332,7 @@ pub struct ResolvedAxis {
 fn cascade_element_chain<const N: usize>(
     chain: [&Element<TextElement>; N],
     axis_default: Option<&TextElement>,
-    extra_root: Option<&TextElement>,
+    extra_roots: &[Option<&TextElement>],
 ) -> Option<TextElement> {
     // Walk most-specific to least-specific. The first Blank short-
     // circuits to None; Set values merge child-over-parent via
@@ -340,10 +356,10 @@ fn cascade_element_chain<const N: usize>(
             None => d.clone(),
         });
     }
-    if let Some(r) = extra_root {
+    for r in extra_roots.iter().flatten() {
         merged = Some(match merged {
             Some(m) => m.cascade(r),
-            None => r.clone(),
+            None => (*r).clone(),
         });
     }
     merged
@@ -381,4 +397,15 @@ fn cascade_line_chain<const N: usize>(
         });
     }
     merged
+}
+
+/// Built once. `PerAxis::resolve` reads it on every axis it resolves —
+/// roughly ten times per plot per frame — and each construction builds
+/// seven `Element`s carrying `FontSpec`s and linetype `Arc`s.
+static AXIS_CONCRETE_DEFAULTS: std::sync::LazyLock<AxisTheme> =
+    std::sync::LazyLock::new(build_axis_concrete_defaults);
+
+/// Bottom-of-cascade concrete values for an [`AxisTheme`].
+pub fn axis_concrete_defaults() -> AxisTheme {
+    AXIS_CONCRETE_DEFAULTS.clone()
 }

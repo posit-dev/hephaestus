@@ -570,7 +570,7 @@ pub(crate) fn auto_endpoint_clip_pt(
 
 /// Compute the outward direction for an endpoint marker.
 ///
-/// The rule, per Phase C.5: the arrowhead's local +x axis points along
+/// The rule: the arrowhead's local +x axis points along
 /// the chord from the post-clip endpoint toward the *original* endpoint
 /// (i.e. the direction the line "would have continued" if it hadn't
 /// been trimmed). When the endpoint wasn't trimmed (`was_clipped =

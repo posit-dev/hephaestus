@@ -40,9 +40,9 @@ use std::sync::Arc;
 use super::resolve::{
     auto_endpoint_clip_pt, draw_stroke_with_linetype, emit_endpoint_marker,
     endpoint_marker_outline_px, endpoint_outward, override_alpha, pt_to_px,
-    resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or,
-    resolve_str_channel_or,
+    resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel,
+    resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
+    resolve_number_channel, resolve_number_channel_or, resolve_str_channel_or,
 };
 use super::{Channel, GeomContext};
 
@@ -167,9 +167,14 @@ pub(crate) fn resolve_outline_spec(
     i0: usize,
     pick: PickId,
 ) -> Option<OutlineSpec> {
-    let _ = ctx;
     let stroke_color = override_alpha(
-        resolve_color_channel(ch.stroke, sc.stroke, i0),
+        resolve_color_channel_or_theme(
+            ch.stroke,
+            sc.stroke,
+            i0,
+            defaults.stroke.as_ref(),
+            &ctx.theme.palette,
+        ),
         resolve_number_channel(ch.stroke_opacity, sc.stroke_opacity, i0),
     )?;
     let linewidth_pt =

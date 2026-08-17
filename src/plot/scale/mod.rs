@@ -15,9 +15,8 @@
 pub mod constructors;
 pub use constructors::*;
 
-use std::cell::Cell;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::color::{Color, ColorSpace};
 #[cfg(test)]
@@ -25,10 +24,10 @@ use crate::scales::value::DataColumn;
 use crate::scales::value::{LinetypeStep, Value};
 use crate::scales::Locale;
 
-// Re-export scales-crate items so legacy `crate::plot::scale::*` paths
-// continue to resolve. The submodules (`breaks`, `transform`, etc.) are
-// re-exported wholesale; selected free functions and types are pulled to
-// the top level.
+// The scales-layer surface, re-exported so `crate::plot::scale::*`
+// reaches both this bundle and the algorithms it delegates to. The
+// submodules (`breaks`, `transform`, etc.) come through wholesale;
+// selected free functions and types are pulled to the top level.
 pub use crate::scales::{
     binned_band_width, binned_band_width_at, binned_breaks, binned_map, binned_map_break, breaks,
     chrome, continuous_breaks, continuous_map, continuous_minor_breaks, discrete_band_width,
@@ -41,17 +40,31 @@ pub use crate::scales::{
     ScaleTypeKind, TemporalInterval, TemporalUnit, Transform, TransformKind, DEFAULT_BREAK_COUNT,
 };
 
-// Axis / legend chrome renderers live in src/plot/chrome/ — re-exported
-// here so legacy `crate::plot::scale::axis::*` paths keep working.
-#[cfg(feature = "text")]
-pub use crate::plot::chrome::{axis, legend};
-
 /// Tick-label formatter closure stored on a [`Scale`]. Receives a break
 /// value and the active [`Locale`], and returns its rendered label.
 /// User formatters can ignore the locale, consult its decimal /
 /// grouping separators, or look up month / day names —
 /// [`Scale::default_format`] does the latter automatically.
-pub type LabelFormatter = dyn Fn(&Value, &Locale) -> String;
+pub type LabelFormatter = dyn Fn(&Value, &Locale) -> String + Send + Sync;
+
+/// Reject a bin-edge list that can't describe a bin ladder. Bin lookup
+/// assumes strictly increasing finite edges; a list that violates that
+/// silently misplaces rows, so it's caught where the caller sets it.
+fn validate_bin_edges(edges: &[f64]) {
+    assert!(
+        edges.len() >= 2,
+        "binned scale needs at least two bin edges, got {}",
+        edges.len()
+    );
+    assert!(
+        edges.iter().all(|e| e.is_finite()),
+        "binned scale bin edges must all be finite: {edges:?}"
+    );
+    assert!(
+        edges.windows(2).all(|w| w[0] < w[1]),
+        "binned scale bin edges must be strictly increasing: {edges:?}"
+    );
+}
 
 // ─── BreaksSpec ──────────────────────────────────────────────────────────────
 
@@ -123,7 +136,6 @@ pub enum MinorBreaksSpec {
 /// exposes only the underlying enums + free functions. The methods on
 /// `Scale` (`map`, `breaks`, `band_width`, …) match-dispatch on the
 /// scale type and delegate to those free functions.
-#[derive(Clone)]
 pub struct Scale {
     scale_type: ScaleTypeKind,
     transform: Transform,
@@ -154,9 +166,39 @@ pub struct Scale {
     /// User-supplied tick-label formatter, if any. `None` ⇒ use the
     /// default per-variant formatter (see [`Scale::default_format`]).
     formatter: Option<Arc<LabelFormatter>>,
-    /// Bumped on every mutation. Plumbed for per-channel cache
-    /// invalidation; not currently consulted by the draw path.
-    generation: Cell<u64>,
+    /// Bumped on every mutation. Keys the break memo below, and is
+    /// plumbed for the same job in future per-channel caches.
+    generation: u64,
+    /// Memoized result of the last [`Self::breaks`] call, keyed on the
+    /// generation it was computed at and the tick target. Chrome asks
+    /// for the same breaks a dozen times per frame — axis measure, axis
+    /// draw, gridlines, legend — and every miss re-runs a
+    /// Wilkinson-extended search.
+    ///
+    /// A `Mutex` rather than a `RefCell` so `Scale` stays `Sync`; the
+    /// lock is uncontended and far cheaper than the search it skips.
+    breaks_cache: Mutex<Option<(u64, usize, Vec<Value>)>>,
+}
+
+impl Clone for Scale {
+    /// The break memo is not carried over — it's a pure function of the
+    /// cloned configuration, so the clone refills it on first use.
+    fn clone(&self) -> Self {
+        Scale {
+            scale_type: self.scale_type,
+            transform: self.transform,
+            input_range: self.input_range.clone(),
+            output_range: self.output_range.clone(),
+            bins: self.bins.clone(),
+            breaks_spec: self.breaks_spec.clone(),
+            minor_breaks_spec: self.minor_breaks_spec.clone(),
+            color_space: self.color_space,
+            direction: self.direction,
+            formatter: self.formatter.clone(),
+            generation: self.generation,
+            breaks_cache: Mutex::new(None),
+        }
+    }
 }
 
 impl Scale {
@@ -174,7 +216,8 @@ impl Scale {
             color_space: ColorSpace::default(),
             direction: Direction::default(),
             formatter: None,
-            generation: Cell::new(0),
+            generation: 0,
+            breaks_cache: Mutex::new(None),
         }
     }
 
@@ -214,8 +257,15 @@ impl Scale {
     /// Bins live in input space, alongside the domain: the output range
     /// stays free to carry a palette (colours, sizes, linetypes) that the
     /// bin index selects from.
+    ///
+    /// # Panics
+    ///
+    /// If the edges don't form a bin ladder: fewer than two edges, a
+    /// non-finite edge, or a pair that doesn't strictly increase.
     pub fn with_bins(mut self, edges: impl IntoIterator<Item = f64>) -> Self {
-        self.bins = Some(edges.into_iter().collect());
+        let edges: Vec<f64> = edges.into_iter().collect();
+        validate_bin_edges(&edges);
+        self.bins = Some(edges);
         self
     }
 
@@ -298,7 +348,13 @@ impl Scale {
     }
 
     /// Replace the bin edges in place. Bumps the generation counter.
+    ///
+    /// # Panics
+    ///
+    /// If the edges don't form a bin ladder: fewer than two edges, a
+    /// non-finite edge, or a pair that doesn't strictly increase.
     pub fn set_bins(&mut self, edges: Vec<f64>) {
+        validate_bin_edges(&edges);
         self.bins = Some(edges);
         self.bump_generation();
     }
@@ -389,7 +445,7 @@ impl Scale {
 
     /// Numeric "every N" breaks: emit multiples of `step` across the
     /// continuous domain. Applies to continuous numeric scales (and to
-    /// temporal scales constructed via the legacy
+    /// temporal scales constructed via the plain
     /// [`continuous`]`(date_a..=date_b)` path, which treats the domain
     /// as raw f64); for calendar-aware ticks on a `temporal(...)`
     /// scale use [`Self::with_temporal_interval`].
@@ -507,7 +563,7 @@ impl Scale {
     /// this closure for the values they cover.
     pub fn with_format<F>(mut self, f: F) -> Self
     where
-        F: Fn(&Value, &Locale) -> String + 'static,
+        F: Fn(&Value, &Locale) -> String + Send + Sync + 'static,
     {
         self.formatter = Some(Arc::new(f));
         self
@@ -517,7 +573,7 @@ impl Scale {
     /// See [`Self::with_format`] for the closure shape.
     pub fn set_format<F>(&mut self, f: F)
     where
-        F: Fn(&Value, &Locale) -> String + 'static,
+        F: Fn(&Value, &Locale) -> String + Send + Sync + 'static,
     {
         self.formatter = Some(Arc::new(f));
         self.bump_generation();
@@ -531,7 +587,7 @@ impl Scale {
     }
 
     fn bump_generation(&mut self) {
-        self.generation.set(self.generation.get() + 1);
+        self.generation += 1;
     }
 
     // ── Operations ──
@@ -640,12 +696,22 @@ impl Scale {
     /// scale type (e.g. [`BreaksSpec::TemporalInterval`] on a numeric
     /// scale) silently falls back to the automatic algorithm.
     pub fn breaks(&self, n: usize) -> Vec<Value> {
-        if let Some(spec) = &self.breaks_spec {
-            if let Some(bs) = self.breaks_from_spec(spec) {
-                return bs;
+        if let Ok(cache) = self.breaks_cache.lock() {
+            if let Some((gen, cached_n, values)) = cache.as_ref() {
+                if *gen == self.generation && *cached_n == n {
+                    return values.clone();
+                }
             }
         }
-        self.breaks_auto(n)
+        let computed = self
+            .breaks_spec
+            .as_ref()
+            .and_then(|spec| self.breaks_from_spec(spec))
+            .unwrap_or_else(|| self.breaks_auto(n));
+        if let Ok(mut cache) = self.breaks_cache.lock() {
+            *cache = Some((self.generation, n, computed.clone()));
+        }
+        computed
     }
 
     // Scale-type's automatic break algorithm — extracted so `breaks`
@@ -965,12 +1031,12 @@ impl Scale {
         format_value(v, locale)
     }
 
-    /// Monotonic counter incremented on every mutation. Plumbed for
-    /// downstream scaled-output caching to invalidate per-channel
-    /// caches without comparing values; not currently consulted.
-    #[allow(dead_code)] // wired through builder/mutators; consumers TBD
-    pub(crate) fn generation(&self) -> u64 {
-        self.generation.get()
+    /// Monotonic counter incremented on every mutation. Keys
+    /// [`Self::breaks`]'s memo, and is the invalidation signal any
+    /// further per-channel cache should use rather than comparing
+    /// values.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// True when `other` lays out the same legend domain as this scale:
@@ -1039,7 +1105,7 @@ impl std::fmt::Debug for Scale {
                 "formatter",
                 &self.formatter.as_ref().map(|_| "<fn>").unwrap_or("none"),
             )
-            .field("generation", &self.generation.get())
+            .field("generation", &self.generation)
             .finish()
     }
 }
@@ -1235,7 +1301,6 @@ impl ScaleRegistry {
     }
 
     /// Mutable read by name — used by the orchestrator's `update_scale`.
-    #[allow(dead_code)] // wired through PlotComposition in Phase 7
     pub(crate) fn get_mut(&mut self, name: &str) -> Option<&mut Scale> {
         self.scales.get_mut(name)
     }
@@ -1271,6 +1336,48 @@ impl ScaleRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn breaks_memo_follows_the_generation_counter() {
+        // The memo is keyed on `(generation, n)`, so a domain change has
+        // to invalidate it and a different tick target must not collide
+        // with a cached one.
+        let nums =
+            |vs: Vec<Value>| -> Vec<f64> { vs.iter().filter_map(|v| v.as_number()).collect() };
+        let mut s = continuous(0.0..=10.0);
+        let first = nums(s.breaks(5));
+        assert_eq!(
+            first,
+            nums(s.breaks(5)),
+            "a repeat call must agree with itself"
+        );
+
+        let coarser = nums(s.breaks(3));
+        assert_eq!(
+            coarser,
+            nums(s.breaks(3)),
+            "the tick target is part of the key"
+        );
+
+        s.set_domain_continuous(0.0, 1000.0);
+        let after = nums(s.breaks(5));
+        assert_ne!(
+            first, after,
+            "a domain change must not serve the stale break set"
+        );
+        assert_eq!(after, nums(s.breaks(5)));
+    }
+
+    #[test]
+    fn scale_and_registry_are_send_and_sync() {
+        // A `Scale` is a plain value bundle plus an `Arc<LabelFormatter>`
+        // whose bound requires `Send + Sync`, so scales can be built on a
+        // worker thread and shared across threads. `Plot` is not — geoms
+        // memoize shaped text behind `RefCell` — which is why the
+        // registry is the sharing boundary.
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Scale>();
+        assert_send_sync::<ScaleRegistry>();
+    }
     use crate::scales::value::{Date, DateTime, Time};
 
     fn approx(a: f64, b: f64, tol: f64, msg: &str) {
@@ -2310,7 +2417,7 @@ mod tests {
         assert!(s.input_range().is_none());
     }
 
-    // ── Transform-aware breaks (E.1) ──
+    // ── Transform-aware breaks ──
 
     #[test]
     fn log10_scale_breaks_emit_decade_powers() {
@@ -2391,7 +2498,6 @@ mod tests {
     fn identity_transform_breaks_match_extended() {
         // Default transform (Identity) on a continuous scale still uses
         // the Wilkinson Extended algorithm — no behavioural change from
-        // E.0.
         let s = continuous(0.0..=10.0);
         let bs = s.breaks(5);
         let nums: Vec<f64> = bs.iter().filter_map(|v| v.as_number()).collect();
@@ -2433,13 +2539,12 @@ mod tests {
 
     #[test]
     fn pseudo_log10_can_be_constructed() {
-        // Previously panicked.
         let s = continuous(0.1..=1000.0).with_transform(TransformKind::PseudoLog10);
         let bs = s.breaks(5);
         assert!(!bs.is_empty());
     }
 
-    // ── Calendar-aware temporal (E.2) ──
+    // ── Calendar-aware temporal ──
 
     #[test]
     fn temporal_date_year_span_emits_year_starts() {
@@ -2554,14 +2659,14 @@ mod tests {
 
     #[test]
     fn temporal_continuous_with_date_endpoints_still_works_numerically() {
-        // The legacy path: scale::continuous(Date..=Date) — keeps
+        // The plain path: scale::continuous(Date..=Date) — keeps
         // numeric breaks (Value::Number containing days).
         let s = continuous(Date::from_ymd(2024, 1, 1)..=Date::from_ymd(2024, 12, 31));
         let bs = s.breaks(5);
         // Expect Value::Number, not Value::Date.
         assert!(
             bs.iter().all(|v| matches!(v, Value::Number(_))),
-            "legacy continuous-with-date-endpoints should produce numeric breaks: {bs:?}"
+            "continuous-with-date-endpoints should produce numeric breaks: {bs:?}"
         );
     }
 

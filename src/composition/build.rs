@@ -7,7 +7,7 @@
 //! composition is placed as a sub-`Grid` spanning the entire outer
 //! block (rows 1..16, cols 1..13). The inner composition's outer-
 //! facing chrome aligns with the outer block's chrome rows/cols via
-//! [`Length::TrackOf`] sizer cells on both sides of the boundary:
+//! [`Extent::TrackOf`] sizer cells on both sides of the boundary:
 //! forward sizers in the outer point at sub-Grid chrome tracks; back
 //! sizers in the sub point at outer chrome tracks. The fixed-point
 //! iteration over `TrackOf` references in the solver converges this
@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use crate::layout::{Axis, Cell, CellId, Grid, Inset, Length, Placement, Track};
+use crate::layout::{Axis, Cell, CellId, Extent, Grid, Inset, Placement, Track};
 
 use super::anatomy::{
     MARGIN_BOTTOM_ROW, MARGIN_LEFT_COL, MARGIN_RIGHT_COL, MARGIN_TOP_ROW, PADDING_BOTTOM_ROW,
@@ -29,7 +29,10 @@ use super::{
 
 pub(super) struct BuildState {
     next_id: u64,
-    pub(super) regions: HashMap<(String, String), CellId>,
+    /// Nested rather than keyed on a `(String, String)` tuple so a
+    /// lookup borrows both halves of the key instead of allocating
+    /// them — `CompositionLayout::get` runs per chrome rect per render.
+    pub(super) regions: HashMap<String, HashMap<Box<str>, CellId>>,
 }
 
 impl BuildState {
@@ -59,11 +62,11 @@ impl BuildState {
     ) -> Result<CellId, CompositionError> {
         let cell_id = self.alloc_id();
         if let Some(pid) = patch_id {
-            let key = (pid.clone(), region.to_string());
-            if self.regions.contains_key(&key) {
+            let by_region = self.regions.entry(pid.clone()).or_default();
+            if by_region.contains_key(region) {
                 return Err(CompositionError::DuplicateId(format!("{pid}:{region}")));
             }
-            self.regions.insert(key, cell_id);
+            by_region.insert(region.into(), cell_id);
         }
         Ok(cell_id)
     }
@@ -612,14 +615,14 @@ fn emit_ring_sizers(
     let end_block_row = block_row + block_row_span - 1;
     let end_block_col = block_col + block_col_span - 1;
     // Top/bottom ring rows live in the start/end block respectively.
-    let row_sizers: [(u16, usize, &Option<Length>); 4] = [
+    let row_sizers: [(u16, usize, &Option<Extent>); 4] = [
         (MARGIN_TOP_ROW, block_row, &margin.top),
         (MARGIN_BOTTOM_ROW, end_block_row, &margin.bottom),
         (PADDING_TOP_ROW, block_row, &padding.top),
         (PADDING_BOTTOM_ROW, end_block_row, &padding.bottom),
     ];
     // Left/right ring cols similarly anchor to start/end block.
-    let col_sizers: [(u16, usize, &Option<Length>); 4] = [
+    let col_sizers: [(u16, usize, &Option<Extent>); 4] = [
         (MARGIN_LEFT_COL, block_col, &margin.left),
         (MARGIN_RIGHT_COL, end_block_col, &margin.right),
         (PADDING_LEFT_COL, block_col, &padding.left),
@@ -652,7 +655,7 @@ fn emit_ring_sizers(
 /// outer block `(block_row, block_col)`, referencing the sub-Grid's
 /// inner border-block chrome tracks. Each sizer is a single-span
 /// `Cell::empty()` whose `inset.height` / `inset.width` is a
-/// `Length::track_of(sub_id, ...)` reference — the solver's fixed-point
+/// `Extent::track_of(sub_id, ...)` reference — the solver's fixed-point
 /// iteration over `TrackOf` makes the outer Auto track grow to the
 /// sub-Grid's resolved inner-border track size.
 #[allow(clippy::too_many_arguments)]
@@ -681,7 +684,7 @@ fn emit_forward_sizers(
         let outer_row = (outer_block_row * TABLE_ROWS) as u16 + anat_r;
         let outer_col = (block_col * TABLE_COLS) as u16 + PANEL_COL;
         g.place(
-            Placement::at(outer_row, outer_col).inset(Inset::default().height(Length::track_of(
+            Placement::at(outer_row, outer_col).inset(Inset::default().height(Extent::track_of(
                 sub_id,
                 Axis::Height,
                 sub_inner_row,
@@ -698,7 +701,7 @@ fn emit_forward_sizers(
         let outer_row = (block_row * TABLE_ROWS) as u16 + PANEL_ROW;
         let outer_col = (outer_block_col * TABLE_COLS) as u16 + anat_c;
         g.place(
-            Placement::at(outer_row, outer_col).inset(Inset::default().width(Length::track_of(
+            Placement::at(outer_row, outer_col).inset(Inset::default().width(Extent::track_of(
                 sub_id,
                 Axis::Width,
                 sub_inner_col,
@@ -733,7 +736,7 @@ fn emit_back_sizers(g: &mut Grid, parent: &ParentCoupling, sub_rows: usize, sub_
             let sub_col = (inner_c * TABLE_COLS) as u16 + PANEL_COL;
             let parent_track = (p_row_block * TABLE_ROWS) as u16 + anat_r;
             g.place(
-                Placement::at(sub_row, sub_col).inset(Inset::default().height(Length::track_of(
+                Placement::at(sub_row, sub_col).inset(Inset::default().height(Extent::track_of(
                     pid,
                     Axis::Height,
                     parent_track,
@@ -754,7 +757,7 @@ fn emit_back_sizers(g: &mut Grid, parent: &ParentCoupling, sub_rows: usize, sub_
             let sub_col = (inner_col_block * TABLE_COLS) as u16 + anat_c;
             let parent_track = (p_col_block * TABLE_COLS) as u16 + anat_c;
             g.place(
-                Placement::at(sub_row, sub_col).inset(Inset::default().width(Length::track_of(
+                Placement::at(sub_row, sub_col).inset(Inset::default().width(Extent::track_of(
                     pid,
                     Axis::Width,
                     parent_track,
@@ -829,7 +832,7 @@ fn translate_patch_placement(
 /// [`Composition::contains_patch_id`].
 pub(super) fn element_contains_patch_id(e: &Element, id: &str) -> bool {
     match e {
-        Element::Patch(p) => p.id() == Some(id),
+        Element::Patch(p) => p.patch_id() == Some(id),
         Element::Composition(c) => c.contains_patch_id(id),
     }
 }

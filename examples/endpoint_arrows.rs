@@ -23,11 +23,10 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{Composition, Patch, Span};
 use hephaestus::geometry::Size;
-#[cfg(feature = "text")]
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::{linetype, scale, LineGeom, Plot, PlotComposition, SegmentGeom, Value};
-#[cfg(feature = "text")]
 use hephaestus::scales::chrome::AxisSide;
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 fn main() {
@@ -60,7 +59,6 @@ fn main() {
                 .set("end_marker_size", 24.0_f64)
                 .build(),
         );
-        #[cfg(feature = "text")]
         {
             plot.add_axis(Axis::rail(
                 "x_scale",
@@ -118,7 +116,6 @@ fn main() {
                 .set("end_marker_fill", end_fill)
                 .build(),
         );
-        #[cfg(feature = "text")]
         {
             plot.add_axis(Axis::rail(
                 "x_scale",
@@ -165,7 +162,6 @@ fn main() {
                 .set("end_marker_size", 20.0_f64)
                 .build(),
         );
-        #[cfg(feature = "text")]
         {
             plot.add_axis(Axis::rail(
                 "x_scale",
@@ -218,7 +214,6 @@ fn main() {
                 .set("end_marker_size", sizes)
                 .build(),
         );
-        #[cfg(feature = "text")]
         {
             plot.add_axis(Axis::rail(
                 "x_scale",
@@ -268,7 +263,6 @@ fn main() {
                 .set("end_marker_size", 18.0_f64)
                 .build(),
         );
-        #[cfg(feature = "text")]
         {
             plot.add_axis(Axis::rail(
                 "x_scale",

@@ -49,11 +49,8 @@ pub mod ribbon;
 pub mod ribbon_bspline;
 pub mod segment;
 pub mod state;
-#[cfg(feature = "text")]
 pub mod text;
-#[cfg(feature = "text")]
 pub mod text_fit;
-#[cfg(feature = "text")]
 pub mod text_path;
 pub mod wedge;
 
@@ -68,11 +65,8 @@ pub use ribbon::RibbonGeom;
 pub use ribbon_bspline::RibbonBSplineGeom;
 pub use segment::SegmentGeom;
 pub use state::{GeomState, KeysStrategy};
-#[cfg(feature = "text")]
 pub use text::TextGeom;
-#[cfg(feature = "text")]
 pub use text_fit::TextFitGeom;
-#[cfg(feature = "text")]
 pub use text_path::TextPathGeom;
 pub use wedge::WedgeGeom;
 
@@ -293,8 +287,8 @@ impl_channel_from_raw_scalar!(Duration);
 // ─── ChannelDecl ─────────────────────────────────────────────────────────────
 
 /// What a geom declares about each channel it consumes — used by
-/// `view.validate()` (Phase 7) to flag bindings whose scale output type
-/// doesn't match the channel's expectation, and by Phase 6 to know which
+/// `view.validate()` to flag bindings whose scale output type
+/// doesn't match the channel's expectation, and to know which
 /// channels are mandatory vs optional.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelDecl {
@@ -328,7 +322,7 @@ pub enum ExpectedOutput {
 
 // ─── Scale resolution ────────────────────────────────────────────────────────
 
-/// Resolves channel names to scales. Implementations: the Phase 6 Plot +
+/// Resolves channel names to scales. Implementations: the Plot +
 /// orchestrator combo (channel name → binding → scale registry), or
 /// stand-alone test helpers like [`DirectScaleResolver`].
 pub trait ScaleResolver {

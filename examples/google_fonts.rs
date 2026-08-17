@@ -3,7 +3,7 @@
 //! Run with:
 //!
 //! ```sh
-//! cargo run --example google_fonts --features vello,png,text-google-fonts
+//! cargo run --example google_fonts --features vello,png,google-fonts
 //! ```
 //!
 //! Cold cache → hits `fonts.googleapis.com` once per family, writes
@@ -18,6 +18,7 @@ use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::theme::{FontFamily, Theme};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom, TextGeom};
 use hephaestus::scales::chrome::AxisSide;
+use hephaestus::scene::SceneBuilder;
 use hephaestus::text::fetch_google_font;
 use hephaestus::Renderer;
 

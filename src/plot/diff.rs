@@ -91,19 +91,21 @@ impl KeyIndex {
 ///   prev-iteration order. Returned as `Value`s rather than indices
 ///   because the caller is about to rotate `prev` to the new column.
 ///
-/// # Panics
-///
-/// Panics if `prev` and `next` have different [`DataColumn`] variants.
-/// The caller has just rebuilt keys for the same geom; a variant mismatch
-/// signals a structural bug (e.g. swapping the key column for one of a
-/// different type without resetting state).
+/// A key column that changes [`DataColumn`] variant between frames
+/// diffs as a complete replacement: keys are variant-strict, so no key
+/// of the old type can equal one of the new type, and every row exits
+/// while every new row enters.
 pub fn diff_columns(
     prev: &DataColumn,
     prev_index: &KeyIndex,
     next: &DataColumn,
 ) -> (Vec<usize>, Vec<(usize, usize)>, Vec<Value>) {
     if std::mem::discriminant(prev) != std::mem::discriminant(next) {
-        panic!("diff_columns: prev/next variant mismatch (prev: {prev:?}, next: {next:?})");
+        return (
+            (0..next.len()).collect(),
+            Vec::new(),
+            (0..prev.len()).map(|i| prev.get(i)).collect(),
+        );
     }
 
     let mut enter = Vec::new();
@@ -302,24 +304,26 @@ mod tests {
     #[test]
     fn number_and_date_with_same_projection_are_distinct() {
         // Date(1) projects to 1.0 numerically, but a Number column with
-        // value 1.0 is a different DataColumn variant — diff would panic
-        // (variant mismatch). This test verifies that mismatch is caught.
+        // value 1.0 is a different DataColumn variant, so the two keys
+        // must not pair up.
         let prev: DataColumn = vec![Date::from_days(1)].into();
         let next: DataColumn = vec![1.0_f64].into();
         let idx = KeyIndex::build(&prev);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            diff_columns(&prev, &idx, &next)
-        }));
-        assert!(result.is_err(), "expected variant-mismatch panic");
+        let (enter, update, exit) = diff_columns(&prev, &idx, &next);
+        assert_eq!(enter, vec![0]);
+        assert!(update.is_empty());
+        assert_eq!(exit.len(), 1);
     }
 
     #[test]
-    #[should_panic(expected = "variant mismatch")]
-    fn variant_mismatch_panics() {
+    fn variant_change_diffs_as_a_full_replacement() {
         let prev: DataColumn = vec![1_i32, 2, 3].into();
-        let next: DataColumn = vec!["a", "b", "c"].into();
+        let next: DataColumn = vec!["a", "b"].into();
         let idx = KeyIndex::build(&prev);
-        let _ = diff_columns(&prev, &idx, &next);
+        let (enter, update, exit) = diff_columns(&prev, &idx, &next);
+        assert_eq!(enter, vec![0, 1]);
+        assert!(update.is_empty(), "no key can survive a variant change");
+        assert_eq!(exit.len(), 3);
     }
 
     // ── NaN handling ──

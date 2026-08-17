@@ -29,6 +29,7 @@ use hephaestus::plot::{
     SegmentGeom, TextGeom, WedgeGeom,
 };
 use hephaestus::scales::chrome::AxisSide;
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 const ANGLES: [f64; 4] = [0.0, FRAC_PI_6, FRAC_PI_4, FRAC_PI_2];

@@ -1418,7 +1418,7 @@ mod tests {
                 let has_curves = path.elements().iter().any(|el| {
                     matches!(
                         el,
-                        kurbo::PathEl::CurveTo(_, _, _) | kurbo::PathEl::QuadTo(_, _)
+                        crate::path::PathEl::CurveTo(_, _, _) | crate::path::PathEl::QuadTo(_, _)
                     )
                 });
                 assert!(has_curves, "rounded rect should have curves");
@@ -1746,7 +1746,7 @@ mod tests {
 
     // Helper used by the new tests.
     fn fill_bbox(scene: &RecordingScene) -> Option<Rect> {
-        use kurbo::Shape;
+        use crate::geometry::Shape as _;
         scene.ops.iter().find_map(|op| match op {
             Op::Fill { path, .. } => {
                 let bb = path.bounding_box();

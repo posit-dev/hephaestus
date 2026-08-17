@@ -681,10 +681,75 @@ fn lerp_f64(a: f64, b: f64, t: f64) -> f64 {
 
 /// Find the bin index whose `[edges[i], edges[i+1])` bracket contains
 /// `v`. The last bin is closed on both sides so values at the upper
-/// boundary still land in the final bin rather than falling off.
+/// boundary still land in the final bin rather than falling off. Values
+/// outside the edge list clamp to the nearest bin, so an edge list
+/// narrower than the domain sends low values to the first bin rather
+/// than wrapping them round to the last.
 fn find_bin(v: f64, edges: &[f64]) -> usize {
     let n_bins = edges.len() - 1;
-    (0..n_bins)
-        .find(|&i| v >= edges[i] && (v < edges[i + 1] || i == n_bins - 1))
-        .unwrap_or(n_bins - 1)
+    // Edges are strictly increasing, so the first edge greater than `v`
+    // bounds the containing bin.
+    edges
+        .partition_point(|e| *e <= v)
+        .saturating_sub(1)
+        .min(n_bins - 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_bin_brackets_are_half_open_with_a_closed_top() {
+        let edges = [10.0, 20.0, 30.0];
+        assert_eq!(find_bin(10.0, &edges), 0);
+        assert_eq!(find_bin(15.0, &edges), 0);
+        assert_eq!(find_bin(20.0, &edges), 1);
+        assert_eq!(find_bin(25.0, &edges), 1);
+        // The last bin is closed on both sides.
+        assert_eq!(find_bin(30.0, &edges), 1);
+    }
+
+    #[test]
+    fn find_bin_clamps_outside_the_edge_list() {
+        let edges = [10.0, 20.0, 30.0];
+        // Below the first edge belongs to the first bin, not the last.
+        assert_eq!(find_bin(5.0, &edges), 0);
+        assert_eq!(find_bin(-100.0, &edges), 0);
+        assert_eq!(find_bin(35.0, &edges), 1);
+    }
+
+    #[test]
+    fn binned_map_sends_below_edge_values_to_the_first_bin() {
+        // A domain wider than the edge list is legal; a value under the
+        // first edge must not wrap round to the top bin's colour.
+        let domain = InputRange::Continuous {
+            min: 0.0,
+            max: 100.0,
+        };
+        let edges = [10.0, 20.0, 30.0];
+        let low = binned_map(
+            &Value::Number(5.0),
+            Some(&domain),
+            Some(&edges),
+            None,
+            ColorSpace::default(),
+            Direction::Forward,
+        );
+        let high = binned_map(
+            &Value::Number(95.0),
+            Some(&domain),
+            Some(&edges),
+            None,
+            ColorSpace::default(),
+            Direction::Forward,
+        );
+        let (low, high) = (low.as_number().unwrap(), high.as_number().unwrap());
+        assert!(
+            low < high,
+            "below-range {low} should sit under above-range {high}"
+        );
+        // Bin 0 spans [10, 20], centre 15 → 0.15 of the 0..100 domain.
+        assert!((low - 0.15).abs() < 1e-12, "{low}");
+    }
 }

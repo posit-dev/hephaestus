@@ -338,15 +338,14 @@ impl PolylineSampler {
             return None;
         }
         let d = distance.clamp(0.0, self.total);
-        // Linear scan for the segment containing `d`. Acceptable for
-        // typical polylines; if a caller needs many samples on a long
-        // polyline, it should sort distances and amortise.
-        let mut seg_idx = 0usize;
-        while seg_idx + 1 < self.segments.len()
-            && d > self.segments[seg_idx].start_distance + self.segments[seg_idx].length
-        {
-            seg_idx += 1;
-        }
+        // Segments are contiguous and ordered by `start_distance`, so a
+        // binary search finds the containing one. The linetype walk
+        // samples every dash boundary of a mark, which made a linear
+        // scan quadratic in vertex count.
+        let seg_idx = self
+            .segments
+            .partition_point(|s| s.start_distance + s.length < d)
+            .min(self.segments.len() - 1);
         Some(sample_at(&self.segments, seg_idx, d, self.subpath))
     }
 }

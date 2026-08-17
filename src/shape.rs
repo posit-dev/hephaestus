@@ -79,6 +79,10 @@ pub enum ShapeStyle {
 pub struct Shape {
     content: ShapeContent,
     anchor: Point,
+    /// Computed once at construction: the linetype walk asks for it
+    /// once per stamped marker, and for a path-backed shape it means
+    /// flattening every subpath.
+    bbox: crate::geometry::Rect,
 }
 
 #[derive(Debug, Clone)]
@@ -90,7 +94,7 @@ enum ShapeContent {
     Glyph {
         font: Font,
         glyph_id: u32,
-        em_bbox: kurbo::Rect,
+        em_bbox: crate::geometry::Rect,
         em_origin: Point,
     },
 }
@@ -114,7 +118,7 @@ pub enum ShapeKind<'a> {
     Glyph {
         font: &'a Font,
         glyph_id: u32,
-        em_bbox: kurbo::Rect,
+        em_bbox: crate::geometry::Rect,
         em_origin: Point,
     },
 }
@@ -122,9 +126,11 @@ pub enum ShapeKind<'a> {
 impl Shape {
     /// Construct a path-backed shape from its subpaths, style hint, and anchor.
     pub fn new(paths: Vec<Path>, style: ShapeStyle, anchor: Point) -> Self {
+        let bbox = paths_bounding_box(&paths);
         Self {
             content: ShapeContent::Paths { paths, style },
             anchor,
+            bbox,
         }
     }
 
@@ -143,7 +149,7 @@ impl Shape {
     pub fn glyph(
         font: Font,
         glyph_id: u32,
-        em_bbox: kurbo::Rect,
+        em_bbox: crate::geometry::Rect,
         em_origin: Point,
         anchor: Point,
     ) -> Self {
@@ -155,6 +161,7 @@ impl Shape {
                 em_origin,
             },
             anchor,
+            bbox: em_bbox,
         }
     }
 
@@ -195,18 +202,18 @@ impl Shape {
     /// Used by callers that need to size the shape against a known extent
     /// (e.g. linetype markers scaling so the local y-extent matches the
     /// line's linewidth).
-    pub fn bounding_box(&self) -> kurbo::Rect {
-        match &self.content {
-            ShapeContent::Paths { paths, .. } => {
-                use kurbo::Shape as _;
-                let mut iter = paths.iter().map(|p| p.bounding_box());
-                match iter.next() {
-                    None => kurbo::Rect::ZERO,
-                    Some(first) => iter.fold(first, |acc, r| acc.union(r)),
-                }
-            }
-            ShapeContent::Glyph { em_bbox, .. } => *em_bbox,
-        }
+    pub fn bounding_box(&self) -> crate::geometry::Rect {
+        self.bbox
+    }
+}
+
+/// Union of every subpath's bounding box; `Rect::ZERO` for no paths.
+fn paths_bounding_box(paths: &[Path]) -> crate::geometry::Rect {
+    use crate::geometry::Shape as _;
+    let mut iter = paths.iter().map(|p| p.bounding_box());
+    match iter.next() {
+        None => crate::geometry::Rect::ZERO,
+        Some(first) => iter.fold(first, |acc, r| acc.union(r)),
     }
 }
 
@@ -344,8 +351,8 @@ pub mod builtin {
     /// Bezier circle at [`REFERENCE_RADIUS`]. Area ≈ 2.01 — reference for
     /// area-equalization of the other closed point shapes.
     pub fn circle() -> Shape {
-        use kurbo::Shape as _;
-        let path = kurbo::Circle::new(Point::ORIGIN, REFERENCE_RADIUS).to_path(0.01);
+        use crate::geometry::Shape as _;
+        let path = crate::geometry::Circle::new(Point::ORIGIN, REFERENCE_RADIUS).to_path(0.01);
         fill_one(path, Point::new(-REFERENCE_RADIUS, 0.0))
     }
 
@@ -646,9 +653,9 @@ pub mod builtin {
 
     /// Small filled circle terminator.
     pub fn arrow_dot() -> Shape {
-        use kurbo::Shape as _;
+        use crate::geometry::Shape as _;
         fill_one(
-            kurbo::Circle::new(Point::ORIGIN, 0.3).to_path(0.01),
+            crate::geometry::Circle::new(Point::ORIGIN, 0.3).to_path(0.01),
             Point::ORIGIN,
         )
     }
@@ -897,9 +904,9 @@ mod tests {
         // Construct a glyph shape with a synthetic font blob; the only thing
         // we exercise here is the wrapping/unwrapping. Drawing semantics are
         // tested in PointGeom / resolve.rs tests.
-        let blob = peniko::Blob::new(std::sync::Arc::new(Vec::<u8>::new()));
+        let blob = crate::brush::Blob::new(std::sync::Arc::new(Vec::<u8>::new()));
         let font = Font::new(blob, 0);
-        let em_bbox = kurbo::Rect::new(0.0, 0.0, 0.6, 1.0);
+        let em_bbox = crate::geometry::Rect::new(0.0, 0.0, 0.6, 1.0);
         let em_origin = Point::new(0.05, 0.8);
         let anchor = Point::new(-0.5, 0.0);
         let s = Shape::glyph(font, 42, em_bbox, em_origin, anchor);
@@ -923,7 +930,7 @@ mod tests {
 
     #[test]
     fn circle_bounding_box_has_expected_extent() {
-        // builtin circle is `kurbo::Circle::new(Point::ORIGIN, 0.8)` —
+        // builtin circle is `crate::geometry::Circle::new(Point::ORIGIN, 0.8)` —
         // bbox should be approximately (-0.8, -0.8) -> (0.8, 0.8),
         // i.e. width = height = 1.6.
         let r = ShapeRegistry::with_builtins();

@@ -1,6 +1,6 @@
 # src/text/CLAUDE.md
 
-Text shaping / layout backed by `parley`. Gated behind the `text` cargo feature. The committed text stack for chrome rendering and the text geoms.
+Text shaping / layout backed by `parley`. The committed text stack for chrome rendering and the text geoms.
 
 ## What this module does
 
@@ -25,7 +25,7 @@ A host crate that wants to plug in its own shaper can do so by preserving `TextR
 
 - **`TextStyle` grows on demand.** Add a property when a chrome path or a geom actually needs it — the same bar that applies to any other public surface in the crate. Letter spacing, line height, OpenType features, variable-font variations are here because chrome and geoms exercise them.
 - **`FontContext` is a process-global `Mutex<FontContext>`** lazily initialised on first use. Shaping is serialised but cheap relative to per-frame work, so the simple Mutex suffices. Don't add per-call font contexts.
-- **Font discovery uses parley's defaults** — enumerates system fonts on construction. Hosts can extend the resolvable set via `register_font_bytes` / `register_font_path` / `register_font_dir`; missing families fall back to the resolved generic family. The optional `text-google-fonts` feature adds `fetch_google_font(family)` for on-demand Google Fonts lookup with on-disk caching.
+- **Font discovery uses parley's defaults** — enumerates system fonts on construction. Hosts can extend the resolvable set via `register_font_bytes` / `register_font_path` / `register_font_dir`; missing families fall back to the resolved generic family. The optional `google-fonts` feature adds `fetch_google_font(family)` for on-demand Google Fonts lookup with on-disk caching.
 - **Brush type is `()`.** Parley's brush generic parameter is fixed to `()` here; real brushes are passed to `draw_text` at draw time, not embedded in the layout.
 
 ## Cross-references

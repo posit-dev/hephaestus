@@ -4,7 +4,7 @@ Patchwork-style plot composition. Stacks on top of `layout/`: every plot is the 
 
 ## What this module does
 
-Every plot is laid out into a **shared 13 columns × 16 rows anatomical grid** (`anatomy::TABLE_COLS` × `anatomy::TABLE_ROWS`). Named [`Slot`]s (Panel, AxisTop, Title, LegendLeft, etc.) drop content into fixed positions inside that grid. Plots compose into hierarchical compositions via [`beside`] / [`stack`] / [`grid`] (or `Composition::place` directly). Nested compositions automatically align by anatomical position through the unified hoist + `Length::TrackOf` chrome-mirroring mechanism documented below.
+Every plot is laid out into a **shared 13 columns × 16 rows anatomical grid** (`anatomy::TABLE_COLS` × `anatomy::TABLE_ROWS`). Named [`Slot`]s (Panel, AxisTop, Title, LegendLeft, etc.) drop content into fixed positions inside that grid. Plots compose into hierarchical compositions via the free [`beside`] / [`stack`] / [`grid`] functions (or `Composition::place` directly); `Composition::append_col` / `append_row` grow an existing single-row / single-column composition instead of building a fresh one. Nested compositions automatically align by anatomical position through the unified hoist + `Extent::TrackOf` chrome-mirroring mechanism documented below.
 
 Construction is id-addressed: every [`Patch`] is created with a string id, and resolved rects are looked up via `CompositionLayout::get(id, region)` — flat across any nesting depth.
 
@@ -35,9 +35,9 @@ Beyond the legend, top / bottom carry title / subtitle / caption; left / right c
 
 All slot positions are 1-indexed to match `Placement`.
 
-## Unified hoist + `Length::TrackOf` chrome mirroring
+## Unified hoist + `Extent::TrackOf` chrome mirroring
 
-When a composition is nested inside another composition's cell, the build pipeline emits **forward sizers** in the outer block pointing at the sub-grid's inner border-block chrome tracks via `Length::TrackOf(sub_id, axis, track, span)`. Simultaneously, **back sizers** in the sub-grid point at the parent's outer chrome tracks. The layout solver iterates over `TrackOf` references using fixed-point arithmetic (see `layout/CLAUDE.md` on iteration), converging the Auto tracks at both sides of the boundary to their pointwise maximum in two or three iterations per nesting level.
+When a composition is nested inside another composition's cell, the build pipeline emits **forward sizers** in the outer block pointing at the sub-grid's inner border-block chrome tracks via `Extent::TrackOf(sub_id, axis, track, span)`. Simultaneously, **back sizers** in the sub-grid point at the parent's outer chrome tracks. The layout solver iterates over `TrackOf` references using fixed-point arithmetic (see `layout/CLAUDE.md` on iteration), converging the Auto tracks at both sides of the boundary to their pointwise maximum in two or three iterations per nesting level.
 
 The effect: inner-composition chrome (axis titles on facet borders, etc.) couples to outer-composition canonical chrome positions, enabling shared Title rows / cols across nested compositions without the caller threading the alignment by hand.
 
@@ -55,6 +55,6 @@ The effect: inner-composition chrome (axis titles on facet borders, etc.) couple
 
 ## Cross-references
 
-- `layout/` — the underlying solver. `Length::TrackOf` (defined in `layout/`) is the mechanism that makes chrome mirroring work across nesting. The fixed-point iteration loop in `layout/solver.rs` is what converges them.
+- `layout/` — the underlying solver. `Extent::TrackOf` (defined in `layout/`) is the mechanism that makes chrome mirroring work across nesting. The fixed-point iteration loop in `layout/solver.rs` is what converges them.
 - `plot::composition` (`src/plot/composition.rs`) — the high-level **orchestrator** that owns a `Composition` template, the scale registry, and attached plots. It rebuilds the composition on every render with each plot's chrome wired into named slots, and wires its own composition-level chrome (title / axis titles / legends) into the slots described above. See `src/plot/CLAUDE.md` for the "why are there two composition modules" answer.
 - `text/` — `TextRun` implements `Measure` and drops directly into a `Patch::slot(Slot::Title, Cell::measured(run))`.

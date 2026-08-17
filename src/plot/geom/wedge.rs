@@ -482,11 +482,11 @@ mod tests {
 
     use crate::color::Color;
     use crate::geometry::Rect;
+    use crate::geometry::Shape as _;
     use crate::plot::geom::{linetype, DirectScaleResolver};
     use crate::plot::scale;
     use crate::plot::value::Value;
     use crate::scene::recording::{Op, RecordingScene};
-    use kurbo::Shape;
 
     fn shapes() -> crate::shape::ShapeRegistry {
         crate::shape::ShapeRegistry::with_builtins()
@@ -639,7 +639,7 @@ mod tests {
                 let move_count = path
                     .elements()
                     .iter()
-                    .filter(|el| matches!(el, kurbo::PathEl::MoveTo(_)))
+                    .filter(|el| matches!(el, crate::path::PathEl::MoveTo(_)))
                     .count();
                 assert!(
                     move_count >= 1,
@@ -982,7 +982,7 @@ mod tests {
                 let moves = path
                     .elements()
                     .iter()
-                    .filter(|el| matches!(el, kurbo::PathEl::MoveTo(_)))
+                    .filter(|el| matches!(el, crate::path::PathEl::MoveTo(_)))
                     .count();
                 assert!(moves >= 1, "annular path expected");
                 return;
@@ -1044,7 +1044,7 @@ mod tests {
                 Op::Fill { path, .. } => Some(
                     path.elements()
                         .iter()
-                        .filter(|el| matches!(el, kurbo::PathEl::CurveTo(_, _, _)))
+                        .filter(|el| matches!(el, crate::path::PathEl::CurveTo(_, _, _)))
                         .count(),
                 ),
                 _ => None,

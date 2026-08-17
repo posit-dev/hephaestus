@@ -82,14 +82,13 @@ impl RecordingScene {
     pub fn new() -> Self {
         Self::default()
     }
-
-    /// Drop every recorded op.
-    pub fn clear(&mut self) {
-        self.ops.clear();
-    }
 }
 
 impl SceneBuilder for RecordingScene {
+    fn clear(&mut self) {
+        self.ops.clear();
+    }
+
     fn fill(
         &mut self,
         rule: FillRule,

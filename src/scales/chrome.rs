@@ -1,7 +1,7 @@
 //! Chrome-placement enums shared by axis and legend rendering.
 //!
 //! Kept feature-flag-agnostic so callers can match on `AxisSide` /
-//! `LegendSide` without pulling in the text feature.
+//! `LegendSide` without depending on the rendering layer.
 
 /// Where an axis is drawn relative to the panel rect.
 ///

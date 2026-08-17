@@ -66,7 +66,7 @@ pub fn identity() -> Scale {
 /// aligned to year / quarter / month / week / day / hour / minute /
 /// second boundaries.
 ///
-/// Use `scale::continuous(date_start..=date_end)` for the legacy
+/// Use `scale::continuous(date_start..=date_end)` for the plain
 /// behaviour (numeric breaks); `scale::temporal(...)` is the opt-in for
 /// calendar awareness.
 ///

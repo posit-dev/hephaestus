@@ -36,7 +36,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::brush::Brush;
-use crate::color::{rgb, Color};
+use crate::color::Color;
 use crate::geometry::{Affine, Point, Rect, Size};
 use crate::layout::{Cell, CellId, Grid, Measure, Placement, Track, WidthHint};
 use crate::path::{FillRule, Path};
@@ -175,6 +175,7 @@ pub fn legend_stack_natural_size(
                 &theme.geom,
                 gap_px,
                 &theme.locale,
+                crate::plot::chrome::root_text_pt(theme),
             )
         })
         .filter(|m| !m.is_empty())
@@ -191,11 +192,11 @@ pub fn legend_stack_natural_size(
         + gap_px * (measures.len() as f64 - 1.0).max(0.0);
     (primary, cross)
 }
+use crate::geometry::Shape as _;
 use crate::scales::value::{LinetypeStep, Value};
 use crate::scene::SceneBuilder;
 use crate::shape::ShapeRegistry;
 use crate::text::{draw_text, Alignment, TextRun, TextStyle};
-use kurbo::Shape;
 
 // ─── Style constants (pt) ───────────────────────────────────────────────────
 
@@ -348,11 +349,11 @@ fn build_discrete_stack_layout(
         let mut entry_cols: Vec<(u16, u16)> = Vec::with_capacity(n);
         for i in 0..n {
             if i > 0 {
-                cols.push(Track::Fixed(crate::layout::Length::px(row_gap_px)));
+                cols.push(Track::Fixed(crate::layout::Extent::px(row_gap_px)));
             }
             cols.push(Track::Auto);
             let sw_col = cols.len() as u16;
-            cols.push(Track::Fixed(crate::layout::Length::px(swatch_label_gap_px)));
+            cols.push(Track::Fixed(crate::layout::Extent::px(swatch_label_gap_px)));
             cols.push(Track::Auto);
             let lb_col = cols.len() as u16;
             entry_cols.push((sw_col, lb_col));
@@ -374,14 +375,14 @@ fn build_discrete_stack_layout(
         let mut entry_rows: Vec<u16> = Vec::with_capacity(n);
         for i in 0..n {
             if i > 0 {
-                row_tracks.push(Track::Fixed(crate::layout::Length::px(row_gap_px)));
+                row_tracks.push(Track::Fixed(crate::layout::Extent::px(row_gap_px)));
             }
             row_tracks.push(Track::Auto);
             entry_rows.push(row_tracks.len() as u16);
         }
         let cols = vec![
             Track::Auto,
-            Track::Fixed(crate::layout::Length::px(swatch_label_gap_px)),
+            Track::Fixed(crate::layout::Extent::px(swatch_label_gap_px)),
             Track::Auto,
         ];
         let mut grid = Grid::new(cols, row_tracks);
@@ -451,7 +452,19 @@ fn translate_rect(r: Rect, dx: f64, dy: f64) -> Rect {
 /// unique per attached legend. Used to remove or update a legend
 /// later; render-time collapse doesn't consume or reassign ids.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct LegendId(pub u32);
+pub struct LegendId(u32);
+
+impl LegendId {
+    pub(crate) fn new(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// The raw handle value. Opaque — useful only as a key, and not
+    /// comparable across plots.
+    pub fn raw(self) -> u32 {
+        self.0
+    }
+}
 
 /// Marker primitives a [`LegendKeySpec`] can draw.
 ///
@@ -1256,6 +1269,7 @@ pub fn legend_measure(
         &theme.geom,
         legend_gap_px(theme, dpi),
         &theme.locale,
+        crate::plot::chrome::root_text_pt(theme),
     ))
 }
 
@@ -1286,6 +1300,7 @@ pub fn legend_stack_measure(
                 &theme.geom,
                 panel_gap_px,
                 &theme.locale,
+                crate::plot::chrome::root_text_pt(theme),
             )
         })
         .collect();
@@ -1331,6 +1346,7 @@ pub fn render_legend_stack(
                     &theme.geom,
                     panel_gap_px,
                     &theme.locale,
+                    crate::plot::chrome::root_text_pt(theme),
                 ),
             )
         })
@@ -1352,8 +1368,12 @@ pub fn render_legend_stack(
         } else {
             Rect::new(cursor, slot_rect.y0, cursor + cross, slot_rect.y1)
         };
-        render_legend(
+        // The stack already measured every child to place it; passing
+        // that measure down saves re-shaping every label and re-solving
+        // the discrete-stack grid a second time per legend per frame.
+        render_legend_with_measure(
             legends[*orig_idx],
+            measure,
             registry,
             shapes,
             sub_rect,
@@ -1382,7 +1402,6 @@ pub fn render_legend(
     theme: &crate::plot::theme::Theme,
 ) {
     let lt = theme.legend_for(legend.theme_variant.as_deref());
-    let gap_px = legend_gap_px(theme, dpi);
     let measure = LegendMeasure::new(
         legend,
         registry,
@@ -1390,9 +1409,32 @@ pub fn render_legend(
         dpi,
         lt,
         &theme.geom,
-        gap_px,
+        legend_gap_px(theme, dpi),
         &theme.locale,
+        crate::plot::chrome::root_text_pt(theme),
     );
+    render_legend_with_measure(
+        legend, &measure, registry, shapes, slot_rect, scene, dpi, theme,
+    );
+}
+
+/// [`render_legend`] against a measure the caller already built.
+/// Building one shapes every label and, for a discrete stack, solves a
+/// whole layout grid — so a caller that measured to place the legend
+/// hands that work down rather than repeating it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_legend_with_measure(
+    legend: &Legend,
+    measure: &LegendMeasure,
+    registry: &ScaleRegistry,
+    shapes: &ShapeRegistry,
+    slot_rect: Rect,
+    scene: &mut dyn SceneBuilder,
+    dpi: f64,
+    theme: &crate::plot::theme::Theme,
+) {
+    let lt = theme.legend_for(legend.theme_variant.as_deref());
+    let gap_px = legend_gap_px(theme, dpi);
     if measure.is_empty() {
         return;
     }
@@ -1409,7 +1451,7 @@ pub fn render_legend(
         LegendBody::Stack(stack) if stack.binned => render_binned_stack_body(
             legend,
             &stack.keys,
-            &measure,
+            measure,
             registry,
             shapes,
             draw_rect,
@@ -1419,11 +1461,12 @@ pub fn render_legend(
             &theme.palette,
             &theme.geom,
             &theme.locale,
+            crate::plot::chrome::root_text_pt(theme),
         ),
         LegendBody::Stack(stack) => render_stack_body(
             legend,
             &stack.keys,
-            &measure,
+            measure,
             registry,
             shapes,
             draw_rect,
@@ -1433,18 +1476,21 @@ pub fn render_legend(
             &theme.palette,
             &theme.geom,
             &theme.locale,
+            crate::plot::chrome::root_text_pt(theme),
         ),
         LegendBody::Colorbar(spec) => render_colorbar_body(
             legend,
             spec,
-            &measure,
+            measure,
             registry,
             draw_rect,
             scene,
             dpi,
             lt,
             &theme.palette,
+            &theme.geom,
             &theme.locale,
+            crate::plot::chrome::root_text_pt(theme),
         ),
     }
 }
@@ -1501,9 +1547,8 @@ fn legend_text_styles(
     lt: &crate::plot::theme::LegendTheme,
     palette: &crate::plot::theme::Palette,
     dpi: f64,
+    root_pt: f64,
 ) -> LegendTextStyles {
-    use crate::plot::theme::DEFAULT_TEXT_SIZE_PT;
-    let root_pt = DEFAULT_TEXT_SIZE_PT;
     let paint = |merged: crate::plot::theme::TextElement| {
         let color = merged
             .color
@@ -1583,7 +1628,7 @@ fn path_for_rect_element(
     defaults: &crate::plot::theme::RectElement,
     dpi: f64,
 ) -> crate::path::Path {
-    use kurbo::Shape;
+    use crate::geometry::Shape as _;
     let radius_pt = el
         .corner_radius
         .or(defaults.corner_radius)
@@ -1626,6 +1671,7 @@ fn render_stack_body(
     palette: &crate::plot::theme::Palette,
     geom: &crate::plot::theme::GeomTheme,
     locale: &crate::scales::Locale,
+    root_pt: f64,
 ) {
     let side = cardinal_side(legend.side);
     let domain = match registry.get(&legend.domain_scale) {
@@ -1643,7 +1689,7 @@ fn render_stack_body(
     } else {
         0.0
     };
-    let styles = legend_text_styles(lt, palette, dpi);
+    let styles = legend_text_styles(lt, palette, dpi, root_pt);
 
     let entries = domain.breaks(DEFAULT_BREAK_COUNT);
     let entries: Vec<&Value> = entries
@@ -1790,8 +1836,9 @@ fn render_binned_stack_body(
     palette: &crate::plot::theme::Palette,
     geom: &crate::plot::theme::GeomTheme,
     locale: &crate::scales::Locale,
+    root_pt: f64,
 ) {
-    let styles = legend_text_styles(lt, palette, dpi);
+    let styles = legend_text_styles(lt, palette, dpi, root_pt);
     let domain = match registry.get(&legend.domain_scale) {
         Some(s) => s,
         None => return,
@@ -1964,6 +2011,7 @@ fn render_binned_stack_body(
         &lt.axis.resolved(),
         palette,
         dpi,
+        root_pt,
     );
     crate::plot::chrome::linear_axis::draw_linear_axis_at(
         scene,
@@ -1993,9 +2041,11 @@ fn render_colorbar_body(
     dpi: f64,
     lt: &crate::plot::theme::LegendTheme,
     palette: &crate::plot::theme::Palette,
+    geom: &crate::plot::theme::GeomTheme,
     locale: &crate::scales::Locale,
+    root_pt: f64,
 ) {
-    let styles = legend_text_styles(lt, palette, dpi);
+    let styles = legend_text_styles(lt, palette, dpi, root_pt);
     let domain = match registry.get(&legend.domain_scale) {
         Some(s) => s,
         None => return,
@@ -2101,7 +2151,6 @@ fn render_colorbar_body(
         paint_rect_frame(scene, frame_el, palette, bar_rect, dpi, true, false);
     }
     draw_gradient_bar(
-        &legend.domain_scale,
         domain,
         spec,
         legend.bin_spacing,
@@ -2110,6 +2159,8 @@ fn render_colorbar_body(
         side,
         bar_radius_px,
         scene,
+        palette,
+        geom,
     );
     if let Some(frame_el) = frame {
         paint_rect_frame(scene, frame_el, palette, bar_rect, dpi, false, true);
@@ -2132,6 +2183,7 @@ fn render_colorbar_body(
         &lt.axis.resolved(),
         palette,
         dpi,
+        root_pt,
     );
     crate::plot::chrome::linear_axis::draw_linear_axis_at(
         scene,
@@ -2226,7 +2278,6 @@ fn colorbar_majors(
 /// adjacent sample rects.
 #[allow(clippy::too_many_arguments)]
 fn draw_gradient_bar(
-    domain_scale_name: &str,
     domain: &crate::plot::scale::Scale,
     spec: &ColorbarSpec,
     bin_spacing: BinSpacing,
@@ -2235,6 +2286,8 @@ fn draw_gradient_bar(
     side: LegendSide,
     corner_radius_px: f64,
     scene: &mut dyn SceneBuilder,
+    palette: &crate::plot::theme::Palette,
+    geom: &crate::plot::theme::GeomTheme,
 ) {
     let (min, max) = match domain.input_range() {
         Some(crate::scales::input::InputRange::Continuous { min, max }) => (*min, *max),
@@ -2289,13 +2342,23 @@ fn draw_gradient_bar(
                 resolved.fill = Some(c);
             }
         }
+        // A stop the bindings can't colour falls through to the same
+        // rect-key default a discrete key would use, so a colorbar
+        // never paints a colour the palette doesn't own.
+        let fallback = || {
+            geom.rect
+                .fill
+                .as_ref()
+                .map(|c| c.resolve(palette))
+                .unwrap_or_else(|| palette.ink)
+        };
         with_opacity(
-            resolved.fill.unwrap_or_else(|| rgb(0.5, 0.5, 0.5)),
+            resolved.fill.unwrap_or_else(fallback),
             resolved.fill_opacity,
         )
     };
 
-    let stops: Vec<peniko::ColorStop> = if spec.stepped {
+    let stops: Vec<crate::brush::ColorStop> = if spec.stepped {
         // Constant-colour blocks between adjacent breaks. Two stops
         // per bin at the *same* colour share offsets with the
         // adjacent bin's outer stop — peniko interpolates between
@@ -2335,11 +2398,11 @@ fn draw_gradient_bar(
                 BinSpacing::Equal => (i as f64 / n_bins as f64, (i + 1) as f64 / n_bins as f64),
             };
             let color = resolve_stop_colour(mid_value);
-            out.push(peniko::ColorStop {
+            out.push(crate::brush::ColorStop {
                 offset: lo_t as f32,
                 color: color.into(),
             });
-            out.push(peniko::ColorStop {
+            out.push(crate::brush::ColorStop {
                 offset: hi_t as f32,
                 color: color.into(),
             });
@@ -2350,7 +2413,7 @@ fn draw_gradient_bar(
             .map(|i| {
                 let t = i as f64 / (n - 1) as f64;
                 let value = Value::Number(min + t * span);
-                peniko::ColorStop {
+                crate::brush::ColorStop {
                     offset: t as f32,
                     color: resolve_stop_colour(value).into(),
                 }
@@ -2358,7 +2421,8 @@ fn draw_gradient_bar(
             .collect()
     };
 
-    let gradient = peniko::Gradient::new_linear(grad_start, grad_end).with_stops(stops.as_slice());
+    let gradient =
+        crate::brush::Gradient::new_linear(grad_start, grad_end).with_stops(stops.as_slice());
     // Clip the gradient to the rounded bar shape — fill via the
     // rounded path so the gradient never paints past the frame's
     // rounded corners.
@@ -2378,7 +2442,6 @@ fn draw_gradient_bar(
     // Suppress unused param when no resolver is needed — keeps the
     // signature stable for future callers that might want to inspect
     // the legend's domain scale name.
-    let _ = domain_scale_name;
 }
 
 // ─── Resolution ─────────────────────────────────────────────────────────────
@@ -2400,7 +2463,7 @@ fn resolve_key(spec: &LegendKeySpec, registry: &ScaleRegistry, row: &Value) -> R
 
 // ─── Measure ────────────────────────────────────────────────────────────────
 
-struct LegendMeasure {
+pub(crate) struct LegendMeasure {
     side: LegendSide,
     body: BodyMeasure,
     /// Shaped label dims, max across breaks.
@@ -2477,13 +2540,12 @@ impl LegendMeasure {
         geom: &crate::plot::theme::GeomTheme,
         legend_gap_px: f64,
         locale: &crate::scales::Locale,
+        root_pt: f64,
     ) -> Self {
         // Label + title styles come from the LegendTheme so measure
         // and draw size identical glyph runs. `Blank` short-circuits
         // to `None` — the corresponding cell reserves zero space
         // because the renderer won't draw it.
-        use crate::plot::theme::DEFAULT_TEXT_SIZE_PT;
-        let root_pt = DEFAULT_TEXT_SIZE_PT;
         let (title_el, label_el) = legend_text_elements(lt);
         let label_style = label_el.map(|el| crate::plot::plot::text_style_from(&el, root_pt));
         let title_style = title_el.map(|el| crate::plot::plot::text_style_from(&el, root_pt));
@@ -2912,6 +2974,7 @@ impl Measure for LegendStackMeasure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::rgb;
     use crate::plot::scale;
     use crate::plot::theme::Theme;
     use crate::scales::Locale;
@@ -3476,6 +3539,7 @@ mod tests {
             &theme.geom,
             0.0,
             &theme.locale,
+            crate::plot::chrome::root_text_pt(theme),
         );
         match m.body {
             BodyMeasure::BinnedStack { row_cells_px, .. } => row_cells_px,
@@ -3552,6 +3616,7 @@ mod tests {
             &theme.geom,
             0.0,
             &theme.locale,
+            crate::plot::chrome::root_text_pt(&theme),
         );
         // Derive the expectation from the bin count independently of
         // the measure, so an extra reserved row can't hide inside a

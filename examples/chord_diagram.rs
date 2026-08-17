@@ -26,6 +26,7 @@ use hephaestus::composition::{Composition, Patch, Span};
 use hephaestus::geometry::Size;
 use hephaestus::plot::projection::Projection;
 use hephaestus::plot::{scale, Plot, PlotComposition, RibbonBSplineGeom};
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 fn cell_comp() -> Composition {

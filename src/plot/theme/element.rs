@@ -279,7 +279,7 @@ pub const DEFAULT_TEXT_LINEHEIGHT: f64 = 1.2;
 /// value meaning "fill only", not a hole to fill, so chrome reads it
 /// directly rather than through the `.expect("… default")` pattern the
 /// other fields use.
-pub fn text_concrete_defaults() -> TextElement {
+fn build_text_concrete_defaults() -> TextElement {
     TextElement {
         font: FontSpec::default(),
         color: Some(ThemeColor::Ink),
@@ -342,7 +342,7 @@ pub const DEFAULT_LINEWIDTH_PT: f64 = 1.0;
 /// Concrete fallback values for a `LineElement` — 1pt solid ink
 /// line, butt cap, miter join. Used as the safety net for any
 /// field still `None` after cascading.
-pub fn line_concrete_defaults() -> LineElement {
+fn build_line_concrete_defaults() -> LineElement {
     LineElement {
         color: Some(ThemeColor::Ink),
         linewidth_pt: Some(Length::Abs(DEFAULT_LINEWIDTH_PT)),
@@ -399,7 +399,7 @@ impl RectElement {
 /// Concrete fallback values for a `RectElement` — paper fill, ink
 /// border, 1pt border width, solid stroke, sharp corners. Used as
 /// the safety net for any field still `None` after cascading.
-pub fn rect_concrete_defaults() -> RectElement {
+fn build_rect_concrete_defaults() -> RectElement {
     RectElement {
         fill: Some(ThemeColor::Paper),
         color: Some(ThemeColor::Ink),
@@ -407,4 +407,43 @@ pub fn rect_concrete_defaults() -> RectElement {
         linetype: Some(Arc::from([])),
         corner_radius: Some(Length::Abs(0.0)),
     }
+}
+
+/// Built once. The chrome cascade asks for these on every text, line
+/// and rect slot it resolves — several times per slot per frame — and
+/// each construction allocates (`FontSpec` carries two `Vec`s, the
+/// linetype an `Arc`).
+static TEXT_CONCRETE_DEFAULTS: std::sync::LazyLock<TextElement> =
+    std::sync::LazyLock::new(build_text_concrete_defaults);
+
+/// Bottom-of-cascade concrete values for a [`TextElement`]. Any field still
+/// `None` after the cascade picks up its fallback here.
+pub fn text_concrete_defaults() -> TextElement {
+    TEXT_CONCRETE_DEFAULTS.clone()
+}
+
+/// Built once. The chrome cascade asks for these on every text, line
+/// and rect slot it resolves — several times per slot per frame — and
+/// each construction allocates (`FontSpec` carries two `Vec`s, the
+/// linetype an `Arc`).
+static LINE_CONCRETE_DEFAULTS: std::sync::LazyLock<LineElement> =
+    std::sync::LazyLock::new(build_line_concrete_defaults);
+
+/// Bottom-of-cascade concrete values for a [`LineElement`]. Any field still
+/// `None` after the cascade picks up its fallback here.
+pub fn line_concrete_defaults() -> LineElement {
+    LINE_CONCRETE_DEFAULTS.clone()
+}
+
+/// Built once. The chrome cascade asks for these on every text, line
+/// and rect slot it resolves — several times per slot per frame — and
+/// each construction allocates (`FontSpec` carries two `Vec`s, the
+/// linetype an `Arc`).
+static RECT_CONCRETE_DEFAULTS: std::sync::LazyLock<RectElement> =
+    std::sync::LazyLock::new(build_rect_concrete_defaults);
+
+/// Bottom-of-cascade concrete values for a [`RectElement`]. Any field still
+/// `None` after the cascade picks up its fallback here.
+pub fn rect_concrete_defaults() -> RectElement {
+    RECT_CONCRETE_DEFAULTS.clone()
 }

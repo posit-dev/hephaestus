@@ -356,11 +356,11 @@ mod tests {
 
     use crate::color::Color;
     use crate::geometry::Rect;
+    use crate::geometry::Shape as _;
     use crate::plot::geom::{linetype, DirectScaleResolver};
     use crate::plot::scale;
     use crate::plot::value::Value;
     use crate::scene::recording::{Op, RecordingScene};
-    use kurbo::Shape;
 
     fn shapes() -> crate::shape::ShapeRegistry {
         crate::shape::ShapeRegistry::with_builtins()
@@ -825,7 +825,7 @@ mod tests {
                 _ => None,
             })
             .expect("fill op");
-        let pivot_world = xform * kurbo::Point::new(50.0, 50.0);
+        let pivot_world = xform * crate::geometry::Point::new(50.0, 50.0);
         assert!(
             (pivot_world.x - 50.0).abs() < 1e-6,
             "pivot.x = {}",

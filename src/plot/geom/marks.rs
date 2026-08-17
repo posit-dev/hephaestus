@@ -65,8 +65,9 @@ pub(crate) fn build_marks(keys: &Keys) -> Vec<MarkSlot> {
 
 /// Build a column of one entry per mark — the key value at each mark's
 /// first row. Used by grouped geoms to feed `diff_columns` at mark
-/// granularity. `geom_name` is interpolated into the variant-mismatch
-/// panic message.
+/// granularity. The result carries the same variant as `col`, so it can
+/// be diffed against a previous snapshot of the same key column.
+/// `geom_name` names the geom in the internal-invariant message.
 pub(crate) fn unique_values_at_first_rows(
     col: &DataColumn,
     first_rows: impl IntoIterator<Item = usize>,
@@ -87,7 +88,10 @@ pub(crate) fn unique_values_at_first_rows(
             (DataColumn::Time(vec), Value::Time(us)) => vec.push(us),
             (DataColumn::Duration(vec), Value::Duration(us)) => vec.push(us),
             (DataColumn::Linetype(vec), Value::Linetype(p)) => vec.push(p),
-            _ => panic!("{geom_name}: unique-keys column variant mismatch"),
+            (DataColumn::Geometry(vec), Value::Geometry(g)) => vec.push(g),
+            _ => unreachable!(
+                "{geom_name}: unique-keys template variant does not match its source column"
+            ),
         }
     }
     template

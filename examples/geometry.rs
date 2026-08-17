@@ -9,13 +9,12 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{Composition, Patch, Span};
 use hephaestus::geometry::Size;
-#[cfg(feature = "text")]
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::value::Value;
 use hephaestus::plot::{scale, GeometryGeom, Plot, PlotComposition};
-#[cfg(feature = "text")]
 use hephaestus::scales::chrome::AxisSide;
 use hephaestus::scales::geometry::{Geometry, Polygon as GeoPolygon};
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 fn main() {
@@ -92,7 +91,6 @@ fn main() {
             .set("size", 7.0_f64)
             .build(),
     );
-    #[cfg(feature = "text")]
     {
         plot.add_axis(Axis::rail(
             "x_axis",

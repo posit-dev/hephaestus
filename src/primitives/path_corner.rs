@@ -21,10 +21,12 @@
 //! circular fillet (Bezier-arc magic `(4/3) · tan(bend/4)`) is a one-line
 //! swap when the visual difference matters.
 
+use crate::geometry::{
+    CubicBez, Line, ParamCurve, ParamCurveArclen, ParamCurveDeriv, PathSeg, QuadBez,
+};
 use crate::geometry::{Point, Vec2};
 use crate::path::{Path, PathEl};
 use crate::primitives::CornerRounding;
-use kurbo::{CubicBez, Line, ParamCurve, ParamCurveArclen, ParamCurveDeriv, PathSeg, QuadBez};
 
 const COLLINEAR_TOL_DEG: f64 = 1e-3;
 const ARCLEN_ACCURACY: f64 = 1e-3;

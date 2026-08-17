@@ -17,6 +17,7 @@
 
 use crate::blend::BlendMode;
 use crate::brush::Brush;
+use crate::geometry::Shape as _;
 use crate::geometry::{Affine, Rect};
 use crate::layout::{Measure, WidthHint};
 use crate::path::{FillRule, Path};
@@ -26,12 +27,10 @@ use crate::plot::chrome::linear_axis::{pt_to_px, stroke_from_rect_border};
 use crate::plot::plot::{draw_text_element_in_rect, text_style_from};
 use crate::plot::theme::{
     rect_concrete_defaults, text_concrete_defaults, RectElement, Rotation, TextElement, Theme,
-    DEFAULT_TEXT_SIZE_PT,
 };
 use crate::scales::chrome::AxisSide;
 use crate::scene::SceneBuilder;
 use crate::text::TextRun;
-use kurbo::Shape;
 
 /// Baseline orientation, in degrees, for an [`AxisSide`] when used
 /// as a strip side. Mirrors `draw_axis_title`'s convention:
@@ -45,16 +44,6 @@ fn baseline_deg(side: AxisSide) -> f32 {
         AxisSide::Left => -90.0,
         AxisSide::Right => 90.0,
     }
-}
-
-/// Resolved root text size in pt — used as the parent for any `Rel`
-/// `Length` in the strip text element and for `Margin` resolution.
-fn theme_root_text_pt(theme: &Theme) -> f64 {
-    theme
-        .text
-        .size_pt
-        .map(|l| l.resolve(DEFAULT_TEXT_SIZE_PT))
-        .unwrap_or(DEFAULT_TEXT_SIZE_PT)
 }
 
 /// Look up the strip background element for `side`. `Blank` surfaces
@@ -76,7 +65,7 @@ fn resolved_text(theme: &Theme, side: AxisSide) -> Option<TextElement> {
 /// Resolve `theme.strip_padding` to a `(top, right, bottom, left)`
 /// tuple in pixels.
 fn strip_padding_px(theme: &Theme, dpi: f64) -> (f64, f64, f64, f64) {
-    let root_pt = theme_root_text_pt(theme);
+    let root_pt = crate::plot::chrome::root_text_pt(theme);
     let (mt, mr, mb, ml) = theme.strip_padding.resolve(root_pt);
     (
         pt_to_px(mt, dpi),
@@ -146,7 +135,7 @@ impl StripMeasure {
     /// background still reserve the slot and draw the text.
     pub(crate) fn new(text: &str, side: AxisSide, theme: &Theme, dpi: f64) -> Option<Self> {
         let text_el = resolved_text(theme, side)?;
-        let root_pt = theme_root_text_pt(theme);
+        let root_pt = crate::plot::chrome::root_text_pt(theme);
         let (pt_top, pt_right, pt_bottom, pt_left) = strip_padding_px(theme, dpi);
         let (mt, mr, mb, ml) = text_margin_px(&text_el, root_pt, dpi);
 
@@ -341,7 +330,7 @@ pub fn draw_strip(
         paint_strip_background(scene, el, path, theme, dpi);
     }
 
-    let root_pt = theme_root_text_pt(theme);
+    let root_pt = crate::plot::chrome::root_text_pt(theme);
     let defaults = text_concrete_defaults();
     let angle = text_el.angle.or(defaults.angle).expect("angle default");
     let resolved_deg = angle.resolve(baseline_deg(side));

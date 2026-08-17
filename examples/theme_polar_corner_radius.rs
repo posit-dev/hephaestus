@@ -9,6 +9,7 @@ use hephaestus::geometry::Size;
 use hephaestus::plot::projection::{PolarProjection, Projection};
 use hephaestus::plot::theme::{Element, Length, RectElement, Theme, ThemeColor};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom};
+use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 fn main() {

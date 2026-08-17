@@ -8,7 +8,7 @@ Scales — value mappers. Map a domain `Value` to a visual output (panel fractio
 
 **No `Scale` aggregate here.** The hephaestus `Scale` struct (bundle of scale_type + transform + direction + ranges + bin edges + break / minor-break specs + formatter + generation counter) lives in `src/plot/scale/mod.rs`, with its named constructors in `src/plot/scale/constructors.rs`. Future consumers of the scales crate roll their own bundle and call the free functions directly. The Scale struct's methods are 1-line shims that match on the enum tags and delegate.
 
-Axes and legends — *rendering* of a scale's ticks / breaks against a `SceneBuilder` — live in `src/plot/chrome/` (hephaestus-internal; feature-gated on `text`). The scale layer here defines *what* to draw; chrome draws it.
+Axes and legends — *rendering* of a scale's ticks / breaks against a `SceneBuilder` — live in `src/plot/chrome/` (hephaestus-internal). The scale layer here defines *what* to draw; chrome draws it.
 
 **Locale, not formatter, crosses the boundary.** `Locale` lives here because break labels are a scale-layer concern, but the `LabelFormatter` that overrides them hangs off hephaestus's `Scale`. A future crate consumer supplies its own formatter and reuses `Locale` as-is.
 
@@ -54,7 +54,7 @@ Rendering of axis and legend chrome lives in `crate::plot::chrome::{axis, legend
 ## Conventions
 
 - **Scales are stateless.** All configuration lives on `Scale`. No per-frame mutation.
-- **Temporal data projects to f64 before entering a scale.** Date → days, DateTime → microseconds, Time → microseconds since midnight, Duration → microseconds. The domain and ticks are always f64-based; axis label formatters reverse the projection.
+- **Temporal data projects to f64 before entering a scale.** Date → days, DateTime → microseconds, Time → nanoseconds since midnight, Duration → microseconds. The domain and ticks are always f64-based; axis label formatters reverse the projection.
 - **Break placement can differ from the data mapping.** Chrome positions ticks and gridlines with `Scale::map_break`, not `Scale::map`. The two agree for every family except Binned, whose `map` sends data to the centre of its bin while its breaks are the bin edges — those must land on their own domain fraction. A new scale type only needs a `map_break` arm when the same distinction applies.
 - **Colour interpolation names its space.** `continuous_map` / `ordinal_map` / `binned_map` take a `ColorSpace` argument, threaded from `Scale::color_space` (`with_color_space` / `set_color_space` configure it; the default is `Oklab`). `discrete_map` doesn't — a discrete palette is a one-to-one lookup with nothing to interpolate. Exact stops come back untouched in either space, so a palette's endpoints survive the round trip.
 - **Band width is a scale-type concept.** Discrete / ordinal / binned report `1.0 / n_bins`; continuous reports 0. Geoms use `scale.map_with_offset(value, band_offset)` to fold a `[0, 1]` within-band offset into the position output. Without a scale (no binding), the band offset is ignored — band is meaningless outside a scale. Band offsets are anchored to the domain, so a `Reversed` scale negates them: flipping an axis mirrors within-band placement along with everything else drawn on it.
@@ -75,4 +75,4 @@ Rendering of axis and legend chrome lives in `crate::plot::chrome::{axis, legend
 - `src/scales/value.rs` — the `Value` enum scales map; `DataColumn`; temporal newtypes (`Date`, `DateTime`, `Time`, `Duration`); `LinetypeStep`. Co-located with scales because they're the data scales operate on.
 - `src/plot/geom/resolve.rs` — the helpers geoms use to apply a scale per row. `resolve_position` (Value → panel fraction), `resolve_color_channel` (Value → Color), `resolve_linetype_channel` (Value → dash pattern).
 - `src/plot/composition.rs` — `PlotComposition::add_scale` / `update_scale` are the user-facing entry points. Scale mutations through `update_scale` bump the generation and mark dependent plots dirty.
-- `src/plot/chrome/` (gated on `text`) — axis / legend rendering: `axis.rs`, `linear_axis.rs`, `polar.rs`, `strip.rs`, `panel.rs`, and `legend/`. Pulls breaks / format / band info from `Scale` and draws them via `SceneBuilder` + `TextRun`.
+- `src/plot/chrome/` — axis / legend rendering: `axis.rs`, `linear_axis.rs`, `polar.rs`, `strip.rs`, `panel.rs`, and `legend/`. Pulls breaks / format / band info from `Scale` and draws them via `SceneBuilder` + `TextRun`.
