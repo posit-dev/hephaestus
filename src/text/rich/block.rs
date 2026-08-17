@@ -284,7 +284,10 @@ mod tests {
                 ..StyleDelta::empty()
             },
         );
-        let run = shape(&sheet, "> hello world");
+        // A paragraph on either side so the quote's margins sit inside
+        // the document — margins that reach the document's own edges
+        // collapse out of the box entirely.
+        let run = shape(&sheet, "before\n\n> hello world\n\nafter");
         let paints = run.block_paints();
         let bq = paints
             .iter()
@@ -296,12 +299,44 @@ mod tests {
         // each of top / bottom (margin) OUTSIDE the paint.
         let paint_h = bq.outer_rect.height();
         let total_h = run.natural_height();
-        // total_h - paint_h ≈ 2 * 20pt = 26.67pt at 96dpi.
-        // (Non-collapsing since blockquote has padding.top+bottom > 0.)
+        let text_h = total_h - paint_h;
+        // The empty sheet gives the paragraphs no margins of their
+        // own, so the two gaps around the paint are exactly the
+        // quote's margin: 2 × 20pt = 26.67pt at 96dpi, on top of the
+        // two paragraph lines. (Non-collapsing since blockquote has
+        // padding.top+bottom > 0.)
         let expected_margin_gap = 2.0 * 20.0 * 96.0 / 72.0;
         assert!(
-            (total_h - paint_h) >= expected_margin_gap * 0.9,
-            "run should be taller than paint by ~2×margin (paint={paint_h}, total={total_h}, expected gap ≈ {expected_margin_gap})",
+            text_h >= expected_margin_gap * 0.9,
+            "run should be taller than paint by ~2×margin plus two lines (paint={paint_h}, total={total_h}, expected gap ≈ {expected_margin_gap})",
+        );
+    }
+
+    #[test]
+    fn container_margin_at_the_document_edge_leaves_no_gap() {
+        // Same container as above, alone in the document: both its
+        // margins now reach the document's edges, collapse out of the
+        // box, and leave the run exactly as tall as the paint.
+        let mut sheet = RichTextStyleSheet::empty();
+        sheet.set(
+            "block_quote",
+            StyleDelta {
+                padding: Some(RichMargin::all(pt(10.0))),
+                margin: Some(RichMargin::all(pt(20.0))),
+                background: Some(ThemeColor::Fixed(Color::from_rgba8(200, 200, 200, 255))),
+                ..StyleDelta::empty()
+            },
+        );
+        let run = shape(&sheet, "> hello world");
+        let paints = run.block_paints();
+        let bq = paints
+            .iter()
+            .find(|p| p.background.is_some())
+            .expect("expected bordered/filled blockquote paint");
+        let gap = run.natural_height() - bq.outer_rect.height();
+        assert!(
+            gap.abs() < 0.01,
+            "document-edge margins should collapse out of the box (gap={gap})"
         );
     }
 

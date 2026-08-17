@@ -320,8 +320,9 @@ impl RichTextRun {
         self.natural_height_px as f64
     }
 
-    /// Total stacked height (px) at the current break width —
-    /// includes any margins on the last block below its content.
+    /// Total stacked height (px) at the current break width — a tight
+    /// box, since margins reaching the document's top or bottom edge
+    /// collapse out of it.
     pub fn current_height(&self) -> f64 {
         *self.current_height_px.borrow() as f64
     }

@@ -31,15 +31,26 @@ pub(crate) struct EdgeSpacing {
 }
 
 /// Running state for the collapse walk down a stack of blocks.
-#[derive(Default)]
 struct MarginAccumulator {
     /// Largest positive margin seen since the last barrier.
     pending_pos: f32,
     /// Most negative margin seen since the last barrier.
     pending_neg: f32,
+    /// True until the first commit, while the collapse run still
+    /// reaches the document's top edge. See [`MarginAccumulator::flush`].
+    at_document_edge: bool,
 }
 
 impl MarginAccumulator {
+    /// A fresh walk, positioned at the document's top edge.
+    fn at_document_top() -> Self {
+        Self {
+            pending_pos: 0.0,
+            pending_neg: 0.0,
+            at_document_edge: true,
+        }
+    }
+
     fn fold(&mut self, margin_px: f32) {
         if margin_px >= 0.0 {
             self.pending_pos = self.pending_pos.max(margin_px);
@@ -49,8 +60,18 @@ impl MarginAccumulator {
     }
 
     /// Commit the collapsed margin into `y` and start a fresh run.
+    ///
+    /// A run that reaches the document's top edge has collapsed out of
+    /// the document — CSS puts it outside the body box, so it is
+    /// dropped rather than committed. The first commit is by
+    /// construction the one at that edge: anything before it has no
+    /// barrier or content above it.
     fn flush(&mut self, y: &mut f32) {
-        *y += self.pending_pos + self.pending_neg;
+        if self.at_document_edge {
+            self.at_document_edge = false;
+        } else {
+            *y += self.pending_pos + self.pending_neg;
+        }
         self.pending_pos = 0.0;
         self.pending_neg = 0.0;
     }
@@ -83,10 +104,19 @@ fn apply_bottom_chain(chain: &[EdgeSpacing], y: &mut f32, acc: &mut MarginAccumu
 }
 
 /// Position every block vertically, collapsing margins across the
-/// whole stack. Returns the total height including trailing margin.
+/// whole stack. Returns the total height — a tight box around the
+/// document, excluding the margins that collapse out through its top
+/// and bottom edges.
+///
+/// Marquee calls that exclusion `force_body_margin` and turns it on
+/// for every label-like use (`geom_marquee`, `element_marquee`). It
+/// matters because the paragraph style carries a bottom margin: a
+/// one-paragraph label whose box absorbed it would hang a blank line
+/// below the text, and every caller anchoring on the box bottom would
+/// place the label higher than the same string shaped as plain text.
 pub(crate) fn stack_blocks(blocks: &mut [BlockLayout]) -> f32 {
     let mut y: f32 = 0.0;
-    let mut acc = MarginAccumulator::default();
+    let mut acc = MarginAccumulator::at_document_top();
     for bl in blocks.iter_mut() {
         apply_top_chain(&bl.top_chain, &mut y, &mut acc);
         // The block's own content is itself a barrier — a margin
@@ -96,7 +126,9 @@ pub(crate) fn stack_blocks(blocks: &mut [BlockLayout]) -> f32 {
         y += bl.height_px;
         apply_bottom_chain(&bl.bottom_chain, &mut y, &mut acc);
     }
-    acc.flush(&mut y);
+    // Whatever is still pending reaches the document's bottom edge and
+    // collapses out of the box, so it is dropped — the mirror of the
+    // top-edge rule in `MarginAccumulator::flush`.
     y
 }
 

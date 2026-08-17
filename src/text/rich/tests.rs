@@ -470,6 +470,64 @@ fn blockquote_indents_its_paragraph() {
 }
 
 #[test]
+fn single_paragraph_box_is_tight_around_its_line() {
+    // `paragraph` carries `margin.bottom = rem(1)`, but that margin
+    // reaches the document's bottom edge and collapses out of the box.
+    // A one-line label therefore measures one line tall — the same box
+    // a plain `TextRun` of the same string reports, so both anchor the
+    // same way.
+    let run = make("**bold** and *italic*");
+    let line = run.layout_bounds().height as f64;
+    let total = run.natural_height();
+    assert!(
+        (total - line).abs() < 0.01,
+        "one-paragraph run should measure one line (line={line}, total={total})"
+    );
+}
+
+#[test]
+fn leading_block_margin_collapses_out_of_the_box() {
+    // Mirror of the trailing case: `h2` carries `margin.top = em(1)`,
+    // which reaches the document's top edge. The heading's first line
+    // therefore starts at the top of the box rather than one em down.
+    let run = make("## Heading");
+    let ink_top = run.layout_bounds().ink_top;
+    assert!(
+        ink_top < 1.0,
+        "leading margin should collapse out of the box (ink_top={ink_top})"
+    );
+}
+
+#[test]
+fn interior_block_margins_survive() {
+    // Only the document's own edges drop margins. A heading between
+    // two paragraphs keeps both of its margins, so the stack is taller
+    // than the same blocks with the heading's margins zeroed.
+    let mut flat = RichTextStyleSheet::new();
+    flat.set(
+        "h2",
+        StyleDelta {
+            margin: Some(RichMargin::all(pt(0.0))),
+            ..flat.get("h2").cloned().unwrap_or_default()
+        },
+    );
+    let spaced = make("intro\n\n## Heading\n\nbody");
+    let flattened = RichTextRun::new(
+        "intro\n\n## Heading\n\nbody",
+        &base_style(),
+        Color::from_rgba8(0, 0, 0, 255),
+        &flat,
+        &palette(),
+        96.0,
+    );
+    let delta = spaced.natural_height() - flattened.natural_height();
+    assert!(
+        delta > 10.0,
+        "interior heading margins should still add space (delta={delta})"
+    );
+}
+
+#[test]
 fn sibling_margins_collapse_via_max_not_sum() {
     // Every paragraph carries `margin.bottom = rem(1)` and no top
     // margin, so an adjacent pair collapses to one gap of 1rem,

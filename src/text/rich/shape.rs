@@ -92,6 +92,9 @@ pub(crate) fn shape_run(
     //   negative).
     // - Mixed: `max_positive + min_negative`.
     // - Padding / border between two margins breaks the collapse.
+    // - A margin that reaches the document's top or bottom edge
+    //   collapses out of the box and is dropped (marquee's
+    //   `force_body_margin`); see `stack_blocks`.
     //
     // Container top/bottom padding + margin contributions are
     // routed to first / last descendant leaves; padding acts as

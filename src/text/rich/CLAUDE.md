@@ -42,6 +42,14 @@ Marquee's four-way model, in `length.rs`. Every measurement on a `StyleDelta` is
 
 Marquee inherits *everything* down the tree and relies on `classic_style()` carrying explicit resets on every inline tag, so a block's background doesn't reappear on the spans inside it. We get the same rendered output from `ResolvedStyle::for_inline()`, which zeroes the box-level fields (`margin` / `padding` / `background` / `border_*` / `indent` / `hanging` / `bullet` / `align`) when a block's style seeds the cascade for its own content. The mechanism differs; the pixels don't.
 
+## The box is tight at the document edges
+
+Vertical margins collapse per CSS, with one rule on top: **a margin that reaches the run's top or bottom edge collapses out of the box and is dropped**. `stack_blocks` implements it — the first commit in the walk and whatever is left pending after the last block are both discarded.
+
+This is marquee's `force_body_margin`, which it turns on for `geom_marquee()` and `element_marquee()` — every label-like use. The reason is that `paragraph` carries `margin.bottom = rem(1)`: a box that absorbed it would hang a blank line under a one-paragraph label, so every caller anchoring on the box bottom would place markdown text higher than the same string shaped as plain `TextRun`. Since every consumer here is a label or a chrome slot, the rule is unconditional rather than a flag.
+
+Marquee arrives at the same place from the other side: it wraps the document in a `body` block styled `margin = trbl(0)` and forces those authored margins to win over anything that collapsed onto them. Adding a `body` selector is the extension point if an authored document margin (or padding / background around the whole run) is ever wanted; the tree recursion marquee needs for it is not, because the chain reaching each document edge is exactly what the flat walk has pending at its first and last commit.
+
 ## Style sheets
 
 `RichTextStyleSheet` maps selector names to `StyleDelta`s. `new()` ships marquee's `classic_style()` values against palette-relative colours; `empty()` is a blank slate. Reserved names: `base`, the inline tags (`em`, `strong`, `underline`, `del`, `code`, `sup`, `sub`, `link`, `outline`), and the block tags (`paragraph`, `h1`..`h6`, `block_quote`, `list`, `list_ordered`, `list_item`, `list_item_body`, `code_block`, `hr`).
