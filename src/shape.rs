@@ -238,6 +238,15 @@ impl ShapeRegistry {
         r
     }
 
+    /// Shared registry holding every built-in shape, built once per
+    /// process. Draw paths that only ever look up built-ins — rich-text
+    /// block borders, linetype marker stamps with no user shapes — read
+    /// from this instead of constructing a fresh registry per call.
+    pub fn shared_builtins() -> &'static ShapeRegistry {
+        static SHARED: std::sync::OnceLock<ShapeRegistry> = std::sync::OnceLock::new();
+        SHARED.get_or_init(ShapeRegistry::with_builtins)
+    }
+
     /// Insert a shape under the given name. Returns the previous shape if one
     /// existed.
     pub fn insert(&mut self, name: impl Into<String>, shape: Shape) -> Option<Shape> {

@@ -28,14 +28,14 @@ pub mod google_fonts;
 #[cfg(feature = "text-google-fonts")]
 pub use google_fonts::{fetch_google_font, google_font_cache_dir, GoogleFontError};
 
+pub mod rich;
+pub(crate) mod shape_common;
+
 use std::cell::RefCell;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use parley::{
-    AlignmentOptions, FontContext, FontFamily, FontFamilyName, FontStyle, FontWeight,
-    GenericFamily, LayoutContext, PositionedLayoutItem, StyleProperty,
-};
+use parley::{AlignmentOptions, FontContext, LayoutContext, PositionedLayoutItem};
 
 /// Line justification within the text box. Re-exported from parley so
 /// downstream geoms can construct one without depending on parley directly.
@@ -57,8 +57,9 @@ type B = ();
 
 /// Lazy, process-global [`FontContext`]. Constructed on first use; locked
 /// for shaping. A single mutex suffices because shaping is cheap and rare
-/// relative to per-frame work.
-fn font_context() -> &'static Mutex<FontContext> {
+/// relative to per-frame work. `pub(crate)` so [`crate::text::rich`] can
+/// share the same font pool as [`TextRun`].
+pub(crate) fn font_context() -> &'static Mutex<FontContext> {
     static FC: OnceLock<Mutex<FontContext>> = OnceLock::new();
     FC.get_or_init(|| Mutex::new(FontContext::new()))
 }
@@ -212,7 +213,7 @@ impl Default for LineHeight {
 ///
 /// Additional axes (letter spacing, decorations, …) are added as
 /// chrome paths and geoms call for them.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TextStyle {
     /// Font size in points (1pt = 1/72 inch).
     pub size_pt: f32,
@@ -363,18 +364,6 @@ impl Default for TextStyle {
     }
 }
 
-/// Translate a local [`GenericFamilyKind`] to parley's [`GenericFamily`].
-fn generic_family_to_parley(kind: GenericFamilyKind) -> GenericFamily {
-    match kind {
-        GenericFamilyKind::Serif => GenericFamily::Serif,
-        GenericFamilyKind::SansSerif => GenericFamily::SansSerif,
-        GenericFamilyKind::Mono => GenericFamily::Monospace,
-        GenericFamilyKind::Cursive => GenericFamily::Cursive,
-        GenericFamilyKind::Fantasy => GenericFamily::Fantasy,
-        GenericFamilyKind::SystemUi => GenericFamily::SystemUi,
-    }
-}
-
 // ─── TextRun ─────────────────────────────────────────────────────────────────
 
 /// Shaped text — built once, re-laid-out cheaply on width changes.
@@ -410,83 +399,7 @@ impl TextRun {
         let mut lcx = LayoutContext::<B>::new();
         let mut builder = lcx.ranged_builder(&mut fcx, text, 1.0, true);
 
-        let size_px = (style.size_pt as f64 * dpi / 72.0) as f32;
-        builder.push_default(StyleProperty::FontSize(size_px));
-        builder.push_default(StyleProperty::FontWeight(FontWeight::new(
-            style.weight as f32,
-        )));
-        builder.push_default(StyleProperty::FontWidth(parley::FontWidth::from_ratio(
-            style.width,
-        )));
-        let parley_style = match style.style {
-            FontStyleKind::Normal => FontStyle::Normal,
-            FontStyleKind::Italic => FontStyle::Italic,
-            FontStyleKind::Oblique(angle) => FontStyle::Oblique(Some(angle)),
-        };
-        builder.push_default(StyleProperty::FontStyle(parley_style));
-        let line_height = match style.line_height {
-            LineHeight::Relative(mult) => parley::LineHeight::FontSizeRelative(mult),
-            LineHeight::Absolute(pt) => {
-                parley::LineHeight::Absolute((pt as f64 * dpi / 72.0) as f32)
-            }
-        };
-        builder.push_default(StyleProperty::LineHeight(line_height));
-        if style.letter_spacing_pt != 0.0 {
-            let letter_spacing_px = (style.letter_spacing_pt as f64 * dpi / 72.0) as f32;
-            builder.push_default(StyleProperty::LetterSpacing(letter_spacing_px));
-        }
-        if style.underline {
-            builder.push_default(StyleProperty::Underline(true));
-        }
-        if style.strikethrough {
-            builder.push_default(StyleProperty::Strikethrough(true));
-        }
-        // Owned families list — parley borrows from us via `Cow`s, so
-        // the source strings must outlive `build()`. Constructing the
-        // names eagerly and pushing them keeps the lifetimes local.
-        if style.families.is_empty() {
-            builder.push_default(StyleProperty::FontFamily(FontFamily::Single(
-                FontFamilyName::Generic(GenericFamily::SansSerif),
-            )));
-        } else {
-            let names: Vec<FontFamilyName<'_>> = style
-                .families
-                .iter()
-                .map(|entry| match entry {
-                    FontFamilyEntry::Named(name) => FontFamilyName::named(name),
-                    FontFamilyEntry::Generic(kind) => {
-                        FontFamilyName::Generic(generic_family_to_parley(*kind))
-                    }
-                })
-                .collect();
-            builder.push_default(StyleProperty::FontFamily(if names.len() == 1 {
-                FontFamily::Single(names[0].clone())
-            } else {
-                FontFamily::List(std::borrow::Cow::Owned(names))
-            }));
-        }
-        if !style.features.is_empty() {
-            let parley_features: Vec<parley::FontFeature> = style
-                .features
-                .iter()
-                .map(|f| parley::FontFeature::new(parley::setting::Tag::from_bytes(f.tag), f.value))
-                .collect();
-            builder.push_default(StyleProperty::FontFeatures(parley::FontFeatures::List(
-                std::borrow::Cow::Owned(parley_features),
-            )));
-        }
-        if !style.variations.is_empty() {
-            let parley_variations: Vec<parley::FontVariation> = style
-                .variations
-                .iter()
-                .map(|v| {
-                    parley::FontVariation::new(parley::setting::Tag::from_bytes(v.tag), v.value)
-                })
-                .collect();
-            builder.push_default(StyleProperty::FontVariations(parley::FontVariations::List(
-                std::borrow::Cow::Owned(parley_variations),
-            )));
-        }
+        shape_common::push_style_defaults(&mut builder, style, dpi);
 
         let mut layout: parley::Layout<B> = builder.build(text);
         // Initial unconstrained break — gives us valid line data so
@@ -892,13 +805,19 @@ pub fn draw_text<S: SceneBuilder + ?Sized>(
             let baseline = gr.baseline();
             let run_x0 = x as f32 + gr.offset();
             let run_x1 = run_x0 + gr.advance();
+            // Skrifa exposes decoration offsets in font-typography
+            // convention (Y-UP, relative to baseline): underline
+            // offset typically negative (below baseline in
+            // typography), strikeout offset typically positive
+            // (above baseline in typography). In our screen Y-DOWN
+            // frame we SUBTRACT to flip.
             if let Some(deco) = &style.underline {
                 emit_decoration_rect(
                     scene,
                     DecorationRect {
                         x0: run_x0,
                         x1: run_x1,
-                        top: y as f32 + baseline + deco.offset.unwrap_or(metrics.underline_offset),
+                        top: y as f32 + baseline - deco.offset.unwrap_or(metrics.underline_offset),
                         thickness: deco.size.unwrap_or(metrics.underline_size).max(0.0),
                     },
                     brush,
@@ -912,9 +831,8 @@ pub fn draw_text<S: SceneBuilder + ?Sized>(
                     DecorationRect {
                         x0: run_x0,
                         x1: run_x1,
-                        top: y as f32
-                            + baseline
-                            + deco.offset.unwrap_or(metrics.strikethrough_offset),
+                        top: y as f32 + baseline
+                            - deco.offset.unwrap_or(metrics.strikethrough_offset),
                         thickness: deco.size.unwrap_or(metrics.strikethrough_size).max(0.0),
                     },
                     brush,

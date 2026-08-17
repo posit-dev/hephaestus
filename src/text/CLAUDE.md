@@ -12,6 +12,11 @@ Provides the text infrastructure that chrome (axis labels, legends, plot titles)
 
 Plus `Alignment` (re-exported from parley) for line justification — geom-facing string aliases (`"start"`, `"center"`, `"end"`, `"justify"`) parse through the `justify_x` channel.
 
+## Submodules
+
+- **`rich/`** — marquee-flavoured markdown: parse → reduce → shape → draw, with its own style-sheet and length vocabulary. See `src/text/rich/CLAUDE.md`.
+- **`shape_common.rs`** — the parley pieces both the plain and rich paths use: `push_style_defaults` (every `TextStyle` property, including features and variations), the generic-family translation, `glyphs_of_run`, and the underline / strikethrough rule emitter. Anything both paths need goes here rather than being written twice; the rich path shares these free functions, it does not wrap `TextRun`.
+
 ## Host-supplied shaper (optional extension)
 
 A host crate that wants to plug in its own shaper can do so by preserving `TextRun`'s `Measure` impl and `draw_text`'s glyph-emission contract — those are the stable surface. Anything inside (parley layout, `FontContext` caching) is implementation detail. This is an opt-in extension, not the planned trajectory.

@@ -79,20 +79,7 @@ impl<T> Element<T> {
     }
 }
 
-/// Horizontal alignment — for text justification within a slot, and
-/// for `hjust`-style anchor positioning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum HAlign {
-    /// Align with the start edge (left in left-to-right scripts).
-    #[default]
-    Start,
-    /// Centre within the slot.
-    Center,
-    /// Align with the end edge (right in left-to-right scripts).
-    End,
-    /// Stretch lines to fill the slot width.
-    Justify,
-}
+pub use crate::style_vocab::{HAlign, VAlign};
 
 /// Which region a plot-level text slot (title / subtitle / caption)
 /// aligns to.
@@ -108,20 +95,6 @@ pub enum AlignTo {
     /// legends). A centered title sits over the whole figure.
     /// Mirrors ggplot2's `plot.title.position = "plot"`.
     Plot,
-}
-
-/// Vertical alignment — for text baseline positioning within a slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum VAlign {
-    /// Align with the top edge of the slot.
-    Top,
-    /// Centre vertically within the slot.
-    #[default]
-    Middle,
-    /// Align with the alphabetic baseline within the slot.
-    Baseline,
-    /// Align with the bottom edge of the slot.
-    Bottom,
 }
 
 /// Text rotation — either an absolute angle or a semantic
@@ -242,6 +215,22 @@ pub struct TextElement {
     /// text's measured box, matching the text geoms — a deliberately
     /// heavy outline needs clearance from `margin`, which is measured.
     pub text_linewidth_pt: Option<Length>,
+    /// Interpret the slot's string as marquee-flavoured markdown and
+    /// shape it through the rich-text pipeline
+    /// ([`crate::text::rich::RichTextRun`]). Off by default so every
+    /// existing chrome label renders unchanged.
+    ///
+    /// When on, the slot's [`crate::plot::theme::Theme::rich_text`]
+    /// style sheet drives the markdown styling; the `TextElement`'s
+    /// resolved font / colour / size / letter-spacing feed into the
+    /// rich run's base style so plain-text fragments still inherit
+    /// the slot's ambient look.
+    ///
+    /// Text-outline (`text_stroke` / `text_linewidth_pt`) is not
+    /// applied on markdown slots — the rich pipeline doesn't expose
+    /// a glyph-outline surface. Chrome renderers fall back to plain
+    /// text when an outline is needed on the same slot.
+    pub markdown: Option<bool>,
 }
 
 impl TextElement {
@@ -267,6 +256,7 @@ impl TextElement {
                 .clone()
                 .or_else(|| parent.text_stroke.clone()),
             text_linewidth_pt: self.text_linewidth_pt.or(parent.text_linewidth_pt),
+            markdown: self.markdown.or(parent.markdown),
         }
     }
 }
@@ -304,6 +294,7 @@ pub fn text_concrete_defaults() -> TextElement {
         margin: Some(Margin::ZERO),
         text_stroke: None,
         text_linewidth_pt: Some(Length::Abs(DEFAULT_LINEWIDTH_PT)),
+        markdown: Some(false),
     }
 }
 

@@ -94,13 +94,23 @@
 //! Hit-testing falls out of the standard rasterised-pick path (alpha
 //! coverage in the pick scene).
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use crate::brush::Brush;
 use crate::geometry::{Affine, Point, Rect};
 use crate::path::FillRule;
+use crate::plot::theme::HAlign;
 use crate::plot::value::Value;
 use crate::primitives::{rect as rect_path, rounded_rect};
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
+use crate::style_vocab::ThemeColor;
+use crate::text::rich::{
+    draw_rich_text, pt as rich_pt, HAnchor, RichAnchor, RichKey, RichShapeCache, RichTextRun,
+    RichTextStyleSheet, RichTextWidth, StyleDelta as RichStyleDelta, VAnchor,
+};
 use crate::text::{draw_text, Alignment, TextRun, TextStyle};
 
 use super::resolve::{
@@ -136,6 +146,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("letter_spacing", ExpectedOutput::Numbers),
     ("underline", ExpectedOutput::Any),
     ("strikethrough", ExpectedOutput::Any),
+    ("markdown", ExpectedOutput::Any),
     ("text_stroke", ExpectedOutput::Colors),
     ("text_linewidth", ExpectedOutput::Numbers),
     ("anchor_x", ExpectedOutput::Numbers),
@@ -161,9 +172,53 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
 /// A vectorised text-label geom. One label per row.
 pub struct TextGeom {
     pub(crate) state: GeomState,
+    /// Optional per-geom style sheet used when the `"markdown"`
+    /// channel resolves `true`. `None` falls back to the theme's
+    /// `rich_text` sheet.
+    pub(crate) rich_sheet: Option<Arc<RichTextStyleSheet>>,
+    /// Shaped markdown rows, reused across frames. Cleared whenever
+    /// the geom's data is replaced.
+    pub(crate) rich_cache: RichShapeCache,
+    /// Sheets derived from the base one by folding a row's
+    /// `text_stroke` / `text_linewidth` onto its root selector, keyed
+    /// by `(base sheet identity, colour, width)`. Held so the derived
+    /// sheet keeps one identity across frames — [`RichShapeCache`]
+    /// keys on that identity, and a fresh `Arc` per frame would miss
+    /// every time.
+    pub(crate) rich_outline_sheets: RefCell<HashMap<(usize, u128, u64), Arc<RichTextStyleSheet>>>,
 }
 
 crate::impl_geom_inherents!(TextGeom);
+
+impl TextGeom {
+    /// Install a rich-text style sheet used for every row this geom
+    /// renders as markdown. Overrides the theme's default sheet.
+    /// Chains for builder-style construction.
+    pub fn with_rich_sheet(mut self, sheet: Arc<RichTextStyleSheet>) -> Self {
+        self.rich_sheet = Some(sheet);
+        self
+    }
+
+    /// Same as [`Self::with_rich_sheet`] for mutation through
+    /// `Plot::update_geom(&mut TextGeom)`.
+    pub fn set_rich_sheet(&mut self, sheet: Arc<RichTextStyleSheet>) {
+        self.rich_sheet = Some(sheet);
+    }
+
+    /// Clear the shaped-markdown cache. The key covers the sheet's
+    /// identity, so swapping sheets doesn't require this — it exists
+    /// for callers that mutate a sheet in place despite the
+    /// immutable-once-installed convention.
+    pub fn clear_rich_cache(&mut self) {
+        self.rich_cache.clear();
+    }
+
+    /// Clear any per-geom rich-text sheet override — falls back to
+    /// the theme default.
+    pub fn clear_rich_sheet(&mut self) {
+        self.rich_sheet = None;
+    }
+}
 
 // ─── BuildableGeom impl ──────────────────────────────────────────────────────
 
@@ -180,7 +235,12 @@ impl BuildableGeom for TextGeom {
             CHANNELS,
             "TextGeom",
         );
-        TextGeom { state }
+        TextGeom {
+            state,
+            rich_sheet: None,
+            rich_cache: RichShapeCache::new(),
+            rich_outline_sheets: RefCell::new(HashMap::new()),
+        }
     }
 }
 
@@ -197,6 +257,11 @@ impl Geom for TextGeom {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+
+    fn invalidate_caches(&mut self) {
+        self.rich_cache.clear();
+        self.rich_outline_sheets.borrow_mut().clear();
     }
 
     fn draw(&self, scene: &mut dyn SceneBuilder, ctx: &GeomContext<'_>) {
@@ -225,6 +290,7 @@ impl Geom for TextGeom {
         let letter_spacing_scale = ctx.scale_for("letter_spacing");
         let underline_scale = ctx.scale_for("underline");
         let strikethrough_scale = ctx.scale_for("strikethrough");
+        let markdown_scale = ctx.scale_for("markdown");
         let text_stroke_scale = ctx.scale_for("text_stroke");
         let text_linewidth_scale = ctx.scale_for("text_linewidth");
         let anchor_x_scale = ctx.scale_for("anchor_x");
@@ -267,6 +333,10 @@ impl Geom for TextGeom {
         let letter_spacing_ch = channels.get("letter_spacing");
         let underline_ch = channels.get("underline");
         let strikethrough_ch = channels.get("strikethrough");
+        let markdown_ch = channels.get("markdown");
+        // Kept as an `Arc` so the shape cache can key on its identity.
+        let rich_sheet: &Arc<RichTextStyleSheet> =
+            self.rich_sheet.as_ref().unwrap_or(&ctx.theme.rich_text);
         let text_stroke_ch = channels.get("text_stroke");
         let text_linewidth_ch = channels.get("text_linewidth");
         let anchor_x_ch = channels.get("anchor_x");
@@ -341,7 +411,7 @@ impl Geom for TextGeom {
                 ctx.theme.geom.text.strikethrough,
             );
 
-            // ── Build TextStyle + TextRun. ──
+            // ── Build TextStyle. ──
             let mut style = TextStyle::new(size_pt as f32)
                 .weight(weight)
                 .italic(italic)
@@ -351,6 +421,240 @@ impl Geom for TextGeom {
             if let Some(fam) = family {
                 style = style.family(fam);
             }
+
+            // ── Markdown branch. ──
+            //
+            // When the row's `markdown` channel resolves `true` (or
+            // the theme default is on), shape the row's text as
+            // marquee-flavoured markdown via [`RichTextRun`]. The
+            // geom's `bg_*` channels compose: they wrap the whole
+            // label; markdown's block-level backgrounds paint inside.
+            // The row's `text_stroke` / `text_linewidth` fold onto the
+            // sheet's root selector so every span inherits the halo.
+            let markdown = resolve_bool_channel_or(
+                markdown_ch,
+                markdown_scale,
+                i,
+                ctx.theme.geom.text.markdown,
+            );
+            if markdown {
+                // Fill colour (resolved early — RichTextRun needs it
+                // as the base brush for plain-styled runs).
+                let fill_color = override_alpha(
+                    resolve_color_channel_or_theme(
+                        fill_ch,
+                        fill_scale,
+                        i,
+                        ctx.theme.geom.text.fill.as_ref(),
+                        &ctx.theme.palette,
+                    ),
+                    resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i),
+                )
+                .unwrap_or_else(default_fill);
+                // The row's outline channels fold onto the sheet's
+                // root selector so every span inherits them; a span
+                // that sets its own `text_stroke` still wins.
+                let row_stroke = resolve_color_channel_or_theme(
+                    text_stroke_ch,
+                    text_stroke_scale,
+                    i,
+                    ctx.theme.geom.text.text_stroke.as_ref(),
+                    &ctx.theme.palette,
+                );
+                let row_sheet = match row_stroke {
+                    None => Arc::clone(rich_sheet),
+                    Some(c) => {
+                        let width_pt = resolve_number_channel_or(
+                            text_linewidth_ch,
+                            text_linewidth_scale,
+                            i,
+                            ctx.theme.geom.text.text_linewidth_pt,
+                        );
+                        let [r, g, b, a] = c.components;
+                        let color_bits = (r.to_bits() as u128) << 96
+                            | (g.to_bits() as u128) << 64
+                            | (b.to_bits() as u128) << 32
+                            | a.to_bits() as u128;
+                        let key = (
+                            Arc::as_ptr(rich_sheet) as usize,
+                            color_bits,
+                            width_pt.to_bits(),
+                        );
+                        let mut sheets = self.rich_outline_sheets.borrow_mut();
+                        Arc::clone(sheets.entry(key).or_insert_with(|| {
+                            let mut s = (**rich_sheet).clone();
+                            let base = s.get("base").cloned().unwrap_or_default();
+                            s.set(
+                                "base",
+                                RichStyleDelta {
+                                    text_stroke: Some(ThemeColor::Fixed(c)),
+                                    text_stroke_width: Some(rich_pt(width_pt)),
+                                    ..base
+                                },
+                            );
+                            Arc::new(s)
+                        }))
+                    }
+                };
+                // Wrap.
+                let x_raw = x_col.get(i);
+                let x_band_width_px = band_width_at(x_scale, &x_raw) * panel_w;
+                let width_pt = resolve_number_channel_or(width_ch, width_scale, i, 0.0);
+                let width_band_frac =
+                    resolve_number_channel_or(width_band_ch, width_band_scale, i, 0.0);
+                let wrap_width_px = pt_to_px(width_pt, ctx.dpi) + width_band_frac * x_band_width_px;
+                let justify_x = resolve_justify_channel(justify_x_ch, justify_x_scale, i);
+                let wraps = wrap_width_px > 0.0 && wrap_width_px.is_finite();
+                let align = alignment_to_halign(justify_x);
+                let width_spec = if wraps {
+                    RichTextWidth::Fixed(wrap_width_px as f32)
+                } else {
+                    RichTextWidth::Natural
+                };
+                let key = RichKey::new(
+                    &text,
+                    &style,
+                    fill_color,
+                    &row_sheet,
+                    &ctx.theme.palette,
+                    ctx.dpi,
+                    width_spec,
+                    align,
+                );
+                let rich = self.rich_cache.get_or_shape(key, || {
+                    let run = RichTextRun::new(
+                        &text,
+                        &style,
+                        fill_color,
+                        &row_sheet,
+                        &ctx.theme.palette,
+                        ctx.dpi,
+                    );
+                    if wraps {
+                        run.set_max_width(wrap_width_px as f32, align);
+                    }
+                    run
+                });
+                let (text_w, text_h) = if wraps {
+                    (rich.content_width(), rich.current_height())
+                } else {
+                    (rich.natural_width(), rich.natural_height())
+                };
+                let anchor_x = resolve_number_channel_or(
+                    anchor_x_ch,
+                    anchor_x_scale,
+                    i,
+                    ctx.theme.geom.text.anchor_x,
+                );
+                let anchor_y = resolve_number_channel_or(
+                    anchor_y_ch,
+                    anchor_y_scale,
+                    i,
+                    ctx.theme.geom.text.anchor_y,
+                );
+                let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
+                // Background rect (from `bg_*` channels — wraps the
+                // whole rich block).
+                let bg_fill = override_alpha(
+                    resolve_color_channel(bg_fill_ch, bg_fill_scale, i),
+                    resolve_number_channel(bg_fill_opacity_ch, bg_fill_opacity_scale, i),
+                );
+                let bg_stroke = override_alpha(
+                    resolve_color_channel(bg_stroke_ch, bg_stroke_scale, i),
+                    resolve_number_channel(bg_stroke_opacity_ch, bg_stroke_opacity_scale, i),
+                );
+                let has_bg = bg_fill.is_some() || bg_stroke.is_some();
+                let (draw_x, draw_y, bg_rect_opt) = if has_bg {
+                    let padding_pt =
+                        resolve_number_channel_or(bg_padding_ch, bg_padding_scale, i, 0.0);
+                    let padding_px = pt_to_px(padding_pt, ctx.dpi);
+                    let bg_w = text_w + 2.0 * padding_px;
+                    let bg_h = text_h + 2.0 * padding_px;
+                    let bg_left = anchor_px - anchor_x * bg_w;
+                    let bg_top = anchor_py - anchor_y * bg_h;
+                    let dx = bg_left + padding_px;
+                    let dy = bg_top + padding_px;
+                    let bg_rect = Rect::new(bg_left, bg_top, bg_left + bg_w, bg_top + bg_h);
+                    (dx, dy, Some(bg_rect))
+                } else {
+                    let dx = anchor_px - anchor_x * text_w;
+                    let dy = anchor_py - anchor_y * text_h;
+                    (dx, dy, None)
+                };
+                // Rotation around the alignment anchor.
+                let angle = resolve_angle_channel(angle_ch, angle_scale, i);
+                let xform = if angle == 0.0 {
+                    Affine::IDENTITY
+                } else {
+                    Affine::rotate_about(-angle, Point::new(anchor_px, anchor_py))
+                };
+                // Draw label bg first, then rich text on top.
+                if let Some(bg_rect) = bg_rect_opt {
+                    if bg_rect.is_finite() && bg_rect.width() > 0.0 && bg_rect.height() > 0.0 {
+                        let bg_corner_radius_pt = resolve_number_channel_or(
+                            bg_corner_radius_ch,
+                            bg_corner_radius_scale,
+                            i,
+                            0.0,
+                        );
+                        let bg_corner_radius_px = pt_to_px(bg_corner_radius_pt, ctx.dpi).max(0.0);
+                        let bg_path = if bg_corner_radius_px > 0.0 {
+                            rounded_rect(bg_rect, bg_corner_radius_px)
+                        } else {
+                            rect_path(bg_rect)
+                        };
+                        if let Some(fc) = bg_fill {
+                            scene.fill(
+                                FillRule::NonZero,
+                                xform,
+                                &Brush::Solid(fc),
+                                None,
+                                &bg_path,
+                                pick,
+                            );
+                        }
+                        if let Some(sc) = bg_stroke {
+                            let lw_pt = resolve_number_channel_or(
+                                bg_linewidth_ch,
+                                bg_linewidth_scale,
+                                i,
+                                ctx.theme.geom.text.bg_linewidth_pt,
+                            );
+                            let lw_px = pt_to_px(lw_pt, ctx.dpi);
+                            if lw_px.is_finite() && lw_px > 0.0 {
+                                let stroke_spec = Stroke::new(lw_px)
+                                    .with_caps(Cap::Butt)
+                                    .with_join(Join::Miter);
+                                scene.stroke(
+                                    &stroke_spec,
+                                    xform,
+                                    &Brush::Solid(sc),
+                                    None,
+                                    &bg_path,
+                                    pick,
+                                );
+                            }
+                        }
+                    }
+                }
+                // Emit rich text at (draw_x, draw_y) using top-left
+                // anchor — the anchor_x/anchor_y math above already
+                // positioned the top-left of the label there.
+                draw_rich_text(
+                    scene,
+                    &rich,
+                    draw_x,
+                    draw_y,
+                    RichAnchor {
+                        h: HAnchor::Left,
+                        v: VAnchor::Top,
+                    },
+                    xform,
+                    pick,
+                );
+                continue;
+            }
+
             let run = TextRun::new(&text, &style, ctx.dpi);
 
             // ── Soft-wrap. ──
@@ -587,6 +891,18 @@ fn resolve_str_channel(
     mapped.as_str().map(str::to_owned)
 }
 
+/// Map a parley `Alignment` onto the block-level [`HAlign`] the rich
+/// pipeline takes. `Justify` keeps its own variant so a rich block can
+/// stretch its lines.
+fn alignment_to_halign(a: Alignment) -> HAlign {
+    match a {
+        Alignment::Center => HAlign::Center,
+        Alignment::End => HAlign::End,
+        Alignment::Justify => HAlign::Justify,
+        _ => HAlign::Start,
+    }
+}
+
 /// Resolve a `"justify_x"` channel to a parley `Alignment`. Recognises
 /// the canonical string aliases — `"start"` / `"center"` / `"end"` /
 /// `"justify"`. Unknown / non-string / unset → `Alignment::Start`,
@@ -639,7 +955,6 @@ fn resolve_bool_or_italic_string(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     use crate::color::Color;
     use crate::geometry::Rect;
@@ -1461,5 +1776,157 @@ mod tests {
             &ctx(Rect::new(0.0, 0.0, 200.0, 100.0), &shapes, &resolver),
         );
         assert!(glyph_count(&scene) >= 1);
+    }
+
+    #[test]
+    fn markdown_channel_switches_to_rich_text_path() {
+        // A `{.red xyz}` span shapes as rich text only when the
+        // `markdown` channel is true — the rich path emits a red
+        // glyph run while the plain path renders the braces / dots
+        // literally with the fill colour.
+        let make = |md: bool| {
+            TextGeom::builder()
+                .set("x", vec![0.5_f64])
+                .set("y", vec![0.5_f64])
+                .set("text", vec!["{.red hi}"])
+                .set("fill", Color::new([0.0, 0.0, 0.0, 1.0]))
+                .set("markdown", md)
+                .build()
+        };
+        let s_plain = draw_text_geom_to_scene(make(false));
+        let s_md = draw_text_geom_to_scene(make(true));
+        let has_red_glyphs = |scene: &RecordingScene| {
+            scene.ops.iter().any(|op| match op {
+                Op::DrawGlyphs(run) => match &run.brush {
+                    Brush::Solid(c) => {
+                        let [r, g, b, _] = c.components;
+                        (r - 1.0).abs() < 1e-3 && g < 0.1 && b < 0.1
+                    }
+                    _ => false,
+                },
+                _ => false,
+            })
+        };
+        assert!(
+            !has_red_glyphs(&s_plain),
+            "plain path shouldn't produce red glyphs"
+        );
+        assert!(
+            has_red_glyphs(&s_md),
+            "markdown path should produce red glyphs from {{.red hi}}"
+        );
+    }
+
+    #[test]
+    fn markdown_code_block_paints_inside_geom_bg() {
+        // A geom-level bg_fill combined with markdown containing a
+        // fenced code block should emit at least TWO fill ops:
+        // 1. The geom's outer bg (rect wrapping the whole label).
+        // 2. The code block's per-block background (inside the outer).
+        let g = TextGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("text", vec!["```\nlet x = 1;\n```"])
+            .set("markdown", true)
+            .set("fill", Color::new([0.0, 0.0, 0.0, 1.0]))
+            .set("bg_fill", Color::new([1.0, 1.0, 0.5, 1.0])) // outer yellow
+            .build();
+        let scene = draw_text_geom_to_scene(g);
+        let fills = count_fills(&scene);
+        assert!(
+            fills >= 2,
+            "expected outer bg fill + code_block fill (≥ 2), got {fills}"
+        );
+    }
+
+    #[test]
+    fn markdown_theme_default_toggles_rich_path() {
+        // When the theme sets `geom.text.markdown = true`, unset
+        // channels default to rich shaping. Compare glyph counts:
+        // markdown on strips the `*` markers, so the run yields one
+        // fewer glyph.
+        let g = TextGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("text", vec!["*hi*"])
+            .set("fill", Color::new([0.0, 0.0, 0.0, 1.0]))
+            .build();
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        // Default theme: markdown = false → 4 glyphs (`*`, `h`, `i`, `*`).
+        let ctx_plain = ctx(Rect::new(0.0, 0.0, 400.0, 200.0), &shapes, &scales);
+        let mut s_plain = RecordingScene::default();
+        g.draw(&mut s_plain, &ctx_plain);
+        // Themed with markdown default on → 2 glyphs (`h`, `i`).
+        let mut theme_md = crate::plot::theme::Theme::default();
+        theme_md.geom.text.markdown = true;
+        let ctx_md = ctx(Rect::new(0.0, 0.0, 400.0, 200.0), &shapes, &scales).with_theme(&theme_md);
+        let mut s_md = RecordingScene::default();
+        g.draw(&mut s_md, &ctx_md);
+        let count_glyphs = |sc: &RecordingScene| {
+            sc.ops
+                .iter()
+                .map(|op| match op {
+                    Op::DrawGlyphs(r) => r.glyphs.len(),
+                    _ => 0,
+                })
+                .sum::<usize>()
+        };
+        assert!(
+            count_glyphs(&s_md) < count_glyphs(&s_plain),
+            "markdown theme default should strip `*` markers (plain={}, md={})",
+            count_glyphs(&s_plain),
+            count_glyphs(&s_md)
+        );
+    }
+
+    #[test]
+    fn markdown_rows_shape_once_and_are_reused_next_frame() {
+        let geom = TextGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("text", vec!["**bold** and *italic*"])
+            .set("markdown", vec![true])
+            .build();
+        let registry = shapes();
+        let sx = scale::continuous(0.0..=1.0);
+        let scales = DirectScaleResolver::new().with("x", &sx).with("y", &sx);
+        let panel = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let mut scene = RecordingScene::default();
+        geom.draw(&mut scene, &ctx(panel, &registry, &scales));
+        assert_eq!(geom.rich_cache.len(), 1, "the row should be cached");
+        let ops_after_first = scene.ops.len();
+        geom.draw(&mut scene, &ctx(panel, &registry, &scales));
+        assert_eq!(
+            geom.rich_cache.len(),
+            1,
+            "the second frame must reuse the shaped run, not add another"
+        );
+        assert_eq!(
+            scene.ops.len(),
+            ops_after_first * 2,
+            "both frames should emit the same drawing work"
+        );
+    }
+
+    #[test]
+    fn invalidate_caches_drops_shaped_markdown() {
+        let mut geom = TextGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("text", vec!["**bold**"])
+            .set("markdown", vec![true])
+            .build();
+        let registry = shapes();
+        let sx = scale::continuous(0.0..=1.0);
+        let scales = DirectScaleResolver::new().with("x", &sx).with("y", &sx);
+        let mut scene = RecordingScene::default();
+        geom.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 200.0, 100.0), &registry, &scales),
+        );
+        assert!(!geom.rich_cache.is_empty());
+        geom.invalidate_caches();
+        assert!(geom.rich_cache.is_empty());
     }
 }

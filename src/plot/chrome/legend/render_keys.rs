@@ -11,14 +11,13 @@
 use crate::brush::Brush;
 use crate::color::Color;
 use crate::geometry::{Affine, Point, Rect};
+use crate::linetype::MARKER_INK_COVERAGE_BOOST;
 use crate::path::FillRule;
 use crate::pick::PickId;
 use crate::plot::chrome::linear_axis::pt_to_px;
 use crate::plot::geom::outline::{draw_curve_outline, EndpointMarker, OutlineSpec};
 use crate::plot::geom::point::GLYPH_BBOX_REFERENCE;
-use crate::plot::geom::resolve::{
-    auto_endpoint_clip_pt, endpoint_marker_outline_px, MARKER_INK_COVERAGE_BOOST,
-};
+use crate::plot::geom::resolve::{auto_endpoint_clip_pt, endpoint_marker_outline_px};
 use crate::primitives::{circle, rounded_rect};
 use crate::scene::{Glyph, GlyphRun, SceneBuilder};
 use crate::shape::builtin::REFERENCE_RADIUS as POINT_SHAPE_RADIUS;

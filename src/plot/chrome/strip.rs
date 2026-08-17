@@ -127,7 +127,8 @@ pub(crate) struct StripMeasure {
     side: AxisSide,
     /// Shaped label, re-broken per query so the reserved thickness
     /// tracks the wrap the draw pass performs at the same width.
-    run: TextRun,
+    /// Shaped through whichever pipeline the draw pass will use.
+    run: StripRun,
     /// Text advance direction in degrees, resolved against the side's
     /// baseline.
     angle_deg: f32,
@@ -150,8 +151,24 @@ impl StripMeasure {
         let (mt, mr, mb, ml) = text_margin_px(&text_el, root_pt, dpi);
 
         let style = text_style_from(&text_el, root_pt);
-        let run = TextRun::new(text, &style, dpi);
         let defaults = text_concrete_defaults();
+        let run = if matches!(text_el.markdown, Some(true)) {
+            let color = text_el
+                .color
+                .clone()
+                .or_else(|| defaults.color.clone())
+                .expect("text_concrete_defaults sets color");
+            StripRun::Rich(crate::text::rich::RichTextRun::new(
+                text,
+                &style,
+                color.resolve(&theme.palette),
+                &theme.rich_text,
+                &theme.palette,
+                dpi,
+            ))
+        } else {
+            StripRun::Plain(TextRun::new(text, &style, dpi))
+        };
         let angle = text_el.angle.or(defaults.angle).expect("angle default");
         Some(Self {
             side,
@@ -173,9 +190,7 @@ impl StripMeasure {
         };
         let interior = (along_px - along_inset).max(0.0);
         let wrap_px = self.wrap_width(interior);
-        let _ = self
-            .run
-            .set_max_width(wrap_px as f32, crate::text::Alignment::Start);
+        self.run.set_max_width(wrap_px);
         let (rotated_w, rotated_h) = rotated_bbox(
             self.run.content_width(),
             self.run.current_height(),
@@ -211,6 +226,57 @@ impl StripMeasure {
         match self.run.width_hint(dpi) {
             WidthHint::Min(w) => w < self.run.natural_width() - 0.5,
             WidthHint::NeedsHeight { .. } => true,
+        }
+    }
+}
+
+/// The label a [`StripMeasure`] reserves space for, shaped through the
+/// same pipeline the draw pass uses so measured and drawn thickness
+/// agree.
+enum StripRun {
+    /// Plain text.
+    Plain(TextRun),
+    /// Marquee-flavoured markdown.
+    Rich(crate::text::rich::RichTextRun),
+}
+
+impl StripRun {
+    fn set_max_width(&self, px: f64) {
+        match self {
+            StripRun::Plain(r) => {
+                r.set_max_width(px as f32, crate::text::Alignment::Start);
+            }
+            StripRun::Rich(r) => {
+                r.set_max_width(px as f32, crate::style_vocab::HAlign::Start);
+            }
+        }
+    }
+
+    fn content_width(&self) -> f64 {
+        match self {
+            StripRun::Plain(r) => r.content_width(),
+            StripRun::Rich(r) => r.content_width(),
+        }
+    }
+
+    fn current_height(&self) -> f64 {
+        match self {
+            StripRun::Plain(r) => r.current_height(),
+            StripRun::Rich(r) => r.current_height(),
+        }
+    }
+
+    fn natural_width(&self) -> f64 {
+        match self {
+            StripRun::Plain(r) => r.natural_width(),
+            StripRun::Rich(r) => r.natural_width(),
+        }
+    }
+
+    fn width_hint(&self, dpi: f64) -> WidthHint {
+        match self {
+            StripRun::Plain(r) => r.width_hint(dpi),
+            StripRun::Rich(r) => r.width_hint(dpi),
         }
     }
 }
@@ -332,6 +398,7 @@ pub fn draw_strip(
         root_pt,
         dpi,
         PickId::Skip,
+        Some(&theme.rich_text),
     );
     if clipping.is_some() {
         scene.pop_layer();

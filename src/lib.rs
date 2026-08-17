@@ -16,6 +16,7 @@ pub mod color;
 pub mod composition;
 pub mod geometry;
 pub mod layout;
+pub mod linetype;
 pub mod mesh;
 pub mod path;
 pub mod pick;
@@ -25,6 +26,7 @@ pub mod scales;
 pub mod scene;
 pub mod shape;
 pub mod stroke;
+pub mod style_vocab;
 
 #[cfg(feature = "png")]
 pub mod png;
