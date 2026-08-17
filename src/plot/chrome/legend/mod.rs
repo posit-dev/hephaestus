@@ -64,6 +64,7 @@ use crate::plot::scale::ScaleRegistry;
 // Inter-legend (and panel ↔ legend) gap parents — shared with
 // `Theme::default()` so the `Length::Rel` resolve parent matches the
 // bottom-of-cascade concrete value.
+use crate::plot::theme::HAlign;
 use crate::plot::theme::{
     DEFAULT_LEGEND_GAP_PT as PANEL_LEGEND_GAP_PT, DEFAULT_LEGEND_SPACING_PT as LEGEND_GAP_PT,
 };
@@ -72,7 +73,7 @@ use crate::scales::chrome::{Anchor, LegendSide};
 use crate::scales::value::Value;
 use crate::scene::SceneBuilder;
 use crate::shape::ShapeRegistry;
-use crate::text::{draw_text, Alignment, TextRun, TextStyle};
+use crate::text::{draw_text, TextRun, TextStyle};
 
 // ─── Shared shell helpers ───────────────────────────────────────────────────
 
@@ -684,7 +685,7 @@ fn render_stack_body(
 
     if let (Some(title), Some(paint)) = (&legend.title, &styles.title) {
         let run = TextRun::new(title, &paint.style, dpi);
-        let _ = run.set_max_width(f32::INFINITY, Alignment::Start);
+        let _ = run.set_max_width(f32::INFINITY, HAlign::Start);
         crate::plot::chrome::text::draw_text_outline_pass(
             scene,
             paint.outline.as_ref(),

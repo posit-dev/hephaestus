@@ -139,9 +139,9 @@ dependencies = [
 
 [[package]]
 name = "clipper2-rust"
-version = "1.0.3"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "119b9306cc17492f50224736a2b2595543665c3095ba40c04c5c5181d53678bc"
+checksum = "0fd663fe209e7030c956e3be4c051dcc20cdb73da794f31466762cff12ca11bf"
 dependencies = [
  "num-traits",
 ]
@@ -318,6 +318,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "font-types"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75382bc7392ef10aad10935f92fc3db36d2d4dad0e5d96d8d65e04f89a07ec39"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
 name = "fontique"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -331,7 +340,7 @@ dependencies = [
  "objc2-core-text",
  "objc2-foundation",
  "parlance",
- "read-fonts",
+ "read-fonts 0.39.2",
  "roxmltree",
  "smallvec",
  "windows",
@@ -491,7 +500,7 @@ dependencies = [
  "bitflags",
  "bytemuck",
  "core_maths",
- "read-fonts",
+ "read-fonts 0.39.2",
  "smallvec",
 ]
 
@@ -526,7 +535,7 @@ dependencies = [
 
 [[package]]
 name = "hephaestus"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "bytemuck",
  "chrono",
@@ -1079,7 +1088,7 @@ dependencies = [
  "linebender_resource_handle",
  "parlance",
  "parley_data",
- "skrifa",
+ "skrifa 0.42.1",
 ]
 
 [[package]]
@@ -1254,7 +1263,18 @@ checksum = "c4ed38b89c2c77ff968c524145ad65fb010f38af5c7a224b53b81d47ac2daa81"
 dependencies = [
  "bytemuck",
  "core_maths",
- "font-types",
+ "font-types 0.11.3",
+]
+
+[[package]]
+name = "read-fonts"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "046a7d674daf459825b32f5062056d6882db0d2f5a479fbd76ccfc870ac18709"
+dependencies = [
+ "bytemuck",
+ "font-types 0.12.3",
+ "once_cell",
 ]
 
 [[package]]
@@ -1408,7 +1428,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c34617370ae968efb7161bb2beb517d9084659aae19e24b89e3db25b46e4564"
 dependencies = [
  "bytemuck",
- "read-fonts",
+ "read-fonts 0.39.2",
+]
+
+[[package]]
+name = "skrifa"
+version = "0.44.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "819ab7d62b1d3e72d9d9dea5650bac30424f9111364bb94928dbf5ecad1baa68"
+dependencies = [
+ "bytemuck",
+ "read-fonts 0.41.0",
 ]
 
 [[package]]
@@ -1624,16 +1654,16 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "vello"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "261359dbef879f8110ef7e1c442246c838d33d3d91cb05e0ea9288d432760c9f"
+checksum = "af76ceb17b2869be23598baef40a9c8db4de86b87c60510c3bc245559275a617"
 dependencies = [
  "bytemuck",
  "futures-intrusive",
  "log",
  "peniko",
  "png",
- "skrifa",
+ "skrifa 0.44.0",
  "static_assertions",
  "thiserror 2.0.18",
  "vello_encoding",
@@ -1643,22 +1673,22 @@ dependencies = [
 
 [[package]]
 name = "vello_encoding"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2346f5f0d7dccb3582fcd397b4a57b43165209f1424e0d76e85dd814db164af7"
+checksum = "1e31cd622201690d8dfe9fd8fea8d1ae59db1bfeea414856a617d1d03438418c"
 dependencies = [
  "bytemuck",
  "guillotiere",
  "peniko",
- "skrifa",
+ "skrifa 0.44.0",
  "smallvec",
 ]
 
 [[package]]
 name = "vello_shaders"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dd38937516fa4b47423d9255bb5e4a65e839ec9d57c38c4af6189ce56bf46b7"
+checksum = "abf943bd2920bfd22928a9c1bad39866f7ffcc1109b6ed924ab52773e3868a83"
 dependencies = [
  "bytemuck",
  "log",

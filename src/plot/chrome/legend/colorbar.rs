@@ -16,12 +16,13 @@ use crate::geometry::{Affine, Point, Rect};
 use crate::path::{FillRule, Path};
 use crate::pick::PickId;
 use crate::plot::scale::ScaleRegistry;
+use crate::plot::theme::HAlign;
 use crate::scales::breaks::DEFAULT_BREAK_COUNT;
 use crate::scales::chrome::LegendSide;
 use crate::scales::value::Value;
 use crate::scene::SceneBuilder;
 use crate::shape::ShapeRegistry;
-use crate::text::{draw_text, Alignment, TextRun};
+use crate::text::{draw_text, TextRun};
 
 use super::measure::{BodyMeasure, LegendMeasure};
 use super::render_keys::{render_key, with_opacity};
@@ -195,7 +196,7 @@ pub(super) fn render_binned_stack_body(
     );
     if let (Some(title), Some(paint)) = (&legend.title, &styles.title) {
         let run = TextRun::new(title, &paint.style, dpi);
-        let _ = run.set_max_width(f32::INFINITY, Alignment::Start);
+        let _ = run.set_max_width(f32::INFINITY, HAlign::Start);
         crate::plot::chrome::text::draw_text_outline_pass(
             scene,
             paint.outline.as_ref(),
@@ -378,7 +379,7 @@ pub(super) fn render_colorbar_body(
 
     if let (Some(title), Some(paint)) = (&legend.title, &styles.title) {
         let run = TextRun::new(title, &paint.style, dpi);
-        let _ = run.set_max_width(f32::INFINITY, Alignment::Start);
+        let _ = run.set_max_width(f32::INFINITY, HAlign::Start);
         crate::plot::chrome::text::draw_text_outline_pass(
             scene,
             paint.outline.as_ref(),

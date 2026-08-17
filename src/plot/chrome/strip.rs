@@ -25,6 +25,7 @@ use crate::pick::PickId;
 use crate::plot::chrome::axis::axis_side_to_channel_side;
 use crate::plot::chrome::linear_axis::{pt_to_px, stroke_from_rect_border};
 use crate::plot::chrome::text::{draw_text_element_in_rect, rotated_bbox, text_style_from};
+use crate::plot::theme::HAlign;
 use crate::plot::theme::{
     rect_concrete_defaults, text_concrete_defaults, RectElement, Rotation, TextElement, Theme,
 };
@@ -222,7 +223,7 @@ impl StripRun {
     fn set_max_width(&self, px: f64) {
         match self {
             StripRun::Plain(r) => {
-                r.set_max_width(px as f32, crate::text::Alignment::Start);
+                r.set_max_width(px as f32, HAlign::Start);
             }
             StripRun::Rich(r) => {
                 r.set_max_width(px as f32, crate::style_vocab::HAlign::Start);
@@ -337,7 +338,7 @@ pub fn draw_strip(
     let ink_offset_px = {
         let style = text_style_from(&text_el, root_pt);
         let run = TextRun::new(text, &style, dpi);
-        let _ = run.set_max_width(f32::INFINITY, crate::text::Alignment::Start);
+        let _ = run.set_max_width(f32::INFINITY, HAlign::Start);
         run.baseline_offset() - run.cap_height() * 0.5 - run.natural_height() * 0.5
     };
     let (pt_top, pt_right, pt_bottom, pt_left) = strip_padding_px(theme, dpi);

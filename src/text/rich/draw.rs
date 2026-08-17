@@ -1,4 +1,4 @@
-//! Draw a shaped [`RichTextRun`](super::run::RichTextRun) into a
+//! Draw a shaped [`RichTextRun`] into a
 //! `SceneBuilder`: block backgrounds and borders first, then list
 //! markers, then the glyph runs with their span chrome and
 //! decorations.

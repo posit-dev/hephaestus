@@ -23,12 +23,13 @@ use crate::plot::chrome::linear_axis::pt_to_px;
 use crate::plot::geom::outline::{draw_curve_outline, EndpointMarker, OutlineSpec};
 use crate::plot::geom::point::GLYPH_BBOX_REFERENCE;
 use crate::plot::geom::resolve::{auto_endpoint_clip_pt, endpoint_marker_outline_px};
+use crate::plot::theme::HAlign;
 use crate::primitives::{circle, rounded_rect};
 use crate::scene::{Glyph, GlyphRun, SceneBuilder};
 use crate::shape::builtin::REFERENCE_RADIUS as POINT_SHAPE_RADIUS;
 use crate::shape::{ShapeKind, ShapeRegistry, ShapeStyle};
 use crate::stroke::{Cap, Join, Stroke};
-use crate::text::{draw_text, draw_text_outline, Alignment, TextRun, TextStyle};
+use crate::text::{draw_text, draw_text_outline, TextRun, TextStyle};
 
 use crate::geometry::Shape as _;
 use std::sync::Arc;
@@ -157,7 +158,7 @@ fn text_key_run(
         style = style.family(family);
     }
     let run = TextRun::new(text, &style, dpi);
-    run.set_max_width(f32::INFINITY, Alignment::Start);
+    run.set_max_width(f32::INFINITY, HAlign::Start);
     Some(run)
 }
 

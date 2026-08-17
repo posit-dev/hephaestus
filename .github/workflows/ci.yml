@@ -54,6 +54,37 @@ jobs:
       - name: cargo test --all-features
         run: cargo test --all-features
 
+  # The `rust-version` in Cargo.toml is a promise to downstream crates, and the
+  # jobs above all run on stable — so nothing there would catch a newer-than-1.88
+  # language or std feature creeping in. This job is what backs the claim.
+  msrv:
+    name: MSRV (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Cache cargo registry, git, and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-msrv-
+
+      - name: Install fontconfig
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev
+
+      - name: cargo check --all-features
+        run: cargo check --all-features
+
   # wasm32 is a supported target, so it gets its own job: it shares no compiled
   # artifacts with the host build and needs none of the system libraries above
   # (fontconfig and Vulkan are both gated to native targets). Catches

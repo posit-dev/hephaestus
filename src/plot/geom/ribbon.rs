@@ -45,7 +45,7 @@
 //!   the channel varies across the mark — see below). Default: none.
 //! - `"fill_opacity"` — overrides the alpha of `"fill"` (per-mark or
 //!   per-row, same dispatch rule as `"fill"`). Folded in via
-//!   [`override_alpha`](super::resolve::override_alpha).
+//!   `override_alpha`.
 //! - `"stroke"` — outline color for curve A (per-mark; first-row-of-mark).
 //!   Bound → curve A is stroked; unbound → no outline on curve A.
 //! - `"stroke2"` — outline color for curve B (per-mark). Independent of
@@ -72,7 +72,7 @@
 //!
 //! Uniform fill across a mark always renders as a single
 //! [`Brush::Solid`] fill. Variance is detected via
-//! [`channel_varies_across`](super::resolve::channel_varies_across) —
+//! `channel_varies_across` —
 //! the same dispatcher [`LineGeom`](super::LineGeom) uses for its
 //! ribbon-mesh outline upgrade.
 //!

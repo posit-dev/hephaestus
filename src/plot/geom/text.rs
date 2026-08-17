@@ -111,7 +111,7 @@ use crate::text::rich::{
     draw_rich_text, pt as rich_pt, HAnchor, RichAnchor, RichKey, RichShapeCache, RichTextRun,
     RichTextStyleSheet, RichTextWidth, StyleDelta as RichStyleDelta, VAnchor,
 };
-use crate::text::{draw_text, Alignment, TextRun, TextStyle};
+use crate::text::{draw_text, TextRun, TextStyle};
 
 use super::resolve::{
     band_width_at, override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or,
@@ -505,7 +505,7 @@ impl Geom for TextGeom {
                 let wrap_width_px = pt_to_px(width_pt, ctx.dpi) + width_band_frac * x_band_width_px;
                 let justify_x = resolve_justify_channel(justify_x_ch, justify_x_scale, i);
                 let wraps = wrap_width_px > 0.0 && wrap_width_px.is_finite();
-                let align = alignment_to_halign(justify_x);
+                let align = justify_x;
                 let width_spec = if wraps {
                     RichTextWidth::Fixed(wrap_width_px as f32)
                 } else {
@@ -891,37 +891,24 @@ fn resolve_str_channel(
     mapped.as_str().map(str::to_owned)
 }
 
-/// Map a parley `Alignment` onto the block-level [`HAlign`] the rich
-/// pipeline takes. `Justify` keeps its own variant so a rich block can
-/// stretch its lines.
-fn alignment_to_halign(a: Alignment) -> HAlign {
-    match a {
-        Alignment::Center => HAlign::Center,
-        Alignment::End => HAlign::End,
-        Alignment::Justify => HAlign::Justify,
-        _ => HAlign::Start,
-    }
-}
-
-/// Resolve a `"justify_x"` channel to a parley `Alignment`. Recognises
-/// the canonical string aliases — `"start"` / `"center"` / `"end"` /
-/// `"justify"`. Unknown / non-string / unset → `Alignment::Start`,
-/// matching the historical (pre-channel) behaviour.
+/// Resolve a `"justify_x"` channel to an [`HAlign`]. Recognises the
+/// canonical string aliases — `"start"` / `"center"` / `"end"` /
+/// `"justify"`. Unknown / non-string / unset → [`HAlign::Start`].
 fn resolve_justify_channel(
     channel: Option<&Channel>,
     scale: Option<&crate::plot::scale::Scale>,
     i: usize,
-) -> Alignment {
+) -> HAlign {
     let s = match resolve_str_channel(channel, scale, i) {
         Some(s) => s,
-        None => return Alignment::Start,
+        None => return HAlign::Start,
     };
     match s.as_str() {
-        "start" => Alignment::Start,
-        "center" | "centre" | "middle" => Alignment::Center,
-        "end" => Alignment::End,
-        "justify" | "justified" => Alignment::Justify,
-        _ => Alignment::Start,
+        "start" => HAlign::Start,
+        "center" | "centre" | "middle" => HAlign::Center,
+        "end" => HAlign::End,
+        "justify" | "justified" => HAlign::Justify,
+        _ => HAlign::Start,
     }
 }
 

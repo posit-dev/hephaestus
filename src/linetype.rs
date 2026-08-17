@@ -15,17 +15,20 @@
 //! `linewidth` pt of arc length, so they don't eat into the
 //! surrounding gaps.
 //!
-//! ```ignore
+//! ```
 //! use hephaestus::linetype::{self, dash, gap, marker, pattern};
 //!
-//! linetype::solid();    // []
-//! linetype::dashed();   // [Dash(8), Gap(4)]
-//! linetype::dotted();   // [Dash(2), Gap(3)]
-//! linetype::dashdot();  // [Dash(8), Gap(3), Dash(2), Gap(3)]
+//! assert!(linetype::solid().is_empty());
+//! let dashed = linetype::dashed();   // [Dash(8), Gap(4)]
+//! let dotted = linetype::dotted();   // [Dash(2), Gap(3)]
+//! let dashdot = linetype::dashdot(); // [Dash(8), Gap(3), Dash(2), Gap(3)]
+//! assert_eq!(dashed.len(), 2);
+//! assert_eq!(dashdot.len(), 4);
 //!
 //! // Mixed marker + dash pattern: 5pt dash, 3pt gap, circle marker,
 //! // 5pt gap, repeat.
-//! pattern([dash(5.0), gap(3.0), marker("circle"), gap(5.0)]);
+//! let mixed = pattern([dash(5.0), gap(3.0), marker("circle"), gap(5.0)]);
+//! assert!(!linetype::is_marker_free(&mixed));
 //! ```
 //!
 //! `draw_linetype_with_markers` is the renderer for marker-bearing

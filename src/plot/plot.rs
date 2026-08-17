@@ -1,7 +1,7 @@
 //! `Plot` — a per-patch unit of plotting state.
 //!
 //! A `Plot` is bound to a named patch in a user-supplied
-//! [`Composition`](crate::composition::Composition) and stores:
+//! [`Composition`] and stores:
 //!
 //! - Channel → scale-name bindings (the orchestrator's scale registry
 //!   carries the actual scales).
@@ -1308,9 +1308,10 @@ impl Plot {
         use crate::plot::chrome::polar::{
             BleedAxis, BleedLabel, BleedLabelKind, BleedTitle, BleedTitleKind, PolarBleedMeasure,
         };
+        use crate::plot::theme::HAlign;
         use crate::scales::breaks::DEFAULT_BREAK_COUNT;
         use crate::scales::value::Value;
-        use crate::text::{Alignment, TextRun};
+        use crate::text::TextRun;
 
         // Polar projection's angle/sweep — needed to convert a
         // scale's break (as a `theta_frac`) into the math angle the
@@ -1383,7 +1384,7 @@ impl Plot {
                         }
                         let text = scale.format(&v, &theme.locale);
                         let run = TextRun::new(&text, label_style, dpi);
-                        let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+                        let h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
                         let w = run.natural_width();
                         max_label_w = max_label_w.max(w);
                         max_label_h = max_label_h.max(h);
@@ -1412,7 +1413,7 @@ impl Plot {
                         let theta = polar.theta_for_frac(frac);
                         let text = scale.format(&v, &theme.locale);
                         let run = TextRun::new(&text, label_style, dpi);
-                        let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+                        let h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
                         let w = run.natural_width();
                         max_label_w = max_label_w.max(w);
                         max_label_h = max_label_h.max(h);

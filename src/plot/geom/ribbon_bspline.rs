@@ -107,7 +107,7 @@
 //!   closed-contour path (fast path).
 //! - Varying `"fill"` (or `"fill_opacity"`) → per-vertex quad-strip mesh via
 //!   [`ribbon_band_mesh`](crate::primitives::ribbon_band_mesh). Unlike
-//!   [`RibbonGeom`], B-spline ribbons always use the mesh for varying
+//!   [`RibbonGeom`](super::RibbonGeom), B-spline ribbons always use the mesh for varying
 //!   fill — the gradient-brush fast path needs row-aligned stops, which
 //!   doesn't map cleanly onto interpolated spline samples.
 //!

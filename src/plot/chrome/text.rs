@@ -342,7 +342,7 @@ pub(crate) fn rotated_wrap_width(w: f64, h: f64, angle_rad: f64) -> f64 {
 /// Render `text` styled by `el` inside `rect`, honoring every
 /// layout-affecting field on the [`TextElement`]: `margin` insets the
 /// rect before wrapping, `align` controls justification along the
-/// text's advance direction (parley `Alignment`), `valign` positions
+/// text's advance direction, `valign` positions
 /// the wrapped block across its stacked lines (Top / Middle / Bottom;
 /// `Baseline` treated as Top), `angle` rotates the rendered block
 /// around the inset's centre (only `Rotation::Degrees(_)` resolves
@@ -377,7 +377,7 @@ pub(crate) fn draw_text_element_in_rect(
     use crate::geometry::{Affine, Vec2};
     use crate::plot::theme::{text_concrete_defaults, HAlign, Rotation, VAlign};
     use crate::text::rich::{draw_rich_text, HAnchor, RichAnchor, RichTextRun, VAnchor};
-    use crate::text::{draw_text, Alignment, TextRun};
+    use crate::text::{draw_text, TextRun};
 
     let defaults = text_concrete_defaults();
     // Inset by margin (pt → px).
@@ -497,13 +497,7 @@ pub(crate) fn draw_text_element_in_rect(
     }
 
     let run = TextRun::new(text, &style, dpi);
-    let align = el.align.or(defaults.align).expect("align default");
-    let alignment = match align {
-        HAlign::Start => Alignment::Start,
-        HAlign::Center => Alignment::Center,
-        HAlign::End => Alignment::End,
-        HAlign::Justify => Alignment::Justify,
-    };
+    let alignment = el.align.or(defaults.align).expect("align default");
     let angle = el.angle.or(defaults.angle).expect("angle default");
     let angle_rad = match angle {
         Rotation::Degrees(d) => (d as f64).to_radians(),
@@ -582,7 +576,8 @@ pub(crate) fn draw_axis_title(
     angle: crate::plot::theme::Rotation,
 ) {
     use crate::geometry::{Affine, Vec2};
-    use crate::text::{draw_text, Alignment};
+    use crate::plot::theme::HAlign;
+    use crate::text::draw_text;
     let cx = (rect.x0 + rect.x1) * 0.5;
     let cy = (rect.y0 + rect.y1) * 0.5;
     let pid = crate::pick::PickId::Skip;
@@ -595,13 +590,13 @@ pub(crate) fn draw_axis_title(
     let theta = (resolved_deg as f64).to_radians();
     if theta.abs() < 1e-9 {
         let w = (rect.x1 - rect.x0) as f32;
-        run.set_max_width(w, Alignment::Center);
+        run.set_max_width(w, HAlign::Center);
         draw_text_outline_pass(scene, outline, run, rect.x0, rect.y0, Affine::IDENTITY);
         draw_text(scene, run, rect.x0, rect.y0, brush, Affine::IDENTITY, pid);
     } else {
         // Lay out unconstrained so the run stays single-line; the
         // surrounding slot drives how much the rotated text can grow.
-        let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+        let h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
         let w = run.content_width();
         let transform = Affine::translate(Vec2::new(cx, cy))
             * Affine::rotate(theta)

@@ -6,7 +6,7 @@
 //! Temporal data flows through `Continuous { min, max }` after projection
 //! to f64 (Date → days, DateTime/Duration → microseconds, Time →
 //! nanoseconds — see the
-//! [`Value`](crate::scales::value::Value) docs). The `Scale` exposes
+//! [`Value`] docs). The `Scale` exposes
 //! ergonomic constructors that build the f64 domain from
 //! [`Date`](crate::scales::value::Date) /
 //! [`DateTime`](crate::scales::value::DateTime) inputs so user code stays

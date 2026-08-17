@@ -37,23 +37,29 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use parley::{AlignmentOptions, FontContext, LayoutContext, PositionedLayoutItem};
 
-/// Line justification within the text box. Re-exported from parley so
-/// downstream geoms can construct one without depending on parley directly.
-///
-/// Geom-facing string aliases (used by the `justify_x` channel parser):
-/// `"start"` → [`Alignment::Start`], `"center"` → [`Alignment::Center`],
-/// `"end"` → [`Alignment::End`], `"justify"` → [`Alignment::Justify`].
-pub use parley::Alignment;
-
 use crate::brush::Brush;
 use crate::geometry::{Affine, Point, Rect};
 use crate::layout::{Measure, WidthHint};
 use crate::pick::PickId;
 use crate::scene::{Font, Glyph, GlyphRun, SceneBuilder};
 use crate::shape::Shape;
+use crate::style_vocab::HAlign;
 
 /// Placeholder brush type for parley — real brushes are passed at draw time.
 type B = ();
+
+/// Map the crate's direction-aware [`HAlign`] onto parley's matching
+/// logical alignment variants. Parley's physical `Left` / `Right` are
+/// unreachable from here by design — resolving them against text
+/// direction is the shaper's job.
+fn halign_to_parley(align: HAlign) -> parley::Alignment {
+    match align {
+        HAlign::Start => parley::Alignment::Start,
+        HAlign::Center => parley::Alignment::Center,
+        HAlign::End => parley::Alignment::End,
+        HAlign::Justify => parley::Alignment::Justify,
+    }
+}
 
 /// Lazy, process-global [`FontContext`]. Constructed on first use; locked
 /// for shaping. A single mutex suffices because shaping is cheap and rare
@@ -421,7 +427,7 @@ impl TextRun {
             // `calculate_content_widths` returns meaningful numbers and `lines()`
             // works for callers that draw without solving a composition first.
             layout.break_all_lines(None);
-            layout.align(Alignment::Start, AlignmentOptions::default());
+            layout.align(parley::Alignment::Start, AlignmentOptions::default());
             let widths = layout.calculate_content_widths();
             // The unconstrained natural height — typically the single-line
             // height for one paragraph of text.
@@ -443,14 +449,14 @@ impl TextRun {
     /// but exposed for callers that want to draw without first running
     /// through a composition solve.
     ///
-    /// `alignment` controls justification within the wrap box: `Start`
-    /// is the historical default (every line flush-left within the wrap
-    /// width). `Middle` / `End` / `Justified` apply matching parley
-    /// alignments.
-    pub fn set_max_width(&self, max_width: f32, alignment: Alignment) -> f32 {
+    /// `alignment` controls justification within the wrap box:
+    /// [`HAlign::Start`] leaves every line flush against the leading
+    /// edge; `Center` / `End` / `Justify` apply the matching
+    /// direction-aware alignment.
+    pub fn set_max_width(&self, max_width: f32, alignment: HAlign) -> f32 {
         let mut layout = self.layout.borrow_mut();
         layout.break_all_lines(Some(max_width));
-        layout.align(alignment, AlignmentOptions::default());
+        layout.align(halign_to_parley(alignment), AlignmentOptions::default());
         *self.last_break_width.borrow_mut() = Some(max_width);
         layout.height()
     }
@@ -613,7 +619,7 @@ impl Measure for TextRun {
         // first or below the last, so a chrome slot sized off this
         // measure hugs the visible glyphs instead of inheriting the
         // empty half-leading the line-box reserves.
-        let _ = self.set_max_width(width as f32, Alignment::Start);
+        let _ = self.set_max_width(width as f32, HAlign::Start);
         self.inked_height()
     }
 }
@@ -1011,7 +1017,7 @@ pub fn draw_text_in_rect<S: SceneBuilder + ?Sized>(
     brush: &Brush,
     pick_id: PickId,
 ) {
-    run.set_max_width((rect.x1 - rect.x0) as f32, Alignment::Start);
+    run.set_max_width((rect.x1 - rect.x0) as f32, HAlign::Start);
     draw_text(
         scene,
         run,

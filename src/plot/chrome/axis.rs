@@ -18,11 +18,11 @@ use crate::geometry::{Point, Rect};
 use crate::layout::{Measure, WidthHint};
 use crate::plot::chrome::linear_axis::{draw_linear_axis_at, AxisChromeStyle};
 use crate::plot::scale::Scale;
-use crate::plot::theme::Theme;
+use crate::plot::theme::{HAlign, Theme};
 use crate::scales::breaks::DEFAULT_BREAK_COUNT;
 use crate::scales::value::Value;
 use crate::scene::SceneBuilder;
-use crate::text::{Alignment, TextRun};
+use crate::text::TextRun;
 
 use crate::scales::chrome::AxisSide;
 
@@ -175,7 +175,7 @@ impl AxisMeasure {
             let label = scale.format(v, locale);
             let run = TextRun::new(&label, &chrome_style.text_style, dpi);
             // Lay out unconstrained to get the natural single-line width.
-            let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+            let h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
             // Tick labels render unwrapped — `natural_width` is the
             // actual draw width. `width_hint` returns the longest-
             // unbreakable-cluster bound (one word), which undershoots

@@ -1,7 +1,7 @@
 //! `TextFitGeom` — vectorised text labels that **scale font size** to
 //! fit inside a target rect.
 //!
-//! Sibling of [`TextGeom`]. The user supplies a target rect via
+//! Sibling of [`TextGeom`](super::TextGeom). The user supplies a target rect via
 //! `(x, y) – (x2, y2)` corners (same convention as `RectGeom`) plus a
 //! string; the geom runs a small binary search on font size between
 //! `min_font_size` and `max_font_size` to find the largest size at
@@ -51,11 +51,12 @@
 use crate::brush::Brush;
 use crate::geometry::{Affine, Point, Rect};
 use crate::path::FillRule;
+use crate::plot::theme::HAlign;
 use crate::plot::value::Value;
 use crate::primitives::{rect as rect_path, rounded_rect};
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
-use crate::text::{draw_text, Alignment, TextRun, TextStyle};
+use crate::text::{draw_text, TextRun, TextStyle};
 
 use super::resolve::{
     override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or,
@@ -653,17 +654,17 @@ fn resolve_justify_x(
     channel: Option<&Channel>,
     scale: Option<&crate::plot::scale::Scale>,
     i: usize,
-) -> Alignment {
+) -> HAlign {
     let s = match resolve_str_channel(channel, scale, i) {
         Some(s) => s,
-        None => return Alignment::Start,
+        None => return HAlign::Start,
     };
     match s.as_str() {
-        "start" => Alignment::Start,
-        "center" | "centre" | "middle" => Alignment::Center,
-        "end" => Alignment::End,
-        "justify" | "justified" => Alignment::Justify,
-        _ => Alignment::Start,
+        "start" => HAlign::Start,
+        "center" | "centre" | "middle" => HAlign::Center,
+        "end" => HAlign::End,
+        "justify" | "justified" => HAlign::Justify,
+        _ => HAlign::Start,
     }
 }
 
@@ -970,13 +971,13 @@ mod tests {
             let ch = Channel::Constant(Value::from(s));
             resolve_justify_x(Some(&ch), None, 0)
         };
-        assert!(matches!(align("start"), Alignment::Start));
-        assert!(matches!(align("center"), Alignment::Center));
-        assert!(matches!(align("middle"), Alignment::Center));
-        assert!(matches!(align("end"), Alignment::End));
-        assert!(matches!(align("justify"), Alignment::Justify));
-        assert!(matches!(align("justified"), Alignment::Justify));
-        assert!(matches!(align("sideways"), Alignment::Start));
-        assert!(matches!(resolve_justify_x(None, None, 0), Alignment::Start));
+        assert!(matches!(align("start"), HAlign::Start));
+        assert!(matches!(align("center"), HAlign::Center));
+        assert!(matches!(align("middle"), HAlign::Center));
+        assert!(matches!(align("end"), HAlign::End));
+        assert!(matches!(align("justify"), HAlign::Justify));
+        assert!(matches!(align("justified"), HAlign::Justify));
+        assert!(matches!(align("sideways"), HAlign::Start));
+        assert!(matches!(resolve_justify_x(None, None, 0), HAlign::Start));
     }
 }

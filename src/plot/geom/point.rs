@@ -61,8 +61,9 @@
 //!   rotated themselves.
 //!
 //! Channels are stored in a `HashMap<String, Channel>` keyed by channel
-//! name. There is a single binding method, [`PointGeomBuilder::set`] on
-//! the builder + [`PointGeom::set`] at runtime; the data-vs-constant
+//! name. There is a single binding method,
+//! [`GeomBuilder::set`](super::GeomBuilder::set) on the builder +
+//! [`PointGeom::set`] at runtime; the data-vs-constant
 //! distinction is inferred from the value's type via `Into<Channel>`. The
 //! same call site works for first-binding and update.
 //!

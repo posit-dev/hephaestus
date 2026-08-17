@@ -13,11 +13,12 @@
 use crate::layout::{Measure, WidthHint};
 use crate::plot::chrome::linear_axis::pt_to_px;
 use crate::plot::scale::ScaleRegistry;
+use crate::plot::theme::HAlign;
 use crate::scales::breaks::DEFAULT_BREAK_COUNT;
 use crate::scales::chrome::LegendSide;
 use crate::scales::value::Value;
 use crate::shape::ShapeRegistry;
-use crate::text::{Alignment, TextRun};
+use crate::text::TextRun;
 
 use super::colorbar::{bin_edges, bin_midpoints};
 use super::layout::{
@@ -142,7 +143,7 @@ impl LegendMeasure {
             };
             let label = domain.map(|s| s.format(v, locale)).unwrap_or_default();
             let run = TextRun::new(&label, label_style, dpi);
-            let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+            let h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
             // Labels render unwrapped, so the slot needs the full
             // single-line width — `width_hint` returns the
             // longest-unbreakable-cluster bound (one word), which
@@ -221,7 +222,7 @@ impl LegendMeasure {
                             let label_text =
                                 domain.map(|s| s.format(v, locale)).unwrap_or_default();
                             let run = TextRun::new(&label_text, style, dpi);
-                            let nat_h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+                            let nat_h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
                             let nat_w = run.natural_width();
                             LabelMeasure {
                                 natural_w_px: nat_w,
@@ -256,7 +257,7 @@ impl LegendMeasure {
         let (title_w_px, title_h_px) = match (&legend.title, title_style.as_ref()) {
             (Some(text), Some(style)) if !text.is_empty() => {
                 let run = TextRun::new(text, style, dpi);
-                let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+                let h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
                 // Titles render unwrapped — `natural_width` is the
                 // actual draw width; `width_hint` would undershoot
                 // for multi-word titles like "Category (hero)".

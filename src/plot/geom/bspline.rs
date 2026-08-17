@@ -56,7 +56,7 @@
 //!   extending past it.
 //! - `"start_marker"` / `"end_marker"` — registered shape name stamped
 //!   at the post-clip endpoint (per-mark). Outward direction follows
-//!   [`endpoint_outward`](super::resolve::endpoint_outward): when the
+//!   `endpoint_outward`: when the
 //!   endpoint was clipped, the chord from the clipped endpoint toward
 //!   the *original* endpoint (the direction the curve would have
 //!   continued in); otherwise the terminal edge of the flattened

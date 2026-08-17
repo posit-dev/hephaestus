@@ -25,7 +25,7 @@
 //! - `"linewidth"` — stroke width in pt (per-mark; default 1.0 pt).
 //!   Also dictates the marker size (markers are sized to one
 //!   `linewidth` of arc length, rotated to the local tangent).
-//! - `"linetype"` — [`LinetypeStep`] pattern (per-mark; default
+//! - `"linetype"` — [`LinetypeStep`](crate::LinetypeStep) pattern (per-mark; default
 //!   solid). Even-length, alternating Dash | Marker and Gap. A pure
 //!   dashed pattern (no Marker entries) renders via the kurbo stroke
 //!   fast path; patterns containing Marker entries walk the polyline

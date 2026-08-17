@@ -18,7 +18,7 @@ use crate::plot::chrome::linear_axis::{
 };
 use crate::plot::projection::PolarProjection;
 use crate::plot::scale::Scale;
-use crate::plot::theme::Theme;
+use crate::plot::theme::{HAlign, Theme};
 use crate::primitives::{segment, PolylineSampler};
 use crate::scales::breaks::DEFAULT_BREAK_COUNT;
 use crate::scales::chrome::AxisSide;
@@ -26,7 +26,7 @@ use crate::scales::value::Value;
 use crate::scene::SceneBuilder;
 use crate::scene::{Glyph, GlyphRun};
 use crate::text::run_layout_glyphs;
-use crate::text::{Alignment, TextRun, TextStyle};
+use crate::text::{TextRun, TextStyle};
 
 /// Draw a radius axis along the spoke at `theta_frac` ∈ [0, 1].
 /// Baseline + minor ticks + major ticks + labels via the shared
@@ -104,7 +104,7 @@ pub fn draw_radius_axis(
                     .iter()
                     .fold((0.0_f64, 0.0_f64), |(mw, mh), (_, label)| {
                         let run = TextRun::new(label, &label_style, dpi);
-                        let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+                        let h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
                         let w = run.natural_width();
                         (mw.max(w), mh.max(h))
                     });
@@ -280,7 +280,7 @@ pub fn draw_angular_axis(
                 .fold((0.0_f64, 0.0_f64), |(mw, mh), v| {
                     let label = scale.format(v, &theme.locale);
                     let run = TextRun::new(&label, &style, dpi);
-                    let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+                    let h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
                     let w = run.natural_width();
                     (mw.max(w), mh.max(h))
                 });
@@ -447,7 +447,7 @@ pub(crate) fn compute_polar_bleed(axes: &[BleedAxis], dpi: f64, theme: &Theme) -
         for label in &axis.labels {
             let label_style = title_style_for(&label.kind);
             let run = TextRun::new(&label.text, &label_style.text_style, dpi);
-            let h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+            let h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
             // Polar tick labels draw on one line — the bleed has to
             // reserve their full width, not the longest-unbreakable-
             // cluster bound `width_hint` reports.
@@ -508,7 +508,7 @@ pub(crate) fn compute_polar_bleed(axes: &[BleedAxis], dpi: f64, theme: &Theme) -
                         continue;
                     };
                     let run = TextRun::new(&title.text, &title_text_style, dpi);
-                    let title_h = run.set_max_width(f32::INFINITY, Alignment::Start) as f64;
+                    let title_h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
                     let title_w = run.natural_width();
                     // Radial extent past r_outer at the arc midpoint.
                     // Mirrors `draw_angular_title`'s placement formula.
@@ -688,7 +688,7 @@ fn draw_radius_title(
     let style = crate::plot::chrome::text::text_style_from(title_el, root_pt);
     let run = crate::text::TextRun::new(title, &style, dpi);
     let title_w = run.natural_width();
-    let title_h = run.set_max_width(f32::INFINITY, crate::text::Alignment::Start) as f64;
+    let title_h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
     let glyphs = run_layout_glyphs(&run);
     if glyphs.is_empty() {
         return;
@@ -814,7 +814,7 @@ fn draw_angular_title(
     let style = crate::plot::chrome::text::text_style_from(title_el, root_pt);
     let run = crate::text::TextRun::new(title, &style, dpi);
     let text_w = run.natural_width();
-    let _title_h = run.set_max_width(f32::INFINITY, crate::text::Alignment::Start) as f64;
+    let _title_h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
     let glyphs = run_layout_glyphs(&run);
     if glyphs.is_empty() || text_w <= 0.0 {
         return;

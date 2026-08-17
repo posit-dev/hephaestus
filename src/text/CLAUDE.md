@@ -10,7 +10,7 @@ Provides the text infrastructure that chrome (axis labels, legends, plot titles)
 - **`TextRun`** — shaped string + cached parley `Layout`. Implements `crate::layout::Measure`, so it drops directly into a `Cell::measured(run)` and participates in Auto-track sizing in `layout/`. Constructed via `TextRun::new(text, &style, dpi)` — the DPI converts the style's `size_pt` to pixels before shaping. `set_max_width(px)` re-breaks lines cheaply (parley keeps the shaping result; only line breaking re-runs).
 - **`draw_text`** — bridge from a positioned `TextRun` to `SceneBuilder::draw_glyphs`.
 
-Plus `Alignment` (re-exported from parley) for line justification — geom-facing string aliases (`"start"`, `"center"`, `"end"`, `"justify"`) parse through the `justify_x` channel.
+Line justification is expressed with `crate::style_vocab::HAlign` — the same four-variant vocabulary the theme and the rich path use. Geom-facing string aliases (`"start"`, `"center"`, `"end"`, `"justify"`) parse through the `justify_x` channel. Parley's own `Alignment` stays inside the module: `halign_to_parley` maps to its logical variants for the plain path, and `hal_to_alignment` resolves the physical `Left` / `Right` against text direction for the rich path. No parley type appears in a public signature, so parley's version is an implementation detail.
 
 ## Submodules
 

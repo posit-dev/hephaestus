@@ -1,5 +1,5 @@
 //! Geoms — the vectorised drawing primitives that consume per-channel
-//! data + a [`Scale`](crate::plot::scale::Scale) registry and emit scene
+//! data + a [`Scale`] registry and emit scene
 //! calls.
 //!
 //! The trait surface lives here; concrete geoms (e.g. [`point::PointGeom`])
@@ -386,7 +386,9 @@ pub struct GeomContext<'a> {
     pub shapes: &'a ShapeRegistry,
     pub scales: &'a dyn ScaleResolver,
     /// Coordinate projection. Geoms route their final fraction→pixel
-    /// conversion through [`Projection::project_to_panel_px`] so
+    /// conversion through
+    /// [`Projection::project_to_panel_px`](crate::plot::projection::Projection::project_to_panel_px)
+    /// so
     /// non-Cartesian variants (polar, future ternary) drop in without
     /// touching geom code. Defaults to `Projection::Cartesian` for
     /// callers that construct a context via [`Self::new`].
@@ -553,17 +555,22 @@ pub(crate) fn empty_datacolumn_like(col: &DataColumn) -> DataColumn {
 /// Methods take `&mut self` and return `&mut Self` so they're equally
 /// fluent in two contexts:
 ///
-/// ```ignore
+/// ```
+/// use hephaestus::plot::PointGeom;
+///
+/// let xs = vec![0.0, 1.0, 2.0];
+/// let ys = vec![3.0, 4.0, 5.0];
+///
 /// // Initial construction (auto-ref the rvalue):
-/// let g = PointGeom::builder()
+/// let mut g = PointGeom::builder()
 ///     .set("x", xs)
 ///     .set("y", ys)
 ///     .build();
 ///
 /// // Inside an `update` closure (the builder is already borrowed):
 /// g.update(|b| {
-///     b.set("x", new_xs);
-///     b.set("y", new_ys);
+///     b.set("x", vec![10.0, 11.0, 12.0]);
+///     b.set("y", vec![13.0, 14.0, 15.0]);
 /// });
 /// ```
 pub struct GeomBuilder<G: BuildableGeom> {

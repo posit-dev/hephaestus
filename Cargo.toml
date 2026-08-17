@@ -1,12 +1,23 @@
 [package]
 name = "hephaestus"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
 description = "Backend-agnostic 2D scene renderer for data visualization."
 license = "MIT"
-repository = "https://github.com/thomasp85/hephaestus"
-publish = false
+repository = "https://github.com/posit-dev/hephaestus"
+readme = "README.md"
+keywords = ["visualization", "plotting", "graphics", "renderer", "vello"]
+categories = ["graphics", "visualization", "rendering::engine"]
+# Agent-orientation docs and CI config: useful in the repo, noise in the
+# published tarball. `PLAN.md` is gitignored and would never ship anyway.
+exclude = ["CLAUDE.md", "src/**/CLAUDE.md", ".github/", "PLAN.md"]
+
+# docs.rs builds default features only unless told otherwise, which would
+# hide the `google-fonts`, `geom-*` and datetime-interop items entirely.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["vello", "png"]
@@ -46,7 +57,7 @@ thiserror = "2"
 # only compiles the one GPU backend it actually uses. The shared baseline is
 # `wgsl` (vello's shaders) + `std`; per-platform backends are added in the
 # `[target.*]` tables below.
-vello = { version = "0.9", optional = true, default-features = false, features = ["wgpu"] }
+vello = { version = "0.10", optional = true, default-features = false, features = ["wgpu"] }
 wgpu = { version = "29", optional = true, default-features = false, features = ["wgsl", "std"] }
 pollster = { version = "0.4", optional = true }
 futures-intrusive = { version = "0.5", optional = true }
@@ -56,7 +67,7 @@ parley = "0.9"
 # CommonMark parser for rich text. `default-features = false` drops the
 # optional HTML-rendering helpers we don't use.
 pulldown-cmark = { version = "0.13", default-features = false }
-clipper2-rust = "1.0.3"
+clipper2-rust = "1.1"
 
 # Google Fonts auto-lookup — feature-gated; pulled in by `google-fonts`.
 ureq = { version = "2", optional = true, default-features = false, features = ["tls"] }

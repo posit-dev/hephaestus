@@ -41,7 +41,8 @@
 //! fallback path**: walks the four channel-space corners
 //! `(x, y)` / `(x2, y)` / `(x2, y2)` / `(x, y2)` in CCW order,
 //! projects each, and densifies each edge via
-//! [`Projection::interpolate_segment`] so the polygon outline follows
+//! [`Projection::interpolate_segment`](crate::plot::projection::Projection::interpolate_segment)
+//! so the polygon outline follows
 //! the projected geodesic. Under polar this turns a "rect" into the
 //! correct annular wedge or sector.
 //!

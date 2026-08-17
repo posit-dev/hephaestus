@@ -207,8 +207,7 @@ pub enum LegendBody {
     /// Continuous gradient colorbar: a bar sampled along the
     /// domain scale's colour output range, with axis-style tick
     /// labels alongside it (drawn via the shared
-    /// [`draw_linear_axis_at`](crate::plot::chrome::linear_axis)
-    /// helper).
+    /// `draw_linear_axis_at` helper).
     Colorbar(ColorbarSpec),
 }
 
@@ -222,8 +221,8 @@ pub struct StackBody {
     /// boundaries** (N+1 breaks → N swatches). Each swatch is
     /// rendered at the midpoint of its bin; an axis-style tick
     /// rail labels the boundaries between rows, drawn through the
-    /// shared [`draw_linear_axis_at`](crate::plot::chrome::linear_axis)
-    /// helper for visual consistency with cartesian / polar axes.
+    /// shared `draw_linear_axis_at` helper for visual consistency
+    /// with cartesian / polar axes.
     pub binned: bool,
 }
 

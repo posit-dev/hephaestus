@@ -19,11 +19,22 @@
 //! point, or a filled terminator that should sit on a line endpoint and occlude
 //! the line cap. The anchor is **ignored**:
 //!
-//! ```ignore
+//! ```
+//! use hephaestus::scene::recording::RecordingScene;
+//! use hephaestus::shape::{ShapeKind, ShapeRegistry};
+//! use hephaestus::{Affine, Brush, FillRule, PickId, Point, SceneBuilder};
+//! use hephaestus::color::rgb8;
+//!
+//! let registry = ShapeRegistry::with_builtins();
+//! let shape = registry.get("circle").expect("builtin circle");
+//! let mut sb = RecordingScene::new();
+//! let (center, size) = (Point::new(50.0, 50.0), 8.0);
+//! let brush: Brush = rgb8(200, 60, 60).into();
+//!
 //! let xform = Affine::translate(center.to_vec2()) * Affine::scale(size);
 //! match shape.kind() {
 //!     ShapeKind::Paths { paths, .. } => for sub in paths {
-//!         sb.fill(rule, xform, &brush, None, sub, pick);
+//!         sb.fill(FillRule::NonZero, xform, &brush, None, sub, PickId::Skip);
 //!     },
 //!     ShapeKind::Glyph { .. } => { /* emit a GlyphRun — see PointGeom */ }
 //! }
@@ -33,13 +44,19 @@
 //! used as a stroke-only outline terminator where the line shouldn't pass
 //! through the interior. The anchor lands on the placement point:
 //!
-//! ```ignore
-//! let angle        = direction.angle();
+//! ```
+//! use hephaestus::shape::ShapeRegistry;
+//! use hephaestus::{Affine, Point, Vec2};
+//!
+//! let registry = ShapeRegistry::with_builtins();
+//! let shape = registry.get("circle").expect("builtin circle");
+//! let (placement, direction, size) = (Point::new(50.0, 50.0), Vec2::new(1.0, 0.0), 8.0);
+//!
+//! let angle        = direction.atan2();
 //! let rot          = Affine::rotate(angle);
-//! let anchor_world = rot * (shape.anchor().to_vec2() * size);
-//! let origin       = placement - anchor_world;
+//! let anchor_world = rot * (shape.anchor().to_vec2() * size).to_point();
+//! let origin       = placement - anchor_world.to_vec2();
 //! let xform        = Affine::translate(origin.to_vec2()) * rot * Affine::scale(size);
-//! match shape.kind() { /* same dispatch as (A) */ }
 //! ```
 //!
 //! Built-in anchors are chosen for mode (B): point shapes get a back-edge

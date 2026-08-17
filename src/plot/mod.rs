@@ -4,7 +4,7 @@
 //! projections drop in additively.
 //!
 //! The canonical user-facing surface is
-//! [`PlotComposition`](composition::PlotComposition). It owns a
+//! [`PlotComposition`]. It owns a
 //! [`Composition`](crate::composition::Composition) template, a named
 //! [`ScaleRegistry`], and a `HashMap<String, Plot>` of attached plots;
 //! `view.render(scene, size, dpi)` is the single entry point for

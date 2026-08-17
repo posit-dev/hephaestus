@@ -21,10 +21,10 @@ use crate::geometry::{Affine, Point};
 use crate::path::Path;
 use crate::pick::PickId;
 use crate::plot::geom::resolve::build_stroke_for_pattern;
-use crate::plot::theme::{LineElement, Palette, RectElement, ResolvedAxis};
+use crate::plot::theme::{HAlign, LineElement, Palette, RectElement, ResolvedAxis};
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
-use crate::text::{draw_text, Alignment, TextRun, TextStyle};
+use crate::text::{draw_text, TextRun, TextStyle};
 
 /// Build a kurbo [`Stroke`] from a themed [`LineElement`] at `dpi`,
 /// honoring linewidth, linetype (dash pattern), cap, and join.
@@ -342,7 +342,7 @@ pub(crate) fn draw_axis_label(
     dpi: f64,
 ) {
     let run = TextRun::new(text, style, dpi);
-    let _ = run.set_max_width(f32::INFINITY, Alignment::Start);
+    let _ = run.set_max_width(f32::INFINITY, HAlign::Start);
     // Tick labels draw on one line, so the anchoring width is the
     // laid-out width. `width_hint` reports the longest unbreakable
     // cluster instead — a wrap lower bound that undershoots any
@@ -431,7 +431,7 @@ mod tests {
     /// pass puts on screen.
     fn drawn_width(text: &str) -> f64 {
         let run = TextRun::new(text, &style(), DPI);
-        let _ = run.set_max_width(f32::INFINITY, Alignment::Start);
+        let _ = run.set_max_width(f32::INFINITY, HAlign::Start);
         run.content_width()
     }
 

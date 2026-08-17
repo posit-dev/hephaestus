@@ -124,7 +124,7 @@ pub struct MaxMergeMeasure {
 impl MaxMergeMeasure {
     /// Build a wrapper around a non-empty stack of measures. Passing
     /// an empty `Vec` is allowed; the wrapper then behaves like
-    /// [`EmptyMeasure`] (zero on every query).
+    /// an empty measure (zero on every query).
     pub fn new(children: Vec<Box<dyn Measure>>) -> Self {
         Self { children }
     }

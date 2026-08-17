@@ -18,9 +18,14 @@ use super::{Scale, ScaleTypeKind, TemporalUnit};
 /// `f64`, `f32`, `i32`, `i64`, and the temporal newtypes (`Date`,
 /// `DateTime`, `Time`, `Duration`).
 ///
-/// ```ignore
-/// scale::continuous(0.0 ..= 100.0)
-/// scale::continuous(Date::from_ymd(2024,1,1) ..= Date::from_ymd(2024,12,31))
+/// ```
+/// use hephaestus::plot::scale;
+/// use hephaestus::scales::value::Date;
+///
+/// let numeric = scale::continuous(0.0 ..= 100.0);
+/// let dates = scale::continuous(
+///     Date::from_ymd(2024, 1, 1) ..= Date::from_ymd(2024, 12, 31),
+/// );
 /// ```
 pub fn continuous<T>(domain: RangeInclusive<T>) -> Scale
 where
@@ -70,10 +75,17 @@ pub fn identity() -> Scale {
 /// behaviour (numeric breaks); `scale::temporal(...)` is the opt-in for
 /// calendar awareness.
 ///
-/// ```ignore
-/// scale::temporal(Date::from_ymd(2024, 1, 1) ..= Date::from_ymd(2024, 12, 31))
-/// scale::temporal(DateTime::from_ymd_hms_micros(2024, 1, 1, 0, 0, 0, 0)
-///     ..= DateTime::from_ymd_hms_micros(2025, 1, 1, 0, 0, 0, 0))
+/// ```
+/// use hephaestus::plot::scale;
+/// use hephaestus::scales::value::{Date, DateTime};
+///
+/// let by_date = scale::temporal(
+///     Date::from_ymd(2024, 1, 1) ..= Date::from_ymd(2024, 12, 31),
+/// );
+/// let by_instant = scale::temporal(
+///     DateTime::from_ymd_hms_micros(2024, 1, 1, 0, 0, 0, 0)
+///         ..= DateTime::from_ymd_hms_micros(2025, 1, 1, 0, 0, 0, 0),
+/// );
 /// ```
 ///
 /// Panics if `domain.start()` is not a temporal value.
