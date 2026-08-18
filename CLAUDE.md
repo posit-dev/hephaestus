@@ -28,6 +28,7 @@ cargo fmt                                                # rustfmt; always run b
 cargo run --example hello                                # renders examples/hello.png — visual sanity check
 cargo run --example image_formats --features jpeg,tiff,webp  # all four raster writers
 cargo run --example window --features window             # live window: resize + hover picking
+cargo run --release --example window --features window -- 100000  # same scene at N points
 ```
 
 **Always run `cargo fmt` after completing a coding task.** It's the last step before reporting work done, even when the diff looks cosmetically fine — rustfmt catches subtle layout drift (over-long lines, brace style, import ordering) that otherwise piles up across changes.

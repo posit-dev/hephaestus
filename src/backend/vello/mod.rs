@@ -29,6 +29,19 @@ use mesh::{
 /// remain hittable even when the visual stroke is sub-pixel.
 const MIN_PICK_STROKE_WIDTH: f64 = 2.0;
 
+/// Largest number of draw-info words vello can rasterise in one pass.
+///
+/// Vello sizes its `bin_data` GPU buffer to a fixed `1 << 18` words and stores
+/// the scene's draw-info stream at its front. A scene whose stream is longer
+/// cannot be configured at all — the size arithmetic underflows before any GPU
+/// work is dispatched. [`VelloScene::draw_info_words`] measures a scene against
+/// this budget; the render entry points reject an over-budget scene with
+/// [`BackendError::SceneTooLarge`].
+///
+/// A solid-brush fill or stroke costs one word, so this caps a scene at ~262k
+/// flat-coloured objects. Gradient and image brushes cost more per draw.
+pub const MAX_DRAW_INFO_WORDS: u32 = 1 << 18;
+
 /// A `SceneBuilder` that writes into a `vello::Scene`.
 ///
 /// When picking is enabled (constructed via `with_picking`), every
@@ -69,6 +82,43 @@ impl VelloScene {
     pub(crate) fn raw_pick(&self) -> Option<&Scene> {
         self.pick.as_ref()
     }
+
+    /// Draw-info words the encoded display scene occupies, to be compared
+    /// against [`MAX_DRAW_INFO_WORDS`].
+    pub fn draw_info_words(&self) -> u32 {
+        draw_info_words(&self.inner)
+    }
+
+    /// True when both the display scene and the pick scene fit the backend's
+    /// draw budget, so a render will not be rejected.
+    pub fn fits_draw_budget(&self) -> bool {
+        check_draw_budget(&self.inner).is_ok()
+            && self
+                .pick
+                .as_ref()
+                .is_none_or(|p| check_draw_budget(p).is_ok())
+    }
+}
+
+/// Length of a scene's draw-info stream, measured the way vello sizes it.
+fn draw_info_words(scene: &Scene) -> u32 {
+    scene
+        .encoding()
+        .draw_tags
+        .iter()
+        .map(|tag| tag.info_size())
+        .sum()
+}
+
+fn check_draw_budget(scene: &Scene) -> Result<(), BackendError> {
+    let used = draw_info_words(scene);
+    if used > MAX_DRAW_INFO_WORDS {
+        return Err(BackendError::SceneTooLarge {
+            used,
+            max: MAX_DRAW_INFO_WORDS,
+        });
+    }
+    Ok(())
 }
 
 impl Default for VelloScene {
@@ -546,6 +596,15 @@ impl VelloRenderer {
         }
     }
 
+    /// Reject a scene vello cannot configure, before any GPU work is queued.
+    fn check_scene_budget(&self) -> Result<(), BackendError> {
+        check_draw_budget(self.scene.raw())?;
+        if let Some(pick) = self.scene.raw_pick() {
+            check_draw_budget(pick)?;
+        }
+        Ok(())
+    }
+
     /// Rasterise the pick scene into the cached pick target, copy it back
     /// to CPU, and refresh the hitmap. Assumes [`Self::ensure_pick_target`]
     /// has already been called and picking is enabled.
@@ -696,6 +755,7 @@ impl Renderer for VelloRenderer {
                 actual: out.len(),
             });
         }
+        self.check_scene_budget()?;
 
         self.ensure_display_target(width, height);
         self.ensure_pick_target(width, height);
@@ -878,6 +938,7 @@ impl WgpuRenderer for VelloRenderer {
         height: u32,
         background: Color,
     ) -> Result<(), BackendError> {
+        self.check_scene_budget()?;
         self.renderer
             .render_to_texture(
                 &self.device,
@@ -901,5 +962,69 @@ impl WgpuRenderer for VelloRenderer {
             self.render_pick_and_readback(width, height)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::color::rgb8;
+
+    /// Add `n` flat-coloured triangles, each its own draw object.
+    fn solid_fills(scene: &mut VelloScene, n: usize) {
+        let brush = Brush::Solid(rgb8(10, 20, 30));
+        for i in 0..n {
+            let x = (i % 256) as f64;
+            let mut path = Path::new();
+            path.move_to(Point::new(x, 0.0));
+            path.line_to(Point::new(x + 1.0, 0.0));
+            path.line_to(Point::new(x + 1.0, 1.0));
+            path.close_path();
+            scene.fill(
+                FillRule::NonZero,
+                Affine::IDENTITY,
+                &brush,
+                None,
+                &path,
+                PickId::Skip,
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_scene_spends_no_draw_budget() {
+        let scene = VelloScene::new();
+        assert_eq!(scene.draw_info_words(), 0);
+        assert!(scene.fits_draw_budget());
+    }
+
+    #[test]
+    fn each_solid_fill_costs_one_draw_info_word() {
+        let mut scene = VelloScene::new();
+        solid_fills(&mut scene, 3);
+        assert_eq!(scene.draw_info_words(), 3);
+    }
+
+    #[test]
+    fn clearing_a_scene_returns_its_draw_budget() {
+        let mut scene = VelloScene::new();
+        solid_fills(&mut scene, 5);
+        scene.clear();
+        assert_eq!(scene.draw_info_words(), 0);
+    }
+
+    #[test]
+    fn a_scene_at_the_cap_fits_but_one_draw_more_does_not() {
+        let mut scene = VelloScene::new();
+        solid_fills(&mut scene, MAX_DRAW_INFO_WORDS as usize);
+        assert!(scene.fits_draw_budget());
+
+        solid_fills(&mut scene, 1);
+        assert!(!scene.fits_draw_budget());
+        assert!(matches!(
+            check_draw_budget(scene.raw()),
+            Err(BackendError::SceneTooLarge { used, max })
+                if used == MAX_DRAW_INFO_WORDS + 1 && max == MAX_DRAW_INFO_WORDS
+        ));
     }
 }

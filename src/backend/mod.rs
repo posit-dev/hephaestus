@@ -93,6 +93,17 @@ pub enum BackendError {
     #[error("GPU readback failed: {0}")]
     Readback(String),
 
+    #[error(
+        "scene exceeds the backend's draw capacity ({used} draw-info words, max {max}); \
+         draw fewer objects or split the scene across passes"
+    )]
+    SceneTooLarge {
+        /// Draw-info words the scene occupies.
+        used: u32,
+        /// Largest count the backend can rasterise in one pass.
+        max: u32,
+    },
+
     #[error("backend internal error: {0}")]
     Other(String),
 }
