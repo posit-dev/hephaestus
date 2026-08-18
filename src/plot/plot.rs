@@ -1339,7 +1339,7 @@ impl Plot {
         let axis_label_style = |ch: u8| {
             crate::plot::chrome::linear_axis::AxisChromeStyle::from_resolved(
                 &theme.resolved_axis(ch, 0),
-                &theme.palette,
+                theme,
                 dpi,
                 root_pt,
             )

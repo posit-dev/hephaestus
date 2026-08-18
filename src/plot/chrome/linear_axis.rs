@@ -20,11 +20,12 @@ use crate::color::{rgb, Color};
 use crate::geometry::{Affine, Point};
 use crate::path::Path;
 use crate::pick::PickId;
+use crate::plot::chrome::text::{ChromeRun, RichChrome};
 use crate::plot::geom::resolve::build_stroke_for_pattern;
-use crate::plot::theme::{HAlign, LineElement, Palette, RectElement, ResolvedAxis};
+use crate::plot::theme::{LineElement, RectElement, ResolvedAxis, Theme};
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
-use crate::text::{draw_text, TextRun, TextStyle};
+use crate::text::TextStyle;
 
 /// Build a kurbo [`Stroke`] from a themed [`LineElement`] at `dpi`,
 /// honoring linewidth, linetype (dash pattern), cap, and join.
@@ -120,6 +121,10 @@ pub(crate) struct AxisChromeStyle {
     pub text_brush: Brush,
     /// Outline pass for tick labels. `None` draws labels fill-only.
     pub text_outline: Option<crate::plot::chrome::text::TextOutline>,
+    /// Markdown context for tick labels. `Some` when the axis's text
+    /// element opts in, in which case labels shape through the rich
+    /// pipeline and `text_outline` is carried on the sheet instead.
+    pub rich: Option<RichChrome>,
     pub draw_labels: bool,
 }
 
@@ -134,13 +139,9 @@ impl AxisChromeStyle {
     /// Construct from a `ResolvedAxis` against the theme's palette at
     /// the given dpi. `root_pt` is the parent size relative text sizes
     /// resolve against — see [`crate::plot::chrome::root_text_pt`].
-    pub fn from_resolved(
-        resolved: &ResolvedAxis,
-        palette: &Palette,
-        dpi: f64,
-        root_pt: f64,
-    ) -> Self {
+    pub fn from_resolved(resolved: &ResolvedAxis, theme: &Theme, dpi: f64, root_pt: f64) -> Self {
         use crate::plot::theme::{line_concrete_defaults, text_concrete_defaults};
+        let palette = &theme.palette;
         let fallback_stroke = || Stroke::new(pt_to_px(STROKE_WIDTH_PT, dpi));
         let mk_brush = |c: Color| Brush::Solid(c);
         let line_defaults = line_concrete_defaults();
@@ -171,7 +172,7 @@ impl AxisChromeStyle {
             None => (None, fallback_stroke()),
         };
 
-        let (text_style, text_brush, text_outline, draw_labels) = match &resolved.text {
+        let (text_style, text_brush, text_outline, rich, draw_labels) = match &resolved.text {
             Some(el) => {
                 let color = el
                     .color
@@ -187,12 +188,14 @@ impl AxisChromeStyle {
                     crate::plot::chrome::text::text_style_from(el, root_pt),
                     mk_brush(color),
                     crate::plot::chrome::text::text_outline_from(el, palette, dpi),
+                    crate::plot::chrome::text::rich_chrome_for(el, theme, dpi),
                     true,
                 )
             }
             None => (
                 TextStyle::new(root_pt as f32),
                 mk_brush(axis_ink()),
+                None,
                 None,
                 false,
             ),
@@ -215,6 +218,7 @@ impl AxisChromeStyle {
             text_style,
             text_brush,
             text_outline,
+            rich,
             draw_labels,
         }
     }
@@ -300,6 +304,7 @@ pub(crate) fn draw_linear_axis_at(
                 &style.text_style,
                 &style.text_brush,
                 style.text_outline.as_ref(),
+                style.rich.as_ref(),
                 AxisLabelAt {
                     anchor,
                     direction: (outward_tx, outward_ty),
@@ -338,16 +343,20 @@ pub(crate) fn draw_axis_label(
     style: &TextStyle,
     brush: &Brush,
     outline: Option<&crate::plot::chrome::text::TextOutline>,
+    // `Some` reads the label as markdown. The sheet carries the
+    // outline in that case, so `outline` applies to the plain path
+    // only — see [`crate::plot::chrome::text::ChromeRun::draw`].
+    rich: Option<&RichChrome>,
     at: AxisLabelAt,
     dpi: f64,
 ) {
-    let run = TextRun::new(text, style, dpi);
-    let _ = run.set_max_width(f32::INFINITY, HAlign::Start);
+    let run = ChromeRun::shape(text, style, dpi, rich);
     // Tick labels draw on one line, so the anchoring width is the
-    // laid-out width. `width_hint` reports the longest unbreakable
-    // cluster instead — a wrap lower bound that undershoots any
-    // label carrying a space and slides it off its tick.
-    let label_w = run.content_width();
+    // natural laid-out width. `width_hint` reports the longest
+    // unbreakable cluster instead — a wrap lower bound that
+    // undershoots any label carrying a space and slides it off its
+    // tick.
+    let label_w = run.width();
     // Use the cap-height band as the "visible height" for vertical
     // positioning — numeric and uppercase labels (the common case
     // for ticks + discrete key labels) then centre on their ink
@@ -388,8 +397,7 @@ pub(crate) fn draw_axis_label(
 
     let x = label_cx - label_w * 0.5;
     let y = label_cy - cap_h * 0.5 - cap_top_offset;
-    crate::plot::chrome::text::draw_text_outline_pass(scene, outline, &run, x, y, Affine::IDENTITY);
-    draw_text(scene, &run, x, y, brush, Affine::IDENTITY, PickId::Skip);
+    run.draw(scene, x, y, brush, outline, Affine::IDENTITY, PickId::Skip);
 }
 
 fn lerp(a: Point, b: Point, t: f64) -> Point {
@@ -430,9 +438,7 @@ mod tests {
     /// Laid-out width of `text` at the test style — the width the draw
     /// pass puts on screen.
     fn drawn_width(text: &str) -> f64 {
-        let run = TextRun::new(text, &style(), DPI);
-        let _ = run.set_max_width(f32::INFINITY, HAlign::Start);
-        run.content_width()
+        ChromeRun::shape(text, &style(), DPI, None).width()
     }
 
     /// Leftmost glyph pen position across every emitted run, which is
@@ -458,10 +464,88 @@ mod tests {
             &style(),
             &Brush::Solid(rgb(0.0, 0.0, 0.0)),
             None,
+            None,
             AxisLabelAt { anchor, direction },
             DPI,
         );
         scene
+    }
+
+    /// The markdown context a themed axis with `markdown` on resolves
+    /// to, at the same style the plain helpers use.
+    fn markdown_ctx() -> crate::plot::chrome::text::RichChrome {
+        let theme = crate::plot::theme::Theme::default();
+        let el = crate::plot::theme::TextElement {
+            markdown: Some(true),
+            ..Default::default()
+        };
+        crate::plot::chrome::text::rich_chrome_for(&el, &theme, DPI).expect("markdown is on")
+    }
+
+    fn draw_markdown(text: &str, direction: (f64, f64), anchor: Point) -> RecordingScene {
+        let ctx = markdown_ctx();
+        let mut scene = RecordingScene::default();
+        draw_axis_label(
+            &mut scene,
+            text,
+            &style(),
+            &Brush::Solid(rgb(0.0, 0.0, 0.0)),
+            None,
+            Some(&ctx),
+            AxisLabelAt { anchor, direction },
+            DPI,
+        );
+        scene
+    }
+
+    fn glyph_count(scene: &RecordingScene) -> usize {
+        scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::DrawGlyphs(run) => Some(run.glyphs.len()),
+                _ => None,
+            })
+            .sum()
+    }
+
+    #[test]
+    fn a_markdown_break_label_reads_its_markers_as_syntax() {
+        let anchor = Point::new(200.0, 100.0);
+        let plain = glyph_count(&draw("**hi**", (0.0, 1.0), anchor));
+        let md = glyph_count(&draw_markdown("**hi**", (0.0, 1.0), anchor));
+        assert_eq!(plain, 6, "the plain path draws the asterisks");
+        assert_eq!(md, 2, "the markdown path emboldens `hi` instead");
+    }
+
+    /// The markdown path anchors on the same cap band as the plain
+    /// one, so a label doesn't jump when a theme turns markdown on.
+    #[test]
+    fn a_markdown_break_label_sits_where_the_plain_one_does() {
+        let anchor = Point::new(200.0, 100.0);
+        let plain = &draw("hi", (0.0, 1.0), anchor);
+        let md = &draw_markdown("hi", (0.0, 1.0), anchor);
+        let (px, py) = first_glyph(plain);
+        let (mx, my) = first_glyph(md);
+        assert!(
+            (px - mx).abs() < 0.5 && (py - my).abs() < 0.5,
+            "plain at ({px}, {py}), markdown at ({mx}, {my})"
+        );
+    }
+
+    /// Screen position of the first glyph emitted. The rich path
+    /// carries placement on the run's transform rather than in the
+    /// glyph offsets, so both have to be composed to compare the two.
+    fn first_glyph(scene: &RecordingScene) -> (f64, f64) {
+        for op in &scene.ops {
+            if let Op::DrawGlyphs(run) = op {
+                if let Some(g) = run.glyphs.first() {
+                    let p = run.transform * Point::new(g.x as f64, g.y as f64);
+                    return (p.x, p.y);
+                }
+            }
+        }
+        panic!("no glyphs emitted");
     }
 
     #[test]

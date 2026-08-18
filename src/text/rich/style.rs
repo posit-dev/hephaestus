@@ -551,14 +551,19 @@ impl RichTextStyleSheet {
     }
 
     /// The root selector every document starts from.
+    ///
+    /// Deliberately empty. Marquee's `classic_style()` sets a `1.6`
+    /// line height here because its base style *is* the caller's
+    /// style; here the caller passes a [`TextStyle`] that
+    /// [`ResolvedStyle::from_base`] already folds in, so a value on
+    /// `base` would be the one field of that style the sheet
+    /// overrides — leaving a chrome slot unable to reach its own
+    /// theme's line height. A document that wants marquee's leading
+    /// asks for it on the style it passes, or sets `base` itself.
+    ///
+    /// [`TextStyle`]: crate::text::TextStyle
     fn install_root_defaults(&mut self) {
-        self.set(
-            "base",
-            StyleDelta {
-                lineheight: Some(LineHeightSpec::Mult(1.6)),
-                ..StyleDelta::empty()
-            },
-        );
+        self.set("base", StyleDelta::empty());
     }
 
     fn install_inline_defaults(&mut self) {

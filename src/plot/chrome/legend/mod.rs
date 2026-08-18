@@ -64,7 +64,7 @@ use crate::plot::scale::ScaleRegistry;
 // Inter-legend (and panel ↔ legend) gap parents — shared with
 // `Theme::default()` so the `Length::Rel` resolve parent matches the
 // bottom-of-cascade concrete value.
-use crate::plot::theme::HAlign;
+use crate::plot::chrome::text::ChromeRun;
 use crate::plot::theme::{
     DEFAULT_LEGEND_GAP_PT as PANEL_LEGEND_GAP_PT, DEFAULT_LEGEND_SPACING_PT as LEGEND_GAP_PT,
 };
@@ -73,7 +73,7 @@ use crate::scales::chrome::{Anchor, LegendSide};
 use crate::scales::value::Value;
 use crate::scene::SceneBuilder;
 use crate::shape::ShapeRegistry;
-use crate::text::{draw_text, TextRun, TextStyle};
+use crate::text::TextStyle;
 
 // ─── Shared shell helpers ───────────────────────────────────────────────────
 
@@ -187,6 +187,7 @@ pub fn legend_stack_natural_size(
                 shapes,
                 dpi,
                 theme.legend_for(l.theme_variant.as_deref()),
+                theme,
                 &theme.geom,
                 gap_px,
                 &theme.locale,
@@ -229,6 +230,7 @@ pub fn legend_measure(
         shapes,
         dpi,
         theme.legend_for(legend.theme_variant.as_deref()),
+        theme,
         &theme.geom,
         legend_gap_px(theme, dpi),
         &theme.locale,
@@ -260,6 +262,7 @@ pub fn legend_stack_measure(
                 shapes,
                 dpi,
                 theme.legend_for(l.theme_variant.as_deref()),
+                theme,
                 &theme.geom,
                 panel_gap_px,
                 &theme.locale,
@@ -306,6 +309,7 @@ pub fn render_legend_stack(
                     shapes,
                     dpi,
                     theme.legend_for(l.theme_variant.as_deref()),
+                    theme,
                     &theme.geom,
                     panel_gap_px,
                     &theme.locale,
@@ -371,6 +375,7 @@ pub fn render_legend(
         shapes,
         dpi,
         lt,
+        theme,
         &theme.geom,
         legend_gap_px(theme, dpi),
         &theme.locale,
@@ -421,7 +426,7 @@ pub(crate) fn render_legend_with_measure(
             scene,
             dpi,
             lt,
-            &theme.palette,
+            theme,
             &theme.geom,
             &theme.locale,
             crate::plot::chrome::root_text_pt(theme),
@@ -436,7 +441,7 @@ pub(crate) fn render_legend_with_measure(
             scene,
             dpi,
             lt,
-            &theme.palette,
+            theme,
             &theme.geom,
             &theme.locale,
             crate::plot::chrome::root_text_pt(theme),
@@ -450,7 +455,7 @@ pub(crate) fn render_legend_with_measure(
             scene,
             dpi,
             lt,
-            &theme.palette,
+            theme,
             &theme.geom,
             &theme.locale,
             crate::plot::chrome::root_text_pt(theme),
@@ -466,6 +471,10 @@ pub(super) struct LegendTextPaint {
     pub(super) style: TextStyle,
     pub(super) brush: Brush,
     pub(super) outline: Option<crate::plot::chrome::text::TextOutline>,
+    /// Markdown context for the slot. `Some` when the element opts
+    /// in, in which case the outline rides on the sheet rather than
+    /// on a separate pass.
+    pub(super) rich: Option<crate::plot::chrome::text::RichChrome>,
 }
 
 /// Resolved per-legend text styling. Each slot is `None` when the
@@ -484,6 +493,7 @@ pub(super) struct LegendTextStyles {
 /// Shared by the measure and draw passes so the two can't drift.
 pub(super) fn legend_text_elements(
     lt: &crate::plot::theme::LegendTheme,
+    root_text: &crate::plot::theme::TextElement,
 ) -> (
     Option<crate::plot::theme::TextElement>,
     Option<crate::plot::theme::TextElement>,
@@ -491,11 +501,16 @@ pub(super) fn legend_text_elements(
     use crate::plot::theme::{axis_concrete_defaults, text_concrete_defaults, Element};
     let text_defaults = text_concrete_defaults();
     let axis_defaults = axis_concrete_defaults();
+    // The theme's root text element sits between the legend's own
+    // layers and the concrete fallbacks, exactly where
+    // `Theme::resolved_axis` puts it — so a figure-wide font, colour
+    // or markdown switch reaches a legend the way it reaches an axis.
+    let root = root_text.cascade(&text_defaults);
     let axis_title = axis_defaults
         .title
         .as_set()
         .expect("axis_concrete_defaults sets title")
-        .cascade(&text_defaults);
+        .cascade(&root);
     let title = match &lt.title {
         Element::Set(child) => Some(child.cascade(&axis_title)),
         Element::Blank => None,
@@ -504,7 +519,11 @@ pub(super) fn legend_text_elements(
     // Break labels come out of the legend's own `AxisTheme` cascade,
     // which already merges the axis tick-label defaults underneath
     // whatever the theme set.
-    let label = lt.axis.resolved().text.map(|el| el.cascade(&text_defaults));
+    let label = lt
+        .axis
+        .resolved_with_root(Some(root_text))
+        .text
+        .map(|el| el.cascade(&root));
     (title, label)
 }
 
@@ -512,10 +531,11 @@ pub(super) fn legend_text_elements(
 /// paint — shaped style, fill brush, and optional outline pass.
 pub(super) fn legend_text_styles(
     lt: &crate::plot::theme::LegendTheme,
-    palette: &crate::plot::theme::Palette,
+    theme: &crate::plot::theme::Theme,
     dpi: f64,
     root_pt: f64,
 ) -> LegendTextStyles {
+    let palette = &theme.palette;
     let paint = |merged: crate::plot::theme::TextElement| {
         let color = merged
             .color
@@ -528,9 +548,10 @@ pub(super) fn legend_text_styles(
             // Resolve off the cascaded element so the safety net's
             // unset outline and any themed value both come through.
             outline: crate::plot::chrome::text::text_outline_from(&merged, palette, dpi),
+            rich: crate::plot::chrome::text::rich_chrome_for(&merged, theme, dpi),
         }
     };
-    let (title, label) = legend_text_elements(lt);
+    let (title, label) = legend_text_elements(lt, &theme.text);
     LegendTextStyles {
         title: title.map(paint),
         label: label.map(paint),
@@ -637,11 +658,12 @@ fn render_stack_body(
     scene: &mut dyn SceneBuilder,
     dpi: f64,
     lt: &crate::plot::theme::LegendTheme,
-    palette: &crate::plot::theme::Palette,
+    theme: &crate::plot::theme::Theme,
     geom: &crate::plot::theme::GeomTheme,
     locale: &crate::scales::Locale,
     root_pt: f64,
 ) {
+    let palette = &theme.palette;
     let side = cardinal_side(legend.side);
     let domain = match registry.get(&legend.domain_scale) {
         Some(s) => s,
@@ -658,7 +680,7 @@ fn render_stack_body(
     } else {
         0.0
     };
-    let styles = legend_text_styles(lt, palette, dpi, root_pt);
+    let styles = legend_text_styles(lt, theme, dpi, root_pt);
 
     let entries = domain.breaks(DEFAULT_BREAK_COUNT);
     let entries: Vec<&Value> = entries
@@ -684,22 +706,13 @@ fn render_stack_body(
     let entries_y = title_y + measure.title_h_px + title_gap;
 
     if let (Some(title), Some(paint)) = (&legend.title, &styles.title) {
-        let run = TextRun::new(title, &paint.style, dpi);
-        let _ = run.set_max_width(f32::INFINITY, HAlign::Start);
-        crate::plot::chrome::text::draw_text_outline_pass(
+        let run = ChromeRun::shape(title, &paint.style, dpi, paint.rich.as_ref());
+        run.draw(
             scene,
-            paint.outline.as_ref(),
-            &run,
-            title_x,
-            title_y,
-            Affine::IDENTITY,
-        );
-        draw_text(
-            scene,
-            &run,
             title_x,
             title_y,
             &paint.brush,
+            paint.outline.as_ref(),
             Affine::IDENTITY,
             PickId::Skip,
         );
@@ -730,6 +743,7 @@ fn render_stack_body(
                 dpi,
                 geom,
                 palette,
+                theme,
             );
         }
         if let Some(frame_el) = key_frame {
@@ -744,6 +758,7 @@ fn render_stack_body(
                 &paint.style,
                 &paint.brush,
                 paint.outline.as_ref(),
+                paint.rich.as_ref(),
                 AxisLabelAt {
                     anchor,
                     direction: (1.0, 0.0),
@@ -775,6 +790,89 @@ mod tests {
         let mut t = Theme::default();
         t.legend.key.frame = crate::plot::theme::Element::Blank;
         t
+    }
+
+    /// A theme whose every text slot reads markdown, the way a host
+    /// that wants rich chrome sets it: once, on the root element.
+    fn markdown_theme() -> Theme {
+        let mut t = default_theme();
+        t.text.markdown = Some(true);
+        t
+    }
+
+    fn glyph_count(scene: &RecordingScene) -> usize {
+        scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::DrawGlyphs(run) => Some(run.glyphs.len()),
+                _ => None,
+            })
+            .sum()
+    }
+
+    fn render_titled(title: &str, theme: &Theme) -> RecordingScene {
+        let legend = Legend::new("category_color")
+            .title(title)
+            .key(LegendKeySpec::point().scaled("fill", "category_color"));
+        let mut scene = RecordingScene::default();
+        render_legend(
+            &legend,
+            &build_registry(),
+            &shape_reg(),
+            Rect::new(0.0, 0.0, 300.0, 300.0),
+            &mut scene,
+            dpi_96(),
+            theme,
+        );
+        scene
+    }
+
+    /// A legend title reads its markers as syntax once the theme opts
+    /// in — the four `*`s stop being glyphs.
+    #[test]
+    fn a_markdown_legend_title_reads_its_markers_as_syntax() {
+        let plain = glyph_count(&render_titled("**Hue**", &default_theme()));
+        let md = glyph_count(&render_titled("**Hue**", &markdown_theme()));
+        assert_eq!(
+            plain - md,
+            4,
+            "the markdown title should drop four asterisks (plain {plain}, markdown {md})"
+        );
+    }
+
+    /// Break labels come off the same cascade, so a category that
+    /// spells markdown gets parsed too.
+    #[test]
+    fn markdown_break_labels_read_their_markers_as_syntax() {
+        let mut reg = ScaleRegistry::new();
+        reg.insert(
+            "md_color",
+            scale::discrete([
+                Value::String(Arc::from("*A*")),
+                Value::String(Arc::from("*B*")),
+            ])
+            .range_colors([rgb(1.0, 0.0, 0.0), rgb(0.0, 1.0, 0.0)]),
+        );
+        let legend = Legend::new("md_color").key(LegendKeySpec::point().scaled("fill", "md_color"));
+        let render = |theme: &Theme| {
+            let mut scene = RecordingScene::default();
+            render_legend(
+                &legend,
+                &reg,
+                &shape_reg(),
+                Rect::new(0.0, 0.0, 300.0, 300.0),
+                &mut scene,
+                dpi_96(),
+                theme,
+            );
+            glyph_count(&scene)
+        };
+        assert_eq!(
+            render(&default_theme()) - render(&markdown_theme()),
+            4,
+            "two italic labels should drop two asterisks each"
+        );
     }
 
     fn shape_reg() -> ShapeRegistry {

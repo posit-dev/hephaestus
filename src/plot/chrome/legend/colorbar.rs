@@ -15,14 +15,13 @@ use crate::geometry::Shape as _;
 use crate::geometry::{Affine, Point, Rect};
 use crate::path::{FillRule, Path};
 use crate::pick::PickId;
+use crate::plot::chrome::text::ChromeRun;
 use crate::plot::scale::ScaleRegistry;
-use crate::plot::theme::HAlign;
 use crate::scales::breaks::DEFAULT_BREAK_COUNT;
 use crate::scales::chrome::LegendSide;
 use crate::scales::value::Value;
 use crate::scene::SceneBuilder;
 use crate::shape::ShapeRegistry;
-use crate::text::{draw_text, TextRun};
 
 use super::measure::{BodyMeasure, LegendMeasure};
 use super::render_keys::{render_key, with_opacity};
@@ -133,12 +132,13 @@ pub(super) fn render_binned_stack_body(
     scene: &mut dyn SceneBuilder,
     dpi: f64,
     lt: &crate::plot::theme::LegendTheme,
-    palette: &crate::plot::theme::Palette,
+    theme: &crate::plot::theme::Theme,
     geom: &crate::plot::theme::GeomTheme,
     locale: &crate::scales::Locale,
     root_pt: f64,
 ) {
-    let styles = legend_text_styles(lt, palette, dpi, root_pt);
+    let palette = &theme.palette;
+    let styles = legend_text_styles(lt, theme, dpi, root_pt);
     let domain = match registry.get(&legend.domain_scale) {
         Some(s) => s,
         None => return,
@@ -195,22 +195,13 @@ pub(super) fn render_binned_stack_body(
         bar_thickness,
     );
     if let (Some(title), Some(paint)) = (&legend.title, &styles.title) {
-        let run = TextRun::new(title, &paint.style, dpi);
-        let _ = run.set_max_width(f32::INFINITY, HAlign::Start);
-        crate::plot::chrome::text::draw_text_outline_pass(
+        let run = ChromeRun::shape(title, &paint.style, dpi, paint.rich.as_ref());
+        run.draw(
             scene,
-            paint.outline.as_ref(),
-            &run,
-            title_x,
-            title_y,
-            Affine::IDENTITY,
-        );
-        draw_text(
-            scene,
-            &run,
             title_x,
             title_y,
             &paint.brush,
+            paint.outline.as_ref(),
             Affine::IDENTITY,
             PickId::Skip,
         );
@@ -287,7 +278,9 @@ pub(super) fn render_binned_stack_body(
         };
         for key in keys {
             let resolved = resolve_key(key, registry, midpoint);
-            render_key(key.kind, &resolved, cell, shapes, scene, dpi, geom, palette);
+            render_key(
+                key.kind, &resolved, cell, shapes, scene, dpi, geom, palette, theme,
+            );
         }
     }
 
@@ -308,8 +301,8 @@ pub(super) fn render_binned_stack_body(
     };
     let majors = open_end_trim(&majors_owned, legend.open_lower, legend.open_upper);
     let style = crate::plot::chrome::linear_axis::AxisChromeStyle::from_resolved(
-        &lt.axis.resolved(),
-        palette,
+        &lt.axis.resolved_with_root(Some(&theme.text)),
+        theme,
         dpi,
         root_pt,
     );
@@ -340,12 +333,13 @@ pub(super) fn render_colorbar_body(
     scene: &mut dyn SceneBuilder,
     dpi: f64,
     lt: &crate::plot::theme::LegendTheme,
-    palette: &crate::plot::theme::Palette,
+    theme: &crate::plot::theme::Theme,
     geom: &crate::plot::theme::GeomTheme,
     locale: &crate::scales::Locale,
     root_pt: f64,
 ) {
-    let styles = legend_text_styles(lt, palette, dpi, root_pt);
+    let palette = &theme.palette;
+    let styles = legend_text_styles(lt, theme, dpi, root_pt);
     let domain = match registry.get(&legend.domain_scale) {
         Some(s) => s,
         None => return,
@@ -378,22 +372,13 @@ pub(super) fn render_colorbar_body(
     );
 
     if let (Some(title), Some(paint)) = (&legend.title, &styles.title) {
-        let run = TextRun::new(title, &paint.style, dpi);
-        let _ = run.set_max_width(f32::INFINITY, HAlign::Start);
-        crate::plot::chrome::text::draw_text_outline_pass(
+        let run = ChromeRun::shape(title, &paint.style, dpi, paint.rich.as_ref());
+        run.draw(
             scene,
-            paint.outline.as_ref(),
-            &run,
-            title_x,
-            title_y,
-            Affine::IDENTITY,
-        );
-        draw_text(
-            scene,
-            &run,
             title_x,
             title_y,
             &paint.brush,
+            paint.outline.as_ref(),
             Affine::IDENTITY,
             PickId::Skip,
         );
@@ -480,8 +465,8 @@ pub(super) fn render_colorbar_body(
     };
     let majors = open_end_trim(&majors_owned, legend.open_lower, legend.open_upper);
     let style = crate::plot::chrome::linear_axis::AxisChromeStyle::from_resolved(
-        &lt.axis.resolved(),
-        palette,
+        &lt.axis.resolved_with_root(Some(&theme.text)),
+        theme,
         dpi,
         root_pt,
     );

@@ -259,6 +259,231 @@ pub(crate) fn draw_text_outline_pass(
     }
 }
 
+// ─── Unwrapped chrome labels ────────────────────────────────────────────────
+//
+// Break labels, legend titles and polar labels all shape at natural
+// width and never re-break, so they share one shaped-run type and one
+// cross-frame memo. Slots that *do* wrap (the title band, axis titles,
+// strip labels) go through `draw_text_element_in_rect` instead.
+
+thread_local! {
+    /// Shaped rich runs for unwrapped chrome labels, held across
+    /// frames.
+    ///
+    /// Thread-local rather than owned by a `Plot` because chrome is
+    /// drawn through free functions whose signatures are public API;
+    /// the alternative is threading a cache reference into every one
+    /// of them. `RichKey` covers everything that decides what a run
+    /// looks like, so sharing one cache between plots on a thread
+    /// only lets them dedupe labels they have in common. Rendering is
+    /// single-threaded by design, which is what keeps `Rc` sound here.
+    static CHROME_RICH_CACHE: crate::text::rich::RichShapeCache =
+        crate::text::rich::RichShapeCache::new();
+}
+
+/// The markdown context one chrome text slot shapes through.
+///
+/// Resolved once per slot rather than once per label: every run a
+/// slot shapes then shares a single sheet `Arc`, which is the
+/// identity [`crate::text::rich::RichShapeCache`] keys on. Rebuilding
+/// it per label would miss the cache every time.
+#[derive(Clone)]
+pub(crate) struct RichChrome {
+    /// Sheet the slot's spans resolve through — the theme's, or a
+    /// derivative carrying the element's outline on its `base`.
+    pub(crate) sheet: std::sync::Arc<crate::text::rich::RichTextStyleSheet>,
+    /// Palette the sheet's `ThemeColor` references resolve against.
+    pub(crate) palette: crate::plot::theme::Palette,
+    /// Fill the base style paints with.
+    pub(crate) fill: crate::color::Color,
+}
+
+/// The markdown context for `el`, or `None` when the element leaves
+/// `markdown` off — in which case the slot shapes plain text and
+/// keeps its separate [`TextOutline`] pass.
+///
+/// An element carrying `text_stroke` gets a derived sheet with the
+/// outline folded onto `base`, since the rich pipeline paints glyph
+/// outlines from the sheet rather than from a second pass. Per-span
+/// `text_stroke` in the sheet still wins.
+pub(crate) fn rich_chrome_for(
+    el: &crate::plot::theme::TextElement,
+    theme: &crate::plot::theme::Theme,
+    dpi: f64,
+) -> Option<RichChrome> {
+    use crate::plot::theme::text_concrete_defaults;
+    if !matches!(el.markdown, Some(true)) {
+        return None;
+    }
+    let fill = el
+        .color
+        .clone()
+        .or_else(|| text_concrete_defaults().color.clone())
+        .expect("text_concrete_defaults sets color")
+        .resolve(&theme.palette);
+    let sheet = match (&el.text_stroke, text_outline_from(el, &theme.palette, dpi)) {
+        (Some(stroke_color), Some(o)) => {
+            let mut s = (*theme.rich_text).clone();
+            let base = s.get("base").cloned().unwrap_or_default();
+            s.set(
+                "base",
+                crate::text::rich::StyleDelta {
+                    text_stroke: Some(stroke_color.clone()),
+                    text_stroke_width: Some(crate::text::rich::pt(o.stroke.width * 72.0 / dpi)),
+                    ..base
+                },
+            );
+            std::sync::Arc::new(s)
+        }
+        _ => std::sync::Arc::clone(&theme.rich_text),
+    };
+    Some(RichChrome {
+        sheet,
+        palette: theme.palette,
+        fill,
+    })
+}
+
+/// A chrome label shaped at its natural width, through whichever
+/// pipeline its slot opted into.
+///
+/// Measure and draw both hold one of these, so a slot can't reserve a
+/// box shaped one way and paint one shaped the other.
+// The plain variant is the wider one and the one on the default
+// path; boxing it to even the two out would put an allocation on
+// every chrome label a figure without markdown draws.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum ChromeRun {
+    /// Plain shaping — the label's markers render literally.
+    Plain(crate::text::TextRun),
+    /// Marquee-flavoured markdown, memoized across frames.
+    Rich(std::rc::Rc<crate::text::rich::RichTextRun>),
+}
+
+impl ChromeRun {
+    /// Shape `text` unwrapped. `rich` opts the label into markdown;
+    /// `None` shapes plain text.
+    pub(crate) fn shape(
+        text: &str,
+        style: &crate::text::TextStyle,
+        dpi: f64,
+        rich: Option<&RichChrome>,
+    ) -> Self {
+        use crate::text::rich::{RichKey, RichTextRun, RichTextWidth};
+        let Some(rc) = rich else {
+            let run = crate::text::TextRun::new(text, style, dpi);
+            let _ = run.set_max_width(f32::INFINITY, crate::plot::theme::HAlign::Start);
+            return ChromeRun::Plain(run);
+        };
+        let key = RichKey::new(
+            text,
+            style,
+            rc.fill,
+            &rc.sheet,
+            &rc.palette,
+            dpi,
+            RichTextWidth::Natural,
+            crate::plot::theme::HAlign::Start,
+        );
+        let run = CHROME_RICH_CACHE.with(|cache| {
+            cache.get_or_shape(key, || {
+                RichTextRun::new(text, style, rc.fill, &rc.sheet, &rc.palette, dpi)
+            })
+        });
+        ChromeRun::Rich(run)
+    }
+
+    /// Natural single-line width in pixels — what the label actually
+    /// draws, and what an unwrapped slot reserves.
+    pub(crate) fn width(&self) -> f64 {
+        match self {
+            ChromeRun::Plain(r) => r.natural_width(),
+            ChromeRun::Rich(r) => r.natural_width(),
+        }
+    }
+
+    /// Full line-box height in pixels, half-leading included.
+    pub(crate) fn line_box_height(&self) -> f64 {
+        match self {
+            ChromeRun::Plain(r) => r.natural_height(),
+            ChromeRun::Rich(r) => r.natural_height(),
+        }
+    }
+
+    /// Height of the visible band — ascender top to descender bottom.
+    pub(crate) fn inked_height(&self) -> f64 {
+        match self {
+            ChromeRun::Plain(r) => r.inked_height(),
+            ChromeRun::Rich(r) => r.inked_height(),
+        }
+    }
+
+    /// Offset from the run's top edge to its visible top.
+    pub(crate) fn ink_top_offset(&self) -> f64 {
+        match self {
+            ChromeRun::Plain(r) => r.first_line_ascender_offset(),
+            ChromeRun::Rich(r) => r.ink_top_offset(),
+        }
+    }
+
+    /// Offset from the run's top edge to the first line's baseline.
+    pub(crate) fn baseline_offset(&self) -> f64 {
+        match self {
+            ChromeRun::Plain(r) => r.baseline_offset(),
+            ChromeRun::Rich(r) => r.baseline_offset(),
+        }
+    }
+
+    /// Cap-height of the run's first glyph run, in pixels.
+    pub(crate) fn cap_height(&self) -> f64 {
+        match self {
+            ChromeRun::Plain(r) => r.cap_height(),
+            ChromeRun::Rich(r) => r.cap_height(),
+        }
+    }
+
+    /// Draw the label with its top-left at `(x, y)` in the frame
+    /// `transform` establishes.
+    ///
+    /// `outline` applies to the plain path only — a markdown slot
+    /// carries its outline on the sheet's `base` selector (see
+    /// [`rich_chrome_for`]), so the rich pipeline has already emitted
+    /// it by the time the glyphs paint.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw(
+        &self,
+        scene: &mut dyn SceneBuilder,
+        x: f64,
+        y: f64,
+        brush: &crate::brush::Brush,
+        outline: Option<&TextOutline>,
+        transform: crate::geometry::Affine,
+        pick_id: crate::pick::PickId,
+    ) {
+        match self {
+            ChromeRun::Plain(run) => {
+                draw_text_outline_pass(scene, outline, run, x, y, transform);
+                crate::text::draw_text(scene, run, x, y, brush, transform, pick_id);
+            }
+            ChromeRun::Rich(run) => {
+                use crate::text::rich::{draw_rich_text, HAnchor, RichAnchor, VAnchor};
+                draw_rich_text(
+                    scene,
+                    run,
+                    x,
+                    y,
+                    RichAnchor {
+                        h: HAnchor::Left,
+                        v: VAnchor::Top,
+                    },
+                    transform,
+                    pick_id,
+                );
+            }
+        }
+    }
+}
+
 /// Resolve the effective [`TextElement`](crate::plot::theme::TextElement)
 /// for an `Element<TextElement>` slot. `Blank` short-circuits to
 /// `None`; otherwise the slot's sparse fields cascade onto `root`,
@@ -446,7 +671,13 @@ pub(crate) fn draw_text_element_in_rect(
         let rich = RichTextRun::new(text, &style, base_brush_col, sheet, palette, dpi);
         rich.set_max_width(along_px as f32, align_h);
         let block_w = rich.content_width();
-        let block_h = rich.current_height();
+        // Inked band, not the stacked box — the same quantity
+        // `measure_for_element` reserved. `ink_top` is the empty
+        // band the box keeps above the first thing that paints; the
+        // origin backs it out so the visible top lands flush with
+        // the slot edge, mirroring the plain path's ascender shift.
+        let block_h = rich.inked_height();
+        let ink_top = rich.ink_top_offset();
         let hf = match align_h {
             HAlign::Start => 0.0,
             HAlign::Center | HAlign::Justify => 0.5,
@@ -459,7 +690,7 @@ pub(crate) fn draw_text_element_in_rect(
         };
         if angle_rad.abs() < 1e-9 {
             let tx = inset.x0 + (along_px - block_w) * hf;
-            let ty = inset.y0 + (cross_px - block_h) * vf;
+            let ty = inset.y0 + (cross_px - block_h) * vf - ink_top;
             draw_rich_text(
                 scene,
                 &rich,
@@ -478,7 +709,7 @@ pub(crate) fn draw_text_element_in_rect(
                 * Affine::rotate(angle_rad)
                 * Affine::translate(Vec2::new(
                     -along_px * 0.5 + (along_px - block_w) * hf,
-                    -cross_px * 0.5 + (cross_px - block_h) * vf,
+                    -cross_px * 0.5 + (cross_px - block_h) * vf - ink_top,
                 ));
             draw_rich_text(
                 scene,
@@ -711,4 +942,92 @@ pub(crate) fn rotated_bbox(text_w: f64, text_h: f64, angle_deg: f32) -> (f64, f6
         text_w * cos_t + text_h * sin_t,
         text_w * sin_t + text_h * cos_t,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plot::theme::{TextElement, Theme};
+    use crate::text::TextStyle;
+
+    const DPI: f64 = 96.0;
+
+    fn markdown_ctx(theme: &Theme) -> RichChrome {
+        let el = TextElement {
+            markdown: Some(true),
+            ..Default::default()
+        };
+        rich_chrome_for(&el, theme, DPI).expect("markdown is on")
+    }
+
+    /// A slot that leaves `markdown` unset gets no context, so it
+    /// shapes plain text and keeps its separate outline pass.
+    #[test]
+    fn an_element_without_markdown_gets_no_context() {
+        let theme = Theme::default();
+        assert!(rich_chrome_for(&TextElement::default(), &theme, DPI).is_none());
+    }
+
+    /// Every label a slot shapes has to share the sheet's identity,
+    /// or each one misses the cache.
+    #[test]
+    fn a_slot_reuses_one_shaped_run_across_labels() {
+        let theme = Theme::default();
+        let ctx = markdown_ctx(&theme);
+        let style = TextStyle::new(11.0);
+        let a = ChromeRun::shape("42", &style, DPI, Some(&ctx));
+        let b = ChromeRun::shape("42", &style, DPI, Some(&ctx));
+        let (ChromeRun::Rich(a), ChromeRun::Rich(b)) = (&a, &b) else {
+            panic!("markdown context should produce rich runs");
+        };
+        assert!(
+            std::rc::Rc::ptr_eq(a, b),
+            "the same label at the same style must hit the cache"
+        );
+    }
+
+    /// A different label is a different entry — the memo keys on the
+    /// source, not just the style.
+    #[test]
+    fn a_different_label_shapes_its_own_run() {
+        let theme = Theme::default();
+        let ctx = markdown_ctx(&theme);
+        let style = TextStyle::new(11.0);
+        let a = ChromeRun::shape("42", &style, DPI, Some(&ctx));
+        let b = ChromeRun::shape("43", &style, DPI, Some(&ctx));
+        let (ChromeRun::Rich(a), ChromeRun::Rich(b)) = (&a, &b) else {
+            panic!("markdown context should produce rich runs");
+        };
+        assert!(!std::rc::Rc::ptr_eq(a, b));
+    }
+
+    /// The metrics a break label anchors on agree between the two
+    /// pipelines, which is what keeps a label from moving when a
+    /// theme turns markdown on.
+    #[test]
+    fn both_pipelines_report_the_same_anchoring_metrics() {
+        let theme = Theme::default();
+        let ctx = markdown_ctx(&theme);
+        let style = TextStyle::new(11.0);
+        let plain = ChromeRun::shape("Hello", &style, DPI, None);
+        let rich = ChromeRun::shape("Hello", &style, DPI, Some(&ctx));
+        assert!(
+            (plain.width() - rich.width()).abs() < 0.01,
+            "widths differ: {} vs {}",
+            plain.width(),
+            rich.width()
+        );
+        assert!(
+            (plain.cap_height() - rich.cap_height()).abs() < 0.01,
+            "cap heights differ: {} vs {}",
+            plain.cap_height(),
+            rich.cap_height()
+        );
+        assert!(
+            (plain.baseline_offset() - rich.baseline_offset()).abs() < 0.51,
+            "baselines differ: {} vs {}",
+            plain.baseline_offset(),
+            rich.baseline_offset()
+        );
+    }
 }
