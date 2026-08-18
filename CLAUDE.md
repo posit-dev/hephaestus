@@ -15,6 +15,7 @@ cargo build                                              # default features (vel
 cargo build --no-default-features                        # core types & traits only — no wgpu pulled in
 cargo check --target wasm32-unknown-unknown             # wasm is a supported target; catches GL-backend and dep regressions
 cargo build --no-default-features --features vello,png   # explicit feature combination
+cargo run --example image_formats --features jpeg,tiff,webp  # all four raster writers
 
 cargo test                                               # all tests
 cargo test --test smoke                                  # the GPU smoke test (requires a working wgpu adapter)
@@ -53,7 +54,8 @@ Style rules (apply everywhere, including comments in `tests/` and `examples/`):
 ## Cargo features
 
 - **`vello`** (default) — the GPU rasterising backend (wgpu + vello + pollster + futures-intrusive + bytemuck).
-- **`png`** (default) — PNG writer (`png` crate). Used by examples and tests.
+- **`png`** (default) — PNG writer (`png` crate).
+- **`jpeg`**, **`tiff`**, **`webp`** (off by default) — the other raster writers, one encoder each (`jpeg-encoder`, `tiff`, `image-webp`). All four writers live in `src/image/` and consume the same RGBA8 buffer a `Renderer` produces, so a format costs only its encoder — unlike `svg` / `pdf`, which need an alternative render path. All pure Rust and wasm-clean.
 - **`google-fonts`** (off by default) — auto-fetch named Google Fonts families on demand. Synchronous network call on cache miss; cache hits are offline.
 - **`geom-wkt`**, **`geom-wkb`**, **`geom-geojson`** (off by default) — opt-in parsers for `crate::scales::Geometry`. Each gate enables one of `Geometry::from_wkt` / `from_wkb` / `from_geojson`. Hand-rolled and dependency-free, so toggling them only affects what constructors compile, not the dependency tree.
 - **`blend2d`**, **`svg`**, **`pdf`** — feature placeholders only; no backend code behind them yet. Wired so dependent crates can write `features = ["blend2d"]` once they exist.

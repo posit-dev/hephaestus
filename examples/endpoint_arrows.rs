@@ -308,6 +308,6 @@ fn render_to(
         .render_to_buffer(w, h, bg, &mut pixels)
         .expect("render");
     let path = std::env::current_dir().unwrap().join(out_relative);
-    hephaestus::png::write_png(&path, w, h, &pixels).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels).expect("write png");
     println!("wrote {}", path.display());
 }

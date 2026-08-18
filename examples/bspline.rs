@@ -452,6 +452,6 @@ fn write_buffer(renderer: &mut VelloRenderer, w: u32, h: u32, bg: Color, out_rel
         .render_to_buffer(w, h, bg, &mut pixels)
         .expect("render");
     let path = std::env::current_dir().unwrap().join(out_relative);
-    hephaestus::png::write_png(&path, w, h, &pixels).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels).expect("write png");
     println!("wrote {}", path.display());
 }

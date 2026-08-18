@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **JPEG, TIFF and WebP writers** — behind the new `jpeg`, `tiff` and `webp` features, one encoder each (`jpeg-encoder`, `tiff`, `image-webp`; all pure Rust and wasm-clean). Each format offers the same three entry points as PNG: `write_*` to a path, `write_*_to` for any writer, `encode_*` for the bytes in memory. TIFF and WebP are lossless and carry alpha; TIFF takes a `TiffCompression` (deflate, LZW, PackBits, or none) and declares its alpha unassociated. JPEG has no alpha channel, so `write_jpeg` takes a `quality` (1–100) and a background `Color` to composite the buffer onto.
+- **`hephaestus::image`** — the home of every raster writer, including PNG. `hephaestus::png::{write_png, encode_png, write_png_to}` continue to resolve as aliases for the entries in `image`.
+
+### Changed
+
+- Writers reject a zero width or height with `io::ErrorKind::InvalidInput` and a message naming the dimensions. A zero-area image already failed; the error is now the same shape as the wrong-buffer-length one, for every format.
+
 ## 0.1.0
 
 First public release.
