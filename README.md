@@ -80,7 +80,7 @@ let mut renderer = VelloRenderer::new().expect("vello init");
 }
 ```
 
-The renderer produces RGBA8 buffers. Surface presentation, event loops, and animation scheduling are the host's problem by design.
+The renderer produces RGBA8 buffers for file output. The optional `window` feature presents those frames live instead — an OS window, resize, and pointer events wired to picking. Animation scheduling stays the host's problem by design.
 
 ## What's in the box
 
@@ -91,6 +91,7 @@ The renderer produces RGBA8 buffers. Surface presentation, event loops, and anim
 - **Themes** — every chrome element is a themed element; no hardcoded constants in the render path.
 - **Rich text** — a marquee-flavoured markdown subset with inline styling, block borders, and backgrounds.
 - **Picking** — opt-in per renderer; emits pixel ids for hit-testing without a CPU post-pass.
+- **Live window** — optional `window` feature: presents frames on screen, re-lays-out on resize, and reports the pick id under the cursor.
 
 ## Features
 
@@ -98,6 +99,7 @@ The renderer produces RGBA8 buffers. Surface presentation, event loops, and anim
 |---|---|---|
 | `vello` | ✅ | GPU rasterizer via wgpu. |
 | `png` | ✅ | PNG writer, used by examples and tests. |
+| `window` | | Live window presentation: OS window, wgpu surface, event loop with resize and pointer events (`winit`). Requires `vello`. |
 | `google-fonts` | | Fetch named Google Fonts families on demand. Network call on cache miss; cache hits are offline. |
 | `chrono` / `time` / `jiff` | | `From` impls between the temporal newtypes and the matching datetime library. Pick whichever your code already uses. |
 | `geom-wkt` / `geom-wkb` / `geom-geojson` | | Parsers for `scales::Geometry`. Hand-rolled and dependency-free, so toggling them only changes what constructors compile. |
@@ -115,6 +117,12 @@ cargo run --example point         # plot API, shared scales across panels
 cargo run --example polar         # polar projection
 cargo run --example legends       # legend and colorbar variants
 cargo run --example theme_dark    # theming
+```
+
+One example opens a window instead of writing a file:
+
+```sh
+cargo run --example window --features window   # live plot: resize + hover picking
 ```
 
 ## Status

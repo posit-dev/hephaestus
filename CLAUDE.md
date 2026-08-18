@@ -15,15 +15,18 @@ cargo build                                              # default features (vel
 cargo build --no-default-features                        # core types & traits only — no wgpu pulled in
 cargo check --target wasm32-unknown-unknown             # wasm is a supported target; catches GL-backend and dep regressions
 cargo build --no-default-features --features vello,png   # explicit feature combination
+cargo build --features window                            # adds winit + the presentation surface
 
 cargo test                                               # all tests
 cargo test --test smoke                                  # the GPU smoke test (requires a working wgpu adapter)
 cargo test --test picking                                # picking round-trip
+cargo test --test window_blit                            # the window presentation blit, headless
 
 cargo clippy --all-features --all-targets -- -D warnings # treat warnings as errors
 cargo fmt                                                # rustfmt; always run before declaring a task done
 
 cargo run --example hello                                # renders examples/hello.png — visual sanity check
+cargo run --example window --features window             # live window: resize + hover picking
 ```
 
 **Always run `cargo fmt` after completing a coding task.** It's the last step before reporting work done, even when the diff looks cosmetically fine — rustfmt catches subtle layout drift (over-long lines, brace style, import ordering) that otherwise piles up across changes.
@@ -55,6 +58,7 @@ Style rules (apply everywhere, including comments in `tests/` and `examples/`):
 - **`vello`** (default) — the GPU rasterising backend (wgpu + vello + pollster + futures-intrusive + bytemuck).
 - **`png`** (default) — PNG writer (`png` crate). Used by examples and tests.
 - **`google-fonts`** (off by default) — auto-fetch named Google Fonts families on demand. Synchronous network call on cache miss; cache hits are offline.
+- **`window`** (off by default) — live window presentation: an OS window, a wgpu surface, and an event loop with resize and pointer events (`winit`). Requires `vello`. See `src/window/CLAUDE.md`.
 - **`geom-wkt`**, **`geom-wkb`**, **`geom-geojson`** (off by default) — opt-in parsers for `crate::scales::Geometry`. Each gate enables one of `Geometry::from_wkt` / `from_wkb` / `from_geojson`. Hand-rolled and dependency-free, so toggling them only affects what constructors compile, not the dependency tree.
 - **`blend2d`**, **`svg`**, **`pdf`** — feature placeholders only; no backend code behind them yet. Wired so dependent crates can write `features = ["blend2d"]` once they exist.
 
@@ -64,8 +68,7 @@ The core types and traits compile with `--no-default-features` (no wgpu pulled i
 
 The following belong in higher layers or other crates and should not land here:
 
-- **Surface presentation** — no winit, no event loop. The renderer produces RGBA8 buffers; presentation is the caller's problem.
-- **Interaction model and animation runtime** — picking emits pixel ids (see `src/CLAUDE.md`), but routing those to event handlers, tweening states, and animation scheduling all live in the host.
+- **Animation runtime** — picking emits pixel ids (see `src/CLAUDE.md`) and the `window` feature delivers them to an event handler, but tweening states and animation scheduling live in the host.
 - **Filter effects** — blur, drop shadow, etc. Outside the Vello-∩-Blend2D intersection that governs the scene API.
 - **Font selection / loading at the `SceneBuilder` level** — the scene API consumes already-positioned glyphs. Shaping and font discovery live in the `text` module (parley-backed); a host that wants its own shaper can replace it behind the `TextRun` / `draw_text` surface.
 
@@ -74,7 +77,7 @@ The `plot/` module is in-scope: it is the high-level layer inside this crate tha
 ## Where to look next
 
 - **`src/CLAUDE.md`** — code architecture: API levels, two-trait split, intersection-of-backends rule, picking model, module map.
-- **Per-module `CLAUDE.md` files** under `src/scene/`, `src/backend/`, `src/backend/vello/`, `src/layout/`, `src/composition/`, `src/primitives/`, `src/plot/`, `src/plot/geom/`, `src/plot/theme/`, `src/scales/`, `src/text/`, `src/text/rich/`.
+- **Per-module `CLAUDE.md` files** under `src/scene/`, `src/backend/`, `src/backend/vello/`, `src/layout/`, `src/composition/`, `src/primitives/`, `src/plot/`, `src/plot/geom/`, `src/plot/theme/`, `src/scales/`, `src/text/`, `src/text/rich/`, `src/window/`.
 
 ## Help / feedback
 

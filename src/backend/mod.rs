@@ -44,15 +44,18 @@ pub trait Renderer {
 /// This is the path for showing a scene in a window. A host that owns its own
 /// wgpu device, queue, and presentation surface constructs the backend with a
 /// `with_device`-style constructor so all GPU work shares a single device,
-/// then calls [`render_to_texture`](Self::render_to_texture) each frame.
+/// then calls [`render_to_texture`](Self::render_to_texture) each frame. The
+/// `window` feature is this crate's own implementation of that host; see
+/// [`crate::window`].
 ///
 /// **Target constraints.** The supplied `view` must wrap a texture with
-/// format `Rgba8Unorm` and usage including
-/// `STORAGE_BINDING | COPY_SRC` — the backend writes via a compute shader
-/// (Vello), so a render-attachment-only swap chain texture cannot be used
-/// directly. Hosts whose presentation surface uses a different format
-/// (typical for swap chains, which are usually `Bgra8UnormSrgb`) are
-/// responsible for blitting from this view to the surface.
+/// format `Rgba8Unorm` and usage including `STORAGE_BINDING` — the backend
+/// writes via a compute shader (Vello), so a render-attachment-only swap
+/// chain texture cannot be used directly. Whatever the host does with the
+/// result adds its own flag: `TEXTURE_BINDING` to blit the view onto a
+/// surface, `COPY_SRC` to copy it back. Hosts whose presentation surface uses
+/// a different format (typical for swap chains) are responsible for blitting
+/// from this view to the surface.
 ///
 /// **Alpha.** The view receives straight (un-premultiplied) alpha, matching
 /// [`Renderer::render_to_buffer`]. A host presenting translucent content
