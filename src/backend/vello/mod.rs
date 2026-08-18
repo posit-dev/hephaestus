@@ -553,10 +553,23 @@ impl VelloRenderer {
         let pick_scene = self.scene.raw_pick().expect("pick scene present");
         let pick_target = self.pick_target.as_ref().expect("pick target ensured");
 
-        // Use AaConfig::Area (the only mode our AaSupport opted into).
-        // Edge pixels of solid fills will be partially blended toward the
-        // background — fine for picking interior regions, with a small
-        // ambiguity zone at borders the renderer does not try to eliminate.
+        // AaConfig::Area is the only mode vello offers that our AaSupport
+        // opted into, and vello has no way to turn antialiasing off — so the
+        // pick scene is antialiased whether or not that suits it, and edge
+        // pixels blend.
+        //
+        // The transparent base is what makes that survivable. Vello
+        // unpremultiplies on output, so a mark's fringe over *nothing*
+        // divides back out to its exact id with coverage left in alpha. An
+        // opaque base would instead blend every fringe toward black and hand
+        // back a plausible but wrong id at full alpha. Measured on one mark
+        // tagged 200: transparent base leaves 140 stray pixels, all at alpha
+        // 0 and rejected by `pick::decode`; an opaque base leaves 228, all at
+        // alpha 255 and undetectable.
+        //
+        // What neither base fixes: a fringe over *other picked content*
+        // blends two real ids and lands at full alpha. See the conflation
+        // note on `crate::pick`.
         self.renderer
             .render_to_texture(
                 &self.device,
@@ -703,16 +716,14 @@ impl Renderer for VelloRenderer {
             )
             .map_err(|e| BackendError::Other(format!("vello render: {e}")))?;
 
-        // If picking is enabled, render the parallel pick scene with AA off
-        // and a transparent base so uncovered pixels decode as id 0.
+        // If picking is enabled, render the parallel pick scene over a
+        // transparent base. See `render_pick_and_readback` for why the base
+        // must stay transparent.
         let picking = self.scene.raw_pick().is_some();
         if picking {
             let pick_scene = self.scene.raw_pick().unwrap();
             let pick_target = self.pick_target.as_ref().expect("pick target ensured");
-            // Use AaConfig::Area (the only mode our AaSupport opted into).
-            // Edge pixels of solid fills will be partially blended toward the
-            // background — fine for picking interior regions, with a small
-            // ambiguity zone at borders the renderer does not try to eliminate.
+            // Same AA and base-colour contract as `render_pick_and_readback`.
             self.renderer
                 .render_to_texture(
                     &self.device,

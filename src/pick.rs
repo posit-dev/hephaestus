@@ -7,10 +7,31 @@
 //! answer "which item is at pixel (x, y)?" — no per-event GPU round-trip.
 //!
 //! The id space is 24-bit (1..=0xFF_FFFF, ~16M items), with `0` reserved as the
-//! "no hit" sentinel. Callers manage their own id assignment (typically a row
+//! "no hit" sentinel, alongside a fully transparent pixel — nothing was drawn
+//! there, so its colour channels are not an id. Callers manage their own id assignment (typically a row
 //! index or item index). The encoding packs the id into the RGB channels of an
 //! `Rgba8Unorm` texture with alpha forced to 255, which round-trips cleanly
 //! through default SrcOver compositing without any per-draw blend-mode plumbing.
+//!
+//! # Limitation: blended ids where picked content meets picked content
+//!
+//! The pick scene is antialiased — vello offers no way to disable it — so a
+//! mark's edge pixels are a coverage blend of what is above and below them.
+//! Over empty space that is harmless: the rasteriser unpremultiplies, so the
+//! fringe divides back out to the mark's exact id. Where a mark's edge falls
+//! on **other picked content**, the blend mixes two ids and the result is a
+//! third, entirely plausible id at full alpha, which [`decode`] cannot tell
+//! from a real hit.
+//!
+//! Two arrangements trigger it: overlapping marks (a boundary between ids
+//! 100 and 200 reports values across that range) and a mark drawn over a
+//! [`PickId::Block`] fill (the fringe ramps from 0 up to the mark's id,
+//! producing low ids that alias onto low-numbered rows).
+//!
+//! Keeping decorative chrome on [`PickId::Skip`] — the default, and what the
+//! plot layer does for panel backgrounds and gridlines — keeps marks
+//! compositing over nothing and avoids the conflation entirely. The affected
+//! band is one pixel wide at each boundary.
 //!
 //! # Limitation: alpha-insensitive picking
 //!
@@ -52,14 +73,23 @@ pub fn id_to_color(id: u32) -> Color {
     Color::new([r, g, b, 1.0])
 }
 
-/// Decode a u32 pixel sampled from the hitmap into the originating id,
-/// or `None` for the no-hit sentinel (`id == 0`). The alpha byte is
-/// discarded; only the low 24 bits carry the id payload.
+/// Decode a u32 pixel sampled from the hitmap into the originating id, or
+/// `None` for a miss.
+///
+/// A pixel misses when nothing was drawn over it (alpha `0`) or when what was
+/// drawn carries the no-hit sentinel (`id == 0`). The alpha test is what makes
+/// the RGB payload meaningful: every recorded id composites at alpha `255`
+/// (see [`id_to_color`]), so an alpha of `0` means the RGB channels hold
+/// whatever the rasteriser left behind rather than an id, and reading them as
+/// one reports hits on empty space.
 ///
 /// Public because a caller doing bulk queries over
 /// [`VelloRenderer::hitmap`](crate::backend::vello::VelloRenderer::hitmap)
 /// reads raw pixels and needs this to interpret them.
 pub fn decode(px: u32) -> Option<u32> {
+    if px >> 24 == 0 {
+        return None;
+    }
     let id = px & 0x00FF_FFFF;
     (id != 0).then_some(id)
 }
@@ -145,11 +175,19 @@ mod tests {
     }
 
     #[test]
-    fn decode_ignores_the_alpha_byte() {
-        assert_eq!(decode(0x0000_1234), Some(0x1234));
-        assert_eq!(decode(0xFF00_1234), Some(0x1234));
+    fn a_fully_transparent_pixel_misses_whatever_its_rgb_holds() {
+        // Nothing composited here, so the RGB channels are residue, not an id.
+        assert_eq!(decode(0x0000_1234), None);
         assert_eq!(decode(0x0000_0000), None);
+    }
+
+    #[test]
+    fn any_coverage_at_all_makes_the_id_payload_count() {
+        assert_eq!(decode(0xFF00_1234), Some(0x1234));
         assert_eq!(decode(0xFF00_0000), None);
+        // Partial coverage still carries an exact id: the rasteriser
+        // unpremultiplies, so a fringe pixel reports the mark it belongs to.
+        assert_eq!(decode(0x0100_1234), Some(0x1234));
     }
 
     #[test]
