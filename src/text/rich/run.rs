@@ -224,6 +224,12 @@ pub(crate) struct Derived {
     pub(crate) bounds: LayoutBounds,
     /// Per-block background / border instructions, outer-first.
     pub(crate) paints: Vec<BlockPaint>,
+    /// Run-local y of the visible top — the first line's ascender
+    /// top, pulled up to any block paint that reaches higher.
+    pub(crate) ink_top: f32,
+    /// Run-local y of the visible bottom — the last line's descender
+    /// bottom, pushed down to any block paint that reaches lower.
+    pub(crate) ink_bottom: f32,
 }
 
 // ─── RichTextRun ────────────────────────────────────────────────────────────
@@ -346,6 +352,98 @@ impl RichTextRun {
         self.with_derived(|d| d.bounds)
     }
 
+    /// Offset from the run's top edge to the baseline of the first
+    /// line, in pixels. Counterpart to
+    /// [`crate::text::TextRun::baseline_offset`].
+    pub fn baseline_offset(&self) -> f64 {
+        self.with_derived(|d| d.bounds.first_baseline as f64)
+    }
+
+    /// Offset from the run's top edge to the visible top — the first
+    /// line's ascender top, or the top of a block background / border
+    /// when one reaches higher. Counterpart to
+    /// [`crate::text::TextRun::first_line_ascender_offset`]: the
+    /// empty band the box reserves above whatever actually paints.
+    pub fn ink_top_offset(&self) -> f64 {
+        self.with_derived(|d| d.ink_top as f64)
+    }
+
+    /// Height of the run's visible band — ascender top of the first
+    /// line to descender bottom of the last, widened to any block
+    /// paint that spills past either. Leading appears only *between*
+    /// lines, so a slot sized off this hugs what the run draws rather
+    /// than the line box around it.
+    pub fn inked_height(&self) -> f64 {
+        self.with_derived(|d| (d.ink_bottom - d.ink_top).max(0.0) as f64)
+    }
+
+    /// Cap-height of the run's first glyph run, in pixels — distance
+    /// from the baseline to the top of capital letters. Falls back to
+    /// `x_height`, then `0.7 × ascent`, the same ladder
+    /// [`crate::text::TextRun::cap_height`] walks. Chrome labels
+    /// centre on this band; spans that resolve to a different font or
+    /// size don't move it, so a label reads against its tick the way
+    /// the surrounding plain labels do.
+    pub fn cap_height(&self) -> f64 {
+        let blocks = self.blocks.borrow();
+        let Some(line) = blocks.first().and_then(|bl| bl.layout.lines().next()) else {
+            return 0.0;
+        };
+        let ascent_fallback = line.metrics().ascent as f64;
+        for item in line.items() {
+            if let parley::PositionedLayoutItem::GlyphRun(gr) = item {
+                let m = gr.run().metrics();
+                if let Some(h) = m.cap_height.or(m.x_height) {
+                    return h as f64;
+                }
+            }
+        }
+        ascent_fallback * 0.7
+    }
+
+    /// Visible top and bottom in run-local y. Glyph extents come from
+    /// the ascender / descender band rather than the line box, so a
+    /// single-line run matches what the plain shaper reports; block
+    /// paints then widen the band so a backgrounded block isn't
+    /// measured tighter than it draws.
+    fn compute_ink_band(&self, paints: &[BlockPaint]) -> (f32, f32) {
+        let blocks = self.blocks.borrow();
+        let mut top = f32::INFINITY;
+        let mut bottom = f32::NEG_INFINITY;
+        for bl in blocks.iter() {
+            if let Some(line) = bl.layout.lines().next() {
+                let m = line.metrics();
+                top = top.min(bl.y_px + m.baseline - m.ascent);
+            }
+            // A hanging indent splits the block in two, and the
+            // continuation layout is where its later lines live.
+            let last = match &bl.continuation_layout {
+                Some(cont) => cont.lines().last().map(|l| {
+                    let m = l.metrics();
+                    bl.y_px + bl.first_line_height_px + m.baseline + m.descent
+                }),
+                None => bl.layout.lines().last().map(|l| {
+                    let m = l.metrics();
+                    bl.y_px + m.baseline + m.descent
+                }),
+            };
+            if let Some(y) = last {
+                bottom = bottom.max(y);
+            }
+        }
+        for p in paints {
+            top = top.min(p.outer_rect.y0 as f32);
+            bottom = bottom.max(p.outer_rect.y1 as f32);
+        }
+        if !top.is_finite() {
+            top = 0.0;
+        }
+        if !bottom.is_finite() {
+            bottom = 0.0;
+        }
+        (top, bottom.max(top))
+    }
+
     /// Run `f` against the values derived from the current break,
     /// computing them first if the blocks have moved since last time.
     pub(crate) fn with_derived<T>(&self, f: impl FnOnce(&Derived) -> T) -> T {
@@ -355,9 +453,13 @@ impl RichTextRun {
                 return f(d);
             }
         }
+        let paints = compute_block_paints(self);
+        let (ink_top, ink_bottom) = self.compute_ink_band(&paints);
         let derived = Derived {
             bounds: self.compute_layout_bounds(),
-            paints: compute_block_paints(self),
+            paints,
+            ink_top,
+            ink_bottom,
         };
         let out = f(&derived);
         *self.derived.borrow_mut() = Some(derived);
@@ -444,6 +546,14 @@ impl Measure for RichTextRun {
     }
 
     fn height_at(&self, width: f64, _dpi: f64) -> f64 {
-        self.set_max_width(width as f32, HAlign::Start) as f64
+        // Re-break at the requested width, then report the *inked*
+        // band rather than the stacked line box, matching
+        // [`crate::text::TextRun`]'s measure. A chrome slot sized off
+        // the box would reserve the half-leading above the first line
+        // and below the last — room the run never paints into — and a
+        // markdown slot would come out taller than the same string
+        // shaped plain.
+        let _ = self.set_max_width(width as f32, HAlign::Start);
+        self.inked_height()
     }
 }

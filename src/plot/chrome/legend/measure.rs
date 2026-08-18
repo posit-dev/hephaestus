@@ -12,13 +12,12 @@
 
 use crate::layout::{Measure, WidthHint};
 use crate::plot::chrome::linear_axis::pt_to_px;
+use crate::plot::chrome::text::ChromeRun;
 use crate::plot::scale::ScaleRegistry;
-use crate::plot::theme::HAlign;
 use crate::scales::breaks::DEFAULT_BREAK_COUNT;
 use crate::scales::chrome::LegendSide;
 use crate::scales::value::Value;
 use crate::shape::ShapeRegistry;
-use crate::text::TextRun;
 
 use super::colorbar::{bin_edges, bin_midpoints};
 use super::layout::{
@@ -110,6 +109,7 @@ impl LegendMeasure {
         shapes: &ShapeRegistry,
         dpi: f64,
         lt: &crate::plot::theme::LegendTheme,
+        theme: &crate::plot::theme::Theme,
         geom: &crate::plot::theme::GeomTheme,
         legend_gap_px: f64,
         locale: &crate::scales::Locale,
@@ -118,12 +118,22 @@ impl LegendMeasure {
         // Label + title styles come from the LegendTheme so measure
         // and draw size identical glyph runs. `Blank` short-circuits
         // to `None` — the corresponding cell reserves zero space
-        // because the renderer won't draw it.
-        let (title_el, label_el) = legend_text_elements(lt);
-        let label_style =
-            label_el.map(|el| crate::plot::chrome::text::text_style_from(&el, root_pt));
-        let title_style =
-            title_el.map(|el| crate::plot::chrome::text::text_style_from(&el, root_pt));
+        // because the renderer won't draw it. The markdown context
+        // resolves here too: a slot that parses its text has to be
+        // measured through the same pipeline that paints it.
+        let (title_el, label_el) = legend_text_elements(lt, &theme.text);
+        let label_rich = label_el
+            .as_ref()
+            .and_then(|el| crate::plot::chrome::text::rich_chrome_for(el, theme, dpi));
+        let title_rich = title_el
+            .as_ref()
+            .and_then(|el| crate::plot::chrome::text::rich_chrome_for(el, theme, dpi));
+        let label_style = label_el
+            .as_ref()
+            .map(|el| crate::plot::chrome::text::text_style_from(el, root_pt));
+        let title_style = title_el
+            .as_ref()
+            .map(|el| crate::plot::chrome::text::text_style_from(el, root_pt));
         let domain = registry.get(&legend.domain_scale);
         let breaks = domain
             .map(|s| s.breaks(DEFAULT_BREAK_COUNT))
@@ -142,13 +152,13 @@ impl LegendMeasure {
                 continue;
             };
             let label = domain.map(|s| s.format(v, locale)).unwrap_or_default();
-            let run = TextRun::new(&label, label_style, dpi);
-            let h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
+            let run = ChromeRun::shape(&label, label_style, dpi, label_rich.as_ref());
+            let h = run.line_box_height();
             // Labels render unwrapped, so the slot needs the full
             // single-line width — `width_hint` returns the
             // longest-unbreakable-cluster bound (one word), which
             // undershoots multi-word labels and clips them at draw.
-            let w = run.natural_width();
+            let w = run.width();
             max_label_w = max_label_w.max(w);
             max_label_h = max_label_h.max(h);
         }
@@ -175,7 +185,8 @@ impl LegendMeasure {
                         let (mut row_w, mut row_h) = (0.0_f64, 0.0_f64);
                         for key in &stack.keys {
                             let resolved = resolve_key(key, registry, v);
-                            let (w, h) = swatch_dim_for(key.kind, &resolved, dpi, geom, shapes);
+                            let (w, h) =
+                                swatch_dim_for(key.kind, &resolved, dpi, geom, shapes, theme);
                             row_w = row_w.max(w);
                             row_h = row_h.max(h);
                         }
@@ -205,7 +216,7 @@ impl LegendMeasure {
                     let (mut row_w, mut row_h) = (0.0_f64, 0.0_f64);
                     for key in &stack.keys {
                         let resolved = resolve_key(key, registry, v);
-                        let (w, h) = swatch_dim_for(key.kind, &resolved, dpi, geom, shapes);
+                        let (w, h) = swatch_dim_for(key.kind, &resolved, dpi, geom, shapes, theme);
                         row_w = row_w.max(w);
                         row_h = row_h.max(h);
                     }
@@ -221,9 +232,10 @@ impl LegendMeasure {
                         Some(style) => {
                             let label_text =
                                 domain.map(|s| s.format(v, locale)).unwrap_or_default();
-                            let run = TextRun::new(&label_text, style, dpi);
-                            let nat_h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
-                            let nat_w = run.natural_width();
+                            let run =
+                                ChromeRun::shape(&label_text, style, dpi, label_rich.as_ref());
+                            let nat_h = run.line_box_height();
+                            let nat_w = run.width();
                             LabelMeasure {
                                 natural_w_px: nat_w,
                                 natural_h_px: nat_h,
@@ -256,12 +268,12 @@ impl LegendMeasure {
 
         let (title_w_px, title_h_px) = match (&legend.title, title_style.as_ref()) {
             (Some(text), Some(style)) if !text.is_empty() => {
-                let run = TextRun::new(text, style, dpi);
-                let h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
-                // Titles render unwrapped — `natural_width` is the
+                let run = ChromeRun::shape(text, style, dpi, title_rich.as_ref());
+                let h = run.line_box_height();
+                // Titles render unwrapped — the natural width is the
                 // actual draw width; `width_hint` would undershoot
                 // for multi-word titles like "Category (hero)".
-                let w = run.natural_width();
+                let w = run.width();
                 (w, h)
             }
             _ => (0.0, 0.0),
@@ -682,6 +694,7 @@ mod tests {
             &shape_reg(),
             dpi_96(),
             theme.legend_for(legend.theme_variant.as_deref()),
+            theme,
             &theme.geom,
             0.0,
             &theme.locale,
@@ -734,6 +747,7 @@ mod tests {
             &shape_reg(),
             dpi_96(),
             theme.legend_for(None),
+            &theme,
             &theme.geom,
             0.0,
             &theme.locale,

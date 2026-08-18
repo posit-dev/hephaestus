@@ -288,6 +288,14 @@ impl AxisTheme {
     pub fn resolved(&self) -> ResolvedAxis {
         PerAxis::new(self.clone()).resolve(0, 0)
     }
+
+    /// [`Self::resolved`] with `root_text` as the final parent of both
+    /// text-shaped slots, so a figure-wide font, colour or markdown
+    /// switch reaches a legend's break labels the way it reaches an
+    /// axis's.
+    pub fn resolved_with_root(&self, root_text: Option<&TextElement>) -> ResolvedAxis {
+        PerAxis::new(self.clone()).resolve_with_root(0, 0, root_text)
+    }
 }
 
 /// Bundle of resolved [`AxisTheme`] fields for one (channel, side).

@@ -1,13 +1,13 @@
-//! Demonstrates the `markdown` opt-in on chrome `TextElement`s. A
-//! plot's title, subtitle, caption, and axis titles all render through
-//! [`draw_text_element_in_rect`], so setting
-//! `TextElement::markdown = Some(true)` on any of them routes that
-//! slot through [`draw_rich_text`] against the theme's `rich_text`
-//! sheet.
+//! Demonstrates the `markdown` opt-in on chrome `TextElement`s.
+//!
+//! Setting `markdown = Some(true)` once on the theme's root `text`
+//! element reaches every text slot: the title band, axis titles, the
+//! legend title, and the break labels on both the axis and the legend.
 //!
 //! Renders one plot whose title highlights a variable name in a
-//! hex-colour span, whose subtitle italicises the metric name, and
-//! whose caption emphasises the sample size in bold.
+//! hex-colour span, whose subtitle italicises the metric name, whose
+//! caption emphasises the sample size in bold, and whose legend
+//! labels each carry their own inline styling.
 //!
 //! Writes `examples/rich_text_chrome.png`.
 
@@ -16,25 +16,22 @@ use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{Composition, Patch, Span};
 use hephaestus::geometry::Size;
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
-use hephaestus::plot::theme::{Element, TextElement, Theme};
+use hephaestus::plot::chrome::legend::{Legend, LegendKeySpec};
+use hephaestus::plot::theme::Theme;
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom};
+use hephaestus::scales::value::Value;
+use std::sync::Arc;
+
 use hephaestus::scales::chrome::AxisSide;
 use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
-/// A theme where every text slot opts into markdown shaping.
+/// A theme where every text slot opts into markdown shaping. One
+/// field on the root element — the cascade carries it to the title
+/// band, the axis titles and labels, and the legend.
 fn markdown_chrome_theme() -> Theme {
-    fn md(slot: &Element<TextElement>) -> Element<TextElement> {
-        let mut el = slot.as_set().cloned().unwrap_or_default();
-        el.markdown = Some(true);
-        Element::Set(el)
-    }
     let mut theme = Theme::default();
-    theme.plot_title = md(&theme.plot_title);
-    theme.plot_subtitle = md(&theme.plot_subtitle);
-    theme.plot_caption = md(&theme.plot_caption);
-    // Axis titles cascade through `axis.all.title`.
-    theme.axis.all.title = md(&theme.axis.all.title);
+    theme.text.markdown = Some(true);
     theme
 }
 
@@ -52,9 +49,22 @@ fn main() {
         .map(|x| 2.5 + 1.2 * (x * 0.7).sin() + 0.4 * (x * 2.1).cos())
         .collect();
 
+    // Break labels are data-derived, so a category that spells
+    // markdown gets parsed like any other string.
+    let bands: [&'static str; 3] = ["*low*", "**mid**", "{.red high}"];
+    let groups: Vec<&'static str> = ys
+        .iter()
+        .map(|y| match *y {
+            v if v < 2.0 => bands[0],
+            v if v < 3.0 => bands[1],
+            _ => bands[2],
+        })
+        .collect();
+
     let mut plot = Plot::new(&comp(), "p")
         .bind("x", "x")
         .bind("y", "y")
+        .bind("fill", "band")
         .title("Trend of **{#c14b4b price}** across the day")
         .subtitle("Metric: *closing_bid* — sampled hourly")
         .caption("n = **60**, source: {.gray internal}");
@@ -62,9 +72,14 @@ fn main() {
         PointGeom::builder()
             .set("x", xs)
             .set("y", ys)
-            .set("fill", rgb8(88, 106, 195))
+            .set("fill", groups)
             .set("size", 8.0_f64)
             .build(),
+    );
+    plot.add_legend(
+        Legend::new("band")
+            .title("**band** of the *close*")
+            .key(LegendKeySpec::point().scaled("fill", "band")),
     );
     plot.add_axis(
         Axis::rail("x", AxisPlacement::Cartesian(AxisSide::Bottom))
@@ -78,6 +93,14 @@ fn main() {
         .theme(markdown_chrome_theme())
         .add_scale("x", scale::continuous(0.0..=10.0))
         .add_scale("y", scale::continuous(0.0..=5.0))
+        .add_scale(
+            "band",
+            scale::discrete(bands.iter().map(|b| Value::String(Arc::from(*b)))).range_colors([
+                rgb8(88, 106, 195),
+                rgb8(214, 146, 60),
+                rgb8(193, 75, 75),
+            ]),
+        )
         .with_plot(plot);
 
     let mut renderer = VelloRenderer::new().expect("vello renderer init");
@@ -93,6 +116,6 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/rich_text_chrome.png");
-    hephaestus::png::write_png(&path, w, h, &pixels).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels).expect("write png");
     println!("wrote {}", path.display());
 }

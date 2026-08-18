@@ -1278,3 +1278,89 @@ fn a_background_with_no_padding_still_blocks_margin_collapse() {
         "a background must stop the collapse ({collapsed} → {separated})"
     );
 }
+
+// ─── Ink-band metrics ───────────────────────────────────────────────
+
+/// A plain string has to measure the same through both shapers, or a
+/// chrome slot that opts into markdown silently reserves a different
+/// box than the same slot without it.
+#[test]
+fn a_plain_string_measures_the_same_through_both_shapers() {
+    // No sheet surgery: the built-in sheet leaves `base` empty, so
+    // the line height on the style the caller passes is the one both
+    // shapers use.
+    let style = base_style().line_height(crate::text::LineHeight::Relative(1.2));
+    let sheet = RichTextStyleSheet::new();
+    let plain = crate::text::TextRun::new("Hello World", &style, 96.0);
+    let rich = RichTextRun::new(
+        "Hello World",
+        &style,
+        Color::from_rgba8(0, 0, 0, 255),
+        &sheet,
+        &palette(),
+        96.0,
+    );
+    let (p, r) = (
+        plain.height_at(f64::INFINITY, 96.0),
+        rich.height_at(f64::INFINITY, 96.0),
+    );
+    assert!(
+        (p - r).abs() < 0.51,
+        "measured heights should agree within half a pixel (plain {p}, rich {r})"
+    );
+    let (pc, rc) = (plain.cap_height(), rich.cap_height());
+    assert!(
+        (pc - rc).abs() < 0.01,
+        "cap heights should agree (plain {pc}, rich {rc})"
+    );
+    let (pi, ri) = (plain.first_line_ascender_offset(), rich.ink_top_offset());
+    assert!(
+        (pi - ri).abs() < 0.51,
+        "ink top offsets should agree (plain {pi}, rich {ri})"
+    );
+}
+
+/// A block that paints a background reaches past its glyphs, so the
+/// measured band has to grow with it — otherwise the slot clips the
+/// box it reserved room for.
+#[test]
+fn a_block_background_widens_the_ink_band() {
+    let mut sheet = RichTextStyleSheet::new();
+    sheet.set(
+        "boxed",
+        StyleDelta {
+            background: Some(crate::style_vocab::ThemeColor::Accent),
+            padding: Some(RichMargin::new(pt(12.0), pt(0.0), pt(12.0), pt(0.0))),
+            ..StyleDelta::empty()
+        },
+    );
+    let make_with = |src: &str| {
+        RichTextRun::new(
+            src,
+            &base_style(),
+            Color::from_rgba8(0, 0, 0, 255),
+            &sheet,
+            &palette(),
+            96.0,
+        )
+    };
+    let bare = make_with("a").inked_height();
+    let boxed = make_with(":::boxed\na\n:::").inked_height();
+    assert!(
+        boxed > bare + 20.0,
+        "the padded background has to count toward the band ({bare} → {boxed})"
+    );
+}
+
+/// The band tracks the current break: wrapping a run onto more lines
+/// makes it taller, and the measure follows.
+#[test]
+fn the_ink_band_follows_the_current_break() {
+    let run = make("one two three four five six seven eight");
+    let wide = run.height_at(1000.0, 96.0);
+    let narrow = run.height_at(60.0, 96.0);
+    assert!(
+        narrow > wide,
+        "a narrower break must measure taller ({wide} → {narrow})"
+    );
+}

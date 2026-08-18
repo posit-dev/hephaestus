@@ -1,3 +1,4 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //! `hephaestus` — backend-agnostic 2D scene renderer for data visualization.
 //!
 //! The public API is the [`scene::SceneBuilder`] trait (what plot
@@ -15,6 +16,8 @@ pub mod brush;
 pub mod color;
 pub mod composition;
 pub mod geometry;
+#[cfg(any(feature = "png", feature = "jpeg", feature = "tiff", feature = "webp"))]
+pub mod image;
 pub mod layout;
 pub mod linetype;
 pub mod mesh;

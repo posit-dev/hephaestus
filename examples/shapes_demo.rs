@@ -187,6 +187,6 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/shapes_demo.png");
-    hephaestus::png::write_png(&path, W, H, &pixels).expect("write png");
+    hephaestus::image::write_png(&path, W, H, &pixels).expect("write png");
     println!("wrote {}", path.display());
 }

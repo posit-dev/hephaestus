@@ -26,6 +26,7 @@ cargo clippy --all-features --all-targets -- -D warnings # treat warnings as err
 cargo fmt                                                # rustfmt; always run before declaring a task done
 
 cargo run --example hello                                # renders examples/hello.png — visual sanity check
+cargo run --example image_formats --features jpeg,tiff,webp  # all four raster writers
 cargo run --example window --features window             # live window: resize + hover picking
 ```
 
@@ -56,7 +57,8 @@ Style rules (apply everywhere, including comments in `tests/` and `examples/`):
 ## Cargo features
 
 - **`vello`** (default) — the GPU rasterising backend (wgpu + vello + pollster + futures-intrusive + bytemuck).
-- **`png`** (default) — PNG writer (`png` crate). Used by examples and tests.
+- **`png`** (default) — PNG writer (`png` crate).
+- **`jpeg`**, **`tiff`**, **`webp`** (off by default) — the other raster writers, one encoder each (`jpeg-encoder`, `tiff`, `image-webp`). All four writers live in `src/image/` and consume the same RGBA8 buffer a `Renderer` produces, so a format costs only its encoder — unlike `svg` / `pdf`, which need an alternative render path. All pure Rust and wasm-clean.
 - **`google-fonts`** (off by default) — auto-fetch named Google Fonts families on demand. Synchronous network call on cache miss; cache hits are offline.
 - **`window`** (off by default) — live window presentation: an OS window, a wgpu surface, and an event loop with resize and pointer events (`winit`). Requires `vello`. See `src/window/CLAUDE.md`.
 - **`geom-wkt`**, **`geom-wkb`**, **`geom-geojson`** (off by default) — opt-in parsers for `crate::scales::Geometry`. Each gate enables one of `Geometry::from_wkt` / `from_wkb` / `from_geojson`. Hand-rolled and dependency-free, so toggling them only affects what constructors compile, not the dependency tree.
@@ -77,7 +79,7 @@ The `plot/` module is in-scope: it is the high-level layer inside this crate tha
 ## Where to look next
 
 - **`src/CLAUDE.md`** — code architecture: API levels, two-trait split, intersection-of-backends rule, picking model, module map.
-- **Per-module `CLAUDE.md` files** under `src/scene/`, `src/backend/`, `src/backend/vello/`, `src/layout/`, `src/composition/`, `src/primitives/`, `src/plot/`, `src/plot/geom/`, `src/plot/theme/`, `src/scales/`, `src/text/`, `src/text/rich/`, `src/window/`.
+- **Per-module `CLAUDE.md` files** under `src/scene/`, `src/backend/`, `src/backend/vello/`, `src/layout/`, `src/composition/`, `src/primitives/`, `src/plot/`, `src/plot/geom/`, `src/plot/theme/`, `src/scales/`, `src/image/`, `src/text/`, `src/text/rich/`, `src/window/`.
 
 ## Help / feedback
 

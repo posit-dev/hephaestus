@@ -15,6 +15,16 @@ Four stages, each in its own file, each consuming the previous stage's output an
 
 Supporting files: `length.rs` (the measurement vocabulary), `style.rs` (`StyleDelta` / `ResolvedStyle` / `RichTextStyleSheet` / `css_color`), `block.rs` (block paints), `anchor.rs` (`RichAnchor` positioning), `cache.rs` (`RichShapeCache`), `tests.rs` (shape / wrap / draw tests).
 
+## Metrics mirror the plain shaper
+
+`RichTextRun` answers the same questions `TextRun` does, so a caller can anchor either kind of run the same way: `baseline_offset`, `cap_height`, `ink_top_offset` (the rich name for `first_line_ascender_offset`) and `inked_height`.
+
+The band those last two describe is the union of the glyph ink — first line's ascender top to last line's descender bottom, leading only *between* lines — and every block paint box, so a backgrounded or bordered block is measured at the size it draws rather than at its glyphs. For a single unstyled paragraph the union collapses to exactly what `TextRun` reports.
+
+`Measure::height_at` returns that band, not the stacked line box. A slot sized off the box would reserve half-leading above the first line and below the last that the run never paints into, and a markdown slot would come out taller than the same string shaped plain.
+
+`cap_height` reads the first glyph run of the first line, matching `TextRun`'s ladder (`cap_height` → `x_height` → `0.7 × ascent`). Spans that resolve to a different font or size don't move it, so a label centres on its tick the way the plain labels around it do.
+
 ## Layering rule
 
 **Nothing under `src/text/` may import from `src/plot/`.** The text layer is the low-level surface; the plot layer builds on it. Shared styling vocabulary lives at the crate root:
@@ -56,6 +66,10 @@ Marquee arrives at the same place from the other side: it wraps the document in 
 
 Selector names are descriptive rather than marquee's HTML-tag abbreviations (`block_quote`, not `qb`); the *values* match marquee. Colours are `ThemeColor` references so a sheet inverts with the palette.
 
+**`base` is empty.** Marquee's `classic_style()` sets a `1.6` line height on its root because its base style *is* the caller's style. Here the caller passes a `TextStyle` that `ResolvedStyle::from_base` already folds into the cascade, so a value on `base` would be the one field of that style the sheet overrides — and a chrome slot could not reach its own theme's line height without rewriting the sheet. A document that wants marquee's leading asks for it on the style it passes, or sets `base` itself.
+
+This is what lets a plain string measure identically through both shapers, which is the invariant every chrome slot depends on: turning markdown on for a slot must not change the box it reserves.
+
 **A sheet is immutable once installed.** `RichShapeCache` keys on the `Arc` identity of the sheet a run shaped against; mutating a live sheet in place would leave stale entries. Build a new sheet instead.
 
 ## Parsing never fails
@@ -85,7 +99,9 @@ Two layers:
 
 `shape.rs` also keeps parley's `LayoutContext` in a thread-local, reused across blocks. It pairs with the process-global `crate::text::font_context()` mutex, which is taken first and released after the layout is built.
 
-**Chrome slots are not cached across frames.** A chrome run is constructed at natural width and broken later by the solver, so its cache key can't include the width it will end up at — two slots sharing a key would fight over one run's break state. The per-run memo still covers the solver's repeated probing, which is where the cost was.
+**Chrome divides on whether the slot wraps.** A slot the solver re-breaks — the title band, axis titles, strip labels — can't be keyed across frames, because its key would have to include a width it doesn't know at construction and two slots sharing that key would fight over one run's break state. The per-run memo still covers the solver's repeated probing there.
+
+Every *unwrapped* slot is cached: break labels, legend and colorbar titles, polar labels, legend text swatches. They shape at natural width and never re-break, so `RichTextWidth::Natural` is the whole of their width key. `plot::chrome::text` owns that cache and hands out `ChromeRun`s from it; see `src/plot/CLAUDE.md` for why it's thread-local rather than owned by a `Plot`.
 
 ## Known limitations
 
@@ -100,4 +116,5 @@ Two layers:
 - `src/CLAUDE.md` — crate architecture, including `style_vocab` and `linetype`.
 - `src/plot/plot.rs` — `draw_text_element_in_rect` and `measure_for_element` route chrome slots through this module when a `TextElement` opts into markdown.
 - `src/plot/geom/text.rs` — `TextGeom`'s `"markdown"` channel.
+- `src/plot/chrome/text.rs` — `ChromeRun` / `RichChrome`, the unwrapped-chrome path and its cache.
 - `src/plot/theme/CLAUDE.md` — `Theme::rich_text` is the default sheet every markdown-enabled slot resolves through.

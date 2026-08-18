@@ -131,7 +131,7 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/nesting_deep.png");
-    hephaestus::png::write_png(&path, w, h, &pixels).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels).expect("write png");
     println!("wrote {}", path.display());
 
     // Print panel y0s so the user can verify alignment across all 3 nesting levels.

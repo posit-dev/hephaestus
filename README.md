@@ -98,7 +98,10 @@ The renderer produces RGBA8 buffers for file output. The optional `window` featu
 | Feature | Default | What it does |
 |---|---|---|
 | `vello` | ✅ | GPU rasterizer via wgpu. |
-| `png` | ✅ | PNG writer, used by examples and tests. |
+| `png` | ✅ | PNG writer. Lossless, alpha preserved. |
+| `jpeg` | | JPEG writer. Lossy, and the format has no alpha channel, so the buffer is composited onto a background color. |
+| `tiff` | | TIFF writer. Lossless, alpha preserved, choice of compressor. |
+| `webp` | | WebP writer. Lossless, alpha preserved, and smaller than PNG on most plots. |
 | `window` | | Live window presentation: OS window, wgpu surface, event loop with resize and pointer events (`winit`). Requires `vello`. |
 | `google-fonts` | | Fetch named Google Fonts families on demand. Network call on cache miss; cache hits are offline. |
 | `chrono` / `time` / `jiff` | | `From` impls between the temporal newtypes and the matching datetime library. Pick whichever your code already uses. |
@@ -107,9 +110,11 @@ The renderer produces RGBA8 buffers for file output. The optional `window` featu
 
 The core types and traits build with `--no-default-features`, pulling in no wgpu, so downstream crates can target `SceneBuilder` without GPU dependencies.
 
+The four writer features are encoders over the RGBA8 buffer a renderer already produces, so each one costs only its own encoder — all four are pure Rust and build for wasm. They live together in `hephaestus::image`.
+
 ## Examples
 
-Around 60 runnable examples live in `examples/`, each writing a PNG next to itself:
+Around 60 runnable examples live in `examples/`, each writing its output next to itself:
 
 ```sh
 cargo run --example hello         # scene API sanity check
@@ -117,6 +122,8 @@ cargo run --example point         # plot API, shared scales across panels
 cargo run --example polar         # polar projection
 cargo run --example legends       # legend and colorbar variants
 cargo run --example theme_dark    # theming
+
+cargo run --example image_formats --features jpeg,tiff,webp  # all four raster writers
 ```
 
 One example opens a window instead of writing a file:

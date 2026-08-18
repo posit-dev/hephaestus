@@ -23,6 +23,13 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = ["vello", "png"]
 vello = ["dep:vello", "dep:wgpu", "dep:pollster", "dep:futures-intrusive", "dep:bytemuck"]
 png = ["dep:png"]
+# Raster output formats. Each gate adds one encoder over the RGBA8 buffer a
+# `Renderer` already produces, so they cost nothing but the encoder itself —
+# unlike `svg` / `pdf`, which need a whole alternative render path. All three
+# encoders are pure Rust and build for wasm.
+jpeg = ["dep:jpeg-encoder"]
+tiff = ["dep:tiff"]
+webp = ["dep:image-webp"]
 # Auto-fetch named Google Fonts families on demand. Hits the Google Fonts
 # CSS2 API, caches downloaded font files in the platform cache dir, and
 # registers them with the running font context. Synchronous network call
@@ -67,6 +74,11 @@ wgpu = { version = "29", optional = true, default-features = false, features = [
 pollster = { version = "0.4", optional = true }
 futures-intrusive = { version = "0.5", optional = true }
 png = { version = "0.18", optional = true }
+jpeg-encoder = { version = "0.7", optional = true }
+# `default-features = false` drops the fax and jpeg decode paths; we keep only
+# the two compressors the writer offers beyond uncompressed and packbits.
+tiff = { version = "0.11", optional = true, default-features = false, features = ["deflate", "lzw"] }
+image-webp = { version = "0.2", optional = true }
 bytemuck = { version = "1", optional = true }
 # Windowing — feature-gated; pulled in by `window`. 0.30 is the series that
 # uses raw-window-handle 0.6, which is what wgpu 29 resolves to.
@@ -358,6 +370,10 @@ name = "long_labels"
 required-features = ["vello", "png"]
 
 [[example]]
+name = "image_formats"
+required-features = ["vello", "png", "jpeg", "tiff", "webp"]
+
+[[example]]
 name = "window"
 required-features = ["vello", "window"]
 
@@ -411,3 +427,7 @@ name = "module_boundaries"
 
 [[test]]
 name = "composition_public_paths"
+
+[[test]]
+name = "image_writers"
+required-features = ["vello"]

@@ -20,7 +20,7 @@ A `Renderer` owns backend resources (GPU device, pipelines, readback buffer) and
 - **Device sharing for windowing.** GPU backends that implement `WgpuRenderer` expose a `with_device(&wgpu::Device, &wgpu::Queue)` (+ `with_device_and_picking`) constructor so the host can hand in the device backing its presentation surface. Each backend's `new()` continues to spin up its own headless device — that path stays available for file export and tests. The crate re-exports `wgpu` at `hephaestus::wgpu` so callers don't need a separate dependency at a matching version.
 - **One backend per subfolder.** Each backend lives in `src/backend/<name>/` with at minimum `mod.rs` (the `SceneBuilder` and `Renderer` impls) and `convert.rs` (the enum-mapping layer).
 - **`convert.rs` is where the intersection rule is enforced.** Our restricted enums (`FillRule`, `BlendMode`, `Compose`, `Mix`, `Sampling`) map into the backend's wider native enums here. When peniko exposes `Mix::Clip` and we don't, the conversion table is the only place that knows that.
-- **Feature-gated.** Each backend is gated by a cargo feature of the same name (`vello`, future `blend2d`). `vello` and `png` are default-on. `blend2d`, `svg`, `pdf` are stub features (no code behind them yet) so dependent crates can write `features = ["blend2d"]` once available.
+- **Feature-gated.** Each backend is gated by a cargo feature of the same name (`vello`, future `blend2d`). `vello` and `png` are default-on; `jpeg` / `tiff` / `webp` gate the other writers in `src/image/`. `blend2d`, `svg`, `pdf` are stub features (no code behind them yet) so dependent crates can write `features = ["blend2d"]` once available.
 
 ## Adding a new backend
 

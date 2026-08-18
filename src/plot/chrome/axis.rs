@@ -18,11 +18,10 @@ use crate::geometry::{Point, Rect};
 use crate::layout::{Measure, WidthHint};
 use crate::plot::chrome::linear_axis::{draw_linear_axis_at, AxisChromeStyle};
 use crate::plot::scale::Scale;
-use crate::plot::theme::{HAlign, Theme};
+use crate::plot::theme::Theme;
 use crate::scales::breaks::DEFAULT_BREAK_COUNT;
 use crate::scales::value::Value;
 use crate::scene::SceneBuilder;
-use crate::text::TextRun;
 
 use crate::scales::chrome::AxisSide;
 
@@ -173,14 +172,20 @@ impl AxisMeasure {
                 continue;
             }
             let label = scale.format(v, locale);
-            let run = TextRun::new(&label, &chrome_style.text_style, dpi);
-            // Lay out unconstrained to get the natural single-line width.
-            let h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
-            // Tick labels render unwrapped — `natural_width` is the
+            // Shaped through whichever pipeline the draw pass uses,
+            // so the reserved rail matches what lands in it.
+            let run = crate::plot::chrome::text::ChromeRun::shape(
+                &label,
+                &chrome_style.text_style,
+                dpi,
+                chrome_style.rich.as_ref(),
+            );
+            let h = run.line_box_height();
+            // Tick labels render unwrapped — the natural width is the
             // actual draw width. `width_hint` returns the longest-
             // unbreakable-cluster bound (one word), which undershoots
             // multi-word labels and clips them at draw.
-            let w = run.natural_width();
+            let w = run.width();
             max_w = max_w.max(w);
             max_h = max_h.max(h);
         }
@@ -242,7 +247,7 @@ pub fn measure(scale: &Scale, side: AxisSide, dpi: f64, theme: &Theme) -> Box<dy
     let resolved = theme.resolved_axis(ch, side_idx);
     let chrome_style = AxisChromeStyle::from_resolved(
         &resolved,
-        &theme.palette,
+        theme,
         dpi,
         crate::plot::chrome::root_text_pt(theme),
     );
@@ -343,7 +348,7 @@ pub fn draw(
     let resolved = theme.resolved_axis(ch, side_idx);
     let style = AxisChromeStyle::from_resolved(
         &resolved,
-        &theme.palette,
+        theme,
         dpi,
         crate::plot::chrome::root_text_pt(theme),
     );
@@ -404,6 +409,79 @@ mod tests {
         let title_only = Axis::title_only("Depth", AxisPlacement::PolarAngular(PolarRing::Outer));
         assert_eq!(title_only.scale_name(), None);
         assert_eq!(title_only.title_ref(), Some("Depth"));
+    }
+
+    /// A theme whose root text element reads markdown, the way a host
+    /// that wants rich chrome sets it.
+    fn markdown_theme() -> Theme {
+        let mut t = Theme::default();
+        t.text.markdown = Some(true);
+        t
+    }
+
+    /// A discrete x scale whose categories spell markdown.
+    fn italic_labels() -> crate::plot::scale::Scale {
+        scale::discrete([
+            Value::String(std::sync::Arc::from("*a*")),
+            Value::String(std::sync::Arc::from("*b*")),
+        ])
+    }
+
+    fn glyph_count(scene: &RecordingScene) -> usize {
+        scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::DrawGlyphs(run) => Some(run.glyphs.len()),
+                _ => None,
+            })
+            .sum()
+    }
+
+    fn draw_axis(theme: &Theme) -> RecordingScene {
+        let mut scene = RecordingScene::default();
+        draw(
+            &italic_labels(),
+            &mut scene,
+            Rect::new(50.0, 320.0, 450.0, 360.0),
+            panel_400_300(),
+            AxisSide::Bottom,
+            dpi_96(),
+            theme,
+        );
+        scene
+    }
+
+    /// The theme's root `markdown` reaches cartesian tick labels, so
+    /// a category spelling markdown renders as styled text.
+    #[test]
+    fn markdown_reaches_cartesian_tick_labels() {
+        let plain = glyph_count(&draw_axis(&Theme::default()));
+        let md = glyph_count(&draw_axis(&markdown_theme()));
+        assert_eq!(
+            plain - md,
+            4,
+            "two italic labels drop two asterisks each (plain {plain}, markdown {md})"
+        );
+    }
+
+    /// The rail reserves what it draws: a markdown label whose markers
+    /// vanish needs less room than the same string drawn literally.
+    #[test]
+    fn a_markdown_axis_reserves_the_width_it_draws() {
+        let s = italic_labels();
+        let plain = measure(&s, AxisSide::Left, dpi_96(), &Theme::default());
+        let md = measure(&s, AxisSide::Left, dpi_96(), &markdown_theme());
+        let width = |m: &dyn Measure| match m.width_hint(dpi_96()) {
+            WidthHint::Min(w) => w,
+            WidthHint::NeedsHeight { seed } => seed,
+        };
+        assert!(
+            width(md.as_ref()) < width(plain.as_ref()),
+            "markdown labels lose their markers, so the rail narrows ({} → {})",
+            width(plain.as_ref()),
+            width(md.as_ref())
+        );
     }
 
     // ── axis_measure ──

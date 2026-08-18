@@ -16,6 +16,7 @@ use crate::pick::PickId;
 use crate::plot::chrome::linear_axis::{
     draw_axis_label, draw_linear_axis_at, AxisChromeStyle, AxisLabelAt,
 };
+use crate::plot::chrome::text::ChromeRun;
 use crate::plot::projection::PolarProjection;
 use crate::plot::scale::Scale;
 use crate::plot::theme::{HAlign, Theme};
@@ -77,7 +78,7 @@ pub fn draw_radius_axis(
     let resolved = theme.resolved_axis(1, 0);
     let style = AxisChromeStyle::from_resolved(
         &resolved,
-        &theme.palette,
+        theme,
         dpi,
         crate::plot::chrome::root_text_pt(theme),
     );
@@ -103,10 +104,8 @@ pub fn draw_radius_axis(
                 majors
                     .iter()
                     .fold((0.0_f64, 0.0_f64), |(mw, mh), (_, label)| {
-                        let run = TextRun::new(label, &label_style, dpi);
-                        let h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
-                        let w = run.natural_width();
-                        (mw.max(w), mh.max(h))
+                        let run = ChromeRun::shape(label, &label_style, dpi, style.rich.as_ref());
+                        (mw.max(run.width()), mh.max(run.line_box_height()))
                     });
             // Projecting the label's bbox onto the tick direction picks
             // whichever axis the label is offset along. Equivalent to the
@@ -177,7 +176,7 @@ pub fn draw_angular_axis(
     let resolved = theme.resolved_axis(0, side_idx);
     let chrome_style = AxisChromeStyle::from_resolved(
         &resolved,
-        &theme.palette,
+        theme,
         dpi,
         crate::plot::chrome::root_text_pt(theme),
     );
@@ -261,6 +260,7 @@ pub fn draw_angular_axis(
             &style,
             &chrome_style.text_brush,
             chrome_style.text_outline.as_ref(),
+            chrome_style.rich.as_ref(),
             AxisLabelAt {
                 anchor,
                 direction: (rx, ry),
@@ -279,10 +279,8 @@ pub fn draw_angular_axis(
                 .filter(|v| !matches!(v, Value::Null))
                 .fold((0.0_f64, 0.0_f64), |(mw, mh), v| {
                     let label = scale.format(v, &theme.locale);
-                    let run = TextRun::new(&label, &style, dpi);
-                    let h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
-                    let w = run.natural_width();
-                    (mw.max(w), mh.max(h))
+                    let run = ChromeRun::shape(&label, &style, dpi, chrome_style.rich.as_ref());
+                    (mw.max(run.width()), mh.max(run.line_box_height()))
                 });
             let label_max = max_label_w.max(max_label_h);
             // Outer ring titles sit further out past the label rail;
@@ -411,9 +409,9 @@ pub(crate) fn compute_polar_bleed(axes: &[BleedAxis], dpi: f64, theme: &Theme) -
     // channel 0 / side 0; radius labels live on channel 1 / side 0.
     let root_pt = crate::plot::chrome::root_text_pt(theme);
     let angular_style =
-        AxisChromeStyle::from_resolved(&theme.resolved_axis(0, 0), &theme.palette, dpi, root_pt);
+        AxisChromeStyle::from_resolved(&theme.resolved_axis(0, 0), theme, dpi, root_pt);
     let radial_style =
-        AxisChromeStyle::from_resolved(&theme.resolved_axis(1, 0), &theme.palette, dpi, root_pt);
+        AxisChromeStyle::from_resolved(&theme.resolved_axis(1, 0), theme, dpi, root_pt);
     let title_style_for = |kind: &BleedLabelKind| match kind {
         BleedLabelKind::Radius => &radial_style,
         _ => &angular_style,
@@ -446,12 +444,17 @@ pub(crate) fn compute_polar_bleed(axes: &[BleedAxis], dpi: f64, theme: &Theme) -
     for axis in axes {
         for label in &axis.labels {
             let label_style = title_style_for(&label.kind);
-            let run = TextRun::new(&label.text, &label_style.text_style, dpi);
-            let h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
+            let run = ChromeRun::shape(
+                &label.text,
+                &label_style.text_style,
+                dpi,
+                label_style.rich.as_ref(),
+            );
+            let h = run.line_box_height();
             // Polar tick labels draw on one line — the bleed has to
             // reserve their full width, not the longest-unbreakable-
             // cluster bound `width_hint` reports.
-            let w = run.natural_width();
+            let w = run.width();
             let anchor_offset = match label.kind {
                 BleedLabelKind::OuterAngular | BleedLabelKind::Radius => {
                     label_style.tick_length_px + label_style.gap_px
