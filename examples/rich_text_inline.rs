@@ -121,6 +121,6 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/rich_text_inline.png");
-    hephaestus::png::write_png(&path, w, h, &pixels).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels).expect("write png");
     println!("wrote {}", path.display());
 }

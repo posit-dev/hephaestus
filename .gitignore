@@ -1,5 +1,8 @@
 /target
 examples/*.png
+examples/*.jpg
+examples/*.tiff
+examples/*.webp
 tests/*.png
 .claude/
 PLAN.md

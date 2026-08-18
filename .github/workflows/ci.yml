@@ -51,6 +51,15 @@ jobs:
       - name: cargo build --no-default-features
         run: cargo build --no-default-features
 
+      # Each raster writer must stand on its own: they share a module, so one
+      # leaning on another's gated code would still pass every combination
+      # above. The `--all-features` runs never build a feature in isolation.
+      - name: cargo check, one writer feature at a time
+        run: |
+          for feature in png jpeg tiff webp; do
+            cargo check --no-default-features --features "$feature"
+          done
+
       - name: cargo test --all-features
         run: cargo test --all-features
 
@@ -113,3 +122,10 @@ jobs:
 
       - name: cargo check --target wasm32-unknown-unknown
         run: cargo check --target wasm32-unknown-unknown
+
+      # The raster encoders are pure Rust and expected to build for wasm; the
+      # default-feature check above would not notice one that isn't. Named
+      # explicitly rather than `--all-features` because `google-fonts` pulls
+      # `ureq`, which has no wasm target.
+      - name: cargo check --target wasm32-unknown-unknown --features jpeg,tiff,webp
+        run: cargo check --target wasm32-unknown-unknown --features jpeg,tiff,webp
