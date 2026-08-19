@@ -257,6 +257,13 @@ fn a_reloaded_composition_emits_the_same_draw_calls_at_sizes_the_writer_never_sa
             want.len()
         );
         for (i, (a, b)) in want.iter().zip(&got).enumerate() {
+            // `Op: PartialEq` compares fonts by the face they name, not by
+            // which blob handed it over — font resolution loads one file
+            // more than once, and CI caught exactly that. The same is not
+            // true of `Op::DrawImage`: `peniko::ImageData` is foreign and
+            // compares its blob by identity, so a plot that draws images
+            // would need that handled before this comparison means
+            // anything. Nothing in `build` draws one.
             assert!(
                 a == b,
                 "at {w}x{h} draw call {i} differs:\n  original: {a:?}\n  reloaded: {b:?}"
