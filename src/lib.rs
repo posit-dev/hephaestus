@@ -34,6 +34,9 @@ pub mod style_vocab;
 #[cfg(feature = "png")]
 pub mod png;
 
+#[cfg(feature = "window")]
+pub mod window;
+
 pub mod text;
 
 // Curated re-exports: the types a caller touches writing a

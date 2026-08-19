@@ -55,7 +55,9 @@ Every drawing primitive on `SceneBuilder` (`fill`, `stroke`, `draw_image`, `draw
 - `PickId::Block` — record with id 0. Occludes whatever is beneath in the hitmap but is itself reported as "no hit". Use for opaque panels that should block picks without being interactive.
 - `PickId::Id(n)` — record with the given id. `n` is a 24-bit caller-managed value (typically a row / item index). Ids above `0xFF_FFFF` are truncated; `Id(0)` is treated identically to `Block`.
 
-Encoding lives in `pick.rs` (authoritative): ids pack into the RGB channels of an `Rgba8Unorm` pick texture with alpha forced to 255, which round-trips cleanly through default SrcOver compositing without per-draw blend-mode plumbing.
+Encoding lives in `pick.rs` (authoritative): ids pack into the RGB channels of an `Rgba8Unorm` pick texture with alpha forced to 255, which round-trips cleanly through default SrcOver compositing without per-draw blend-mode plumbing. `decode` tests alpha before the payload: an uncovered pixel comes back alpha 0 with arbitrary colour channels, and reading those as an id reports phantom hits on empty space (low byte values decode to low ids, so the phantoms cluster on whichever item was numbered first). Partial coverage over *empty space* is fine — the rasteriser unpremultiplies, so a mark's antialiased fringe still carries its exact id.
+
+**v1 limitation: conflated ids where picked content overlaps.** Vello cannot disable antialiasing, so a mark's edge pixels are a coverage blend. Where that edge falls on other picked content — overlapping marks, or a mark over a `PickId::Block` fill — the blend mixes two ids into a third plausible one at full alpha, indistinguishable from a real hit. Keeping chrome on `PickId::Skip` (the default, and what `plot/` does) avoids it by leaving marks compositing over nothing. Documented on `crate::pick`.
 
 **v1 limitation: alpha-insensitive picking.** Picking ignores display alpha. A semi-transparent layer or image fully occludes picks of content beneath it, even though that content remains visible in the rasterised image. Documented on `crate::pick` and `VelloRenderer::pick_at`.
 
@@ -82,6 +84,7 @@ Folders (each with its own CLAUDE.md):
 - `plot/` — high-level plot API: `Plot`, `PlotComposition` orchestrator, key-based diff for identity-preserving animation. Geoms in `plot/geom/`; axis / legend rendering in `plot/chrome/`. Scales and values themselves live in [`crate::scales`] (see below).
 - `scales/` — leaf module: `Value`, `DataColumn`, `Scale`, scale types, transforms, break / tick algorithms. Backend-agnostic and plot-agnostic; nothing inside imports from `src/plot/`, `src/scene/`, etc. Intended to be lifted into its own crate once the API settles. Hephaestus's own `Scale` bundle, `ScaleRegistry` and the ggplot-style constructors live in `plot/scale/` (which also re-exports `crate::scales::*`, so `hephaestus::plot::scale::*` reaches both); `plot/value.rs` is a pure re-export shim over `crate::scales::value`.
 - `image/` — raster writers (PNG / JPEG / TIFF / WebP), one cargo feature per format.
+- `window/` — live window presentation behind the `window` feature: the `WindowApp` trait, the winit event loop, and the surface blit that puts a rendered frame on screen. Depends on `backend/` (it is a host for `WgpuRenderer`) and on nothing above it.
 - `text/` — parley-backed text shaping and layout. A host crate may swap in its own shaper behind the `TextRun` / `draw_text` surface, but the parley path is the committed default. `text/rich/` layers marquee-flavoured markdown on top of it (see `src/text/rich/CLAUDE.md`).
 
 Single-file modules (no CLAUDE.md, one-line descriptions here):

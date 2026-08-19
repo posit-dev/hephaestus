@@ -35,6 +35,11 @@ webp = ["dep:image-webp"]
 # registers them with the running font context. Synchronous network call
 # on cache miss; cache hits are offline.
 google-fonts = ["dep:ureq", "dep:directories"]
+# Live window presentation: opens an OS window, presents rendered frames
+# through a wgpu surface, and drives an event loop with resize and pointer
+# events. Requires `vello` — the window path presents what a `WgpuRenderer`
+# rasterises. winit stays an implementation detail; the event types are ours.
+window = ["vello", "dep:winit"]
 # Optional datetime-library interop: `From` impls between our temporal
 # newtypes (`Date` / `DateTime` / `Time` / `Duration`) and the matching
 # types in the named library. All three default off — pick whichever
@@ -75,6 +80,9 @@ jpeg-encoder = { version = "0.7", optional = true }
 tiff = { version = "0.11", optional = true, default-features = false, features = ["deflate", "lzw"] }
 image-webp = { version = "0.2", optional = true }
 bytemuck = { version = "1", optional = true }
+# Windowing — feature-gated; pulled in by `window`. 0.30 is the series that
+# uses raw-window-handle 0.6, which is what wgpu 29 resolves to.
+winit = { version = "0.30", optional = true }
 parley = "0.9"
 # CommonMark parser for rich text. `default-features = false` drops the
 # optional HTML-rendering helpers we don't use.
@@ -365,12 +373,20 @@ required-features = ["vello", "png"]
 name = "image_formats"
 required-features = ["vello", "png", "jpeg", "tiff", "webp"]
 
+[[example]]
+name = "window"
+required-features = ["vello", "window"]
+
 [[test]]
 name = "smoke"
 required-features = ["vello"]
 
 [[test]]
 name = "texture_smoke"
+required-features = ["vello"]
+
+[[test]]
+name = "window_blit"
 required-features = ["vello"]
 
 [[test]]
