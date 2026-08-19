@@ -17,6 +17,7 @@
 //! Interning is what keeps the document proportional to the distinct
 //! values rather than the row count.
 
+#[cfg(feature = "document-write")]
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -39,6 +40,15 @@ pub(crate) struct WriteTables {
     /// reason, paired with the name the document refers to them by.
     sheet_index: HashMap<*const RichTextStyleSheet, u32>,
     sheets: Vec<Arc<RichTextStyleSheet>>,
+    /// Distinct strings, keyed by **content** rather than pointer.
+    ///
+    /// `Arc<str>` carries no identity semantics — nothing compares one
+    /// by pointer — so content keying is both correct and strictly
+    /// better here: it folds together equal strings that arrived in
+    /// separate allocations, which is the common case for a grouping
+    /// column built from a `Vec<String>`.
+    string_index: HashMap<Arc<str>, u32>,
+    strings: Vec<Arc<str>>,
 }
 
 #[cfg(feature = "document-write")]
@@ -72,9 +82,25 @@ impl WriteTables {
         &self.geometries
     }
 
+    /// Index for `s`, adding it to the table if it's new.
+    pub(crate) fn string(&mut self, s: &Arc<str>) -> u32 {
+        if let Some(&i) = self.string_index.get(s) {
+            return i;
+        }
+        let i = self.strings.len() as u32;
+        self.strings.push(s.clone());
+        self.string_index.insert(s.clone(), i);
+        i
+    }
+
     /// The interned style sheets, in index order.
     pub(crate) fn sheets(&self) -> &[Arc<RichTextStyleSheet>] {
         &self.sheets
+    }
+
+    /// The interned strings, in index order.
+    pub(crate) fn strings(&self) -> &[Arc<str>] {
+        &self.strings
     }
 }
 
@@ -87,6 +113,7 @@ impl WriteTables {
 pub(crate) struct ReadTables {
     geometries: Vec<Arc<Geometry>>,
     sheets: Vec<Arc<RichTextStyleSheet>>,
+    strings: Vec<Arc<str>>,
 }
 
 #[cfg(feature = "document-read")]
@@ -111,5 +138,16 @@ impl ReadTables {
     /// referenced past the end of its own table.
     pub(crate) fn sheet(&self, index: u32) -> Option<Arc<RichTextStyleSheet>> {
         self.sheets.get(index as usize).cloned()
+    }
+
+    /// Install the string table read from its chunk.
+    pub(crate) fn set_strings(&mut self, ss: Vec<Arc<str>>) {
+        self.strings = ss;
+    }
+
+    /// The string at `index`, or `None` when the document referenced
+    /// past the end of its own table.
+    pub(crate) fn string(&self, index: u32) -> Option<Arc<str>> {
+        self.strings.get(index as usize).cloned()
     }
 }

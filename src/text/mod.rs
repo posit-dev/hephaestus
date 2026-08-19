@@ -91,6 +91,77 @@ pub fn register_font_bytes(bytes: impl Into<Vec<u8>>) -> usize {
     registered.iter().map(|(_, fonts)| fonts.len()).sum()
 }
 
+/// The font files backing `family`, as `(bytes, first face index)`
+/// pairs — one entry per distinct **file**, not per face.
+///
+/// Empty when the family isn't known to the font context. Several faces
+/// of a family usually live in one file: a collection (TTC / OTC) holds
+/// them all, and asking per face would hand back the same multi-megabyte
+/// file once each. [`register_font_bytes`] registers every face in a file
+/// regardless, so one entry per file loses nothing.
+///
+/// The counterpart to [`register_font_bytes`]: what this returns can be
+/// registered somewhere else to make the same family resolvable there,
+/// which is how text survives a trip to a context with no fonts of its
+/// own. Note that a system family can be large — macOS's Helvetica is a
+/// 2.4 MB collection — so carrying one is a deliberate trade against
+/// asking the consumer to supply its own.
+pub fn font_faces_for_family(family: &str) -> Vec<(Vec<u8>, u32)> {
+    let mut fcx = font_context().lock().expect("font context poisoned");
+    let FontContext {
+        collection,
+        source_cache,
+        ..
+    } = &mut *fcx;
+    let Some(info) = collection.family_by_name(family) else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::HashSet::new();
+    info.fonts()
+        .iter()
+        .filter(|font| seen.insert(font.source().id()))
+        .filter_map(|font| {
+            let blob = source_cache.get(font.source())?;
+            Some((blob.as_ref().to_vec(), font.index()))
+        })
+        .collect()
+}
+
+/// The concrete family names this machine resolves `kind` to, best
+/// first.
+///
+/// A generic family is an indirection through the font context, so it
+/// means nothing on its own — asking for `SansSerif` where nothing is
+/// registered resolves to nothing at all. Reading the mapping out here
+/// and reinstating it with [`set_generic_family`] is what carries a
+/// generic across to a context that has never seen a system font.
+pub fn generic_family_names(kind: GenericFamilyKind) -> Vec<String> {
+    let generic = shape_common::generic_family_to_parley(kind);
+    let mut fcx = font_context().lock().expect("font context poisoned");
+    let ids: Vec<_> = fcx.collection.generic_families(generic).collect();
+    ids.into_iter()
+        .filter_map(|id| fcx.collection.family_name(id).map(str::to_string))
+        .collect()
+}
+
+/// Point `kind` at `families`, replacing whatever it resolved to.
+///
+/// Names that aren't registered are skipped, so this is only meaningful
+/// after the corresponding [`register_font_bytes`] calls. Process-global,
+/// like every other registration here.
+pub fn set_generic_family(kind: GenericFamilyKind, families: &[String]) {
+    let generic = shape_common::generic_family_to_parley(kind);
+    let mut fcx = font_context().lock().expect("font context poisoned");
+    let ids: Vec<_> = families
+        .iter()
+        .filter_map(|name| fcx.collection.family_id(name))
+        .collect();
+    if !ids.is_empty() {
+        fcx.collection
+            .set_generic_families(generic, ids.into_iter());
+    }
+}
+
 /// Read `path` and register the contained fonts via
 /// [`register_font_bytes`]. Returns the number of faces registered.
 pub fn register_font_path(path: impl AsRef<Path>) -> std::io::Result<usize> {

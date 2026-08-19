@@ -23,6 +23,7 @@ use super::codec::impl_codec;
 use super::codec::{Decode, Reader};
 #[cfg(feature = "document-write")]
 use super::codec::{Encode, Writer};
+#[cfg(feature = "document-read")]
 use super::DocumentError;
 use crate::plot::theme::legend::Direction as LegendDirection;
 use crate::plot::theme::{
@@ -482,7 +483,7 @@ impl_codec! {
 
 #[cfg(all(test, feature = "document-read", feature = "document-write"))]
 mod tests {
-    use super::super::codec::test_support::{assert_roundtrip, roundtrip_interned};
+    use super::super::codec::test_support::{assert_roundtrip, roundtrip};
     use super::*;
     use crate::color::rgba;
     use crate::style_vocab::{HAlign, Length, Margin, VAlign};
@@ -502,7 +503,7 @@ mod tests {
             ("void", Theme::void()),
         ];
         for (name, theme) in themes {
-            let out = roundtrip_interned(&theme);
+            let out = roundtrip(&theme);
             assert_eq!(out, theme, "{name} theme did not survive the round trip");
         }
     }
@@ -515,7 +516,7 @@ mod tests {
     fn two_themes_sharing_a_sheet_still_share_it_after_a_round_trip() {
         let base = Theme::default();
         let pair = vec![base.clone(), base.clone()];
-        let out = roundtrip_interned(&pair);
+        let out = roundtrip(&pair);
         assert!(std::sync::Arc::ptr_eq(&out[0].rich_text, &out[1].rich_text));
     }
 
@@ -544,7 +545,7 @@ mod tests {
         theme.geom.point.shape = std::sync::Arc::from("diamond");
         theme.locale = crate::scales::locale::Locale::DE_DE;
 
-        assert_eq!(roundtrip_interned(&theme), theme);
+        assert_eq!(roundtrip(&theme), theme);
     }
 
     #[test]
@@ -554,15 +555,12 @@ mod tests {
             legend_gap: Some(Length::Rel(2.0)),
             ..ThemePart::default()
         };
-        assert_eq!(roundtrip_interned(&part), part);
+        assert_eq!(roundtrip(&part), part);
     }
 
     #[test]
     fn an_empty_theme_part_round_trips() {
-        assert_eq!(
-            roundtrip_interned(&ThemePart::default()),
-            ThemePart::default()
-        );
+        assert_eq!(roundtrip(&ThemePart::default()), ThemePart::default());
     }
 
     #[test]
@@ -636,7 +634,7 @@ mod tests {
     #[test]
     fn a_field_set_round_trips_its_members() {
         let set = FieldSet::of(&[StyleField::Size, StyleField::Baseline, StyleField::Bullet]);
-        let out = roundtrip_interned(&set);
+        let out = roundtrip(&set);
         assert_eq!(out, set);
         assert!(out.contains(StyleField::Size));
         assert!(out.contains(StyleField::Baseline));
@@ -646,7 +644,7 @@ mod tests {
 
     #[test]
     fn an_empty_field_set_round_trips() {
-        assert!(roundtrip_interned(&FieldSet::NONE).is_empty());
+        assert!(roundtrip(&FieldSet::NONE).is_empty());
     }
 
     /// A `FieldSet` holding every field, to catch a `StyleField` tag
@@ -654,7 +652,7 @@ mod tests {
     #[test]
     fn a_full_field_set_round_trips() {
         let set = FieldSet::of(&StyleField::ALL);
-        let out = roundtrip_interned(&set);
+        let out = roundtrip(&set);
         for f in StyleField::ALL {
             assert!(out.contains(f), "{f:?} was lost");
         }
@@ -724,15 +722,12 @@ mod tests {
             bullet: Some(vec!["•".to_string(), "◦".to_string()]),
             skip_inherit: FieldSet::of(&[StyleField::Size]),
         };
-        assert_eq!(roundtrip_interned(&delta), delta);
+        assert_eq!(roundtrip(&delta), delta);
     }
 
     #[test]
     fn an_empty_style_delta_round_trips() {
-        assert_eq!(
-            roundtrip_interned(&StyleDelta::empty()),
-            StyleDelta::empty()
-        );
+        assert_eq!(roundtrip(&StyleDelta::empty()), StyleDelta::empty());
     }
 
     /// The marquee-parity sheet has an entry for every reserved

@@ -385,6 +385,20 @@ required-features = ["vello", "png", "jpeg", "tiff", "webp"]
 name = "window"
 required-features = ["vello", "window"]
 
+[[example]]
+name = "aa_nondeterminism"
+required-features = ["vello"]
+
+[[example]]
+name = "document_save"
+required-features = ["document-write"]
+
+# Deliberately not `document-write`: a consumer compiles only the half it
+# uses, and this example is the shape a wasm build would take.
+[[example]]
+name = "document_load"
+required-features = ["vello", "document-read", "png"]
+
 [[test]]
 name = "smoke"
 required-features = ["vello"]
@@ -439,3 +453,7 @@ name = "composition_public_paths"
 [[test]]
 name = "image_writers"
 required-features = ["vello"]
+
+[[test]]
+name = "document_roundtrip"
+required-features = ["vello", "document"]

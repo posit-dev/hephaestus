@@ -173,6 +173,34 @@ struct RebuildCtx<'a> {
     shapes: &'a ShapeRegistry,
 }
 
+impl CompositionTemplate {
+    /// Rebuild the composition's *shape* only — every patch present and
+    /// empty, no chrome wired.
+    ///
+    /// Enough to answer `contains_patch_id`, which is what a `Plot` has
+    /// to be checked against before it can be constructed. A plot can't
+    /// be attached until the composition exists, and the composition
+    /// isn't fully wired until the plots are attached, so the bare form
+    /// breaks the cycle.
+    #[cfg(feature = "document-read")]
+    pub(crate) fn bare(&self) -> Composition {
+        let plots = HashMap::new();
+        let chrome = HashMap::new();
+        let registry = ScaleRegistry::new();
+        let theme = Theme::default();
+        let shapes = ShapeRegistry::new();
+        self.rebuild(&RebuildCtx {
+            plots: &plots,
+            registry: &registry,
+            // The bare form is never measured, so any dpi does.
+            dpi: 96.0,
+            theme: &theme,
+            chrome: &chrome,
+            shapes: &shapes,
+        })
+    }
+}
+
 impl ElementTemplate {
     fn capture(e: &Element) -> Self {
         match e {
@@ -649,36 +677,36 @@ pub enum ValidationIssue {
 /// scale registry, and attached plots. See module docs for the
 /// lifecycle.
 pub struct PlotComposition {
-    template: CompositionTemplate,
-    scales: ScaleRegistry,
+    pub(crate) template: CompositionTemplate,
+    pub(crate) scales: ScaleRegistry,
     /// Shared theme applied to every attached plot at render time.
     /// Each plot can override with its own [`ThemePart`]; the
     /// orchestrator merges per plot before drawing.
-    theme: Arc<Theme>,
+    pub(crate) theme: Arc<Theme>,
     /// Plots attached to each patch id, in attach order. Multiple
     /// plots per patch are supported — each draws its own chrome
     /// into the same patch slots, with later plots overlaying
     /// earlier ones (the user controls draw order via attach
     /// order).
-    plots: HashMap<String, Vec<Plot>>,
+    pub(crate) plots: HashMap<String, Vec<Plot>>,
     /// Patch ids in first-attach order. Every render phase walks this
     /// rather than `plots`, so draw order — and therefore z-order where
     /// patches overlap or an unclipped plot spills — is what the caller
     /// set up rather than whatever the hash seed produced this run.
-    plot_order: Vec<String>,
+    pub(crate) plot_order: Vec<String>,
     /// Composition-level chrome by composition id. The root's entry is
     /// keyed on `root_id`; the builder / mutator methods on this type
     /// all target that entry.
-    chrome: HashMap<String, CompositionChrome>,
+    pub(crate) chrome: HashMap<String, CompositionChrome>,
     /// Composition ids in first-use order, for the same reason as
     /// [`Self::plot_order`].
-    chrome_order: Vec<String>,
+    pub(crate) chrome_order: Vec<String>,
     /// Id of the root composition — the caller's [`Composition::id`] if
     /// they set one, otherwise [`ROOT_COMPOSITION_ID`].
-    root_id: String,
+    pub(crate) root_id: String,
     /// Registry backing the glyphs drawn in composition-level legend
     /// keys. Per-plot legends use their own plot's registry.
-    shapes: ShapeRegistry,
+    pub(crate) shapes: ShapeRegistry,
     /// Per-plot dirty bits, plumbed for partial-repaint heuristics. Not
     /// currently consumed — every render re-draws the full table.
     plot_dirty: HashMap<String, bool>,
@@ -717,6 +745,49 @@ impl PlotComposition {
             shapes: ShapeRegistry::with_builtins(),
             plot_dirty: HashMap::new(),
             scale_dirty: HashMap::new(),
+            layout_dirty: true,
+            last_layout: None,
+            last_size: None,
+            last_dpi: None,
+        }
+    }
+
+    /// Assemble a composition from parts that have already been
+    /// validated — plots checked against the template's patch ids,
+    /// scales and theme fully built.
+    ///
+    /// Every derived field starts empty and `layout_dirty` starts set,
+    /// so the first render solves from scratch rather than trusting a
+    /// cached layout that was never computed here.
+    #[cfg(feature = "document-read")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_document(
+        template: CompositionTemplate,
+        root_id: String,
+        scales: ScaleRegistry,
+        theme: Arc<Theme>,
+        plots: HashMap<String, Vec<Plot>>,
+        plot_order: Vec<String>,
+        chrome: HashMap<String, CompositionChrome>,
+        chrome_order: Vec<String>,
+    ) -> Self {
+        // Seeded to match what `attach_plot` / `insert_scale` would
+        // have left behind, so a rebuilt composition is in the same
+        // state as one assembled call by call.
+        let plot_dirty = plot_order.iter().map(|id| (id.clone(), true)).collect();
+        let scale_dirty = scales.names().map(|n| (n.to_string(), true)).collect();
+        Self {
+            template,
+            scales,
+            theme,
+            plots,
+            plot_order,
+            chrome,
+            chrome_order,
+            root_id,
+            shapes: ShapeRegistry::with_builtins(),
+            plot_dirty,
+            scale_dirty,
             layout_dirty: true,
             last_layout: None,
             last_size: None,

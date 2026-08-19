@@ -16,6 +16,7 @@ use super::codec::impl_codec;
 use super::codec::{Decode, Reader};
 #[cfg(feature = "document-write")]
 use super::codec::{Encode, Writer};
+#[cfg(feature = "document-read")]
 use super::DocumentError;
 use crate::color::{Color, ColorSpace};
 use crate::geometry::{Point, Rect, Size, Vec2};
@@ -230,6 +231,33 @@ impl_codec! {
     }
 }
 
+// ─── Shared strings ──────────────────────────────────────────────────────────
+
+// `Arc<str>` is interned by content. Unlike `String`, which is written
+// inline because titles and labels are mostly distinct, an `Arc<str>`
+// tends to arrive in a repeating column — a grouping key, a marker name
+// per row — where one entry plus a varint per use beats one copy per
+// use. Interning also hands every use one allocation back, restoring
+// the sharing the source column had.
+#[cfg(feature = "document-write")]
+impl Encode for Arc<str> {
+    fn encode(&self, w: &mut Writer) {
+        let index = w.tables().string(self);
+        w.varint(u64::from(index));
+    }
+}
+
+#[cfg(feature = "document-read")]
+impl Decode for Arc<str> {
+    fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
+        let index = u32::decode(r)?;
+        r.tables().string(index).ok_or(DocumentError::Invalid {
+            what: "string reference",
+            why: format!("index {index} is past the end of the string table"),
+        })
+    }
+}
+
 // ─── Shared geometry ─────────────────────────────────────────────────────────
 
 // There is deliberately no blanket `impl Encode for Arc<T>`. Whether a
@@ -261,7 +289,7 @@ impl Decode for Arc<Geometry> {
 
 #[cfg(all(test, feature = "document-read", feature = "document-write"))]
 mod tests {
-    use super::super::codec::test_support::{assert_roundtrip, roundtrip, roundtrip_interned};
+    use super::super::codec::test_support::{assert_roundtrip, roundtrip};
     use super::*;
     use crate::color::rgba;
 
@@ -450,7 +478,7 @@ mod tests {
             Value::Geometry(shared.clone()),
             Value::Geometry(shared.clone()),
         ];
-        let out = roundtrip_interned(&pair);
+        let out = roundtrip(&pair);
         assert!(
             out[0].key_eq(&out[1]),
             "interning should give both references one allocation"
@@ -469,7 +497,7 @@ mod tests {
         let a = Arc::new(Geometry::Point((1.0, 2.0)));
         let b = Arc::new(Geometry::Point((1.0, 2.0)));
         let pair = vec![Value::Geometry(a), Value::Geometry(b)];
-        let out = roundtrip_interned(&pair);
+        let out = roundtrip(&pair);
         assert!(!out[0].key_eq(&out[1]));
     }
 
@@ -508,7 +536,7 @@ mod tests {
             DataColumn::Geometry(vec![Arc::new(Geometry::Point((0.0, 0.0)))]),
         ];
         for col in cases {
-            let out = roundtrip_interned(&col);
+            let out = roundtrip(&col);
             assert_eq!(
                 std::mem::discriminant(&out),
                 std::mem::discriminant(&col),

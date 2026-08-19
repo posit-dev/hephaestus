@@ -18,6 +18,7 @@ use super::codec::impl_codec;
 use super::codec::{Decode, Reader};
 #[cfg(feature = "document-write")]
 use super::codec::{Encode, Writer};
+#[cfg(feature = "document-read")]
 use super::DocumentError;
 use crate::plot::scale::{
     BreaksSpec, FormatSpec, MinorBreaksSpec, Scale, ScaleRegistry, ScaleTypeKind,
@@ -127,7 +128,8 @@ impl_codec! {
 /// A hand-built locale is reported by the write-side validation pass
 /// before encoding starts, which is why the encoder below can treat it
 /// as unreachable.
-fn locale_tag(l: &Locale) -> Option<u64> {
+#[cfg(feature = "document-write")]
+pub(crate) fn locale_tag(l: &Locale) -> Option<u64> {
     if *l == Locale::EN_US {
         Some(0)
     } else if *l == Locale::DE_DE {
@@ -256,9 +258,11 @@ impl Decode for Scale {
             None => {}
         }
 
-        // A formatter this reader has no closure for leaves the scale on
-        // its default labels. Refusing the document over cosmetics
-        // would be a worse trade than rendering it with plain ticks.
+        // Two ways to end up on default labels, both deliberate.
+        // `Custom` reaches the wire only from a lossy write, and names
+        // nothing a reader could resolve. A `Named` the reader hasn't
+        // been taught is a gap in its registry — worth rendering plain
+        // ticks for rather than refusing the whole plot over cosmetics.
         if let FormatSpec::Named(name) = &format {
             if let Some(f) = r.ctx().formatter(name) {
                 s.set_named_format(name.clone(), move |v, loc| f(v, loc));
@@ -298,7 +302,7 @@ impl Decode for ScaleRegistry {
 
 #[cfg(all(test, feature = "document-read", feature = "document-write"))]
 mod tests {
-    use super::super::codec::test_support::{assert_roundtrip, roundtrip};
+    use super::super::codec::test_support::{assert_roundtrip, roundtrip, roundtrip_with_context};
     use super::*;
     use crate::color::{rgba, ColorSpace};
     use crate::plot::scale;
@@ -547,14 +551,9 @@ mod tests {
         let s = scale::continuous(0.0..=100.0)
             .with_named_format("pct", |v, _| format!("{}%", v.as_number().unwrap_or(0.0)));
 
-        let mut w = super::Writer::new();
-        s.encode(&mut w);
-        let bytes = w.finish();
-
         let ctx = super::super::ReadContext::new()
             .with_formatter("pct", |v, _| format!("{}%", v.as_number().unwrap_or(0.0)));
-        let mut r = super::Reader::with_context(&bytes, &ctx);
-        let out = Scale::decode(&mut r).expect("a well-formed scale");
+        let out = roundtrip_with_context(&s, &ctx);
 
         assert_eq!(out.format_spec(), FormatSpec::Named("pct".into()));
         assert_eq!(out.format(&Value::Number(50.0), &Locale::EN_US), "50%");

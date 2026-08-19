@@ -363,6 +363,12 @@ impl Plot {
         self.aspect_mode
     }
 
+    /// The `(width / height)` ratio this plot's panel is locked to, or
+    /// `None` when it takes whatever the layout gives it.
+    pub fn aspect_ratio_ref(&self) -> Option<f64> {
+        self.cartesian_aspect_ratio
+    }
+
     /// Override whether geoms are clipped to the projection's
     /// outline (default `true`). Set to `false` to let geoms spill
     /// past the panel boundary.
@@ -633,9 +639,20 @@ impl Plot {
     /// [`GeomId`] for later [`Self::update_geom`] / [`Self::remove_geom`]
     /// calls.
     pub fn add_geom<G: Geom>(&mut self, geom: G) -> GeomId {
+        self.add_boxed_geom(Box::new(geom))
+    }
+
+    /// Append an already-boxed geom to the plot's draw order.
+    ///
+    /// The counterpart to [`Self::remove_geom`], which hands back a
+    /// `Box<dyn Geom>`: this is how one goes back in, whether it was
+    /// taken out of another plot or built from a kind tag rather than a
+    /// concrete type. The returned id is fresh — a geom does not carry
+    /// its previous handle.
+    pub fn add_boxed_geom(&mut self, geom: Box<dyn Geom>) -> GeomId {
         let id = GeomId::new(self.next_geom_id);
         self.next_geom_id = self.next_geom_id.wrapping_add(1);
-        self.geoms.push((id, Box::new(geom)));
+        self.geoms.push((id, geom));
         self.dirty = true;
         id
     }

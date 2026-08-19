@@ -26,9 +26,11 @@
 //! varints, which is where the compaction actually comes from: almost
 //! every count in a plot is under 128 and costs one byte.
 
+#[cfg(feature = "document-read")]
 use super::DocumentError;
 
 /// Largest number of bytes a `u64` LEB128 varint can occupy.
+#[cfg(feature = "document-read")]
 const MAX_VARINT_BYTES: usize = 10;
 
 // ─── Writer ──────────────────────────────────────────────────────────────────
@@ -147,6 +149,12 @@ impl Writer {
     pub(crate) fn u32_fixed(&mut self, v: u32) {
         self.buf.extend_from_slice(&v.to_le_bytes());
     }
+
+    /// Write a `u16` little-endian at a fixed width, as the container's
+    /// version fields are.
+    pub(crate) fn u16_fixed(&mut self, v: u16) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
 }
 
 // ─── Reader ──────────────────────────────────────────────────────────────────
@@ -190,32 +198,23 @@ impl<'a> Reader<'a> {
         self.ctx
     }
 
-    /// Mutable access to the intern tables, for the chunk that fills
-    /// them.
-    pub(crate) fn tables_mut(&mut self) -> &mut super::intern::ReadTables {
-        &mut self.tables
-    }
-
     /// The intern tables, for the sections that index into them.
     pub(crate) fn tables(&self) -> &super::intern::ReadTables {
         &self.tables
     }
 
-    /// Continue reading `body` with this reader's context and tables.
-    ///
-    /// A chunk's body is a self-contained byte range, so it's decoded by
-    /// a reader of its own — but one that still resolves interned
-    /// references and named factories through the document it belongs
-    /// to.
-    pub(crate) fn nested<'b>(&'b self, body: &'b [u8]) -> Reader<'b>
-    where
-        'a: 'b,
-    {
-        Reader {
-            buf: body,
+    /// Start reading `buf` against `ctx` with `tables` already
+    /// installed.
+    pub(crate) fn with_tables(
+        buf: &'a [u8],
+        ctx: &'a super::ReadContext,
+        tables: super::intern::ReadTables,
+    ) -> Self {
+        Self {
+            buf,
             pos: 0,
-            ctx: self.ctx,
-            tables: self.tables.clone(),
+            ctx,
+            tables,
         }
     }
 
@@ -318,6 +317,13 @@ impl<'a> Reader<'a> {
         Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
 
+    /// Read a fixed-width `u16` little-endian, as the container's
+    /// version fields are written.
+    pub(crate) fn u16_fixed(&mut self) -> Result<u16, DocumentError> {
+        let b = self.take(2)?;
+        Ok(u16::from_le_bytes([b[0], b[1]]))
+    }
+
     /// Read length-prefixed raw bytes.
     pub(crate) fn bytes(&mut self) -> Result<&'a [u8], DocumentError> {
         let n = self.count()?;
@@ -355,6 +361,7 @@ pub(crate) trait Decode: Sized {
 /// Lets a macro repetition driven by field *names* emit one
 /// name-independent expression per field — the decode side of a tuple
 /// variant, where the names exist only to count the fields.
+#[cfg(feature = "document-read")]
 macro_rules! replace_expr {
     ($_tt:tt, $sub:expr) => {
         $sub
@@ -375,10 +382,10 @@ macro_rules! impl_codec_scalar {
         impl Decode for $ty {
             fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
                 #[allow(clippy::useless_conversion)]
-                Ok(r.$read()?.try_into().map_err(|_| DocumentError::Invalid {
+                r.$read()?.try_into().map_err(|_| DocumentError::Invalid {
                     what: stringify!($ty),
                     why: "value out of range".to_string(),
-                })?)
+                })
             }
         }
     };
@@ -475,20 +482,6 @@ impl Encode for String {
 impl Decode for String {
     fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
         Ok(r.str()?.to_string())
-    }
-}
-
-#[cfg(feature = "document-write")]
-impl Encode for std::sync::Arc<str> {
-    fn encode(&self, w: &mut Writer) {
-        w.str(self);
-    }
-}
-
-#[cfg(feature = "document-read")]
-impl Decode for std::sync::Arc<str> {
-    fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
-        Ok(std::sync::Arc::from(r.str()?))
     }
 }
 
@@ -865,7 +858,9 @@ macro_rules! impl_codec {
     };
 }
 
-pub(crate) use {impl_codec, replace_expr};
+pub(crate) use impl_codec;
+#[cfg(feature = "document-read")]
+pub(crate) use replace_expr;
 
 // ─── Test support ────────────────────────────────────────────────────────────
 
@@ -880,11 +875,24 @@ pub(crate) mod test_support {
     /// extent — a bug that a value-equality check alone would miss,
     /// because the *next* value in a real document is what would be
     /// misread.
+    ///
+    /// The intern tables the writer filled are carried over to the
+    /// reader, which is what the chunk container does with the table
+    /// chunks. Without them an interned index has nothing to resolve
+    /// against.
     pub(crate) fn roundtrip<T: Encode + Decode>(v: &T) -> T {
         let mut w = Writer::new();
         v.encode(&mut w);
+        let geometries = w.tables().geometries().to_vec();
+        let sheets = w.tables().sheets().to_vec();
+        let strings = w.tables().strings().to_vec();
         let bytes = w.finish();
-        let mut r = Reader::new(&bytes);
+
+        let mut r = Reader::with_tables(
+            &bytes,
+            super::super::read::default_context(),
+            tables(geometries, sheets, strings),
+        );
         let out = T::decode(&mut r).expect("decoding what we just encoded");
         assert!(
             r.is_empty(),
@@ -892,6 +900,38 @@ pub(crate) mod test_support {
             r.remaining(),
             bytes.len()
         );
+        out
+    }
+
+    /// Bundle the three tables a reader resolves references through.
+    fn tables(
+        geometries: Vec<std::sync::Arc<crate::scales::geometry::Geometry>>,
+        sheets: Vec<std::sync::Arc<crate::text::rich::RichTextStyleSheet>>,
+        strings: Vec<std::sync::Arc<str>>,
+    ) -> super::super::intern::ReadTables {
+        let mut t = super::super::intern::ReadTables::default();
+        t.set_geometries(geometries);
+        t.set_sheets(sheets);
+        t.set_strings(strings);
+        t
+    }
+
+    /// [`roundtrip`] against a caller-supplied context, for values whose
+    /// decode resolves a name through it.
+    pub(crate) fn roundtrip_with_context<T: Encode + Decode>(
+        v: &T,
+        ctx: &super::super::ReadContext,
+    ) -> T {
+        let mut w = Writer::new();
+        v.encode(&mut w);
+        let geometries = w.tables().geometries().to_vec();
+        let sheets = w.tables().sheets().to_vec();
+        let strings = w.tables().strings().to_vec();
+        let bytes = w.finish();
+
+        let mut r = Reader::with_tables(&bytes, ctx, tables(geometries, sheets, strings));
+        let out = T::decode(&mut r).expect("decoding what we just encoded");
+        assert!(r.is_empty(), "decode left {} bytes unread", r.remaining());
         out
     }
 
@@ -899,31 +939,6 @@ pub(crate) mod test_support {
     pub(crate) fn assert_roundtrip<T: Encode + Decode + PartialEq + std::fmt::Debug>(v: T) {
         let out = roundtrip(&v);
         assert_eq!(out, v);
-    }
-
-    /// [`roundtrip`] for values that reference the intern tables.
-    ///
-    /// Carries the tables the writer filled over to the reader, which is
-    /// what the chunk container does with the table chunks — a bare
-    /// `roundtrip` has nothing for an interned index to resolve against.
-    pub(crate) fn roundtrip_interned<T: Encode + Decode>(v: &T) -> T {
-        let mut w = Writer::new();
-        v.encode(&mut w);
-        let geometries = w.tables().geometries().to_vec();
-        let sheets = w.tables().sheets().to_vec();
-        let bytes = w.finish();
-
-        let mut r = Reader::new(&bytes);
-        r.tables_mut().set_geometries(geometries);
-        r.tables_mut().set_sheets(sheets);
-        let out = T::decode(&mut r).expect("decoding what we just encoded");
-        assert!(
-            r.is_empty(),
-            "decode left {} of {} bytes unread",
-            r.remaining(),
-            bytes.len()
-        );
-        out
     }
 }
 
