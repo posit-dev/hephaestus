@@ -55,6 +55,14 @@ jiff = ["dep:jiff"]
 geom-wkt = []
 geom-wkb = []
 geom-geojson = []
+# Plot documents: capture a `PlotComposition` to a self-contained binary
+# file and rebuild it elsewhere. Split by direction because a wasm
+# consumer only ever reads — `document-read` halves the codec it
+# compiles and says what the build is. Both are dependency-free and
+# hand-rolled, like the `geom-*` parsers.
+document-read = []
+document-write = []
+document = ["document-read", "document-write"]
 # Placeholders for future backends — wired through cargo but not implemented yet.
 blend2d = []
 svg = []

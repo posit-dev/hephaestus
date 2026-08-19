@@ -15,6 +15,8 @@ pub mod blend;
 pub mod brush;
 pub mod color;
 pub mod composition;
+#[cfg(any(feature = "document-read", feature = "document-write"))]
+pub mod document;
 pub mod geometry;
 #[cfg(any(feature = "png", feature = "jpeg", feature = "tiff", feature = "webp"))]
 pub mod image;

@@ -324,6 +324,10 @@ impl Geom for RibbonGeom {
         self
     }
 
+    fn kind(&self) -> Option<&'static str> {
+        Some("ribbon")
+    }
+
     fn mark_count(&self) -> usize {
         if self.marks.is_empty() && !self.is_empty() {
             return self.build_marks().len();

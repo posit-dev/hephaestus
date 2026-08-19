@@ -371,6 +371,11 @@ impl Plot {
         self
     }
 
+    /// Whether geoms are clipped to the projection's outline.
+    pub fn is_clipped(&self) -> bool {
+        self.clip
+    }
+
     /// Rebuild each geom's key-based enter / update / exit sets on
     /// every draw (default `false`).
     ///
@@ -382,6 +387,11 @@ impl Plot {
     pub fn track_identity(mut self, track: bool) -> Self {
         self.track_identity = track;
         self
+    }
+
+    /// Whether per-geom enter / update / exit diffs are rebuilt each draw.
+    pub fn tracks_identity(&self) -> bool {
+        self.track_identity
     }
 
     /// Read accessor for the bound patch id.
@@ -514,6 +524,21 @@ impl Plot {
         self
     }
 
+    /// The plot title, or `None` when unset.
+    pub fn title_ref(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    /// The plot subtitle, or `None` when unset.
+    pub fn subtitle_ref(&self) -> Option<&str> {
+        self.subtitle.as_deref()
+    }
+
+    /// The plot caption, or `None` when unset.
+    pub fn caption_ref(&self) -> Option<&str> {
+        self.caption.as_deref()
+    }
+
     /// Set the facet-strip label on `side`. Each side has at most one
     /// strip; calling again with the same side replaces the previous
     /// label. Rendered in the matching `StripTop` / `StripRight` /
@@ -554,6 +579,11 @@ impl Plot {
     pub fn shape_registry(mut self, r: ShapeRegistry) -> Self {
         self.shapes = r;
         self
+    }
+
+    /// Borrow the shape registry geoms resolve marker names against.
+    pub fn shape_registry_ref(&self) -> &ShapeRegistry {
+        &self.shapes
     }
 
     // ── Mutators ──
@@ -636,6 +666,15 @@ impl Plot {
     /// draw order.
     pub fn geom_ids(&self) -> impl Iterator<Item = GeomId> + '_ {
         self.geoms.iter().map(|(id, _)| *id)
+    }
+
+    /// Iterate over every geom on this plot with its id, in draw order.
+    ///
+    /// The borrow is enough to inspect a geom's channels and
+    /// [`Geom::kind`]; mutation goes through [`Self::update_geom`],
+    /// which keeps the diff snapshot and per-geom caches consistent.
+    pub fn geoms(&self) -> impl Iterator<Item = (GeomId, &dyn Geom)> + '_ {
+        self.geoms.iter().map(|(id, g)| (*id, g.as_ref()))
     }
 }
 

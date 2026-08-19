@@ -49,23 +49,118 @@ pub use crate::scales::{
 /// supplying a closure, not by switching locale.
 pub type LabelFormatter = dyn Fn(&Value, &Locale) -> String + Send + Sync;
 
+/// Readable description of which formatter a [`Scale`] carries.
+///
+/// A closure can't be inspected, so this is what tells a caller — a
+/// serializer above all — whether a scale's labels can be reproduced
+/// elsewhere. See [`Scale::format_spec`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FormatSpec {
+    /// No override; labels come from the built-in per-variant rules
+    /// ([`Scale::default_format`]).
+    Default,
+    /// A formatter registered under a name, set via
+    /// [`Scale::with_named_format`]. Reproducible anywhere the same
+    /// name resolves to the same closure.
+    Named(Arc<str>),
+    /// An anonymous closure, set via [`Scale::with_format`]. Cannot be
+    /// named, and so cannot be carried outside the process that built
+    /// it.
+    Custom,
+}
+
+/// The formatter a scale carries, paired with whatever identifies it.
+///
+/// One field rather than a closure plus a separate name, so the two
+/// can't disagree.
+enum FormatterSlot {
+    Default,
+    Named(Arc<str>, Arc<LabelFormatter>),
+    Custom(Arc<LabelFormatter>),
+}
+
+impl Clone for FormatterSlot {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Default => Self::Default,
+            Self::Named(n, f) => Self::Named(n.clone(), f.clone()),
+            Self::Custom(f) => Self::Custom(f.clone()),
+        }
+    }
+}
+
+impl FormatterSlot {
+    /// The closure to apply, if this slot holds one.
+    fn formatter(&self) -> Option<&Arc<LabelFormatter>> {
+        match self {
+            Self::Default => None,
+            Self::Named(_, f) | Self::Custom(f) => Some(f),
+        }
+    }
+
+    fn spec(&self) -> FormatSpec {
+        match self {
+            Self::Default => FormatSpec::Default,
+            Self::Named(n, _) => FormatSpec::Named(n.clone()),
+            Self::Custom(_) => FormatSpec::Custom,
+        }
+    }
+}
+
+/// Why a bin-edge list can't describe a bin ladder.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum BinEdgeError {
+    /// A ladder needs at least a lower and an upper edge.
+    #[error("binned scale needs at least two bin edges, got {found}")]
+    TooFew {
+        /// How many edges were supplied.
+        found: usize,
+    },
+
+    /// An infinite or NaN edge has no position on the ladder.
+    #[error("binned scale bin edge at index {index} is not finite: {value}")]
+    NotFinite {
+        /// Index of the offending edge.
+        index: usize,
+        /// The offending value.
+        value: f64,
+    },
+
+    /// Edges must strictly increase, or a row falls in two bins at once.
+    #[error("binned scale bin edges must strictly increase, but edge {index} ({value}) does not exceed edge {previous_index} ({previous})")]
+    NotIncreasing {
+        /// Index of the edge that failed to increase.
+        index: usize,
+        /// The offending value.
+        value: f64,
+        /// Index of the edge before it.
+        previous_index: usize,
+        /// Value of the edge before it.
+        previous: f64,
+    },
+}
+
 /// Reject a bin-edge list that can't describe a bin ladder. Bin lookup
 /// assumes strictly increasing finite edges; a list that violates that
 /// silently misplaces rows, so it's caught where the caller sets it.
-fn validate_bin_edges(edges: &[f64]) {
-    assert!(
-        edges.len() >= 2,
-        "binned scale needs at least two bin edges, got {}",
-        edges.len()
-    );
-    assert!(
-        edges.iter().all(|e| e.is_finite()),
-        "binned scale bin edges must all be finite: {edges:?}"
-    );
-    assert!(
-        edges.windows(2).all(|w| w[0] < w[1]),
-        "binned scale bin edges must be strictly increasing: {edges:?}"
-    );
+fn check_bin_edges(edges: &[f64]) -> Result<(), BinEdgeError> {
+    if edges.len() < 2 {
+        return Err(BinEdgeError::TooFew { found: edges.len() });
+    }
+    if let Some((index, &value)) = edges.iter().enumerate().find(|(_, e)| !e.is_finite()) {
+        return Err(BinEdgeError::NotFinite { index, value });
+    }
+    for (i, w) in edges.windows(2).enumerate() {
+        if w[0] >= w[1] {
+            return Err(BinEdgeError::NotIncreasing {
+                index: i + 1,
+                value: w[1],
+                previous_index: i,
+                previous: w[0],
+            });
+        }
+    }
+    Ok(())
 }
 
 // ─── BreaksSpec ──────────────────────────────────────────────────────────────
@@ -165,9 +260,10 @@ pub struct Scale {
     /// axis and a palette alike. Ignored by
     /// [`ScaleTypeKind::Identity`], which normalises nothing.
     direction: Direction,
-    /// User-supplied tick-label formatter, if any. `None` ⇒ use the
-    /// default per-variant formatter (see [`Scale::default_format`]).
-    formatter: Option<Arc<LabelFormatter>>,
+    /// User-supplied tick-label formatter and its identity, if any.
+    /// [`FormatterSlot::Default`] ⇒ use the default per-variant
+    /// formatter (see [`Scale::default_format`]).
+    formatter: FormatterSlot,
     /// Bumped on every mutation. Keys the break memo below, and is
     /// plumbed for the same job in future per-channel caches.
     generation: u64,
@@ -217,7 +313,7 @@ impl Scale {
             minor_breaks_spec: None,
             color_space: ColorSpace::default(),
             direction: Direction::default(),
-            formatter: None,
+            formatter: FormatterSlot::Default,
             generation: 0,
             breaks_cache: Mutex::new(None),
         }
@@ -284,12 +380,26 @@ impl Scale {
     /// # Panics
     ///
     /// If the edges don't form a bin ladder: fewer than two edges, a
-    /// non-finite edge, or a pair that doesn't strictly increase.
-    pub fn with_bins(mut self, edges: impl IntoIterator<Item = f64>) -> Self {
+    /// non-finite edge, or a pair that doesn't strictly increase. Use
+    /// [`Self::try_with_bins`] for edges that aren't known-good literals.
+    pub fn with_bins(self, edges: impl IntoIterator<Item = f64>) -> Self {
+        match self.try_with_bins(edges) {
+            Ok(scale) => scale,
+            Err(e) => panic!("with_bins: {e}"),
+        }
+    }
+
+    /// [`Self::with_bins`] but hands back the reason instead of
+    /// panicking. The path to use for edges that come from data or from
+    /// a deserialized document rather than from literals.
+    pub fn try_with_bins(
+        mut self,
+        edges: impl IntoIterator<Item = f64>,
+    ) -> Result<Self, BinEdgeError> {
         let edges: Vec<f64> = edges.into_iter().collect();
-        validate_bin_edges(&edges);
+        check_bin_edges(&edges)?;
         self.bins = Some(edges);
-        self
+        Ok(self)
     }
 
     /// Configure a numeric output range (pt for absolute sizes;
@@ -394,11 +504,21 @@ impl Scale {
     /// # Panics
     ///
     /// If the edges don't form a bin ladder: fewer than two edges, a
-    /// non-finite edge, or a pair that doesn't strictly increase.
+    /// non-finite edge, or a pair that doesn't strictly increase. Use
+    /// [`Self::try_set_bins`] for edges that aren't known-good literals.
     pub fn set_bins(&mut self, edges: Vec<f64>) {
-        validate_bin_edges(&edges);
+        if let Err(e) = self.try_set_bins(edges) {
+            panic!("set_bins: {e}");
+        }
+    }
+
+    /// [`Self::set_bins`] but hands back the reason instead of
+    /// panicking. Leaves the existing edges untouched on error.
+    pub fn try_set_bins(&mut self, edges: Vec<f64>) -> Result<(), BinEdgeError> {
+        check_bin_edges(&edges)?;
         self.bins = Some(edges);
         self.bump_generation();
+        Ok(())
     }
 
     /// Replace the numeric output range in place. Bumps the generation
@@ -607,7 +727,7 @@ impl Scale {
     where
         F: Fn(&Value, &Locale) -> String + Send + Sync + 'static,
     {
-        self.formatter = Some(Arc::new(f));
+        self.formatter = FormatterSlot::Custom(Arc::new(f));
         self
     }
 
@@ -617,15 +737,50 @@ impl Scale {
     where
         F: Fn(&Value, &Locale) -> String + Send + Sync + 'static,
     {
-        self.formatter = Some(Arc::new(f));
+        self.formatter = FormatterSlot::Custom(Arc::new(f));
+        self.bump_generation();
+    }
+
+    /// Set a formatter under a name, so callers that only see the
+    /// scale's configuration can still identify it — the closure
+    /// behaves exactly as in [`Self::with_format`].
+    ///
+    /// The name is what makes the formatter reproducible somewhere
+    /// else: a consumer that resolves the same name to an equivalent
+    /// closure renders the same labels. Names are the caller's
+    /// vocabulary; the crate reserves none.
+    pub fn with_named_format<F>(mut self, name: impl Into<Arc<str>>, f: F) -> Self
+    where
+        F: Fn(&Value, &Locale) -> String + Send + Sync + 'static,
+    {
+        self.formatter = FormatterSlot::Named(name.into(), Arc::new(f));
+        self
+    }
+
+    /// Replace the formatter in place with a named one. Bumps the
+    /// generation counter. See [`Self::with_named_format`].
+    pub fn set_named_format<F>(&mut self, name: impl Into<Arc<str>>, f: F)
+    where
+        F: Fn(&Value, &Locale) -> String + Send + Sync + 'static,
+    {
+        self.formatter = FormatterSlot::Named(name.into(), Arc::new(f));
         self.bump_generation();
     }
 
     /// Clear the custom formatter; revert to the default per-variant
     /// rules. Bumps the generation counter.
     pub fn clear_format(&mut self) {
-        self.formatter = None;
+        self.formatter = FormatterSlot::Default;
         self.bump_generation();
+    }
+
+    /// Which formatter this scale carries.
+    ///
+    /// The closure itself is opaque; this reports whether there is one
+    /// and whether it can be named. Bumping the generation is a
+    /// mutation concern, so this is a plain read.
+    pub fn format_spec(&self) -> FormatSpec {
+        self.formatter.spec()
     }
 
     fn bump_generation(&mut self) {
@@ -976,7 +1131,7 @@ impl Scale {
                 return labels[i].clone();
             }
         }
-        if let Some(f) = &self.formatter {
+        if let Some(f) = self.formatter.formatter() {
             return f(v, locale);
         }
         format_value(v, locale)
@@ -1143,10 +1298,7 @@ impl std::fmt::Debug for Scale {
             .field("minor_breaks_spec", &self.minor_breaks_spec)
             .field("color_space", &self.color_space)
             .field("direction", &self.direction)
-            .field(
-                "formatter",
-                &self.formatter.as_ref().map(|_| "<fn>").unwrap_or("none"),
-            )
+            .field("formatter", &self.format_spec())
             .field("generation", &self.generation)
             .finish()
     }
@@ -2809,6 +2961,102 @@ mod tests {
         let s2 = s.clone();
         assert_eq!(s.format(&Value::Number(3.0), &Locale::EN_US), "n=3");
         assert_eq!(s2.format(&Value::Number(3.0), &Locale::EN_US), "n=3");
+    }
+
+    // ── Formatter identity ──
+
+    #[test]
+    fn a_scale_without_a_formatter_reports_the_default_spec() {
+        assert_eq!(identity().format_spec(), FormatSpec::Default);
+    }
+
+    #[test]
+    fn an_anonymous_formatter_reports_custom_and_cannot_be_named() {
+        let s = identity().with_format(|_, _| "X".to_string());
+        assert_eq!(s.format_spec(), FormatSpec::Custom);
+    }
+
+    #[test]
+    fn a_named_formatter_reports_its_name_and_still_applies() {
+        let s = identity().with_named_format("usd", |v, locale| match v {
+            Value::Number(n) => format!("${n:.2}"),
+            other => Scale::default_format(other, locale),
+        });
+        assert_eq!(s.format_spec(), FormatSpec::Named("usd".into()));
+        assert_eq!(s.format(&Value::Number(12.345), &Locale::EN_US), "$12.35");
+    }
+
+    #[test]
+    fn set_named_format_replaces_an_anonymous_one() {
+        let mut s = identity().with_format(|_, _| "X".to_string());
+        s.set_named_format("tag", |_, _| "Y".to_string());
+        assert_eq!(s.format_spec(), FormatSpec::Named("tag".into()));
+        assert_eq!(s.format(&Value::Number(1.0), &Locale::EN_US), "Y");
+    }
+
+    #[test]
+    fn clearing_a_named_formatter_reverts_the_spec_too() {
+        let mut s = identity().with_named_format("tag", |_, _| "Y".to_string());
+        s.clear_format();
+        assert_eq!(s.format_spec(), FormatSpec::Default);
+        assert_eq!(s.format(&Value::Number(1.0), &Locale::EN_US), "1");
+    }
+
+    #[test]
+    fn a_formatter_name_survives_clone() {
+        let s = identity().with_named_format("tag", |_, _| "Y".to_string());
+        assert_eq!(s.clone().format_spec(), FormatSpec::Named("tag".into()));
+    }
+
+    // ── Bin-edge validation ──
+
+    #[test]
+    fn try_with_bins_accepts_a_well_formed_ladder() {
+        let s = Scale::new(ScaleTypeKind::Binned)
+            .try_with_bins([0.0, 1.0, 2.0])
+            .expect("strictly increasing finite edges");
+        assert_eq!(s.bins(), Some(&[0.0, 1.0, 2.0][..]));
+    }
+
+    #[test]
+    fn try_with_bins_rejects_fewer_than_two_edges() {
+        assert_eq!(
+            Scale::new(ScaleTypeKind::Binned).try_with_bins([1.0]).err(),
+            Some(BinEdgeError::TooFew { found: 1 })
+        );
+    }
+
+    #[test]
+    fn try_with_bins_rejects_a_non_finite_edge() {
+        assert_eq!(
+            Scale::new(ScaleTypeKind::Binned)
+                .try_with_bins([0.0, f64::NAN, 2.0])
+                .err()
+                .map(|e| matches!(e, BinEdgeError::NotFinite { index: 1, .. })),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn try_with_bins_rejects_edges_that_do_not_increase() {
+        let err = Scale::new(ScaleTypeKind::Binned)
+            .try_with_bins([0.0, 2.0, 2.0])
+            .expect_err("equal adjacent edges are not strictly increasing");
+        assert!(matches!(
+            err,
+            BinEdgeError::NotIncreasing {
+                index: 2,
+                previous_index: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn try_set_bins_leaves_the_existing_ladder_on_error() {
+        let mut s = Scale::new(ScaleTypeKind::Binned).with_bins([0.0, 1.0]);
+        assert!(s.try_set_bins(vec![5.0]).is_err());
+        assert_eq!(s.bins(), Some(&[0.0, 1.0][..]));
     }
 
     // ── Explicit break overrides ──

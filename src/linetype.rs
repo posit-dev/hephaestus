@@ -98,8 +98,17 @@ pub fn marker(name: impl Into<Arc<str>>) -> LinetypeStep {
 /// a clear message on violation. Empty input → solid.
 pub fn pattern(steps: impl IntoIterator<Item = LinetypeStep>) -> Arc<[LinetypeStep]> {
     let v: Vec<LinetypeStep> = steps.into_iter().collect();
-    validate_alternation(&v);
+    validate_pattern(&v);
     Arc::from(v)
+}
+
+/// [`pattern`] but hands back the reason instead of panicking.
+pub fn try_pattern(
+    steps: impl IntoIterator<Item = LinetypeStep>,
+) -> Result<Arc<[LinetypeStep]>, PatternError> {
+    let v: Vec<LinetypeStep> = steps.into_iter().collect();
+    check_pattern(&v)?;
+    Ok(Arc::from(v))
 }
 
 /// `true` if `pattern` contains no `LinetypeStep::Marker` entries.
@@ -141,43 +150,69 @@ pub fn strip_markers(pattern: &[LinetypeStep], linewidth_pt: f64) -> Arc<[Linety
     Arc::from(mapped)
 }
 
+/// Why a step list isn't a well-formed dash pattern.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PatternError {
+    /// A pattern alternates in pairs, so it can't have an odd length.
+    #[error("linetype pattern must have even length (alternating Dash|Marker / Gap), got {found}")]
+    OddLength {
+        /// How many steps were supplied.
+        found: usize,
+    },
+
+    /// A step landed on the wrong side of the alternation.
+    #[error("linetype pattern entry {index} is {found} but expected {expected} (patterns must alternate Dash|Marker, Gap, Dash|Marker, Gap, …)")]
+    Misaligned {
+        /// Index of the offending step.
+        index: usize,
+        /// The step kind found there.
+        found: &'static str,
+        /// The step kind the position calls for.
+        expected: &'static str,
+    },
+}
+
 /// Validate the alternation invariant: even-indexed entries are `Dash`
 /// or `Marker`; odd-indexed entries are `Gap`; length is even. Panics
 /// with a clear message on violation. Empty input is valid (solid).
 pub fn validate_pattern(pattern: &[LinetypeStep]) {
-    validate_alternation(pattern);
+    if let Err(e) = check_pattern(pattern) {
+        panic!("linetype::pattern: {e}");
+    }
 }
 
-fn validate_alternation(pattern: &[LinetypeStep]) {
+/// [`validate_pattern`] but hands back the reason instead of panicking.
+/// The path to use for patterns that come from data or from a
+/// deserialized document rather than from literals.
+pub fn check_pattern(pattern: &[LinetypeStep]) -> Result<(), PatternError> {
     if pattern.is_empty() {
-        return;
+        return Ok(());
     }
     if !pattern.len().is_multiple_of(2) {
-        panic!(
-            "linetype::pattern: must have even length (alternating Dash|Marker / Gap), got {}",
-            pattern.len()
-        );
+        return Err(PatternError::OddLength {
+            found: pattern.len(),
+        });
     }
-    for (i, step) in pattern.iter().enumerate() {
+    for (index, step) in pattern.iter().enumerate() {
         let is_gap = matches!(step, LinetypeStep::Gap(_));
-        let expected_gap = i % 2 == 1;
+        let expected_gap = index % 2 == 1;
         if is_gap != expected_gap {
-            let kind = match step {
-                LinetypeStep::Dash(_) => "Dash",
-                LinetypeStep::Marker(_) => "Marker",
-                LinetypeStep::Gap(_) => "Gap",
-            };
-            let expected = if expected_gap {
-                "Gap"
-            } else {
-                "Dash or Marker"
-            };
-            panic!(
-                "linetype::pattern: entry {i} is {kind} but expected {expected} \
-                 (patterns must alternate Dash|Marker, Gap, Dash|Marker, Gap, …)"
-            );
+            return Err(PatternError::Misaligned {
+                index,
+                found: match step {
+                    LinetypeStep::Dash(_) => "Dash",
+                    LinetypeStep::Marker(_) => "Marker",
+                    LinetypeStep::Gap(_) => "Gap",
+                },
+                expected: if expected_gap {
+                    "Gap"
+                } else {
+                    "Dash or Marker"
+                },
+            });
         }
     }
+    Ok(())
 }
 
 /// No dashing — a continuous solid line.
@@ -585,6 +620,45 @@ mod tests {
     #[should_panic(expected = "expected Dash or Marker")]
     fn pattern_panics_on_gap_in_dash_slot() {
         let _ = pattern([gap(2.0), gap(1.0)]);
+    }
+
+    #[test]
+    fn try_pattern_accepts_a_well_formed_pattern() {
+        let p = try_pattern([dash(1.0), gap(2.0)]).expect("alternating pair");
+        assert_eq!(p.len(), 2);
+    }
+
+    #[test]
+    fn try_pattern_accepts_the_empty_solid_pattern() {
+        assert!(try_pattern([]).expect("empty is solid").is_empty());
+    }
+
+    #[test]
+    fn try_pattern_reports_an_odd_length_instead_of_panicking() {
+        assert_eq!(
+            try_pattern([dash(1.0), gap(2.0), dash(3.0)]).err(),
+            Some(PatternError::OddLength { found: 3 })
+        );
+    }
+
+    #[test]
+    fn try_pattern_reports_which_slot_is_misaligned() {
+        assert_eq!(
+            try_pattern([dash(1.0), dash(2.0)]).err(),
+            Some(PatternError::Misaligned {
+                index: 1,
+                found: "Dash",
+                expected: "Gap",
+            })
+        );
+        assert_eq!(
+            try_pattern([gap(2.0), gap(1.0)]).err(),
+            Some(PatternError::Misaligned {
+                index: 0,
+                found: "Gap",
+                expected: "Dash or Marker",
+            })
+        );
     }
 
     #[test]

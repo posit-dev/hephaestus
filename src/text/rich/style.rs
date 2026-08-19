@@ -770,6 +770,26 @@ impl RichTextStyleSheet {
     pub fn get(&self, name: &str) -> Option<&StyleDelta> {
         self.entries.get(name)
     }
+
+    /// Iterate over every selector in the sheet with its delta, in
+    /// unspecified order.
+    ///
+    /// The counterpart to [`Self::set`]: enough to copy a sheet
+    /// selector by selector, which is how one is reproduced somewhere
+    /// the original couldn't reach.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &StyleDelta)> + '_ {
+        self.entries.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// How many selectors the sheet carries.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// True when the sheet carries no selectors.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 // ─── CSS colour-name lookup ─────────────────────────────────────────────────
@@ -1263,6 +1283,43 @@ mod tests {
         assert_eq!(css_color("darkslategrey"), css_color("darkslategray"));
         assert_eq!(css_color("rebeccapurple"), Some([102, 51, 153]));
         assert_eq!(css_color("cyan"), css_color("aqua"));
+    }
+
+    #[test]
+    fn iter_visits_every_selector_that_was_set() {
+        let mut sheet = RichTextStyleSheet::empty();
+        sheet.set(
+            "em",
+            StyleDelta {
+                italic: Some(true),
+                ..StyleDelta::empty()
+            },
+        );
+        sheet.set(
+            "strong",
+            StyleDelta {
+                weight: Some(700),
+                ..StyleDelta::empty()
+            },
+        );
+
+        let mut names: Vec<&str> = sheet.iter().map(|(name, _)| name).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["em", "strong"]);
+        assert_eq!(sheet.len(), 2);
+        assert!(!sheet.is_empty());
+    }
+
+    /// Copying a sheet selector by selector reproduces it — the property
+    /// that lets a sheet be rebuilt where the original can't reach.
+    #[test]
+    fn a_sheet_can_be_rebuilt_from_its_iter() {
+        let original = RichTextStyleSheet::new();
+        let mut copy = RichTextStyleSheet::empty();
+        for (name, delta) in original.iter() {
+            copy.set(name, delta.clone());
+        }
+        assert_eq!(copy, original);
     }
 
     #[test]

@@ -61,31 +61,31 @@ const ROOT_COMPOSITION_ID: &str = "__hephaestus_root__";
 /// reserve space but carries nothing the orchestrator could draw, so
 /// preserving it would produce reserved-but-blank chrome bands.
 #[derive(Debug, Clone)]
-struct CompositionTemplate {
+pub(crate) struct CompositionTemplate {
     /// The composition's id. Composition-level chrome rects resolve as
     /// `(id, region)`, so the root is always given one — see
     /// [`ROOT_COMPOSITION_ID`].
-    id: Option<String>,
-    rows: usize,
-    cols: usize,
-    widths: Vec<Track>,
-    heights: Vec<Track>,
-    aspect: Option<(f64, f64)>,
-    margin: Inset,
-    padding: Inset,
-    placements: Vec<PlacementTemplate>,
+    pub(crate) id: Option<String>,
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) widths: Vec<Track>,
+    pub(crate) heights: Vec<Track>,
+    pub(crate) aspect: Option<(f64, f64)>,
+    pub(crate) margin: Inset,
+    pub(crate) padding: Inset,
+    pub(crate) placements: Vec<PlacementTemplate>,
 }
 
 #[derive(Debug, Clone)]
-struct PlacementTemplate {
-    row: u16,
-    col: u16,
-    span: Span,
-    element: ElementTemplate,
+pub(crate) struct PlacementTemplate {
+    pub(crate) row: u16,
+    pub(crate) col: u16,
+    pub(crate) span: Span,
+    pub(crate) element: ElementTemplate,
 }
 
 #[derive(Debug, Clone)]
-enum ElementTemplate {
+pub(crate) enum ElementTemplate {
     /// Named patch (rebuilt as `Patch::new(id)`). Any pre-attached chrome
     /// is ignored.
     NamedPatch(String),
@@ -414,17 +414,17 @@ fn reject_in_panel_legend(
 /// addresses the root through [`ROOT_COMPOSITION_ID`], so the same
 /// wiring path serves the root and any named nested composition.
 #[derive(Default)]
-struct CompositionChrome {
-    title: Option<String>,
-    subtitle: Option<String>,
-    caption: Option<String>,
+pub(crate) struct CompositionChrome {
+    pub(crate) title: Option<String>,
+    pub(crate) subtitle: Option<String>,
+    pub(crate) caption: Option<String>,
     /// Axis titles by side, indexed as by
     /// [`axis_side_index`](crate::plot::plot::axis_side_index).
-    axis_titles: [Option<String>; 4],
+    pub(crate) axis_titles: [Option<String>; 4],
     /// Legends attached to the composition. Same opt-in model as
     /// [`Plot`]: nothing is inferred from the plots' bindings.
-    legends: Vec<crate::plot::chrome::legend::Legend>,
-    next_legend_id: u32,
+    pub(crate) legends: Vec<crate::plot::chrome::legend::Legend>,
+    pub(crate) next_legend_id: u32,
 }
 
 impl CompositionChrome {

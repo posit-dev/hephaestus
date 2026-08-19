@@ -596,10 +596,13 @@ impl<G: BuildableGeom> GeomBuilder<G> {
         Self::default()
     }
 
-    /// Construct from existing parts — used by [`PointGeom::update`] to
-    /// pre-populate the builder with the current state before running
-    /// the user's closure.
-    pub(crate) fn from_parts(keys: Option<DataColumn>, channels: HashMap<String, Channel>) -> Self {
+    /// Construct from existing parts — the inverse of
+    /// [`Self::into_parts`].
+    ///
+    /// Used by each geom's `update` method to pre-populate the builder
+    /// with the current state before running the caller's closure, and
+    /// by anything rebuilding a geom from its captured channels.
+    pub fn from_parts(keys: Option<DataColumn>, channels: HashMap<String, Channel>) -> Self {
         Self {
             keys,
             channels,
@@ -679,6 +682,22 @@ pub trait Geom: 'static {
     /// concrete type.
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 
+    /// Stable wire name identifying the concrete geom type, or `None`
+    /// when the geom cannot be named on the wire.
+    ///
+    /// The tag is what lets a serialized plot reconstruct a
+    /// `Box<dyn Geom>`, whose concrete type the type system otherwise
+    /// carries implicitly. Every geom in this crate returns `Some`;
+    /// the default is `None`, so a geom defined outside the crate opts
+    /// in by overriding this and registering a matching constructor
+    /// with the reader.
+    ///
+    /// Tags name a type, not a version — once shipped, a tag must keep
+    /// meaning the same channels.
+    fn kind(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Channels this geom recognises. Defaults to the catalog-filtered
     /// list built at construction time and cached in [`GeomState`].
     fn declared_channels(&self) -> &[ChannelDecl] {
@@ -734,6 +753,97 @@ mod tests {
         let resolver = DirectScaleResolver::new().with("x", &s);
         assert!(resolver.scale_for("x").is_some());
         assert!(resolver.scale_for("y").is_none());
+    }
+
+    /// Every geom this crate ships is nameable on the wire, and no two
+    /// share a tag — the property a serialized plot relies on to pick
+    /// the right constructor back out.
+    #[test]
+    fn every_builtin_geom_has_a_distinct_kind_tag() {
+        use crate::plot::geom::{
+            BSplineGeom, EllipseGeom, GeometryGeom, LineGeom, PointGeom, PolygonGeom, RectGeom,
+            RibbonBSplineGeom, RibbonGeom, SegmentGeom, TextFitGeom, TextGeom, TextPathGeom,
+            WedgeGeom,
+        };
+        use crate::scales::geometry::Geometry;
+
+        /// Build a geom from the minimum channels its `build_from`
+        /// demands, erased for uniform iteration.
+        macro_rules! built {
+            ($ty:ty $(, $ch:expr => $v:expr)* $(,)?) => {{
+                let mut b = <$ty>::builder();
+                $( b.set($ch, $v); )*
+                Box::new(b.build()) as Box<dyn Geom>
+            }};
+        }
+
+        let xs = || vec![0.0, 1.0];
+        let ys = || vec![0.0, 1.0];
+        let x2s = || vec![1.0, 2.0];
+        let y2s = || vec![1.0, 2.0];
+        let text = || vec!["a", "b"];
+
+        let geoms: Vec<Box<dyn Geom>> = vec![
+            built!(PointGeom, "x" => xs(), "y" => ys()),
+            built!(LineGeom, "x" => xs(), "y" => ys()),
+            built!(BSplineGeom, "x" => xs(), "y" => ys()),
+            built!(SegmentGeom, "x" => xs(), "y" => ys(), "x2" => x2s(), "y2" => y2s()),
+            built!(RectGeom, "x" => xs(), "y" => ys(), "x2" => x2s(), "y2" => y2s()),
+            built!(EllipseGeom, "x" => xs(), "y" => ys(), "x2" => x2s(), "y2" => y2s()),
+            built!(PolygonGeom, "x" => xs(), "y" => ys()),
+            built!(RibbonGeom, "x" => xs(), "y" => ys(), "y2" => y2s()),
+            built!(RibbonBSplineGeom, "x" => xs(), "y" => ys(), "y2" => y2s()),
+            built!(WedgeGeom, "x" => xs(), "y" => ys()),
+            built!(GeometryGeom, "geometry" => vec![
+                Geometry::Point((0.0, 0.0)),
+                Geometry::Point((1.0, 1.0)),
+            ]),
+            built!(TextGeom, "x" => xs(), "y" => ys(), "text" => text()),
+            built!(TextFitGeom, "x" => xs(), "y" => ys(), "x2" => x2s(), "y2" => y2s(), "text" => text()),
+            built!(TextPathGeom, "x" => xs(), "y" => ys(), "text" => text()),
+        ];
+
+        let tags: Vec<&'static str> = geoms
+            .iter()
+            .map(|g| g.kind().expect("every builtin geom names itself"))
+            .collect();
+
+        let mut unique = tags.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            tags.len(),
+            "duplicate geom kind tags in {tags:?}"
+        );
+    }
+
+    /// A geom defined outside this crate is unnameable until it opts in,
+    /// so a serializer can tell it apart from one it knows.
+    #[test]
+    fn a_geom_that_does_not_override_kind_is_unnamed() {
+        use crate::plot::geom::PointGeom;
+
+        // Borrows a builtin's state rather than building one, so the
+        // test says nothing about how state is constructed.
+        struct Foreign(PointGeom);
+        impl Geom for Foreign {
+            fn state(&self) -> &GeomState {
+                self.0.state()
+            }
+            fn state_mut(&mut self) -> &mut GeomState {
+                self.0.state_mut()
+            }
+            fn draw(&self, _scene: &mut dyn SceneBuilder, _ctx: &GeomContext<'_>) {}
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+
+        let mut b = PointGeom::builder();
+        b.set("x", vec![0.0]);
+        b.set("y", vec![0.0]);
+        assert_eq!(Foreign(b.build()).kind(), None);
     }
 
     #[test]
