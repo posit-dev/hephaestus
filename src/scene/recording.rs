@@ -14,7 +14,7 @@ use crate::pick::PickId;
 use crate::stroke::Stroke;
 
 /// One captured draw operation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Op {
     Fill {
         rule: FillRule,
@@ -55,7 +55,7 @@ pub enum Op {
 }
 
 /// Owned counterpart of `GlyphRun<'_>` for storage in `Op::DrawGlyphs`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OwnedGlyphRun {
     pub font: super::Font,
     pub font_size: f32,
@@ -72,7 +72,11 @@ pub struct OwnedGlyphRun {
 }
 
 /// Recording scene: appends every call to an op list.
-#[derive(Debug, Default, Clone)]
+///
+/// Equality is op-for-op, which is what lets two scenes be compared as
+/// *drawing* rather than as pixels — useful when the rasteriser is the
+/// variable you want to hold still.
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct RecordingScene {
     pub ops: Vec<Op>,
 }

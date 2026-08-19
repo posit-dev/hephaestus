@@ -32,7 +32,7 @@ use crate::color::Color;
 use crate::geometry::Point;
 
 /// A 2D triangle list with per-vertex colour.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Mesh {
     /// Vertex positions in path coordinates.
     pub vertices: Vec<Point>,

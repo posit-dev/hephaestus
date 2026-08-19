@@ -2,22 +2,26 @@
 //!
 //! A document doesn't carry pixels or shaped text — it carries a plot's
 //! configuration, and the reader re-solves the layout and re-shapes the
-//! text for whatever size it's rendering at. The way to test that is to
-//! render the original composition and the reloaded one **at sizes the
-//! writer never saw** and require the buffers to match byte for byte.
+//! text for whatever size it's rendering at. So the test renders the
+//! original composition and the reloaded one **at sizes the writer never
+//! saw** and requires them to agree.
 //!
-//! Equal output at a novel size is the property that separates this from
-//! replaying a baked op stream: a stream could only be scaled, and
-//! scaling changes chrome padding, stroke widths and text metrics. If a
-//! field failed to round-trip, the two renders diverge at some size.
+//! Agreeing at a novel size is what separates this from replaying a baked
+//! op stream: a stream could only be scaled, and scaling changes chrome
+//! padding, stroke widths and text metrics. A field that failed to
+//! round-trip makes the two diverge at some size.
 //!
-//! Each size compares a freshly built composition against a freshly
-//! loaded one, and the comparison allows a tiny tolerance. Rasterising
-//! one unchanged scene is currently nondeterministic — see
-//! `examples/aa_nondeterminism.rs`, which reproduces two different images
-//! from the same composition with no document involved — so requiring
-//! bit-exact equality here would fail on a coin flip. The tolerance is
-//! kept far below anything a real round-trip fault could produce.
+//! **Agreement is asserted on draw calls, not pixels.** Rasterising one
+//! unchanged scene is currently nondeterministic — see
+//! `examples/aa_nondeterminism.rs` — and the magnitude depends on the
+//! backend: one pixel via Metal, fifteen subpixels via Mesa's software
+//! rasteriser, always by one unit. A pixel tolerance would therefore be
+//! tuned to whichever machine set it, and would leave a hole a real
+//! regression could hide in. Draw calls are deterministic, and they are
+//! the whole of what a document is responsible for. A separate test
+//! checks that the reloaded composition still rasterises, asserting only
+//! that no channel moves by more than one — the signature of a coverage
+//! flip, and backend-independent.
 
 use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
@@ -31,6 +35,7 @@ use hephaestus::plot::{
 };
 use hephaestus::scales::chrome::AxisSide;
 use hephaestus::scales::value::Value;
+use hephaestus::scene::recording::{Op, RecordingScene};
 use hephaestus::Renderer;
 
 /// One unmistakable colour per panel, so
@@ -202,25 +207,34 @@ fn render(comp: &mut PlotComposition, w: u32, h: u32) -> Vec<u8> {
     buf
 }
 
-/// Subpixel bytes allowed to differ, and by how much.
+/// Record the draw calls `comp` emits at `(w, h)`.
 ///
-/// Zero would be right if rasterising a scene were deterministic. It
-/// isn't: the same composition rendered twice, unchanged, with a fresh
-/// renderer each time, returns one of two images differing by one unit
-/// in a single antialiased pixel — roughly an even split, in debug and
-/// release alike. `examples/aa_nondeterminism.rs` reproduces it with no
-/// document involved, and the recorded op stream is byte-identical
-/// across runs, so the draw calls are deterministic and only the
-/// rasterisation is not.
-///
-/// The bound stays far tighter than any real round-trip fault: a dropped
-/// field moves geometry, a colour, or a whole mark, changing thousands of
-/// bytes or one byte by a lot.
-const MAX_DIFFERING_BYTES: usize = 8;
-const MAX_BYTE_DELTA: u8 = 1;
+/// No GPU involved: `RecordingScene` is a `SceneBuilder` that keeps the
+/// calls instead of rasterising them.
+fn draw_calls(comp: &mut PlotComposition, w: u32, h: u32) -> Vec<Op> {
+    let mut scene = RecordingScene::new();
+    comp.render(&mut scene, Size::new(f64::from(w), f64::from(h)), 96.0);
+    scene.ops
+}
 
+/// The load-bearing test: a reloaded composition must emit **exactly**
+/// the same draw calls, at sizes the writer never saw.
+///
+/// Asserted on draw calls rather than pixels, and exactly rather than
+/// within a tolerance. Rasterising one unchanged scene is currently
+/// nondeterministic — `examples/aa_nondeterminism.rs` gets two different
+/// images from one composition — and the magnitude is
+/// backend-dependent: a single pixel on Metal, fifteen subpixels on
+/// Mesa's software rasteriser. Any pixel tolerance would therefore be
+/// tuned to whichever machine set it, and would be a hole a real
+/// regression could hide in.
+///
+/// Draw calls are deterministic, and they are also the whole of what a
+/// document is responsible for: everything downstream of them is the
+/// backend's business. So this is both the stricter assertion and the
+/// more honest one.
 #[test]
-fn a_reloaded_composition_renders_identically_at_sizes_the_writer_never_saw() {
+fn a_reloaded_composition_emits_the_same_draw_calls_at_sizes_the_writer_never_saw() {
     let source = build();
     let bytes = write_composition(&source, &WriteOptions::new()).expect("a writable plot");
 
@@ -232,33 +246,65 @@ fn a_reloaded_composition_renders_identically_at_sizes_the_writer_never_saw() {
         let mut reloaded =
             read_composition(&bytes, &ReadContext::new()).expect("a readable document");
 
-        let want = render(&mut original, w, h);
-        let got = render(&mut reloaded, w, h);
+        let want = draw_calls(&mut original, w, h);
+        let got = draw_calls(&mut reloaded, w, h);
 
-        let mut differing = 0usize;
-        let mut worst = 0u8;
-        let mut first = None;
-        for (i, (a, b)) in want.iter().zip(&got).enumerate() {
-            if a != b {
-                differing += 1;
-                worst = worst.max(a.abs_diff(*b));
-                if first.is_none() {
-                    first = Some((i / 4, i % 4, *a, *b));
-                }
-            }
-        }
-
-        assert!(
-            differing <= MAX_DIFFERING_BYTES && worst <= MAX_BYTE_DELTA,
-            "reloaded composition diverges at {w}x{h}: {differing} bytes differ, \
-             worst delta {worst}; first at pixel ({}, {}) channel {} ({} vs {})",
-            first.map_or(0, |(p, _, _, _)| p % w as usize),
-            first.map_or(0, |(p, _, _, _)| p / w as usize),
-            first.map_or(0, |(_, c, _, _)| c),
-            first.map_or(0, |(_, _, a, _)| a),
-            first.map_or(0, |(_, _, _, b)| b),
+        assert_eq!(
+            want.len(),
+            got.len(),
+            "at {w}x{h} the reloaded composition emitted {} draw calls, not {}",
+            got.len(),
+            want.len()
         );
+        for (i, (a, b)) in want.iter().zip(&got).enumerate() {
+            assert!(
+                a == b,
+                "at {w}x{h} draw call {i} differs:\n  original: {a:?}\n  reloaded: {b:?}"
+            );
+        }
     }
+}
+
+/// The reloaded composition also rasterises, and to the same image up to
+/// the backend's own nondeterminism.
+///
+/// The invariant is **worst delta ≤ 1**, with no bound on how many
+/// subpixels are affected. That is the signature of an antialiasing
+/// coverage flip, and it holds whatever the backend; a real round-trip
+/// fault moves a mark, a colour or a coordinate, which changes bytes by
+/// far more than one. Counting affected bytes instead would only measure
+/// which rasteriser is running.
+#[test]
+fn a_reloaded_composition_rasterises_to_the_same_image() {
+    let source = build();
+    let bytes = write_composition(&source, &WriteOptions::new()).expect("a writable plot");
+    let (w, h) = (800u32, 600u32);
+
+    let mut original = build();
+    let mut reloaded = read_composition(&bytes, &ReadContext::new()).expect("a readable document");
+    let want = render(&mut original, w, h);
+    let got = render(&mut reloaded, w, h);
+
+    let mut worst = 0u8;
+    let mut at = None;
+    for (i, (a, b)) in want.iter().zip(&got).enumerate() {
+        let d = a.abs_diff(*b);
+        if d > worst {
+            worst = d;
+            at = Some((i / 4, i % 4, *a, *b));
+        }
+    }
+
+    assert!(
+        worst <= 1,
+        "reloaded composition rasterises differently at {w}x{h}: worst delta {worst} \
+         at pixel ({}, {}) channel {} ({} vs {})",
+        at.map_or(0, |(p, _, _, _)| p % w as usize),
+        at.map_or(0, |(p, _, _, _)| p / w as usize),
+        at.map_or(0, |(_, c, _, _)| c),
+        at.map_or(0, |(_, _, a, _)| a),
+        at.map_or(0, |(_, _, _, b)| b),
+    );
 }
 
 /// Writing what was just read must produce the same bytes. A field that
@@ -457,10 +503,10 @@ fn fonts_are_not_embedded_unless_asked_for() {
     );
 }
 
-/// With fonts embedded, the document still reads back and renders the
-/// same. Registration is process-global, so this mainly pins that the
+/// With fonts embedded, the document still reads back to the same draw
+/// calls. Registration is process-global, so this mainly pins that the
 /// extra chunk parses and that reinstating the generic mapping doesn't
-/// change what this machine already resolves.
+/// change which faces this machine resolves.
 #[test]
 fn a_document_with_embedded_fonts_still_round_trips() {
     let source = build();
@@ -470,13 +516,10 @@ fn a_document_with_embedded_fonts_still_round_trips() {
     let (w, h) = (800u32, 600u32);
     let mut original = build();
     let mut reloaded = read_composition(&bytes, &ReadContext::new()).expect("readable");
-    let want = render(&mut original, w, h);
-    let got = render(&mut reloaded, w, h);
-
-    let differing = want.iter().zip(&got).filter(|(a, b)| a != b).count();
-    assert!(
-        differing <= MAX_DIFFERING_BYTES,
-        "{differing} bytes differ with fonts embedded"
+    assert_eq!(
+        draw_calls(&mut original, w, h),
+        draw_calls(&mut reloaded, w, h),
+        "embedding fonts changed the draw calls"
     );
 }
 

@@ -90,7 +90,10 @@ pub trait SceneBuilder {
 // ---------- glyph types ----------
 
 /// Opaque font handle. Wraps `peniko::FontData` (an Arc-backed font blob + index).
-#[derive(Debug, Clone)]
+///
+/// Equality compares the blob and face index, so two handles onto the
+/// same face are equal however they were obtained.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Font(peniko::FontData);
 
 impl Font {
