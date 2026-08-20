@@ -33,6 +33,14 @@ cargo run --example window --features window             # live window: resize +
 cargo run --release --example window --features window -- 100000  # same scene at N points
 ```
 
+The wasm render client is a separate workspace, so it builds on its own:
+
+```sh
+cargo clippy --target wasm32-unknown-unknown --no-default-features \
+  --features vello,canvas,document-read -- -D warnings   # the client's exact config
+cd crates/hephaestus-web && ./build.sh && node verify-dist.mjs   # assemble + check dist/
+```
+
 **Always run `cargo fmt` after completing a coding task.** It's the last step before reporting work done, even when the diff looks cosmetically fine — rustfmt catches subtle layout drift (over-long lines, brace style, import ordering) that otherwise piles up across changes.
 
 ## Comments
@@ -64,6 +72,7 @@ Style rules (apply everywhere, including comments in `tests/` and `examples/`):
 - **`jpeg`**, **`tiff`**, **`webp`** (off by default) — the other raster writers, one encoder each (`jpeg-encoder`, `tiff`, `image-webp`). All four writers live in `src/image/` and consume the same RGBA8 buffer a `Renderer` produces, so a format costs only its encoder — unlike `svg` / `pdf`, which need an alternative render path. All pure Rust and wasm-clean.
 - **`google-fonts`** (off by default) — auto-fetch named Google Fonts families on demand. Synchronous network call on cache miss; cache hits are offline.
 - **`window`** (off by default) — live window presentation: an OS window, a wgpu surface, and an event loop with resize and pointer events (`winit`). Requires `vello`. See `src/window/CLAUDE.md`.
+- **`canvas`** (off by default) — presentation onto a `<canvas>` already on a page, for a wasm build embedded in a website. Shares the `WindowApp` / `Frame` / `Event` surface and the blit path with `window`, but the page owns the event loop and feeds resize and pointer events in. Requires `vello`; pulls no winit. Only `wasm32` compiles the host, since `wgpu::SurfaceTarget::Canvas` exists nowhere else. The client built on it is `crates/hephaestus-web`.
 - **`geom-wkt`**, **`geom-wkb`**, **`geom-geojson`** (off by default) — opt-in parsers for `crate::scales::Geometry`. Each gate enables one of `Geometry::from_wkt` / `from_wkb` / `from_geojson`. Hand-rolled and dependency-free, so toggling them only affects what constructors compile, not the dependency tree.
 - **`document-read`**, **`document-write`**, **`document`** (off by default) — plot documents: capture a `PlotComposition` to a self-contained binary file and rebuild it elsewhere, so a wasm build on a website re-solves the layout at whatever size it has rather than scaling a frozen image. Hand-rolled and dependency-free, like the `geom-*` parsers. Split by direction because a consumer only ever reads; `document` enables both. See `src/document/CLAUDE.md`. Adding no dependency of their own, they are also the one useful configuration with no renderer at all: `--no-default-features --features document-write` builds a writer that compiles on rustc 1.86, which `vello` rules out.
 - **`blend2d`**, **`svg`**, **`pdf`** — feature placeholders only; no backend code behind them yet. Wired so dependent crates can write `features = ["blend2d"]` once they exist.
@@ -84,6 +93,7 @@ The `plot/` module is in-scope: it is the high-level layer inside this crate tha
 
 - **`src/CLAUDE.md`** — code architecture: API levels, two-trait split, intersection-of-backends rule, picking model, module map.
 - **Per-module `CLAUDE.md` files** under `src/scene/`, `src/backend/`, `src/backend/vello/`, `src/layout/`, `src/composition/`, `src/document/`, `src/primitives/`, `src/plot/`, `src/plot/geom/`, `src/plot/theme/`, `src/scales/`, `src/image/`, `src/text/`, `src/text/rich/`, `src/window/`.
+- **`crates/hephaestus-web/CLAUDE.md`** — the wasm render client: the Rust/JS split, why WebGPU is required, and why fonts are the thing that surprises people.
 
 ## Help / feedback
 

@@ -26,7 +26,9 @@
 use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{beside, stack, Patch};
-use hephaestus::document::{read_composition, write_composition, ReadContext, WriteOptions};
+use hephaestus::document::{
+    read_composition, read_hints, write_composition, ReadContext, WriteOptions,
+};
 use hephaestus::geometry::Size;
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::theme::Theme;
@@ -543,4 +545,57 @@ fn an_unknown_chunk_is_skipped_rather_than_rejected() {
     read_composition(&bytes, &ReadContext::new())
         .map(|_| ())
         .expect("an unknown trailing chunk should be ignored");
+}
+
+/// The head's hints are advisory, but a consumer that has to pick a size
+/// before it lays anything out needs them, so they have to survive the
+/// trip rather than being written and dropped.
+#[test]
+fn the_render_hints_a_writer_records_come_back() {
+    let comp = build();
+    let opts = WriteOptions::new()
+        .background(rgb8(12, 34, 56))
+        .size_hint(640.0, 480.0)
+        .dpi_hint(144.0);
+    let bytes = write_composition(&comp, &opts).expect("writable");
+
+    let hints = read_hints(&bytes).expect("readable head");
+    assert_eq!(hints.background, Some(rgb8(12, 34, 56)));
+    assert_eq!(hints.size, Some((640.0, 480.0)));
+    assert_eq!(hints.dpi, Some(144.0));
+}
+
+/// Hints are optional, and a writer that sets none is the common case —
+/// `WriteOptions::new()` records nothing.
+#[test]
+fn a_document_written_without_hints_reports_none_of_them() {
+    let comp = build();
+    let bytes = write_composition(&comp, &WriteOptions::new()).expect("writable");
+
+    let hints = read_hints(&bytes).expect("readable head");
+    assert_eq!(hints.background, None);
+    assert_eq!(hints.size, None);
+    assert_eq!(hints.dpi, None);
+}
+
+/// Reading the hints must not depend on anything after the head, so that
+/// it stays cheap enough to call before deciding on a size.
+#[test]
+fn hints_read_from_the_head_alone_without_the_chunks_behind_it() {
+    let comp = build();
+    let opts = WriteOptions::new().size_hint(300.0, 200.0);
+    let full = write_composition(&comp, &opts).expect("writable");
+
+    // Truncating to the head plus its own body leaves a document that
+    // `read_composition` must reject and `read_hints` must still answer.
+    let head_end =
+        12 + 4 + 4 + u32::from_le_bytes(full[16..20].try_into().expect("length field")) as usize;
+    let truncated = &full[..head_end];
+
+    let hints = read_hints(truncated).expect("head-only document");
+    assert_eq!(hints.size, Some((300.0, 200.0)));
+    assert!(
+        read_composition(truncated, &ReadContext::new()).is_err(),
+        "a head-only document has no composition to rebuild"
+    );
 }

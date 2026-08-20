@@ -4,6 +4,7 @@
 //! `ApplicationHandler` impl, and the translation from winit's events to
 //! [`Event`]. The rest of [`crate::window`] is backend-agnostic.
 
+use std::cell::Cell;
 use std::sync::Arc;
 
 use winit::application::ApplicationHandler;
@@ -147,15 +148,19 @@ impl<A: WindowApp> Driver<A> {
         };
         let (width, height) = state.surface.size();
         let mut exit = false;
+        let redraw = Cell::new(false);
         let mut ctx = EventCtx {
             renderer: &state.renderer,
-            window: &state.window,
+            redraw: &redraw,
             cursor: self.cursor,
             size: Size::new(width as f64, height as f64),
             dpi: state.dpi,
             exit: &mut exit,
         };
         self.app.event(&mut ctx, event);
+        if redraw.get() {
+            state.window.request_redraw();
+        }
         if exit {
             event_loop.exit();
         }

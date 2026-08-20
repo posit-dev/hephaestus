@@ -34,17 +34,26 @@
 //! [`WindowConfig::continuous_redraw`] and gets a frame as fast as the present
 //! mode allows.
 
-// The window is built and driven from `run`, which is desktop-only until the
-// web entry point lands. The surface and the event-loop driver still compile
-// for wasm — proving the dependency set builds for the target is the point of
-// keeping them in — so on wasm they have no caller.
+// `run` and its winit driver are desktop-only; the browser is served by
+// `CanvasHost` instead. The surface and the driver still compile for wasm —
+// proving the dependency set builds for the target is the point of keeping
+// them in — so on wasm under `window` alone they have no caller.
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
+#[cfg(feature = "window")]
 mod app;
+// `wgpu::SurfaceTarget::Canvas` exists only on wasm's web targets, so the
+// host compiles there and the feature is inert anywhere else.
+#[cfg(all(feature = "canvas", target_arch = "wasm32"))]
+mod canvas;
 mod event;
 mod surface;
 
+#[cfg(all(feature = "canvas", target_arch = "wasm32"))]
+pub use canvas::CanvasHost;
 pub use event::{Event, MouseButton};
+
+use std::cell::Cell;
 
 use crate::backend::vello::{VelloRenderer, VelloScene};
 use crate::color::Color;
@@ -196,7 +205,10 @@ impl Frame<'_> {
 /// What an event handler can inspect and ask for.
 pub struct EventCtx<'a> {
     renderer: &'a VelloRenderer,
-    window: &'a winit::window::Window,
+    // A flag rather than a direct call into the windowing backend: it keeps
+    // winit out of everything but `app.rs`, and lets the canvas host share
+    // this type. The host acts on it once the handler returns.
+    redraw: &'a Cell<bool>,
     cursor: Option<Point>,
     size: Size,
     dpi: f64,
@@ -219,8 +231,10 @@ impl EventCtx<'_> {
     }
 
     /// Ask for another frame to be drawn.
+    ///
+    /// The frame is scheduled once the event handler returns, not during it.
     pub fn request_redraw(&self) {
-        self.window.request_redraw();
+        self.redraw.set(true);
     }
 
     /// Close the window and end the event loop.
@@ -277,7 +291,7 @@ pub enum WindowError {
 /// platform event loops require it, and [`Plot`](crate::plot::Plot) and
 /// [`PlotComposition`](crate::plot::PlotComposition) are single-threaded by
 /// design anyway.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "window", not(target_arch = "wasm32")))]
 pub fn run<A: WindowApp>(config: WindowConfig, app: A) -> Result<(), WindowError> {
     app::run(config, app)
 }

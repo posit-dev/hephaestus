@@ -26,9 +26,13 @@ pub type GeomFactory = fn(Option<DataColumn>, HashMap<String, Channel>) -> Box<d
 
 /// Registries a document is read against.
 ///
-/// [`Self::default`] knows every geom and no named formatters, which is
+/// [`Self::new`] knows every geom and no named formatters, which is
 /// right for a plot that uses only this crate's geoms and no
 /// [`Scale::with_named_format`](crate::plot::Scale::with_named_format).
+/// [`Self::default`] registers nothing, so a document read against it
+/// fails with [`DocumentError::UnknownGeom`](super::DocumentError::UnknownGeom)
+/// on the first geom it holds; build up from it only when supplying every
+/// factory by hand.
 #[derive(Default)]
 pub struct ReadContext {
     geoms: HashMap<String, GeomFactory>,

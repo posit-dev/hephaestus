@@ -445,6 +445,19 @@ impl HeadlessTarget {
 ///
 /// When constructed via [`Self::with_picking`], the renderer also rasterises a
 /// parallel "pick" scene to a second target, reads it back after each render,
+/// A pick readback in flight: a slot the `map_async` callback fills, and the
+/// dimensions it covers.
+///
+/// A slot rather than a future, so completion can be *checked* instead of
+/// awaited. Awaiting would mean holding a borrow of the renderer across a
+/// suspension point, which a browser host — where the only caller is a
+/// callback that may re-enter — cannot do safely.
+struct PendingPick {
+    slot: std::sync::Arc<std::sync::Mutex<Option<Result<(), wgpu::BufferAsyncError>>>>,
+    width: u32,
+    height: u32,
+}
+
 /// and caches the result in a CPU-side hitmap that powers [`Self::pick_at`].
 pub struct VelloRenderer {
     device: wgpu::Device,
@@ -457,6 +470,10 @@ pub struct VelloRenderer {
     /// `&[u32]` via bytemuck. `None` until the first picking-enabled render.
     hitmap: Option<Vec<u32>>,
     hitmap_dims: Option<(u32, u32)>,
+    /// A pick readback that has been submitted but not yet drained, with the
+    /// dimensions it was submitted at. `Some` only between `submit_pick` and
+    /// `finish_pick`, which is the window a browser has to await across.
+    pick_pending: Option<PendingPick>,
 }
 
 impl VelloRenderer {
@@ -497,11 +514,12 @@ impl VelloRenderer {
 
     async fn new_async(picking: bool) -> Result<Self, BackendError> {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
-        // GL is included alongside PRIMARY so the GLES / WebGL backends
-        // compiled in for unix and wasm are actually reachable: a browser
-        // without WebGPU, or a Linux host without Vulkan, falls back to
-        // GL rather than finding no adapter at all. `WGPU_BACKENDS`
-        // overrides the choice when a host needs to pin one.
+        // GL is included alongside PRIMARY so the GLES backend compiled in
+        // for unix is actually reachable: a Linux host without Vulkan falls
+        // back to it rather than finding no adapter at all. `WGPU_BACKENDS`
+        // overrides the choice when a host needs to pin one. On wasm the
+        // flag finds nothing — vello rasterises through compute pipelines,
+        // which WebGL2 has no stage for, so only WebGPU is compiled in.
         desc.backends =
             wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY | wgpu::Backends::GL);
         let instance = wgpu::Instance::new(desc);
@@ -563,6 +581,7 @@ impl VelloRenderer {
             pick_target: None,
             hitmap: None,
             hitmap_dims: None,
+            pick_pending: None,
         })
     }
 
@@ -608,7 +627,28 @@ impl VelloRenderer {
     /// Rasterise the pick scene into the cached pick target, copy it back
     /// to CPU, and refresh the hitmap. Assumes [`Self::ensure_pick_target`]
     /// has already been called and picking is enabled.
+    ///
+    /// Blocks until the readback lands. [`Self::submit_pick`] and
+    /// [`Self::finish_pick`] are the same work either side of the wait, for a
+    /// host that cannot park a thread.
     fn render_pick_and_readback(&mut self, width: u32, height: u32) -> Result<(), BackendError> {
+        self.submit_pick(width, height)?;
+        // A waiting poll returns only once the map callback has run, so the
+        // slot is filled by the time this is reached.
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        if !self.try_finish_pick()? {
+            return Err(BackendError::Readback(
+                "pick readback did not complete after a blocking device poll".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Rasterise the pick scene and submit its readback, without waiting.
+    ///
+    /// Pair with [`Self::finish_pick`]. Assumes [`Self::ensure_pick_target`]
+    /// has already been called and picking is enabled.
+    fn submit_pick(&mut self, width: u32, height: u32) -> Result<(), BackendError> {
         let pick_scene = self.scene.raw_pick().expect("pick scene present");
         let pick_target = self.pick_target.as_ref().expect("pick target ensured");
 
@@ -672,21 +712,53 @@ impl VelloRenderer {
         );
         self.queue.submit(std::iter::once(encoder.finish()));
 
-        let pick_slice = pick_target.readback.slice(..);
-        let (pick_tx, pick_rx) = futures_intrusive::channel::shared::oneshot_channel();
-        pick_slice.map_async(wgpu::MapMode::Read, move |res| {
-            let _ = pick_tx.send(res);
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let sink = std::sync::Arc::clone(&slot);
+        pick_target
+            .readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |res| {
+                if let Ok(mut guard) = sink.lock() {
+                    *guard = Some(res);
+                }
+            });
+        self.pick_pending = Some(PendingPick {
+            slot,
+            width,
+            height,
         });
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-        match pollster::block_on(pick_rx.receive()) {
-            Some(Ok(())) => {}
-            Some(Err(e)) => return Err(BackendError::Readback(e.to_string())),
-            None => {
-                return Err(BackendError::Readback(
-                    "map_async pick sender dropped".into(),
-                ))
-            }
-        }
+        Ok(())
+    }
+
+    /// Drain a readback submitted by [`Self::submit_pick`] into the hitmap,
+    /// if it has landed.
+    ///
+    /// Returns whether the hitmap was refreshed: `false` means nothing was in
+    /// flight, or the GPU has not finished. Never blocks, so a host that
+    /// cannot park a thread calls this and accepts that the hitmap may lag
+    /// the drawn frame.
+    ///
+    /// Only meaningful after [`Self::render_to_texture_deferring_pick`]; the
+    /// blocking render paths drain their own readback before returning.
+    pub fn try_finish_pick(&mut self) -> Result<bool, BackendError> {
+        let Some(pending) = self.pick_pending.as_ref() else {
+            return Ok(false);
+        };
+        let landed = pending
+            .slot
+            .lock()
+            .map_err(|_| BackendError::Readback("pick readback slot poisoned".into()))?
+            .take();
+        let Some(result) = landed else {
+            return Ok(false);
+        };
+
+        let PendingPick { width, height, .. } =
+            self.pick_pending.take().expect("checked just above");
+        result.map_err(|e| BackendError::Readback(e.to_string()))?;
+
+        let pick_target = self.pick_target.as_ref().expect("pick target ensured");
+        let pick_slice = pick_target.readback.slice(..);
 
         let row_bytes = (width as usize) * 4;
         let row_px = width as usize;
@@ -707,6 +779,56 @@ impl VelloRenderer {
         }
         pick_target.readback.unmap();
         self.hitmap_dims = Some((width, height));
+        Ok(true)
+    }
+
+    /// Rasterise into `view` and submit the pick pass without waiting on it.
+    ///
+    /// The non-blocking counterpart to
+    /// [`WgpuRenderer::render_to_texture`](crate::WgpuRenderer::render_to_texture),
+    /// whose pick readback parks the calling thread until the GPU is done —
+    /// which a browser's main thread cannot do. Pair with
+    /// [`Self::try_finish_pick`]: until that drains, [`Self::pick_at`] keeps
+    /// answering from the previous frame's hitmap.
+    ///
+    /// Identical to the trait method when picking is disabled.
+    pub fn render_to_texture_deferring_pick(
+        &mut self,
+        view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        background: Color,
+    ) -> Result<(), BackendError> {
+        self.check_scene_budget()?;
+        self.renderer
+            .render_to_texture(
+                &self.device,
+                &self.queue,
+                self.scene.raw(),
+                view,
+                &RenderParams {
+                    base_color: background,
+                    width,
+                    height,
+                    antialiasing_method: AaConfig::Area,
+                },
+            )
+            .map_err(|e| BackendError::Other(format!("vello render: {e}")))?;
+
+        if self.scene.raw_pick().is_some() {
+            // Drain first: that unmaps the readback buffer, and `map_async`
+            // on a still-mapped buffer is a validation error. Draining also
+            // has to happen before `ensure_pick_target`, which may reallocate
+            // the target the in-flight readback is reading from.
+            self.try_finish_pick()?;
+            // Still in flight — skip this frame rather than queue a second
+            // map on the same buffer. The hitmap lags until it lands, which
+            // `pick_at` already documents.
+            if self.pick_pending.is_none() {
+                self.ensure_pick_target(width, height);
+                self.submit_pick(width, height)?;
+            }
+        }
         Ok(())
     }
 

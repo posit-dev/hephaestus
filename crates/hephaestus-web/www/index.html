@@ -1,0 +1,167 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>hephaestus — plot document in the browser</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1a1a1a; --bg: #fff; --line: #d8d8d8; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e8e8e8; --bg: #101010; --line: #333; }
+  }
+  body {
+    margin: 0; padding: 24px; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 ui-sans-serif, system-ui, sans-serif;
+  }
+  header { display: flex; gap: 16px; align-items: center; margin-bottom: 16px; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0; }
+  label, button { font: inherit; }
+  /* The plot is sized entirely by CSS. Nothing tells the wasm module how big
+     to be — a ResizeObserver picks the box up and the composition re-solves
+     its layout at whatever it turns out to be. Drag the handle to see it. */
+  #frame {
+    resize: both; overflow: hidden; border: 1px solid var(--line);
+    width: 900px; height: 420px; min-width: 240px; min-height: 180px;
+    max-width: 100%; border-radius: 4px;
+  }
+  /* The canvas must fill its container and have no intrinsic size of its
+     own, or the backing store we set would feed back into the layout. */
+  #plot { display: block; width: 100%; height: 100%; }
+  #status { opacity: 0.75; }
+  code { font-family: ui-monospace, monospace; }
+
+  /* The placeholder is an overlay element, never something drawn into the
+     canvas: calling getContext('2d') on it would make getContext('webgpu')
+     return null and there is no way back. #frame is the positioning
+     context; the overlay is removed once the first frame is on screen. */
+  #frame { position: relative; }
+  #loading {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    background: var(--bg); color: var(--fg); opacity: 0.6;
+  }
+  #frame[data-ready] #loading { display: none; }
+</style>
+
+<header>
+  <h1>hephaestus render client</h1>
+  <label><input type="radio" name="scheme" value="light" checked /> light</label>
+  <label><input type="radio" name="scheme" value="dark" /> dark</label>
+  <label><input type="radio" name="scheme" value="auto" /> auto</label>
+  <span id="status">loading…</span>
+</header>
+
+<div id="frame">
+  <canvas id="plot"></canvas>
+  <div id="loading">preparing renderer…</div>
+</div>
+
+<p id="note"></p>
+
+<script type="module">
+  const status = document.getElementById('status');
+  const note = document.getElementById('note');
+  const canvas = document.getElementById('plot');
+
+  const fail = (msg, hint) => {
+    status.textContent = 'failed';
+    note.innerHTML = `<strong>${msg}</strong>` + (hint ? `<br />${hint}` : '');
+    const overlay = document.getElementById('loading');
+    if (overlay) overlay.textContent = 'unavailable';
+  };
+
+  // A module that fails to load never runs its own body, so a static import
+  // of a missing file would leave this page sitting on "loading…" with the
+  // reason only in the console. Everything below is therefore behind a
+  // dynamic import, and these two handlers catch whatever still escapes.
+  addEventListener('error', (e) => fail(e.message ?? 'script error'));
+  addEventListener('unhandledrejection', (e) => fail(e.reason?.message ?? String(e.reason)));
+
+  const SETUP =
+    'Run <code>wasm-pack build --target web --release</code> in ' +
+    '<code>crates/hephaestus-web</code>, then serve that directory ' +
+    '(<code>python3 -m http.server</code>) and open <code>/www/</code>.';
+
+  let mod;
+  try {
+    // dist/ is a sibling of www/, so the server root has to be the crate
+    // directory rather than www/ itself. `build.sh` assembles dist/.
+    mod = await import('../dist/hephaestus.js');
+  } catch (e) {
+    fail(`Could not load the module: ${e.message}`, SETUP);
+    throw e;
+  }
+  const { default: init, PlotView, registerFontFromUrl, isSupported } = mod;
+
+  try {
+    await init();
+  } catch (e) {
+    fail(`Could not initialise wasm: ${e.message}`, SETUP);
+    throw e;
+  }
+
+  if (!isSupported()) {
+    fail(
+      'WebGPU is unavailable in this browser.',
+      'The renderer rasterises through compute shaders, which WebGL2 cannot ' +
+        'run, so there is no fallback. Try a current Chrome, Edge or Safari.',
+    );
+    throw new Error('no WebGPU');
+  }
+
+  // A browser enumerates no system fonts, so without this the plot draws its
+  // chrome and no text at all. Must happen before the first view is created:
+  // the first thing a document decodes is its theme, and that is already
+  // enough to shape. Not committed — drop any TTF/OTF at www/font.ttf.
+  //
+  // The Google Fonts route is the same call with a key:
+  //   await registerGoogleFont('Inter', { apiKey: '…', genericFor: 'sans-serif' });
+  let families = [];
+  try {
+    families = await registerFontFromUrl('./font.ttf', { genericFor: 'sans-serif' });
+  } catch {
+    note.innerHTML =
+      '<strong>No font registered.</strong> Copy any <code>.ttf</code> to ' +
+      '<code>www/font.ttf</code> and reload. Until then the plot draws its ' +
+      'chrome with no text: a browser enumerates no system fonts, so every ' +
+      'family resolves to nothing.';
+  }
+
+  // Generated, not committed:
+  //   cargo run --example document_save --features document-write
+  //   cp examples/document.hplot crates/hephaestus-web/www/
+  const docResponse = await fetch('./document.hplot');
+  if (!docResponse.ok) {
+    fail(
+      'www/document.hplot is missing.',
+      'Generate it with <code>cargo run --example document_save --features ' +
+        'document-write</code> and copy it into <code>www/</code>.',
+    );
+    throw new Error('no document');
+  }
+
+  // The slow part is GPU init — adapter, device, and vello's compute
+  // pipelines — not the wasm module, which instantiates in single-digit ms.
+  // `PlotView.create` resolves only once the first frame is on the canvas,
+  // so hiding the overlay straight after it needs no extra signal.
+  // `saveOnRightClick` gives the plot an ordinary image's context menu —
+  // Save image as…, Copy image, drag-to-save — which a bare <canvas> never
+  // offers. A WebGPU canvas exports as PNG with nothing to configure; the
+  // preserveDrawingBuffer dance is a WebGL concern.
+  const view = await PlotView.create(canvas, new Uint8Array(await docResponse.arrayBuffer()), {
+    colorScheme: 'light',
+    saveOnRightClick: 'plot.png',
+  });
+  document.getElementById('frame').dataset.ready = '';
+
+  for (const input of document.querySelectorAll('input[name=scheme]')) {
+    input.addEventListener('change', (e) => view.setColorScheme(e.target.value));
+  }
+
+  const { width, height } = view.hints();
+  const font = families.length ? families.join(', ') : 'no font';
+  status.textContent = `${font}; document hint ${width}\u00d7${height}pt`;
+  if (families.length) {
+    note.textContent =
+      'Drag the bottom-right corner of the frame — axis ticks and label ' +
+      'placement recompute for each size, because the document carries the ' +
+      'plot rather than a picture of it. Right-click the plot to save it as ' +
+      'a PNG, as you would any image.';
+  }
+</script>

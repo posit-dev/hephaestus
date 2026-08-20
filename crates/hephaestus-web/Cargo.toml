@@ -1,0 +1,59 @@
+[package]
+name = "hephaestus-web"
+version = "0.1.0"
+edition = "2021"
+description = "Render a hephaestus plot document onto a canvas in the browser."
+license = "MIT"
+repository = "https://github.com/posit-dev/hephaestus"
+publish = false
+
+# Its own workspace, not a member of the one above it: profiles are only
+# honoured at a workspace root, and the release profile below must not reach
+# `hephaestus`'s native builds. See the note in `../../Cargo.toml`.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Exactly the three features a render client needs. No `png` / `jpeg` /
+# `tiff` / `webp` (nothing here writes a file), no `document-write` (a
+# consumer only reads), no `google-fonts` (`ureq` has no wasm target), and
+# no `window` (winit would be dead weight beside `canvas`).
+hephaestus = { path = "../..", default-features = false, features = [
+    "vello",
+    "canvas",
+    "document-read",
+] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
+
+# Panic messages cost real bytes, so the hook is opt-in and off in the
+# bundle a site ships. Build with `--features debug-panics` while developing.
+console_error_panic_hook = { version = "0.1", optional = true }
+
+[features]
+debug-panics = ["dep:console_error_panic_hook"]
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# The feature flags are not optional: rustc emits bulk-memory and
+# nontrapping-fptoint for `wasm32-unknown-unknown` by default, and wasm-opt
+# rejects both unless told to expect them.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = [
+    "-Oz",
+    "--enable-bulk-memory",
+    "--enable-nontrapping-float-to-int",
+    "--enable-reference-types",
+    "--enable-sign-ext",
+    "--enable-mutable-globals",
+    "--enable-multivalue",
+]

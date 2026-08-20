@@ -44,6 +44,21 @@ pub use read::{GeomFactory, ReadContext};
 #[cfg(feature = "document-write")]
 pub use write::{unsupported_items, UnsupportedItem, WriteOptions};
 
+/// Major version of the document format this build speaks.
+///
+/// A reader refuses a document whose major differs — the check is equality,
+/// not a floor — so this is a hard compatibility boundary rather than a hint.
+/// A consumer pinned to one build of this crate can only read documents
+/// written at the same major, which is worth surfacing to whatever chooses
+/// the two versions: a wasm client on a website and the process writing its
+/// documents have to agree, and nothing at runtime can paper over a mismatch.
+pub const FORMAT_VERSION_MAJOR: u16 = wire::VERSION_MAJOR;
+
+/// Minor version this build writes. Readers accept any minor, which is what
+/// makes an additive change additive.
+#[cfg(feature = "document-write")]
+pub const FORMAT_VERSION_MINOR: u16 = wire::VERSION_MINOR;
+
 /// Why a document could not be read or written.
 #[derive(Debug, thiserror::Error)]
 pub enum DocumentError {
@@ -253,6 +268,50 @@ pub fn write_composition(
     Ok(w.finish())
 }
 
+/// The render hints a document carries.
+///
+/// Advisory: a document describes a plot, not a frame, so a consumer is free
+/// to render it at any size. These say what the writer had in mind, which is
+/// what a consumer needs when it has to choose a size before it has laid
+/// anything out — an aspect ratio for a container, or a background to clear to.
+#[cfg(feature = "document-read")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DocumentHints {
+    /// Color the writer expected the scene to be rasterised over.
+    pub background: Option<crate::color::Color>,
+    /// Width and height, in points, the writer rendered at.
+    pub size: Option<(f64, f64)>,
+    /// Dots per inch the writer rendered at.
+    pub dpi: Option<f64>,
+}
+
+/// Read just the hints a document carries, without rebuilding it.
+///
+/// Decodes only the head, so this is cheap enough to call before deciding
+/// what size to render at. [`read_composition`] is what builds the plot.
+#[cfg(feature = "document-read")]
+pub fn read_hints(bytes: &[u8]) -> Result<DocumentHints, DocumentError> {
+    let chunks = wire::parse(bytes)?;
+    let body = wire::chunk(&chunks, wire::CHUNK_HEAD)
+        .ok_or(DocumentError::MissingChunk { tag: "HEAD" })?;
+    decode_head(body, read::default_context()).map(|(_, hints)| hints)
+}
+
+/// Decode the head chunk: the root composition's id, plus the hints.
+#[cfg(feature = "document-read")]
+fn decode_head(body: &[u8], ctx: &ReadContext) -> Result<(String, DocumentHints), DocumentError> {
+    use codec::{Decode, Reader};
+
+    let mut r = Reader::with_context(body, ctx);
+    let root_id = String::decode(&mut r)?;
+    let hints = DocumentHints {
+        background: Option::<crate::color::Color>::decode(&mut r)?,
+        size: Option::<(f64, f64)>::decode(&mut r)?,
+        dpi: Option::<f64>::decode(&mut r)?,
+    };
+    Ok((root_id, hints))
+}
+
 /// Rebuild the composition a document holds.
 ///
 /// The result is a live [`PlotComposition`](crate::plot::PlotComposition):
@@ -322,18 +381,8 @@ pub fn read_composition(
         tables.set_sheets(sheets);
     }
 
-    let (root_id, background, size_hint, dpi_hint) = {
-        let body = required(&chunks, wire::CHUNK_HEAD)?;
-        let mut r = Reader::with_tables(body, ctx, tables.clone());
-        (
-            String::decode(&mut r)?,
-            Option::<crate::color::Color>::decode(&mut r)?,
-            Option::<(f64, f64)>::decode(&mut r)?,
-            Option::<f64>::decode(&mut r)?,
-        )
-    };
-    // Hints are advisory; a caller that wants them reads them itself.
-    let _ = (background, size_hint, dpi_hint);
+    // Hints are advisory here; `read_hints` is how a caller asks for them.
+    let (root_id, _hints) = decode_head(required(&chunks, wire::CHUNK_HEAD)?, ctx)?;
 
     let theme = {
         let body = required(&chunks, wire::CHUNK_THEME)?;
