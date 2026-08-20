@@ -20,6 +20,17 @@ cargo clippy --no-default-features --features document-write --lib -- -D warning
 cargo clippy --no-default-features --features document --lib -- -D warnings
 ```
 
+## Building without a renderer
+
+`--no-default-features --features document-write` is a complete writer: no `vello`, no `wgpu`, and nothing in the write path that needs pixels. That configuration is what an R package vendoring this crate for CRAN builds, so it carries a rustc constraint the rest of the crate does not — 1.86, against the crate's own 1.86 `rust-version`.
+
+Two things follow, both easy to break:
+
+- **`--ignore-rust-version` is required, and only because of a declaration.** `parley` and `fontique` declare 1.88 and are still compiled here, since text descriptors and shaping share one module. Their *code* builds on 1.86; cargo refuses on the declared floor alone. Splitting `crate::text` into descriptors and shaping is what would let the flag go away.
+- **Anything the writer reaches must compile on 1.86.** A std API stabilised later is accepted by every other build. `rust-version = "1.86"` is what tells clippy to stop suggesting them, and the `msrv-document` CI job is what proves it.
+
+The read half is gated the same way and checked on 1.86 too, but a reader with no renderer only round-trips — rendering a loaded document needs a backend.
+
 ## Conventions
 
 - **Adding a field to `Theme`, `Scale`, `Plot` or the composition template means adding a line to the matching `impls_*.rs`.** Nothing catches the omission at compile time — a macro invocation lists field *names*, so a new field is silently skipped rather than rejected. `tests/document_roundtrip.rs` catches it only if the field changes pixels.

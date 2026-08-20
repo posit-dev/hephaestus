@@ -188,7 +188,7 @@ pub fn check_pattern(pattern: &[LinetypeStep]) -> Result<(), PatternError> {
     if pattern.is_empty() {
         return Ok(());
     }
-    if !pattern.len().is_multiple_of(2) {
+    if pattern.len() % 2 != 0 {
         return Err(PatternError::OddLength {
             found: pattern.len(),
         });
@@ -565,7 +565,7 @@ mod tests {
     #[test]
     fn named_patterns_alternate_and_are_marker_free() {
         for p in [dashed(), dotted(), dashdot()] {
-            assert!(p.len().is_multiple_of(2));
+            assert_eq!(p.len() % 2, 0);
             assert!(!p.is_empty());
             assert!(is_marker_free(&p));
             validate_pattern(&p);

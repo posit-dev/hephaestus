@@ -16,6 +16,7 @@ cargo build --no-default-features                        # core types & traits o
 cargo check --target wasm32-unknown-unknown             # wasm is a supported target; catches GL-backend and dep regressions
 cargo build --no-default-features --features vello,png   # explicit feature combination
 cargo build --features window                            # adds winit + the presentation surface
+cargo +1.86 check --no-default-features --features document-write --ignore-rust-version  # renderer-free writer on the oldest supported rustc
 
 cargo test                                               # all tests
 cargo test --test smoke                                  # the GPU smoke test (requires a working wgpu adapter)
@@ -64,7 +65,7 @@ Style rules (apply everywhere, including comments in `tests/` and `examples/`):
 - **`google-fonts`** (off by default) — auto-fetch named Google Fonts families on demand. Synchronous network call on cache miss; cache hits are offline.
 - **`window`** (off by default) — live window presentation: an OS window, a wgpu surface, and an event loop with resize and pointer events (`winit`). Requires `vello`. See `src/window/CLAUDE.md`.
 - **`geom-wkt`**, **`geom-wkb`**, **`geom-geojson`** (off by default) — opt-in parsers for `crate::scales::Geometry`. Each gate enables one of `Geometry::from_wkt` / `from_wkb` / `from_geojson`. Hand-rolled and dependency-free, so toggling them only affects what constructors compile, not the dependency tree.
-- **`document-read`**, **`document-write`**, **`document`** (off by default) — plot documents: capture a `PlotComposition` to a self-contained binary file and rebuild it elsewhere, so a wasm build on a website re-solves the layout at whatever size it has rather than scaling a frozen image. Hand-rolled and dependency-free, like the `geom-*` parsers. Split by direction because a consumer only ever reads; `document` enables both. See `src/document/CLAUDE.md`.
+- **`document-read`**, **`document-write`**, **`document`** (off by default) — plot documents: capture a `PlotComposition` to a self-contained binary file and rebuild it elsewhere, so a wasm build on a website re-solves the layout at whatever size it has rather than scaling a frozen image. Hand-rolled and dependency-free, like the `geom-*` parsers. Split by direction because a consumer only ever reads; `document` enables both. See `src/document/CLAUDE.md`. Adding no dependency of their own, they are also the one useful configuration with no renderer at all: `--no-default-features --features document-write` builds a writer that compiles on rustc 1.86, which `vello` rules out.
 - **`blend2d`**, **`svg`**, **`pdf`** — feature placeholders only; no backend code behind them yet. Wired so dependent crates can write `features = ["blend2d"]` once they exist.
 
 The core types and traits compile with `--no-default-features` (no wgpu pulled in), so downstream crates can build on top of `SceneBuilder` without GPU dependencies.

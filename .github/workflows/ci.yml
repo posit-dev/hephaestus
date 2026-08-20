@@ -63,11 +63,11 @@ jobs:
       - name: cargo test --all-features
         run: cargo test --all-features
 
-  # The `rust-version` in Cargo.toml is a promise to downstream crates, and the
-  # jobs above all run on stable — so nothing there would catch a newer-than-1.88
-  # language or std feature creeping in. This job is what backs the claim.
+  # `vello` and `parley` both declare 1.88, so that is the floor for any build
+  # that includes them, whatever `rust-version` says. The jobs above all run on
+  # stable and would not catch a newer language or std feature creeping in.
   msrv:
-    name: MSRV (1.88)
+    name: MSRV (1.88, --all-features)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -93,6 +93,46 @@ jobs:
 
       - name: cargo check --all-features
         run: cargo check --all-features
+
+  # The renderer-free document writer is what an R package vendoring this crate
+  # for CRAN builds, and CRAN's toolchain is older than the 1.88 the job above
+  # pins. `--ignore-rust-version` is needed because the `parley` family declares
+  # 1.88 and is compiled here even though the renderer is not — the declaration
+  # is what blocks the build, not the code, which compiles on 1.86. Dropping the
+  # flag is what making `parley` optional would buy.
+  msrv-document:
+    name: MSRV (1.86, renderer-free document writer)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.86
+        uses: dtolnay/rust-toolchain@1.86
+
+      - name: Cache cargo registry, git, and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-msrv-document-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-msrv-document-
+
+      - name: Install fontconfig
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev
+
+      # One direction at a time, for the reason `src/document/CLAUDE.md` gives:
+      # a helper reachable from only one half still passes both other builds.
+      - name: cargo check, one document feature at a time
+        run: |
+          for feature in document-write document-read document; do
+            cargo check --no-default-features --features "$feature" \
+              --all-targets --ignore-rust-version
+          done
 
   # wasm32 is a supported target, so it gets its own job: it shares no compiled
   # artifacts with the host build and needs none of the system libraries above

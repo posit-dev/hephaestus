@@ -56,7 +56,7 @@ impl Mesh {
             colors.len(),
         );
         assert!(
-            indices.len().is_multiple_of(3),
+            indices.len() % 3 == 0,
             "Mesh::new: indices length must be a multiple of 3, got {}",
             indices.len(),
         );

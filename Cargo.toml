@@ -2,7 +2,12 @@
 name = "hephaestus"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.88"
+# What this crate's own source needs. The `vello` and `parley` dependency
+# trees declare 1.88, so a build that includes them wants that or newer;
+# a renderer-free document writer (`--no-default-features --features
+# document-write`) compiles on 1.86, which is what an R package vendoring
+# this crate for CRAN has to hit.
+rust-version = "1.86"
 description = "Backend-agnostic 2D scene renderer for data visualization."
 license = "MIT"
 repository = "https://github.com/posit-dev/hephaestus"
