@@ -87,7 +87,7 @@
     fail(`Could not load the module: ${e.message}`, SETUP);
     throw e;
   }
-  const { default: init, PlotView, registerFontFromUrl, isSupported } = mod;
+  const { default: init, PlotView, isSupported, hasFonts } = mod;
 
   try {
     await init();
@@ -112,16 +112,13 @@
   //
   // The Google Fonts route is the same call with a key:
   //   await registerGoogleFont('Inter', { apiKey: '…', genericFor: 'sans-serif' });
-  let families = [];
-  try {
-    families = await registerFontFromUrl('./font.ttf', { genericFor: 'sans-serif' });
-  } catch {
-    note.innerHTML =
-      '<strong>No font registered.</strong> Copy any <code>.ttf</code> to ' +
-      '<code>www/font.ttf</code> and reload. Until then the plot draws its ' +
-      'chrome with no text: a browser enumerates no system fonts, so every ' +
-      'family resolves to nothing.';
-  }
+  // No font is registered here on purpose. `PlotView.create` fetches the
+  // bundled default (Roboto: regular, bold, italic, bold-italic, covering
+  // latin, latin-ext, Greek, Cyrillic and Vietnamese) when nothing else is,
+  // which is what lets an embed work with no setup. A page with its own font
+  // registers it first and the default is never fetched:
+  //
+  //   await registerFontFromUrl('/my-font.ttf', { genericFor: 'sans-serif' });
 
   // Generated, not committed:
   //   cargo run --example document_save --features document-write
@@ -155,9 +152,8 @@
   }
 
   const { width, height } = view.hints();
-  const font = families.length ? families.join(', ') : 'no font';
-  status.textContent = `${font}; document hint ${width}\u00d7${height}pt`;
-  if (families.length) {
+  status.textContent = `${hasFonts() ? 'fonts ready' : 'NO FONTS'}; document hint ${width}\u00d7${height}pt`;
+  {
     note.textContent =
       'Drag the bottom-right corner of the frame — axis ticks and label ' +
       'placement recompute for each size, because the document carries the ' +

@@ -70,30 +70,64 @@ pub fn document_format_version() -> u16 {
 /// so a caller cannot pair the two without being told. Guessing from a
 /// filename does not survive contact with a real font.
 ///
-/// `bytes` must be TTF, OTF, TTC or OTC. **WOFF2 is rejected**, with an
-/// error rather than an empty list: it is what a CDN hands a browser by
-/// default, and silently registering nothing would render a textless plot
+/// Accepts TTF, OTF, TTC, OTC and — with the `webfonts` feature, on by
+/// default — WOFF and WOFF2, which are unwrapped to the sfnt inside first.
+/// A blob holding no recognisable face is an error rather than an empty
+/// list, since registering nothing silently would render a textless plot
 /// with no indication why.
 #[wasm_bindgen(js_name = registerFont)]
 pub fn register_font(bytes: &[u8]) -> Result<Vec<String>, JsError> {
-    match bytes.get(..4) {
-        Some(b"wOF2") => return Err(JsError::new(
-            "WOFF2 is not a supported font format; use TTF, OTF, TTC or OTC. \
-             A CDN will serve WOFF2 to a browser unless asked otherwise.",
-        )),
-        Some(b"wOFF") => return Err(JsError::new(
-            "WOFF is not a supported font format; use TTF, OTF, TTC or OTC.",
-        )),
-        _ => {}
-    }
-
-    let families = hephaestus::text::register_font_families(bytes.to_vec());
+    let owned = decode_webfont(bytes)?;
+    let families = hephaestus::text::register_font_families(owned);
     if families.is_empty() {
         return Err(JsError::new(
             "no font faces found; the bytes are not a TTF, OTF, TTC or OTC file",
         ));
     }
     Ok(families)
+}
+
+/// Whether any font family is available to shape with.
+///
+/// A browser starts with none, so this answers "does this page still need a
+/// font?" — and it answers it after a document has been read, so a document
+/// carrying embedded faces counts. That is what lets a fallback be fetched
+/// only when it is genuinely needed rather than on a guess.
+#[wasm_bindgen(js_name = hasFonts)]
+pub fn has_fonts() -> bool {
+    !hephaestus::text::registered_families().is_empty()
+}
+
+/// Unwrap a WOFF / WOFF2 container to the sfnt inside, or pass bytes through.
+///
+/// The shaper ingests sfnt only (TTF / OTF / TTC / OTC), and a font CDN serves
+/// a browser WOFF2 — so without this the single most likely input is the one
+/// that fails.
+#[cfg(feature = "webfonts")]
+fn decode_webfont(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
+    let wrapped = match bytes.get(..4) {
+        Some(b"wOF2") => wuff::decompress_woff2(bytes).map_err(|e| {
+            JsError::new(&format!("could not decode the WOFF2 font: {e:?}"))
+        })?,
+        Some(b"wOFF") => wuff::decompress_woff1(bytes).map_err(|e| {
+            JsError::new(&format!("could not decode the WOFF font: {e:?}"))
+        })?,
+        _ => bytes.to_vec(),
+    };
+    Ok(wrapped)
+}
+
+/// Without the `webfonts` feature the containers are refused by name, rather
+/// than reaching the shaper and registering nothing.
+#[cfg(not(feature = "webfonts"))]
+fn decode_webfont(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
+    match bytes.get(..4) {
+        Some(b"wOF2") | Some(b"wOFF") => Err(JsError::new(
+            "this build cannot decode WOFF or WOFF2; use TTF, OTF, TTC or OTC, \
+             or rebuild with the `webfonts` feature",
+        )),
+        _ => Ok(bytes.to_vec()),
+    }
 }
 
 /// Point a generic family at concrete families already registered.

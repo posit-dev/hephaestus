@@ -8,12 +8,20 @@
 import init, {
   PlotHandle,
   documentFormatVersion,
+  hasFonts,
   isSupported,
   registerFont,
   setGenericFamily,
 } from './hephaestus_web.js';
 
-export { init as default, documentFormatVersion, isSupported, registerFont, setGenericFamily };
+export {
+  init as default,
+  documentFormatVersion,
+  hasFonts,
+  isSupported,
+  registerFont,
+  setGenericFamily,
+};
 
 // Fonts are registered into a process-global context that lives as long as
 // the module, so registering the same file twice is waste rather than an
@@ -24,9 +32,15 @@ const registered = new Set();
 /**
  * Fetch a font file and register it.
  *
- * The URL must serve TTF, OTF, TTC or OTC. WOFF2 is rejected by the wasm
- * side — see `registerFont` — which matters here because that is what most
- * font CDNs hand a browser by default.
+ * Accepts TTF, OTF, TTC, OTC, WOFF and WOFF2 — the container formats are
+ * unwrapped to the sfnt inside on the wasm side, so a URL from a font CDN
+ * works as-is.
+ *
+ * **A variable font is the best thing to point this at.** The shaper applies
+ * the `wght` axis, so one file serves every weight — including interpolated
+ * ones a static set cannot reach — which means one call rather than one per
+ * weight, and no per-face subset to choose. Italic is still a second file,
+ * since it is a separate axis-space in practice.
  *
  * @param {string} url
  * @param {{ genericFor?: string, key?: string }} [opts] `genericFor` also
@@ -52,153 +66,132 @@ export async function registerFontFromUrl(url, opts = {}) {
 }
 
 /**
- * Register a Google Fonts family, via the Developer API.
+ * Register a Google Fonts family. No API key needed.
  *
- * Uses `webfonts/v1`, whose `files` map gives `.ttf` URLs. The CSS2 API is
- * not usable from a page: it serves TTF only to clients sending no
- * `User-Agent` and WOFF2 to anything that looks like a browser, and
- * `User-Agent` is a forbidden header that `fetch` can neither remove nor
- * override. Hence the API key — there is no keyless route to TTF here.
+ * Uses the keyless CSS2 endpoint, which is possible because WOFF2 is decoded
+ * (the `webfonts` feature). CORS allows the `fetch`, and the response is
+ * WOFF2 whatever a page does — `User-Agent` is a forbidden header, so the
+ * TTF the native `google-fonts` cargo feature relies on is unreachable here.
+ *
+ * **Exactly one file is registered per weight/style, by design.** Google
+ * splits every face into per-script subset files sharing one family name, and
+ * the shaper selects within a family by weight and style with no notion of CSS
+ * `unicode-range` — so registering several subsets lets one without basic
+ * Latin win and turns every label into tofu. `subset` picks which to take.
+ * That cap is also why the bundled default font is a single file per face
+ * covering five scripts: see {@link registerDefaultFonts}.
  *
  * @param {string} family e.g. `'Inter'`, `'Open Sans'`. Case-sensitive.
- * @param {{ apiKey: string, variants?: string[], genericFor?: string }} opts
- * @returns {Promise<string[]>} family names registered, deduplicated.
+ * There is no "all subsets" option, and none is possible: the CSS endpoints
+ * never serve a single full-coverage file. Asking for one weight returns seven
+ * `unicode-range`-split files, and the legacy `&subset=` parameter no longer
+ * merges them. For coverage beyond one script, use a **variable** font through
+ * {@link registerFontFromUrl} — one file carries every weight, so it sidesteps
+ * both this and the one-file-per-face cap — or the bundled default, which is
+ * one file per face across five scripts.
+ *
+ * @param {{ weights?: number[], italics?: boolean, subset?: string,
+ *           genericFor?: string }} [opts] `weights` defaults to `[400, 700]`
+ *   and `italics` to `true`, which is what the theme and markdown chrome
+ *   between them ask for. `subset` defaults to `'latin'`; it names one of the
+ *   subsets the CSS response offers, and the error lists them if it misses.
+ * @returns {Promise<string[]>} family names registered.
  */
-export async function registerGoogleFont(family, opts) {
-  if (!opts?.apiKey) {
-    throw new Error(
-      'registerGoogleFont needs an apiKey (Google Fonts Developer API v1). ' +
-        'For a keyless setup, self-host a TTF and use registerFontFromUrl.',
-    );
-  }
-  const variants = opts.variants ?? ['regular'];
+export async function registerGoogleFont(family, opts = {}) {
+  const weights = opts.weights ?? [400, 700];
+  const italics = opts.italics !== false;
+  const subset = opts.subset ?? 'latin';
 
-  const url = new URL('https://www.googleapis.com/webfonts/v1/webfonts');
-  url.searchParams.set('family', family);
-  url.searchParams.set('key', opts.apiKey);
+  // ital,wght axis spec: 0 is upright, 1 italic, and the pairs must be sorted.
+  const specs = [];
+  for (const ital of italics ? [0, 1] : [0]) {
+    for (const w of [...weights].sort((a, b) => a - b)) specs.push(`${ital},${w}`);
+  }
+  const url = new URL('https://fonts.googleapis.com/css2');
+  url.searchParams.set('family', `${family}:ital,wght@${specs.join(';')}`);
+
   const response = await fetch(url);
   if (!response.ok) {
-    throw new Error(`Google Fonts API failed: ${response.status} ${response.statusText}`);
+    throw new Error(
+      `Google Fonts CSS2 failed: ${response.status} ${response.statusText} ` +
+        `for ${JSON.stringify(family)}`,
+    );
   }
-  const item = (await response.json()).items?.[0];
-  if (!item) throw new Error(`Google Fonts has no family named ${JSON.stringify(family)}`);
+  const css = await response.text();
 
-  const families = new Set();
-  for (const variant of variants) {
-    const file = item.files?.[variant];
-    if (!file) {
-      throw new Error(
-        `family ${JSON.stringify(family)} has no ${JSON.stringify(variant)} variant; ` +
-          `available: ${Object.keys(item.files ?? {}).join(', ')}`,
-      );
-    }
-    // The API returns http:// for some families; a page on https can't fetch it.
-    for (const name of await registerFontFromUrl(file.replace(/^http:/, 'https:'), {
-      key: `google:${family}:${variant}`,
+  // Each @font-face is preceded by a comment naming its subset.
+  const blocks = [...css.matchAll(/\/\*\s*([\w-]+)\s*\*\/\s*@font-face\s*\{([^}]*)\}/g)]
+    .map(([, name, body]) => ({
+      subset: name,
+      weight: (body.match(/font-weight:\s*(\d+)/) || [])[1],
+      style: (body.match(/font-style:\s*(\w+)/) || [])[1],
+      src: (body.match(/url\((https:[^)]+)\)/) || [])[1],
+    }))
+    .filter((b) => b.src);
+  if (!blocks.length) {
+    throw new Error(`no @font-face blocks for ${JSON.stringify(family)} — check the name`);
+  }
+
+  const wanted = blocks.filter((b) => b.subset === subset);
+  if (!wanted.length) {
+    const available = [...new Set(blocks.map((b) => b.subset))].join(', ');
+    throw new Error(
+      `${JSON.stringify(family)} has no ${JSON.stringify(subset)} subset; available: ${available}`,
+    );
+  }
+
+  const names = new Set();
+  for (const b of wanted) {
+    for (const n of await registerFontFromUrl(b.src, {
+      key: `google:${family}:${subset}:${b.style}:${b.weight}`,
     })) {
-      families.add(name);
+      names.add(n);
     }
   }
-  const names = [...families];
-  if (opts.genericFor && names.length) setGenericFamily(opts.genericFor, names);
-  return names;
-}
-
-const CRC_TABLE = (() => {
-  const t = new Int32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    t[n] = c;
-  }
-  return t;
-})();
-
-function crc32(bytes) {
-  let c = -1;
-  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
-  return (c ^ -1) >>> 0;
-}
-
-/**
- * Return `png` with a `pHYs` chunk declaring `dpi`, replacing any already
- * there, or `null` when it could not be applied and the input should stand.
- *
- * A canvas exports no physical resolution, so every viewer falls back to its
- * own default — 72 dpi typically — and a plot rendered at 2× device pixels
- * then claims to be twice its intended physical size. `pHYs` is the chunk that
- * records it, and the browser will not write one, so it is spliced in here.
- */
-function withPngDpi(png, dpi) {
-  if (!(dpi > 0)) return null;
-  // PNG signature is 8 bytes; IHDR always follows and must stay first.
-  if (png.length < 8 || png[0] !== 0x89 || png[1] !== 0x50) return null;
-  const ppm = Math.round(dpi / 0.0254); // pixels per metre, pHYs unit 1
-
-  const body = new Uint8Array(13);
-  body.set([0x70, 0x48, 0x59, 0x73]); // "pHYs"
-  const dv = new DataView(body.buffer);
-  dv.setUint32(4, ppm);
-  dv.setUint32(8, ppm);
-  body[12] = 1; // unit: metre
-  const chunk = new Uint8Array(21);
-  new DataView(chunk.buffer).setUint32(0, 9); // length of the chunk data
-  chunk.set(body, 4);
-  new DataView(chunk.buffer).setUint32(17, crc32(body));
-
-  // Walk chunks so an existing pHYs is dropped rather than duplicated, and so
-  // the new one lands after IHDR where the spec requires it.
-  const out = [png.subarray(0, 8)];
-  let i = 8;
-  let inserted = false;
-  const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
-  while (i + 8 <= png.length) {
-    const len = view.getUint32(i);
-    const type = String.fromCharCode(png[i + 4], png[i + 5], png[i + 6], png[i + 7]);
-    const end = i + 12 + len;
-    if (type !== 'pHYs') out.push(png.subarray(i, end));
-    i = end;
-    if (type === 'IHDR' && !inserted) {
-      out.push(chunk);
-      inserted = true;
-    }
-  }
-  if (!inserted) return null;
-  const total = out.reduce((n, a) => n + a.length, 0);
-  const merged = new Uint8Array(total);
-  let at = 0;
-  for (const part of out) {
-    merged.set(part, at);
-    at += part.length;
-  }
-  return merged;
-}
-
-/**
- * Encode bytes back to a `data:image/png;base64,` URL.
- *
- * A blob URL would be cheaper, but Safari's image context menu degrades for
- * `blob:` — the save entries are replaced by a single "Get Picture" — so the
- * scheme the bytes arrive under is load-bearing for the right-click
- * affordance. Chunked because `String.fromCharCode(...bytes)` overflows the
- * argument limit on anything megabyte-sized.
- */
-function bytesToPngDataUrl(bytes) {
-  let binary = '';
-  const STEP = 0x8000;
-  for (let i = 0; i < bytes.length; i += STEP) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + STEP));
-  }
-  return 'data:image/png;base64,' + btoa(binary);
-}
-
-/** Decode a `data:...;base64,` URL to bytes. */
-function dataUrlToBytes(url) {
-  const b64 = url.slice(url.indexOf(',') + 1);
-  const raw = atob(b64);
-  const out = new Uint8Array(raw.length);
-  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  const out = [...names];
+  if (opts.genericFor && out.length) setGenericFamily(opts.genericFor, out);
   return out;
+}
+
+/**
+ * The bundled faces, resolved against this module so a CDN copy finds its own.
+ *
+ * Four static instances rather than one variable font: `gvar` deltas survive
+ * charset subsetting, so a variable roman/italic pair at this coverage is
+ * about 1 MB against ~260 kB brotli for these four. The trade is that a theme
+ * asking for weight 500 snaps to 400 or 700 rather than interpolating; the
+ * built-in themes only use 400 and 700.
+ */
+const DEFAULT_FACES = ['regular', 'bold', 'italic', 'bolditalic'].map(
+  (v) => new URL(`./fonts/roboto-${v}.ttf`, import.meta.url).href,
+);
+
+/** Family the bundled faces register under. */
+const DEFAULT_FAMILY = 'Roboto';
+
+/**
+ * Register the bundled default font — Roboto, four faces.
+ *
+ * Covers latin, latin-ext, Greek, Cyrillic and Vietnamese, in regular, bold,
+ * italic and bold-italic. All four matter: the theme sets a bold plot title,
+ * and the rich-text sheet maps weight and italic independently, so markdown
+ * chrome reaches every combination including nested `***emphasis***`. CJK is
+ * deliberately absent — a CJK face is megabytes, and stays a bring-your-own
+ * case.
+ *
+ * Fetched, not embedded in the wasm, so a page supplying its own font pays
+ * nothing. Also points `sans-serif` at the family, without which a theme
+ * naming the generic resolves to nothing.
+ *
+ * OFL-1.1; `fonts/OFL-Roboto.txt` ships alongside.
+ */
+export async function registerDefaultFonts() {
+  const registered = await Promise.all(
+    DEFAULT_FACES.map((url) => registerFontFromUrl(url, { key: url })),
+  );
+  // After the faces, so the name the mapping points at exists.
+  setGenericFamily('sans-serif', [DEFAULT_FAMILY]);
+  return [...new Set(registered.flat())];
 }
 
 /**
@@ -219,6 +212,9 @@ export class PlotView {
    *   `saveOnRightClick` gives the canvas an ordinary image's context menu.
    *   The browser chooses the suggested filename. See
    *   {@link PlotView#_installImageOverlay}.
+   *   `defaultFont: false` suppresses fetching the bundled font when nothing
+   *   else is registered, for a page that would rather render no text than
+   *   pull ~260 kB.
    */
   static async create(canvas, doc, opts = {}) {
     if (!isSupported()) {
@@ -228,6 +224,17 @@ export class PlotView {
       );
     }
     const bytes = doc instanceof Uint8Array ? doc : new Uint8Array(doc);
+
+    // A browser enumerates no system fonts, so a page that has registered
+    // none would render chrome with no text at all — no error, just missing
+    // glyphs. Fetch the bundled default rather than let that happen, and skip
+    // it entirely when anything is already registered. Before `create`, not
+    // after: reading a document decodes its theme, which is already enough to
+    // shape, so arriving late would mean a textless first frame.
+    if (opts.defaultFont !== false && !hasFonts()) {
+      await registerDefaultFonts();
+    }
+
     const handle = await PlotHandle.create(canvas, bytes, opts.picking === true);
     return new PlotView(canvas, handle, opts);
   }

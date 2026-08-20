@@ -184,6 +184,18 @@ pub fn generic_family_names(kind: GenericFamilyKind) -> Vec<String> {
         .collect()
 }
 
+/// Names of every font family the context knows, in no particular order.
+///
+/// Empty on a host with no system fonts and nothing registered — a browser,
+/// where the collection starts bare — which is what makes this the question to
+/// ask before deciding whether a fallback font is needed. On a desktop it
+/// enumerates the whole system set, so treat it as "is there anything here",
+/// not as a cheap call.
+pub fn registered_families() -> Vec<String> {
+    let mut fcx = font_context().lock().expect("font context poisoned");
+    fcx.collection.family_names().map(str::to_string).collect()
+}
+
 /// Point `kind` at `families`, replacing whatever it resolved to.
 ///
 /// Names that aren't registered are skipped, so this is only meaningful

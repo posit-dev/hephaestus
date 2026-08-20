@@ -34,8 +34,15 @@ web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
 # bundle a site ships. Build with `--features debug-panics` while developing.
 console_error_panic_hook = { version = "0.1", optional = true }
 
+# WOFF / WOFF2 decoding, so `registerFont` accepts what a font CDN actually
+# serves a browser. Pure Rust and no build script; `brotli` here is
+# `brotli-decompressor`, the decode-only half.
+wuff = { version = "0.2", optional = true, default-features = false, features = ["brotli", "z"] }
+
 [features]
+default = ["webfonts"]
 debug-panics = ["dep:console_error_panic_hook"]
+webfonts = ["dep:wuff"]
 
 [profile.release]
 opt-level = "z"

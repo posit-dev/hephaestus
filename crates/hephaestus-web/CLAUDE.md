@@ -42,9 +42,10 @@ no warning, just missing glyphs. Hence:
 
 - `registerFont` **errors rather than reporting nothing registered**, so a
   blob that holds no faces is loud instead of silently textless.
-- It rejects `wOF2` / `wOFF` magic explicitly. WOFF2 is what a font CDN hands
-  a browser by default and what fontique cannot ingest, so this is the single
-  most likely mistake. TTF / OTF / TTC / OTC only.
+- It accepts `wOF2` / `wOFF` alongside sfnt, unwrapping the container before
+  the shaper sees it — fontique itself ingests sfnt only, and WOFF2 is what a
+  font CDN hands a browser, so this was the likeliest input to fail. See
+  "WOFF and WOFF2 are decoded" below.
 - **`registerFont` returns the family names it registered**, which is what
   makes `setGenericFamily` usable: a generic is an indirection through the
   font context rather than a name, so registering Inter does not make
@@ -57,6 +58,58 @@ no warning, just missing glyphs. Hence:
 - Registration is process-global and permanent, so it is once per page, not
   once per plot. Order matters: it must precede the first `PlotView.create`,
   since decoding a document's theme is already enough to shape.
+
+### One file per weight and style — the trap worth knowing
+
+The shaper selects within a family by **weight, width and style, with no notion
+of CSS `unicode-range`.** A CDN meanwhile splits every face into per-script
+subset files that all carry the same family name. Register several and one
+without basic Latin can win the attribute match, at which point every tick
+label becomes a tofu box while the bold title still renders, because a
+different subset won for weight 700. Observed exactly that way before it was
+fixed.
+
+So: **exactly one file per (weight, style)**. `registerGoogleFont` enforces it
+and takes `subset` to say which. Hand-registering means doing the same.
+
+### Google Fonts needs no API key
+
+Since WOFF2 is decoded, `registerGoogleFont` uses the keyless CSS2 endpoint
+rather than the Developer API. CORS allows the `fetch`, and the WOFF2 it
+returns — the only thing it will return to a page, `User-Agent` being a
+forbidden header — is now something the shaper can take.
+
+### Variable fonts work, and are the best answer for coverage
+
+The shaper applies the `wght` axis: measured 399.93 / 403.73 / 411.24 / 420.89
+px for one string at weights 400 / 500 / 700 / 900 off a single variable file.
+So a variable font serves **every** weight, including interpolated ones no
+static set reaches, from one registration — sidestepping both the
+one-file-per-face cap and the subset choice. Italic stays a second file.
+
+| want | route | cost |
+| --- | --- | --- |
+| zero setup | bundled default (4 static faces, 5 scripts) | 258 kB brotli |
+| a site's own typography | `registerGoogleFont`, one subset | ~4 × 10–20 kB |
+| full Unicode + all weights | variable font via `registerFontFromUrl` | Inter 365 + 403 kB; Roboto 231 + 266 kB |
+
+Static instances stay right for the *bundle* — subsetted, they are half what
+Roboto's variable pair costs for the same scripts — and variable is right for a
+page that wants everything.
+
+**There is no full-coverage file on the CSS endpoints, so `subset` has no "all"
+value.** One weight returns seven `unicode-range`-split files, and the legacy
+`&subset=` no longer merges them. Full coverage keyless means the raw variable
+TTF in `google/fonts`, and a *general* helper for that is not buildable: the
+filename embeds each family's axis list (`[wght]` vs `[opsz,wght]` vs
+`[wdth,wght]`), the licence directory varies (`ofl` / `apache` / `ufl`),
+jsDelivr's data API rejects subpath listing, and the GitHub contents API is
+rate-limited per IP. So it stays `registerFontFromUrl(<url you supply>)`.
+
+Getting several CSS subsets into one family would mean rewriting each file's
+`name` table to a distinct family and chaining them through
+`setGenericFamily`, which does accept a fallback list. Not built, and hard to
+justify against fetching one variable file.
 
 ### Can we reuse the fonts the page already loaded?
 
@@ -91,6 +144,49 @@ font it will not hand over, and there is no path from that to a vello scene
 short of rasterising to a 2D canvas and uploading an image — which throws away
 vector output and picking.
 
+### The bundled default font
+
+`PlotView.create` fetches Roboto when `hasFonts()` says nothing is registered,
+so an embed works with no font code at all; a page that registers its own font
+first never fetches it. `defaultFont: false` opts out.
+
+**Four static instances, not one variable font.** Variable fonts look like the
+obvious answer and are the wrong one here: `gvar` deltas survive charset
+subsetting, so a variable roman/italic pair at this coverage is ~1 MB *raw*,
+larger than the renderer. Measured, brotli, four faces:
+
+| face | coverage | size |
+| --- | --- | --- |
+| Inter | latin | 151 kB |
+| Inter | latin + latin-ext | 286 kB |
+| **Roboto** | **latin + latin-ext + Greek + Cyrillic + Vietnamese** | **258 kB** |
+
+Roboto gives four faces and three extra scripts for less than Inter costs at
+latin-ext alone, which is why it is the default. The trade for static instances
+is that a theme asking for weight 500 snaps to 400 or 700 rather than
+interpolating; the built-in themes use only 400 and 700.
+
+**All four faces are required, not a luxury.** The default theme sets a bold
+plot title, and the rich-text sheet maps `weight: 700` and `italic: true`
+independently, so markdown chrome reaches bold-italic through nested
+`***emphasis***`. Three faces plus synthetic oblique would look visibly cruder
+at label sizes.
+
+**CJK is out of scope** — a CJK face is megabytes, and no bundling decision
+closes that. It stays a bring-your-own case.
+
+Licensing: Roboto is **OFL-1.1** (Google relicensed it from Apache-2.0; it now
+lives under `ofl/roboto/` in `google/fonts`). No Reserved Font Name is
+declared, so an instanced, subsetted derivative may keep the family name —
+which matters, since the theme refers to it by name. `fonts/OFL-Roboto.txt`
+ships with the faces, as the licence requires; it covers the fonts, not the
+crate.
+
+The faces are **committed** under `fonts/`, regenerated by `fonts/generate.sh`
+when the font or coverage changes, so `build.sh` and CI need neither network
+access nor fontTools. They are fetched at runtime rather than embedded in the
+wasm, so a page with its own font transfers none of them.
+
 **Google Fonts cannot work the way the `google-fonts` cargo feature does.**
 That feature relies on sending *no* `User-Agent`, which is what makes the CSS2
 API serve TTF instead of WOFF2 (see the comment on `http_get_string` in
@@ -101,9 +197,60 @@ and why it needs a key. A keyless route would need either a WOFF2 decoder or
 a TTF mirror; neither is built.
 
 One thing that *is* settled: `fetch`ing `fonts.googleapis.com/css2` is
-**allowed by CORS** (probed, not assumed), and it returns `format('woff2')`
-with `.woff2` URLs. So a keyless path is gated purely on WOFF2 decoding now,
-not on reaching the API.
+**allowed by CORS** (probed, not assumed). What it returns depends on the user
+agent it sees: a Chrome-131 UA gets `format('woff2')` with `.woff2` URLs, a
+Safari-17 UA gets `.woff`. A real browser therefore gets WOFF2, so a keyless
+path is gated purely on decoding that — not on reaching the API.
+
+### WOFF and WOFF2 are decoded
+
+Behind the `webfonts` feature, on by default. `registerFont` unwraps a `wOF2`
+or `wOFF` container to the sfnt inside before the shaper sees it, so a URL from
+a font CDN works as-is — which matters, because WOFF2 is what a CDN serves a
+browser and was therefore the likeliest input to fail.
+
+`wuff` does the work: pure Rust, no build script, and `brotli-decompressor`
+(the decode-only half) rather than full `brotli`. Chosen over `woff2-patched`
+(full `brotli` plus four more deps) and `woofwoof` (needs `cc`); it is also
+Linebender-adjacent, same ecosystem as parley and fontique.
+
+**Cost: +212 kB raw but +68.5 kB brotli, +8.0% over the wire** — about a
+quarter of what the four bundled faces cost. An earlier note here predicted
+this would be dominated by brotli's ~120 kB static dictionary; that is true of
+the raw figure and misleading about transfer, because the dictionary is
+text-like and compresses well itself. Reason about the compressed number.
+
+Correctness was checked against the real thing. Decoding the Inter WOFF2 that
+Google serves a browser yields exactly the 21312-byte sfnt its header promises,
+fontique registers it, the outlines render, and `hmtx` advances match the
+reference full TTF on **all 224 glyphs** at the same upem. That last check is
+the one that matters: a bad `glyf`/`loca` reconstruction gives plausible
+metrics with mangled outlines, so structural validity proves nothing.
+
+What a WOFF2 actually demands, from that same file:
+
+```
+flavor  TrueType (glyf)   15 tables, 21312-byte sfnt from 10236 compressed
+glyf    13944 bytes  TRANSFORMED
+loca      450 bytes  TRANSFORMED
+others               null transform (brotli only)
+```
+
+`glyf` + `loca` are 65% of the font and are genuinely transformed rather than
+merely compressed — seven parallel sub-streams, triplet-packed point deltas, a
+bbox bitmap, composite passthrough, `loca` rebuilt at the right offset width.
+Not something to hand-roll, which is the argument for the dependency.
+
+Borrowing brotli from the browser was investigated and rejected. The format
+name is `'brotli'`, not `'br'`, and it works in Safari 26 and Firefox 154 but
+**not Chrome 151**, so a bundled decoder is needed regardless; a constructed
+`Response` carrying `Content-Encoding: br` decodes nothing, since content
+coding is applied by the network layer.
+`wuff::decompress_woff2_with_custom_brotli` takes a closure and would allow
+supplying the platform decoder where present, saving those 68.5 kB on two of
+three engines at the cost of an async boundary through `registerFont`. Not
+built; at 68.5 kB it is hard to justify.
+
 
 ## Startup cost, and the placeholder trap
 
@@ -334,9 +481,6 @@ exact-version URL is the integrity story.
 
 ### Open, for whoever ships this
 
-- **No default font.** An embed with no `registerFont` call draws no text.
-  Bundling a subsetted Latin TTF and pointing `sans-serif` at it would make the
-  package work on first use, at 30–100 kB and a licence check.
 - **No fallback for a browser without WebGPU.** `isSupported()` is a hard gate,
   so a producer should emit a static image beside the `.hplot` and the embed
   snippet should swap to it.

@@ -29,6 +29,12 @@ wasm-pack build --target web --"$profile" --out-dir dist --no-pack $extra
 cp js/hephaestus.js dist/hephaestus.js
 cp js/hephaestus.d.ts dist/hephaestus.d.ts
 
+# The bundled default faces, committed under fonts/ by fonts/generate.sh so
+# this script needs neither network access nor fontTools. The licence travels
+# with them, as OFL requires.
+mkdir -p dist/fonts
+cp fonts/roboto-*.ttf fonts/OFL-Roboto.txt dist/fonts/
+
 # The npm version tracks the crate version, so there is one number to bump.
 python3 - <<'PY'
 import json, re, pathlib

@@ -7,7 +7,13 @@
     "type": "git",
     "url": "https://github.com/posit-dev/hephaestus"
   },
-  "keywords": ["visualization", "plotting", "webgpu", "wasm", "canvas"],
+  "keywords": [
+    "visualization",
+    "plotting",
+    "webgpu",
+    "wasm",
+    "canvas"
+  ],
   "type": "module",
   "exports": {
     ".": {
@@ -21,7 +27,8 @@
     "hephaestus.d.ts",
     "hephaestus_web.js",
     "hephaestus_web.d.ts",
-    "hephaestus_web_bg.wasm"
+    "hephaestus_web_bg.wasm",
+    "fonts/"
   ],
   "sideEffects": false
 }

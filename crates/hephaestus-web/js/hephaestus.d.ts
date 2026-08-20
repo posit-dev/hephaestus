@@ -31,7 +31,8 @@ export function documentFormatVersion(): number;
 
 /**
  * Register every font face in `bytes`, returning the family names they landed
- * under. Throws on WOFF2 / WOFF, and on bytes holding no recognisable face.
+ * under. Accepts sfnt (TTF/OTF/TTC/OTC) and WOFF/WOFF2, which are unwrapped
+ * first. Throws on bytes holding no recognisable face.
  *
  * A browser enumerates no system fonts, so a page that registers none renders
  * chrome with no text. Call before creating any view. Registration is global
@@ -48,22 +49,37 @@ export function registerFont(bytes: Uint8Array): string[];
  */
 export function setGenericFamily(kind: string, families: string[]): void;
 
-/** Fetch a TTF/OTF/TTC/OTC and register it. WOFF2 is rejected. */
+/** Fetch a font and register it. TTF/OTF/TTC/OTC/WOFF/WOFF2. */
 export function registerFontFromUrl(
   url: string,
   opts?: { genericFor?: string; key?: string },
 ): Promise<string[]>;
 
 /**
- * Register a Google Fonts family through the Developer API v1.
+ * Register a Google Fonts family. No API key needed — the keyless CSS2
+ * endpoint works because WOFF2 is decoded.
  *
- * Needs a key: the CSS2 API serves TTF only to clients sending no
- * `User-Agent`, which `fetch` cannot do, so a page always gets WOFF2 there.
+ * Registers exactly one file per weight/style: Google splits faces into
+ * per-script subsets sharing a family name, and the shaper has no notion of
+ * CSS `unicode-range`, so mixing them turns labels into tofu. `subset`
+ * chooses which; it defaults to `'latin'`.
  */
 export function registerGoogleFont(
   family: string,
-  opts: { apiKey: string; variants?: string[]; genericFor?: string },
+  opts?: { weights?: number[]; italics?: boolean; subset?: string; genericFor?: string },
 ): Promise<string[]>;
+
+/** Whether any font family is available to shape with. */
+export function hasFonts(): boolean;
+
+/**
+ * Register the bundled default font: Roboto, four faces (regular, bold,
+ * italic, bold-italic), covering latin, latin-ext, Greek, Cyrillic and
+ * Vietnamese. Fetched from the package, not embedded in the wasm. OFL-1.1.
+ *
+ * `PlotView.create` calls this for you when nothing else is registered.
+ */
+export function registerDefaultFonts(): Promise<string[]>;
 
 export interface PlotViewOptions {
   /** Theme to draw with. `'auto'` follows `prefers-color-scheme`. */
@@ -74,6 +90,8 @@ export interface PlotViewOptions {
   picking?: boolean;
   /** Overlay an image so right-click offers the usual save entries. */
   saveOnRightClick?: boolean;
+  /** Set `false` to skip fetching the bundled font when none is registered. */
+  defaultFont?: boolean;
 }
 
 /** The size and dpi a document's writer recorded, if any. Advisory. */

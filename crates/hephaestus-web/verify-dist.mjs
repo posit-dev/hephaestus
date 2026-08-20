@@ -39,8 +39,9 @@ const mod = await import(dir + entry);
 await mod.default({ module_or_path: readFileSync(dir + 'hephaestus_web_bg.wasm') });
 ok('wasm instantiates from the published bytes');
 
-const expected = ['default', 'isSupported', 'documentFormatVersion', 'registerFont',
-                  'setGenericFamily', 'registerFontFromUrl', 'registerGoogleFont', 'PlotView'];
+const expected = ['default', 'isSupported', 'documentFormatVersion', 'hasFonts',
+                  'registerFont', 'setGenericFamily', 'registerFontFromUrl',
+                  'registerGoogleFont', 'registerDefaultFonts', 'PlotView'];
 const missing = expected.filter((k) => !(k in mod));
 if (missing.length) fail(`entry point is missing exports: ${missing.join(', ')}`);
 else ok(`entry point exports all ${expected.length} public names`);
@@ -58,5 +59,44 @@ const major = mod.documentFormatVersion();
 if (Number.isInteger(major) && major > 0) ok(`document format major = ${major}`);
 else fail(`documentFormatVersion() returned ${major}`);
 
+// 8. The bundled faces ship, with their licence. A missing face would only
+//    surface as a plot whose bold text silently fell back.
+const faces = ['regular', 'bold', 'italic', 'bolditalic'];
+let fontBytes = 0;
+for (const f of faces) {
+  const p = `fonts/roboto-${f}.ttf`;
+  if (existsSync(dir + p)) fontBytes += readFileSync(dir + p).length;
+  else fail(`bundled face missing: ${p}`);
+}
+if (fontBytes) ok(`4 bundled faces present, ${fontBytes} bytes raw`);
+if (existsSync(dir + 'fonts/OFL-Roboto.txt')) ok('font licence ships alongside');
+else fail('fonts/OFL-Roboto.txt is missing — OFL requires it to travel with the font');
+
+// 9. hasFonts() must start false, which is what makes the auto-register
+//    decision in PlotView.create meaningful.
+if (mod.hasFonts() === false) ok('hasFonts() is false before anything is registered');
+else fail('hasFonts() is true on a bare context — auto-registration would never fire');
+
+// 10. And the bundled faces really do register, under one family.
+const families = mod.registerFont(readFileSync(dir + 'fonts/roboto-regular.ttf'));
+if (families.length && mod.hasFonts()) ok(`bundled face registers as ${families.join(', ')}`);
+else fail(`bundled face did not register (got ${JSON.stringify(families)})`);
+
+// 11. WOFF2 registers, since that is what a font CDN serves a browser and so
+//     the likeliest thing a consumer will hand us.
+if (existsSync('/tmp/test-inter.woff2')) {
+  const woff2 = readFileSync('/tmp/test-inter.woff2');
+  try {
+    const fams = mod.registerFont(woff2);
+    if (fams.length) ok(`WOFF2 decoded and registered as ${fams.join(', ')}`);
+    else fail('WOFF2 registered no families');
+  } catch (e) {
+    fail(`WOFF2 was rejected: ${e.message}`);
+  }
+} else {
+  console.log('skip: no /tmp/test-inter.woff2 to try');
+}
+
 const size = readFileSync(dir + 'hephaestus_web_bg.wasm').length;
-console.log(`\nwasm: ${size} bytes raw`);
+console.log(`\nwasm:  ${size} bytes raw`);
+console.log(`fonts: ${fontBytes} bytes raw (fetched on demand, not in the wasm)`);
