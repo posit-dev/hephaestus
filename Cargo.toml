@@ -2,7 +2,12 @@
 name = "hephaestus"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.88"
+# What this crate's own source needs. The `vello` and `parley` dependency
+# trees declare 1.88, so a build that includes them wants that or newer;
+# a renderer-free document writer (`--no-default-features --features
+# document-write`) compiles on 1.86, which is what an R package vendoring
+# this crate for CRAN has to hit.
+rust-version = "1.86"
 description = "Backend-agnostic 2D scene renderer for data visualization."
 license = "MIT"
 repository = "https://github.com/posit-dev/hephaestus"
@@ -55,6 +60,14 @@ jiff = ["dep:jiff"]
 geom-wkt = []
 geom-wkb = []
 geom-geojson = []
+# Plot documents: capture a `PlotComposition` to a self-contained binary
+# file and rebuild it elsewhere. Split by direction because a wasm
+# consumer only ever reads — `document-read` halves the codec it
+# compiles and says what the build is. Both are dependency-free and
+# hand-rolled, like the `geom-*` parsers.
+document-read = []
+document-write = []
+document = ["document-read", "document-write"]
 # Placeholders for future backends — wired through cargo but not implemented yet.
 blend2d = []
 svg = []
@@ -377,6 +390,20 @@ required-features = ["vello", "png", "jpeg", "tiff", "webp"]
 name = "window"
 required-features = ["vello", "window"]
 
+[[example]]
+name = "aa_nondeterminism"
+required-features = ["vello"]
+
+[[example]]
+name = "document_save"
+required-features = ["document-write"]
+
+# Deliberately not `document-write`: a consumer compiles only the half it
+# uses, and this example is the shape a wasm build would take.
+[[example]]
+name = "document_load"
+required-features = ["vello", "document-read", "png"]
+
 [[test]]
 name = "smoke"
 required-features = ["vello"]
@@ -431,3 +458,7 @@ name = "composition_public_paths"
 [[test]]
 name = "image_writers"
 required-features = ["vello"]
+
+[[test]]
+name = "document_roundtrip"
+required-features = ["vello", "document"]

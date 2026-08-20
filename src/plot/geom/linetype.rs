@@ -17,6 +17,6 @@
 //! ```
 
 pub use crate::linetype::{
-    dash, dashdot, dashed, dotted, gap, is_marker_free, marker, pattern, solid, strip_markers,
-    to_kurbo_dashes, validate_pattern, LinetypeStep,
+    check_pattern, dash, dashdot, dashed, dotted, gap, is_marker_free, marker, pattern, solid,
+    strip_markers, to_kurbo_dashes, try_pattern, validate_pattern, LinetypeStep, PatternError,
 };

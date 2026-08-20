@@ -124,6 +124,10 @@ impl Geom for SegmentGeom {
         self
     }
 
+    fn kind(&self) -> Option<&'static str> {
+        Some("segment")
+    }
+
     fn draw(&self, scene: &mut dyn SceneBuilder, ctx: &GeomContext<'_>) {
         let panel = ctx.panel_rect;
         let panel_w = panel.x1 - panel.x0;

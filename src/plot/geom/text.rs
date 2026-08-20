@@ -259,6 +259,10 @@ impl Geom for TextGeom {
         self
     }
 
+    fn kind(&self) -> Option<&'static str> {
+        Some("text")
+    }
+
     fn invalidate_caches(&mut self) {
         self.rich_cache.clear();
         self.rich_outline_sheets.borrow_mut().clear();

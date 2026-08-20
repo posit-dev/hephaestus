@@ -7,7 +7,11 @@
 //! pixels exactly.
 
 use hephaestus::backend::vello::VelloRenderer;
-use hephaestus::color::{rgb8, rgba, Color};
+use hephaestus::color::{rgb8, rgba};
+// Only the JPEG writer takes a background colour — it has no alpha channel
+// to leave transparent.
+#[cfg(feature = "jpeg")]
+use hephaestus::color::Color;
 use hephaestus::geometry::{Affine, Rect};
 use hephaestus::path::FillRule;
 use hephaestus::pick::PickId;

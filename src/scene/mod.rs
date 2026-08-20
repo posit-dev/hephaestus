@@ -93,6 +93,28 @@ pub trait SceneBuilder {
 #[derive(Debug, Clone)]
 pub struct Font(peniko::FontData);
 
+/// Two handles are equal when they name the same face — the same font
+/// bytes at the same index — however each was obtained.
+///
+/// Hand-written because the underlying blob compares by *identity*: it
+/// carries a process-local id, so the derived impl would call two
+/// handles onto one face unequal whenever the file had been loaded twice.
+/// Font resolution does that in practice, which makes identity the wrong
+/// question to answer here.
+///
+/// Comparing unequal handles reads both font files. That is a byte
+/// comparison of megabytes in the worst case, so this is not something
+/// to put on a hot path; the identity fast path covers the common case
+/// of two handles that really do share one blob.
+impl PartialEq for Font {
+    fn eq(&self, other: &Self) -> bool {
+        if self.0.index != other.0.index {
+            return false;
+        }
+        self.0.data.id() == other.0.data.id() || self.0.data.as_ref() == other.0.data.as_ref()
+    }
+}
+
 impl Font {
     /// Wrap an already-resolved backend font. Crate-internal: the
     /// public way in is [`Self::new`].
@@ -141,4 +163,47 @@ pub struct GlyphRun<'a> {
     /// strokes them along the outline with the given pen. Used for outlined
     /// text — typically paired with a separate filled pass on top.
     pub style: Option<&'a crate::stroke::Stroke>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use peniko::Blob;
+
+    /// The property the derived impl would have got wrong: font
+    /// resolution can hand out two blobs for one file, and two handles
+    /// onto the same face have to compare equal regardless.
+    #[test]
+    fn fonts_naming_the_same_face_are_equal_across_separate_blobs() {
+        let bytes = vec![7u8, 8, 9, 10];
+        let a = Font::new(Blob::from(bytes.clone()), 0);
+        let b = Font::new(Blob::from(bytes), 0);
+        assert_ne!(
+            a.data().data.id(),
+            b.data().data.id(),
+            "the two blobs should have distinct ids, or this proves nothing"
+        );
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn a_font_equals_a_clone_of_itself() {
+        let font = Font::new(Blob::from(vec![1u8, 2, 3]), 2);
+        assert_eq!(font.clone(), font);
+    }
+
+    #[test]
+    fn fonts_differing_in_face_index_are_not_equal() {
+        let bytes = vec![1u8, 2, 3];
+        let a = Font::new(Blob::from(bytes.clone()), 0);
+        let b = Font::new(Blob::from(bytes), 1);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn fonts_with_different_bytes_are_not_equal() {
+        let a = Font::new(Blob::from(vec![1u8, 2, 3]), 0);
+        let b = Font::new(Blob::from(vec![1u8, 2, 4]), 0);
+        assert_ne!(a, b);
+    }
 }

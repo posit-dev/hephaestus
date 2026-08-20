@@ -284,6 +284,10 @@ impl Geom for LineGeom {
         self
     }
 
+    fn kind(&self) -> Option<&'static str> {
+        Some("line")
+    }
+
     /// Override: number of unique key values, not row count.
     fn mark_count(&self) -> usize {
         if self.marks.is_empty() && !self.is_empty() {

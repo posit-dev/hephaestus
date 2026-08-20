@@ -363,12 +363,23 @@ impl Plot {
         self.aspect_mode
     }
 
+    /// The `(width / height)` ratio this plot's panel is locked to, or
+    /// `None` when it takes whatever the layout gives it.
+    pub fn aspect_ratio_ref(&self) -> Option<f64> {
+        self.cartesian_aspect_ratio
+    }
+
     /// Override whether geoms are clipped to the projection's
     /// outline (default `true`). Set to `false` to let geoms spill
     /// past the panel boundary.
     pub fn clip(mut self, clip: bool) -> Self {
         self.clip = clip;
         self
+    }
+
+    /// Whether geoms are clipped to the projection's outline.
+    pub fn is_clipped(&self) -> bool {
+        self.clip
     }
 
     /// Rebuild each geom's key-based enter / update / exit sets on
@@ -382,6 +393,11 @@ impl Plot {
     pub fn track_identity(mut self, track: bool) -> Self {
         self.track_identity = track;
         self
+    }
+
+    /// Whether per-geom enter / update / exit diffs are rebuilt each draw.
+    pub fn tracks_identity(&self) -> bool {
+        self.track_identity
     }
 
     /// Read accessor for the bound patch id.
@@ -514,6 +530,21 @@ impl Plot {
         self
     }
 
+    /// The plot title, or `None` when unset.
+    pub fn title_ref(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    /// The plot subtitle, or `None` when unset.
+    pub fn subtitle_ref(&self) -> Option<&str> {
+        self.subtitle.as_deref()
+    }
+
+    /// The plot caption, or `None` when unset.
+    pub fn caption_ref(&self) -> Option<&str> {
+        self.caption.as_deref()
+    }
+
     /// Set the facet-strip label on `side`. Each side has at most one
     /// strip; calling again with the same side replaces the previous
     /// label. Rendered in the matching `StripTop` / `StripRight` /
@@ -554,6 +585,11 @@ impl Plot {
     pub fn shape_registry(mut self, r: ShapeRegistry) -> Self {
         self.shapes = r;
         self
+    }
+
+    /// Borrow the shape registry geoms resolve marker names against.
+    pub fn shape_registry_ref(&self) -> &ShapeRegistry {
+        &self.shapes
     }
 
     // ── Mutators ──
@@ -603,9 +639,20 @@ impl Plot {
     /// [`GeomId`] for later [`Self::update_geom`] / [`Self::remove_geom`]
     /// calls.
     pub fn add_geom<G: Geom>(&mut self, geom: G) -> GeomId {
+        self.add_boxed_geom(Box::new(geom))
+    }
+
+    /// Append an already-boxed geom to the plot's draw order.
+    ///
+    /// The counterpart to [`Self::remove_geom`], which hands back a
+    /// `Box<dyn Geom>`: this is how one goes back in, whether it was
+    /// taken out of another plot or built from a kind tag rather than a
+    /// concrete type. The returned id is fresh — a geom does not carry
+    /// its previous handle.
+    pub fn add_boxed_geom(&mut self, geom: Box<dyn Geom>) -> GeomId {
         let id = GeomId::new(self.next_geom_id);
         self.next_geom_id = self.next_geom_id.wrapping_add(1);
-        self.geoms.push((id, Box::new(geom)));
+        self.geoms.push((id, geom));
         self.dirty = true;
         id
     }
@@ -636,6 +683,15 @@ impl Plot {
     /// draw order.
     pub fn geom_ids(&self) -> impl Iterator<Item = GeomId> + '_ {
         self.geoms.iter().map(|(id, _)| *id)
+    }
+
+    /// Iterate over every geom on this plot with its id, in draw order.
+    ///
+    /// The borrow is enough to inspect a geom's channels and
+    /// [`Geom::kind`]; mutation goes through [`Self::update_geom`],
+    /// which keeps the diff snapshot and per-geom caches consistent.
+    pub fn geoms(&self) -> impl Iterator<Item = (GeomId, &dyn Geom)> + '_ {
+        self.geoms.iter().map(|(id, g)| (*id, g.as_ref()))
     }
 }
 

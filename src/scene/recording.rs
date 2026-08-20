@@ -14,7 +14,7 @@ use crate::pick::PickId;
 use crate::stroke::Stroke;
 
 /// One captured draw operation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Op {
     Fill {
         rule: FillRule,
@@ -55,7 +55,7 @@ pub enum Op {
 }
 
 /// Owned counterpart of `GlyphRun<'_>` for storage in `Op::DrawGlyphs`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OwnedGlyphRun {
     pub font: super::Font,
     pub font_size: f32,
@@ -72,7 +72,11 @@ pub struct OwnedGlyphRun {
 }
 
 /// Recording scene: appends every call to an op list.
-#[derive(Debug, Default, Clone)]
+///
+/// Equality is op-for-op, which is what lets two scenes be compared as
+/// *drawing* rather than as pixels — useful when the rasteriser is the
+/// variable you want to hold still.
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct RecordingScene {
     pub ops: Vec<Op>,
 }
@@ -459,6 +463,77 @@ mod tests {
             })
             .collect();
         assert_eq!(kinds, ["push", "fill", "pop"]);
+    }
+
+    /// Two recordings of the same glyph run compare equal even when font
+    /// resolution handed each one its own blob for the same file.
+    ///
+    /// This is what makes op-for-op comparison usable as a test oracle:
+    /// without it, any scene containing text compares unequal to an
+    /// identical scene whenever the font file happened to be loaded
+    /// twice.
+    #[test]
+    fn identical_glyph_runs_compare_equal_across_separate_font_blobs() {
+        let bytes = vec![0u8, 1, 2, 3];
+        let brush = solid(0.0, 0.0, 0.0);
+        let glyphs = [Glyph {
+            id: 12,
+            x: 1.5,
+            y: 2.5,
+        }];
+
+        let record_with = |font: &Font| {
+            let run = GlyphRun {
+                font,
+                font_size: 12.0,
+                transform: Affine::IDENTITY,
+                glyph_transform: None,
+                brush: &brush,
+                brush_alpha: 1.0,
+                hint: false,
+                glyphs: &glyphs,
+                style: None,
+            };
+            let mut scene = RecordingScene::new();
+            scene.draw_glyphs(&run, PickId::Skip);
+            scene
+        };
+
+        let a = record_with(&Font::new(Blob::from(bytes.clone()), 0));
+        let b = record_with(&Font::new(Blob::from(bytes), 0));
+        assert_eq!(a, b);
+    }
+
+    /// The counterpart: a genuinely different face is still caught.
+    #[test]
+    fn glyph_runs_over_different_faces_are_not_equal() {
+        let brush = solid(0.0, 0.0, 0.0);
+        let glyphs = [Glyph {
+            id: 12,
+            x: 1.5,
+            y: 2.5,
+        }];
+
+        let record_with = |font: &Font| {
+            let run = GlyphRun {
+                font,
+                font_size: 12.0,
+                transform: Affine::IDENTITY,
+                glyph_transform: None,
+                brush: &brush,
+                brush_alpha: 1.0,
+                hint: false,
+                glyphs: &glyphs,
+                style: None,
+            };
+            let mut scene = RecordingScene::new();
+            scene.draw_glyphs(&run, PickId::Skip);
+            scene
+        };
+
+        let a = record_with(&Font::new(Blob::from(vec![0u8, 1, 2, 3]), 0));
+        let b = record_with(&Font::new(Blob::from(vec![9u8, 9, 9, 9]), 0));
+        assert_ne!(a, b);
     }
 
     #[test]

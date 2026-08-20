@@ -32,7 +32,7 @@ use crate::color::Color;
 use crate::geometry::Point;
 
 /// A 2D triangle list with per-vertex colour.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Mesh {
     /// Vertex positions in path coordinates.
     pub vertices: Vec<Point>,
@@ -56,7 +56,7 @@ impl Mesh {
             colors.len(),
         );
         assert!(
-            indices.len().is_multiple_of(3),
+            indices.len() % 3 == 0,
             "Mesh::new: indices length must be a multiple of 3, got {}",
             indices.len(),
         );
