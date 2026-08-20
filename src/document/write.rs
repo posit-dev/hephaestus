@@ -9,7 +9,6 @@
 use crate::color::Color;
 use crate::layout::{Extent, Inset, Track};
 use crate::plot::{FormatSpec, PlotComposition};
-use crate::scales::locale::Locale;
 
 /// Something in a plot that a document can't carry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,11 +38,6 @@ pub enum UnsupportedItem {
         /// Where the reference was found.
         location: String,
     },
-
-    /// A locale assembled by hand rather than one of the three
-    /// constants. Its fields are `&'static str`, so there is nothing a
-    /// reader could rebuild it from.
-    UnnameableLocale,
 }
 
 impl std::fmt::Display for UnsupportedItem {
@@ -64,11 +58,6 @@ impl std::fmt::Display for UnsupportedItem {
                 "{location} is sized relative to another grid's track, which is \
                  identified by a per-solve id and cannot be carried"
             ),
-            Self::UnnameableLocale => write!(
-                f,
-                "the theme's locale is not one of `Locale::EN_US` / `DE_DE` / `FR_FR`, \
-                 and a hand-built locale cannot be rebuilt from a document"
-            ),
         }
     }
 }
@@ -80,9 +69,8 @@ pub struct WriteOptions {
     ///
     /// An anonymous formatter is dropped to default labels, an
     /// unnameable geom is omitted, a track reference is replaced with an
-    /// `Auto` track, a hand-built locale falls back to `EN_US`. Off by
-    /// default: silently changing a plot is worse than saying what's
-    /// wrong.
+    /// `Auto` track. Off by default: silently changing a plot is worse
+    /// than saying what's wrong.
     pub lossy: bool,
 
     /// Background colour a consumer should render behind the plot.
@@ -177,10 +165,6 @@ pub fn unsupported_items(comp: &PlotComposition) -> Vec<UnsupportedItem> {
         }
     }
 
-    if locale_is_unnameable(&comp.theme.locale) {
-        out.push(UnsupportedItem::UnnameableLocale);
-    }
-
     for patch in &comp.plot_order {
         for plot in comp.plots.get(patch).into_iter().flatten() {
             for (index, (_, geom)) in plot.geoms().enumerate() {
@@ -196,14 +180,6 @@ pub fn unsupported_items(comp: &PlotComposition) -> Vec<UnsupportedItem> {
 
     check_template_tracks(&comp.template, &mut out);
     out
-}
-
-/// True when `l` is not one of the three constants a document can name.
-///
-/// Defers to the encoder's own tag lookup, so the check and the encoding
-/// can't disagree about what's nameable.
-pub(crate) fn locale_is_unnameable(l: &Locale) -> bool {
-    super::impls_scale::locale_tag(l).is_none()
 }
 
 /// Walk a template's tracks and insets for cross-grid references.

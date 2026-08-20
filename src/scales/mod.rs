@@ -93,7 +93,7 @@ pub use chrome::{AxisSide, LegendSide};
 pub use direction::Direction;
 pub use geometry::{Coord, Geometry, ParseError as GeometryParseError, Polygon as GeometryPolygon};
 pub use input::InputRange;
-pub use locale::{Locale, Weekday};
+pub use locale::Locale;
 pub use output::OutputRange;
 pub use scale_type::{
     binned_band_width, binned_band_width_at, binned_breaks, binned_map, binned_map_break,

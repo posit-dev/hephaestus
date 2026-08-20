@@ -37,7 +37,7 @@ The read half is gated the same way and checked on 1.86 too, but a reader with n
 - **Discriminants are part of the file format.** Adding an enum variant takes the next free number. Renumbering an existing one silently reinterprets every document already written.
 - **`impl_codec!` for types whose fields this module can name; hand-written impls for encapsulated ones.** `Scale`, `PolarProjection`, `Axis` and `Plot` are read through their accessors and rebuilt through their builders, so decoding runs the same validation as ordinary construction — a document with non-increasing bin edges is refused by `Scale::try_set_bins`, not accepted into a scale that would misplace rows.
 - **There is deliberately no blanket `impl Encode for Arc<T>`.** Whether a shared value is written inline or interned is a decision per type: `Arc<str>` and `Arc<[LinetypeStep]>` are values whose sharing saves only memory, while `Arc<Geometry>` and `Arc<RichTextStyleSheet>` carry *identity* that live code compares by pointer. Omitting the blanket impl forces each new shared type to say which it is.
-- **Encoding is infallible; validation is a separate pass.** `write::unsupported_items` runs first and reports everything at once. That is what lets `Encode::encode` return nothing to check, and why `Encode for Locale` can treat an unnameable locale as unreachable.
+- **Encoding is infallible; validation is a separate pass.** `write::unsupported_items` runs first and reports everything at once. That is what lets `Encode::encode` return nothing to check.
 
 ## Interning and identity
 

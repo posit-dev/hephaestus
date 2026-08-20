@@ -437,27 +437,6 @@ fn legend_key_frame_uses_theme_swatch_color() {
 }
 
 #[test]
-fn locale_de_renders_decimal_comma_in_axis_labels() {
-    // With `Locale::DE_DE`, the default numeric formatter swaps
-    // '.' → ',', so a continuous 0..1 axis emits glyph runs for
-    // "0,2", "0,4", … (not "0.2", "0.4", …). The test inspects
-    // recorded glyph runs by re-shaping each break and checking
-    // the locale-aware label.
-    let theme = Theme::default().with_locale(Locale::DE_DE);
-    let s = scale::continuous(0.0..=1.0);
-    let breaks = s.breaks(hephaestus::scales::DEFAULT_BREAK_COUNT);
-    let labels: Vec<String> = breaks.iter().map(|v| s.format(v, &theme.locale)).collect();
-    assert!(
-        labels.iter().any(|l| l.contains(',')),
-        "expected at least one DE_DE label with a decimal comma; got {labels:?}"
-    );
-    assert!(
-        !labels.iter().any(|l| l.contains('.')),
-        "DE_DE labels must not contain decimal points; got {labels:?}"
-    );
-}
-
-#[test]
 fn locale_default_renders_decimal_point() {
     // Default locale is `Locale::EN_US` → decimal point.
     let theme = Theme::default();
@@ -472,13 +451,18 @@ fn locale_default_renders_decimal_point() {
 
 #[test]
 fn user_formatter_receives_locale() {
-    // A user-supplied formatter closure gets `(value, locale)` and
-    // can branch on it.
+    // A user-supplied formatter closure gets `(value, locale)` and can
+    // branch on the tag. This is the only way an axis becomes
+    // locale-aware, the built-in formatter having no rules to apply.
     let s = scale::continuous(0.0..=1.0).with_format(|v, locale| match v {
         hephaestus::scales::Value::Number(n) => {
             format!(
                 "{n:.1}{}",
-                if locale.decimal == ',' { " DE" } else { " US" }
+                if locale.tag() == "de-DE" {
+                    " DE"
+                } else {
+                    " US"
+                }
             )
         }
         other => hephaestus::plot::Scale::default_format(other, locale),

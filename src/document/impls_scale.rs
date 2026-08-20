@@ -8,10 +8,9 @@
 //! rejected by [`Scale::try_set_bins`], not silently accepted into a
 //! scale that would misplace rows.
 //!
-//! The two values a scale carries that aren't plain data get wire forms
-//! of their own: [`FormatSpec`] names the label formatter instead of
-//! carrying it, and [`Locale`] is a tag, since its fields are
-//! `&'static str` and only three values are constructible.
+//! The one value a scale carries that isn't plain data gets a wire form
+//! of its own: [`FormatSpec`] names the label formatter instead of
+//! carrying it. [`Locale`] is a tag, so it travels as the string it is.
 
 use super::codec::impl_codec;
 #[cfg(feature = "document-read")]
@@ -121,51 +120,17 @@ impl_codec! {
 
 // ─── Locale ──────────────────────────────────────────────────────────────────
 
-/// Tag for a built-in locale, or `None` for one assembled by hand.
-///
-/// `Locale`'s string fields are `&'static str`, so an arbitrary locale
-/// can't be rebuilt from bytes — only the three constants can be named.
-/// A hand-built locale is reported by the write-side validation pass
-/// before encoding starts, which is why the encoder below can treat it
-/// as unreachable.
-#[cfg(feature = "document-write")]
-pub(crate) fn locale_tag(l: &Locale) -> Option<u64> {
-    if *l == Locale::EN_US {
-        Some(0)
-    } else if *l == Locale::DE_DE {
-        Some(1)
-    } else if *l == Locale::FR_FR {
-        Some(2)
-    } else {
-        None
-    }
-}
-
 #[cfg(feature = "document-write")]
 impl Encode for Locale {
     fn encode(&self, w: &mut Writer) {
-        // `unwrap_or` rather than a panic: validation has already
-        // refused a locale with no tag, so the fallback is unreachable,
-        // and a panic in an infallible encode would be worse than
-        // writing the default if that ever stopped holding.
-        w.varint(locale_tag(self).unwrap_or(0));
+        self.tag().encode(w);
     }
 }
 
 #[cfg(feature = "document-read")]
 impl Decode for Locale {
     fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
-        let offset = r.pos();
-        match r.varint()? {
-            0 => Ok(Locale::EN_US),
-            1 => Ok(Locale::DE_DE),
-            2 => Ok(Locale::FR_FR),
-            tag => Err(DocumentError::BadDiscriminant {
-                type_name: "Locale",
-                tag,
-                offset,
-            }),
-        }
+        Ok(Locale::from(String::decode(r)?))
     }
 }
 
@@ -580,31 +545,19 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_locale_tag_is_rejected() {
-        let mut w = super::Writer::new();
-        w.varint(9);
-        let bytes = w.finish();
-        let mut r = super::Reader::new(&bytes);
-        assert!(matches!(
-            Locale::decode(&mut r),
-            Err(DocumentError::BadDiscriminant {
-                type_name: "Locale",
-                tag: 9,
-                ..
-            })
-        ));
+    fn any_tag_round_trips() {
+        // A tag is just a string, so there is no set of locales a
+        // document can and cannot carry.
+        for tag in ["ar-EG", "hi-IN", "zh-Hans-CN", "ar_EG.UTF-8", "x-private"] {
+            assert_roundtrip(Locale::from(tag));
+        }
     }
 
     #[test]
-    fn a_hand_built_locale_has_no_tag() {
-        let odd = Locale {
-            decimal: '!',
-            ..Locale::EN_US
-        };
-        assert_eq!(super::locale_tag(&odd), None);
+    fn a_decoded_tag_is_the_one_that_was_written() {
+        let back = super::super::codec::test_support::roundtrip(&Locale::from("ar-EG"));
+        assert_eq!(back.tag(), "ar-EG");
     }
-
-    // ── Registry ──
 
     #[test]
     fn a_scale_registry_round_trips_every_entry() {

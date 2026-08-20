@@ -43,10 +43,9 @@ pub use crate::scales::{
 /// Tick-label formatter closure stored on a [`Scale`]. Receives a break
 /// value and the active [`Locale`], and returns its rendered label.
 ///
-/// The default formatter consults only `locale.decimal`. Grouping
-/// separators and the month / weekday name tables are vocabulary for
-/// formatters that want them — a calendar-native axis is built by
-/// supplying a closure, not by switching locale.
+/// The default formatter ignores the locale: a [`Locale`] is a tag, not
+/// a table of formatting rules, so interpreting it is the closure's job.
+/// A locale-aware or calendar-native axis is built by supplying one.
 pub type LabelFormatter = dyn Fn(&Value, &Locale) -> String + Send + Sync;
 
 /// Readable description of which formatter a [`Scale`] carries.
@@ -1120,11 +1119,10 @@ impl Scale {
     /// (passed `(v, locale)`), then the built-in per-variant default
     /// ([`Self::default_format`]). Numeric values render via Rust's
     /// shortest round-trip `Display` after a 12-sig-fig snap (so
-    /// `0.30000000000000004` reads as `"0.3"`), then the decimal
-    /// mark is swapped to `locale.decimal`. Temporal variants render
-    /// as compact `YYYY-MM-DD` / `HH:MM:SS` and are locale-insensitive;
-    /// a formatter that wants language-specific layouts builds them
-    /// from the locale's `month_short` / `month_long` / `day_*` arrays.
+    /// `0.30000000000000004` reads as `"0.3"`). Temporal variants
+    /// render as compact `YYYY-MM-DD` / `HH:MM:SS`. None of it consults
+    /// `locale`, which is passed through for a custom formatter to
+    /// interpret.
     pub fn format(&self, v: &Value, locale: &Locale) -> String {
         if let Some(BreaksSpec::Labeled { breaks, labels }) = &self.breaks_spec {
             if let Some(i) = breaks.iter().position(|b| b.key_eq(v)) {
@@ -1134,7 +1132,7 @@ impl Scale {
         if let Some(f) = self.formatter.formatter() {
             return f(v, locale);
         }
-        format_value(v, locale)
+        format_value(v)
     }
 
     /// Band width as a fraction of the panel (in `[0, 1]`). Continuous
@@ -1224,8 +1222,8 @@ impl Scale {
     ///     other => Scale::default_format(other, locale),
     /// })
     /// ```
-    pub fn default_format(v: &Value, locale: &Locale) -> String {
-        format_value(v, locale)
+    pub fn default_format(v: &Value, _locale: &Locale) -> String {
+        format_value(v)
     }
 
     /// Monotonic counter incremented on every mutation. Keys
@@ -1316,10 +1314,10 @@ impl std::fmt::Debug for Scale {
 /// - `Duration(us)` → compact `Hh Mm Ss` or `MM:SS` depending on magnitude.
 /// - `String(s)` → `s`.
 /// - Others → debug-formatted.
-fn format_value(v: &Value, locale: &Locale) -> String {
+fn format_value(v: &Value) -> String {
     use crate::scales::value::Date;
     match v {
-        Value::Number(n) => format_number(*n, locale),
+        Value::Number(n) => format_number(*n),
         Value::String(s) => (**s).to_string(),
         Value::Bool(b) => format!("{b}"),
         Value::Null => "NA".to_string(),
@@ -1394,7 +1392,7 @@ fn format_value(v: &Value, locale: &Locale) -> String {
 /// The round-trip via 12-significant-digit scientific form snaps to a
 /// nearby f64 that Rust's shortest-round-trip `Display` then prints
 /// cleanly: `0.30000000000000004` → `"0.3"`; `0.6000000000001` → `"0.6"`.
-fn format_number(n: f64, locale: &Locale) -> String {
+fn format_number(n: f64) -> String {
     let raw = if !n.is_finite() {
         format!("{n}")
     } else if n == 0.0 {
@@ -1405,13 +1403,7 @@ fn format_number(n: f64, locale: &Locale) -> String {
             .expect("formatted scientific f64 round-trips");
         format!("{cleaned}")
     };
-    if locale.decimal == '.' {
-        raw
-    } else {
-        // Tick-label numbers carry at most one decimal point (Rust's
-        // shortest-round-trip Display); a flat replace is correct.
-        raw.replace('.', &locale.decimal.to_string())
-    }
+    raw
 }
 
 /// Project a continuous-domain endpoint to its canonical f64. Accepts
@@ -1524,28 +1516,35 @@ impl ScaleRegistry {
 mod tests {
     use super::*;
     #[test]
-    fn a_comma_decimal_locale_reaches_the_default_formatter() {
-        // `decimal` is the one `Locale` field the default formatter
-        // consults, and every other format test uses `EN_US` — where a
-        // dropped swap is invisible.
-        let s = continuous(0.0..=1.0);
-        assert_eq!(s.format(&Value::Number(0.5), &Locale::EN_US), "0.5");
-        assert_eq!(s.format(&Value::Number(0.5), &Locale::DE_DE), "0,5");
-        assert_eq!(s.format(&Value::Number(0.5), &Locale::FR_FR), "0,5");
-        // Negative and integral values take the same path.
-        assert_eq!(s.format(&Value::Number(-1.25), &Locale::DE_DE), "-1,25");
-        assert_eq!(s.format(&Value::Number(3.0), &Locale::DE_DE), "3");
+    fn the_default_formatter_ignores_the_locale() {
+        // A `Locale` is a tag, so there is nothing for the built-in
+        // formatter to read: numbers and dates render identically
+        // whatever locale is passed. A locale-aware axis supplies a
+        // closure.
+        let n = continuous(0.0..=1.0);
+        let d = Scale::new(ScaleTypeKind::Temporal(TemporalUnit::Date));
+        let date = Value::Date(crate::scales::value::Date::from_ymd(2024, 3, 7).to_days());
+        for loc in [Locale::EN_US, Locale::DE_DE, Locale::from("ar-EG")] {
+            assert_eq!(n.format(&Value::Number(0.5), &loc), "0.5");
+            assert_eq!(d.format(&date, &loc), "2024-03-07");
+        }
     }
 
     #[test]
-    fn temporal_labels_are_locale_insensitive() {
-        // Dates render ISO regardless of locale — the calendar-name
-        // tables are vocabulary for user formatters, not something the
-        // default one reaches for.
-        let s = Scale::new(ScaleTypeKind::Temporal(TemporalUnit::Date));
-        let v = Value::Date(crate::scales::value::Date::from_ymd(2024, 3, 7).to_days());
-        assert_eq!(s.format(&v, &Locale::EN_US), "2024-03-07");
-        assert_eq!(s.format(&v, &Locale::DE_DE), "2024-03-07");
+    fn a_closure_receives_the_tag_to_interpret() {
+        // The locale reaches user code, which is the point of carrying
+        // it: a formatter can key off the tag even though the crate
+        // never does.
+        let s = continuous(0.0..=1.0).with_format(|v, locale| match locale.tag() {
+            "de-DE" => format!("{v:?} (de)"),
+            other => format!("{v:?} ({other})"),
+        });
+        assert!(s
+            .format(&Value::Number(0.5), &Locale::DE_DE)
+            .ends_with("(de)"));
+        assert!(s
+            .format(&Value::Number(0.5), &Locale::from("ar-EG"))
+            .ends_with("(ar-EG)"));
     }
 
     #[test]
