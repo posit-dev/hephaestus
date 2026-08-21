@@ -68,6 +68,16 @@ jobs:
           cargo clippy --no-default-features --features vello-hybrid,png \
             --all-targets -- -D warnings
 
+      # Presentation must work with either backend behind it, and the
+      # hybrid-only combination is the one that would break if the window host
+      # reached for the other backend's gates.
+      - name: cargo clippy, presentation on each backend
+        run: |
+          for backend in vello vello-hybrid; do
+            cargo clippy --no-default-features \
+              --features "window,$backend,png" --all-targets -- -D warnings
+          done
+
       - name: cargo test --all-features
         run: cargo test --all-features
 
@@ -192,12 +202,23 @@ jobs:
       - name: cargo check --target wasm32-unknown-unknown --features window
         run: cargo check --target wasm32-unknown-unknown --features window
 
-      # The sparse-strips backend on wasm: no compute stage, so this is the
-      # configuration that can reach a WebGL2 baseline.
+      # The sparse-strips backend on wasm. It needs no compute stage, which is
+      # what could eventually take the client below WebGPU — but not yet: wgpu's
+      # `webgl` feature is not compiled on wasm and the canvas host asks for
+      # WebGPU only. Today's win is bundle size.
       - name: cargo clippy --target wasm32-unknown-unknown, sparse strips
         run: |
           cargo clippy --target wasm32-unknown-unknown --no-default-features \
             --features vello-hybrid,document-read -- -D warnings
+
+      # What the render client would ship on sparse strips. Still WebGPU: see
+      # the note above.
+      - name: cargo clippy --target wasm32-unknown-unknown, canvas on each backend
+        run: |
+          for backend in vello vello-hybrid; do
+            cargo clippy --target wasm32-unknown-unknown --no-default-features \
+              --features "canvas,$backend,document-read" -- -D warnings
+          done
 
   # The wasm bundle a page loads. Its own job because `crates/hephaestus-web`
   # is a separate workspace with its own lock file and release profile, so it

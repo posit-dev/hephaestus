@@ -383,6 +383,9 @@ pub struct VelloRenderer {
     /// dimensions it was submitted at. `Some` only between `submit_pick` and
     /// `finish_pick`, which is the window a browser has to await across.
     pick_pending: Option<PendingPick>,
+    /// Whether the coming render refreshes the hitmap. See
+    /// [`VelloRenderer::set_refresh_pick`].
+    refresh_pick: bool,
 }
 
 impl VelloRenderer {
@@ -491,6 +494,7 @@ impl VelloRenderer {
             hitmap: None,
             hitmap_dims: None,
             pick_pending: None,
+            refresh_pick: true,
         })
     }
 
@@ -724,7 +728,7 @@ impl VelloRenderer {
             )
             .map_err(|e| BackendError::Other(format!("vello render: {e}")))?;
 
-        if self.scene.raw_pick().is_some() {
+        if self.refreshes_pick() {
             // Drain first: that unmaps the readback buffer, and `map_async`
             // on a still-mapped buffer is a validation error. Draining also
             // has to happen before `ensure_pick_target`, which may reallocate
@@ -739,6 +743,26 @@ impl VelloRenderer {
             }
         }
         Ok(())
+    }
+
+    /// Control whether the coming render refreshes the hitmap.
+    ///
+    /// The pick pass here is a second GPU rasterisation plus a readback, so it
+    /// costs less than it does on a CPU-coverage backend but is not free. A
+    /// host redrawing faster than it queries — mid-resize, say — can leave the
+    /// hitmap alone for a few frames.
+    ///
+    /// While it is off, [`Self::pick_at`] keeps answering from the last render
+    /// that refreshed. Set it back to `true` (the default) and the next render
+    /// brings the hitmap up to date. No effect when picking was not enabled at
+    /// construction.
+    pub fn set_refresh_pick(&mut self, refresh: bool) {
+        self.refresh_pick = refresh;
+    }
+
+    /// Whether the coming render will refresh the hitmap.
+    pub fn refreshes_pick(&self) -> bool {
+        self.refresh_pick && self.scene.raw_pick().is_some()
     }
 
     /// Look up the id at pixel `(x, y)` in the most-recent pick render.
@@ -810,7 +834,7 @@ impl Renderer for VelloRenderer {
         // If picking is enabled, render the parallel pick scene over a
         // transparent base. See `render_pick_and_readback` for why the base
         // must stay transparent.
-        let picking = self.scene.raw_pick().is_some();
+        let picking = self.refreshes_pick();
         if picking {
             let pick_scene = self.scene.raw_pick().unwrap();
             let pick_target = self.pick_target.as_ref().expect("pick target ensured");
@@ -962,6 +986,10 @@ impl Renderer for VelloRenderer {
 }
 
 impl WgpuRenderer for VelloRenderer {
+    const REQUIRED_TARGET_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::STORAGE_BINDING;
+
+    const TARGET_IS_PREMULTIPLIED: bool = false;
+
     fn render_to_texture(
         &mut self,
         view: &wgpu::TextureView,
@@ -988,7 +1016,7 @@ impl WgpuRenderer for VelloRenderer {
         // Picking still goes through the backend-owned pick target +
         // CPU readback. Display has no readback to wait on, so the pick
         // submit / poll happens after the display submit returns.
-        if self.scene.raw_pick().is_some() {
+        if self.refreshes_pick() {
             self.ensure_pick_target(width, height);
             self.render_pick_and_readback(width, height)?;
         }

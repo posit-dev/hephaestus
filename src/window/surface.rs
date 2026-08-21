@@ -1,17 +1,18 @@
 //! Presentation surface: the swap chain, the intermediate texture the
 //! renderer writes into, and the blit that moves one to the other.
 //!
-//! Vello rasterises through a compute shader, so its output texture must be
-//! `Rgba8Unorm` with `STORAGE_BINDING` — which a swap-chain texture never is.
-//! Every frame therefore goes intermediate texture → blit → swap chain.
+//! A backend that rasterises through a render pipeline can write the acquired
+//! swap-chain texture itself, so its frames are one step: render, present. One
+//! that writes through a storage binding cannot — a surface texture is never
+//! one — so its frames go intermediate texture → blit → swap chain. The
+//! backend decides which, and [`WindowSurface`] allocates the intermediate and
+//! the blitter only for the second case.
 
 use crate::window::{PresentMode, WindowError};
 
-/// Usage flags the intermediate texture needs: `STORAGE_BINDING` because
-/// Vello's compute shader writes it, `TEXTURE_BINDING` because the blit
-/// samples it.
-const TARGET_USAGE: wgpu::TextureUsages =
-    wgpu::TextureUsages::STORAGE_BINDING.union(wgpu::TextureUsages::TEXTURE_BINDING);
+/// Usage the blit itself needs, unioned with whatever the backend requires:
+/// `TEXTURE_BINDING`, because the blit samples the intermediate texture.
+const BLIT_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::TEXTURE_BINDING;
 
 /// The swap chain plus everything needed to get a rendered frame onto it.
 pub(crate) struct WindowSurface {
@@ -19,9 +20,20 @@ pub(crate) struct WindowSurface {
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
+    /// The intermediate texture and the blit that moves it onto the swap
+    /// chain. `None` when the renderer writes the surface texture itself.
+    indirect: Option<Indirect>,
+}
+
+/// What a backend that cannot write a surface texture needs: somewhere to
+/// render, and a blit to get it onto the swap chain.
+struct Indirect {
     blitter: wgpu::util::TextureBlitter,
     target: wgpu::Texture,
     target_view: wgpu::TextureView,
+    /// Usage the intermediate is allocated with, kept so a resize reallocates
+    /// it the same way.
+    usage: wgpu::TextureUsages,
 }
 
 impl WindowSurface {
@@ -36,6 +48,7 @@ impl WindowSurface {
         width: u32,
         height: u32,
         present_mode: PresentMode,
+        target_usage: Option<wgpu::TextureUsages>,
     ) -> Result<Self, WindowError> {
         pollster::block_on(Self::new_async(
             instance,
@@ -43,6 +56,7 @@ impl WindowSurface {
             width,
             height,
             present_mode,
+            target_usage,
         ))
     }
 
@@ -57,6 +71,7 @@ impl WindowSurface {
         width: u32,
         height: u32,
         present_mode: PresentMode,
+        target_usage: Option<wgpu::TextureUsages>,
     ) -> Result<Self, WindowError> {
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -98,17 +113,23 @@ impl WindowSurface {
         };
         surface.configure(&device, &config);
 
-        let (target, target_view) = create_target(&device, config.width, config.height);
-        let blitter = wgpu::util::TextureBlitter::new(&device, format);
+        let indirect = target_usage.map(|usage| {
+            let usage = usage | BLIT_USAGE;
+            let (target, target_view) = create_target(&device, config.width, config.height, usage);
+            Indirect {
+                blitter: wgpu::util::TextureBlitter::new(&device, format),
+                target,
+                target_view,
+                usage,
+            }
+        });
 
         Ok(Self {
             device,
             queue,
             surface,
             config,
-            blitter,
-            target,
-            target_view,
+            indirect,
         })
     }
 
@@ -123,9 +144,9 @@ impl WindowSurface {
         &self.queue
     }
 
-    /// The intermediate texture view the renderer draws into.
-    pub(crate) fn target_view(&self) -> &wgpu::TextureView {
-        &self.target_view
+    /// The surface format the renderer must write.
+    pub(crate) fn format(&self) -> wgpu::TextureFormat {
+        self.config.format
     }
 
     /// Current surface size in device pixels.
@@ -147,21 +168,28 @@ impl WindowSurface {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
-        let (target, view) = create_target(&self.device, width, height);
-        self.target = target;
-        self.target_view = view;
+        if let Some(indirect) = self.indirect.as_mut() {
+            let (target, view) = create_target(&self.device, width, height, indirect.usage);
+            indirect.target = target;
+            indirect.target_view = view;
+        }
     }
 
-    /// Blit the intermediate texture onto the swap chain and present it.
+    /// Acquire a frame, render into it, and present it.
     ///
-    /// `pre_present` runs after the blit is submitted and immediately before
-    /// the frame is handed to the compositor — the point at which a windowing
-    /// backend wants to be told a frame is about to appear.
+    /// `render` is handed the view it must draw into: the swap-chain texture
+    /// itself when the backend can write one, otherwise the intermediate that
+    /// is then blitted across. Returning `Ok(false)` means the frame was not
+    /// presentable and nothing was drawn — a resize or an occluded window —
+    /// which is not an error.
     ///
-    /// Returns `Ok(false)` when the frame was skipped because the surface was
-    /// not in a presentable state (occluded, timed out, or outdated); the
-    /// caller should try again on the next redraw.
-    pub(crate) fn present(&self, pre_present: impl FnOnce()) -> Result<bool, WindowError> {
+    /// `pre_present` runs immediately before the frame is handed to the
+    /// compositor, which is the point a windowing backend wants told.
+    pub(crate) fn draw_frame(
+        &self,
+        render: impl FnOnce(&wgpu::TextureView) -> Result<(), WindowError>,
+        pre_present: impl FnOnce(),
+    ) -> Result<bool, WindowError> {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -178,18 +206,27 @@ impl WindowSurface {
                 ))
             }
         };
-
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("hephaestus.window.blit"),
-            });
-        self.blitter
-            .copy(&self.device, &mut encoder, &self.target_view, &view);
-        self.queue.submit([encoder.finish()]);
+
+        match self.indirect.as_ref() {
+            Some(indirect) => {
+                render(&indirect.target_view)?;
+                let mut encoder =
+                    self.device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("hephaestus.window.blit"),
+                        });
+                indirect
+                    .blitter
+                    .copy(&self.device, &mut encoder, &indirect.target_view, &view);
+                self.queue.submit([encoder.finish()]);
+            }
+            // Straight into the acquired texture: no intermediate, no blit,
+            // one fewer full-screen copy per frame.
+            None => render(&view)?,
+        }
 
         pre_present();
         frame.present();
@@ -197,11 +234,12 @@ impl WindowSurface {
     }
 }
 
-/// Allocate the intermediate texture Vello renders into.
+/// Allocate the intermediate texture the renderer draws into.
 fn create_target(
     device: &wgpu::Device,
     width: u32,
     height: u32,
+    usage: wgpu::TextureUsages,
 ) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("hephaestus.window.target"),
@@ -214,7 +252,7 @@ fn create_target(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: TARGET_USAGE,
+        usage,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

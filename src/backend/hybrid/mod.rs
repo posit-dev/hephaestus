@@ -26,7 +26,7 @@ use vello_hybrid::{
     RenderSize, RenderTargetConfig, Renderer as HRenderer, Resources, Scene, TextureBindings,
 };
 
-use crate::backend::{convert, mesh, BackendError, Renderer};
+use crate::backend::{convert, mesh, BackendError, Renderer, WgpuRenderer};
 use crate::blend::BlendMode;
 use crate::brush::{Brush, Image, Sampling};
 use crate::color::Color;
@@ -406,6 +406,7 @@ struct Target {
     height: u32,
     /// Bytes per row in the readback buffer (padded to wgpu's alignment).
     padded_bytes_per_row: u32,
+    format: wgpu::TextureFormat,
 }
 
 impl Target {
@@ -413,7 +414,7 @@ impl Target {
     ///
     /// `RENDER_ATTACHMENT` rather than `STORAGE_BINDING`: this backend
     /// rasterises through a render pipeline, not a compute shader.
-    fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+    fn new(device: &wgpu::Device, width: u32, height: u32, format: wgpu::TextureFormat) -> Self {
         let bytes_per_row = width * 4;
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let padded_bytes_per_row = bytes_per_row.div_ceil(align) * align;
@@ -428,7 +429,7 @@ impl Target {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
@@ -446,6 +447,7 @@ impl Target {
             width,
             height,
             padded_bytes_per_row,
+            format,
         }
     }
 }
@@ -461,6 +463,20 @@ struct Sized {
     display: Scene,
     pick: Option<Scene>,
     images: HashMap<u64, ImageSource>,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+}
+
+/// A pick readback in flight: a slot the `map_async` callback fills, and the
+/// dimensions it covers.
+///
+/// A slot rather than a future, so completion can be *checked* instead of
+/// awaited. Awaiting would mean holding a borrow of the renderer across a
+/// suspension point, which a browser host — where the only caller is a
+/// callback that may re-enter — cannot do safely.
+struct PendingPick {
+    slot: std::sync::Arc<std::sync::Mutex<Option<Result<(), wgpu::BufferAsyncError>>>>,
     width: u32,
     height: u32,
 }
@@ -482,6 +498,13 @@ pub struct HybridRenderer {
     /// Decoded pick pixels of the most recent render, one `u32` per pixel.
     hitmap: Option<Vec<u32>>,
     hitmap_dims: Option<(u32, u32)>,
+    pick_pending: Option<PendingPick>,
+    /// Format `render_to_texture` writes. A host presenting straight into its
+    /// swap chain sets this to the surface's format.
+    target_format: wgpu::TextureFormat,
+    /// Whether the coming render refreshes the hitmap. See
+    /// [`HybridRenderer::set_refresh_pick`].
+    refresh_pick: bool,
 }
 
 impl HybridRenderer {
@@ -556,6 +579,9 @@ impl HybridRenderer {
             pick_target: None,
             hitmap: None,
             hitmap_dims: None,
+            pick_pending: None,
+            target_format: wgpu::TextureFormat::Rgba8Unorm,
+            refresh_pick: true,
         }
     }
 
@@ -574,6 +600,43 @@ impl HybridRenderer {
         pick::decode(hitmap[(y * w + x) as usize])
     }
 
+    /// Control whether the coming render refreshes the hitmap.
+    ///
+    /// The pick pass costs about what the display pass does — it is a second
+    /// strip generation over the same geometry, on the CPU — so a host that is
+    /// resizing, animating, or otherwise redrawing faster than it queries can
+    /// leave the hitmap alone and pay for it only when an answer is wanted.
+    /// Measured at 100k marks: 88 ms a frame without it, 150 ms with.
+    ///
+    /// While it is off, [`Self::pick_at`] keeps answering from the last render
+    /// that refreshed — so the ids stay readable but describe an older frame.
+    /// Set it back to `true` (the default) and the next render brings the
+    /// hitmap up to date.
+    ///
+    /// No effect when picking was not enabled at construction.
+    pub fn set_refresh_pick(&mut self, refresh: bool) {
+        self.refresh_pick = refresh;
+    }
+
+    /// Whether the coming render will refresh the hitmap.
+    pub fn refreshes_pick(&self) -> bool {
+        self.picking && self.refresh_pick
+    }
+
+    /// Set the texture format [`WgpuRenderer::render_to_texture`] writes.
+    ///
+    /// Defaults to `Rgba8Unorm`. A host that presents straight into its swap
+    /// chain — which this backend can do, since it rasterises through a render
+    /// pipeline — sets the surface's format here instead of blitting from an
+    /// intermediate texture. Changing it rebuilds the size-bound state, so set
+    /// it once rather than per frame.
+    ///
+    /// [`Renderer::render_to_buffer`] is unaffected: it owns its target and
+    /// always uses `Rgba8Unorm`, since that is the byte order it hands out.
+    pub fn set_target_format(&mut self, format: wgpu::TextureFormat) {
+        self.target_format = format;
+    }
+
     /// Raw pick pixels of the most recent render, for bulk queries.
     ///
     /// Row-major, `width * height` entries. Interpret each with
@@ -584,11 +647,16 @@ impl HybridRenderer {
 
     /// Rebuild the size-bound state when the requested frame size differs
     /// from what it was built for.
-    fn ensure_sized(&mut self, width: u32, height: u32) -> Result<(), BackendError> {
+    fn ensure_sized(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) -> Result<(), BackendError> {
         if self
             .sized
             .as_ref()
-            .is_some_and(|s| s.width == width && s.height == height)
+            .is_some_and(|s| s.width == width && s.height == height && s.format == format)
         {
             return Ok(());
         }
@@ -596,7 +664,7 @@ impl HybridRenderer {
         let (renderer, resources) = HRenderer::new(
             &self.device,
             &RenderTargetConfig {
-                format: wgpu::TextureFormat::Rgba8Unorm,
+                format,
                 width,
                 height,
             },
@@ -609,6 +677,7 @@ impl HybridRenderer {
             images: HashMap::new(),
             width,
             height,
+            format,
         });
         Ok(())
     }
@@ -713,7 +782,7 @@ impl HybridRenderer {
 
     /// Replay the recording into the display scene, and into the pick scene
     /// when picking is on.
-    fn replay(&mut self, background: Color, width: u32, height: u32) {
+    fn replay(&mut self, background: Color, width: u32, height: u32, refresh_pick: bool) {
         let sized = self.sized.as_mut().expect("sized state ensured");
         let frame = crate::geometry::Rect::new(0.0, 0.0, width.into(), height.into());
 
@@ -733,6 +802,9 @@ impl HybridRenderer {
         };
         self.scene.ops.replay(&mut writer);
 
+        if !refresh_pick {
+            return;
+        }
         if let Some(pick) = sized.pick.as_mut() {
             pick.reset();
             // The one line the whole backend exists for: a pick pixel is
@@ -749,6 +821,282 @@ impl HybridRenderer {
             };
             self.scene.ops.replay(&mut writer);
         }
+    }
+}
+
+impl HybridRenderer {
+    /// Allocate the pick target when the requested size differs from the
+    /// cached one.
+    fn ensure_pick_target(&mut self, width: u32, height: u32) {
+        // The pick pass goes through the same renderer as the display, and a
+        // renderer targets one format — so the pick target has to match it.
+        // `read_hitmap` puts the channels back in order.
+        let format = self
+            .sized
+            .as_ref()
+            .map_or(wgpu::TextureFormat::Rgba8Unorm, |s| s.format);
+        if self
+            .pick_target
+            .as_ref()
+            .is_none_or(|t| t.width != width || t.height != height || t.format != format)
+        {
+            self.pick_target = Some(Target::new(&self.device, width, height, format));
+        }
+    }
+
+    /// Rasterise one of the two scenes into `view`.
+    fn rasterise(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        pass: Pass,
+        view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+    ) -> Result<(), BackendError> {
+        let sized = self.sized.as_mut().expect("sized state ensured");
+        let scene = match pass {
+            Pass::Display => &sized.display,
+            Pass::Pick => sized.pick.as_ref().expect("pick scene present"),
+        };
+        sized
+            .renderer
+            .render(
+                scene,
+                &mut sized.resources,
+                &self.device,
+                &self.queue,
+                encoder,
+                &RenderSize { width, height },
+                view,
+                &TextureBindings::new(),
+            )
+            .map_err(|e| match pass {
+                Pass::Display => BackendError::Other(format!("hybrid render: {e}")),
+                Pass::Pick => BackendError::Other(format!("hybrid pick render: {e}")),
+            })
+    }
+
+    /// Drain the pick target into the CPU-side hitmap.
+    ///
+    /// Assumes the copy has been submitted and the buffer mapped.
+    fn read_hitmap(&mut self, width: u32, height: u32) {
+        let pick_target = self.pick_target.as_ref().expect("pick target ensured");
+        let row_bytes = (width as usize) * 4;
+        let row_px = width as usize;
+        let hitmap = self.hitmap.get_or_insert_with(Vec::new);
+        hitmap.clear();
+        hitmap.resize(row_px * height as usize, 0);
+        // The pick target carries the display format, because one renderer
+        // targets one format. `pick::decode` reads an id out of a
+        // little-endian RGBA word, so a BGRA target needs its red and blue
+        // channels put back before that means anything.
+        let swizzle = matches!(
+            pick_target.format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
+        {
+            let data = pick_target.readback.slice(..).get_mapped_range();
+            let padded = pick_target.padded_bytes_per_row as usize;
+            for y in 0..height as usize {
+                let dst: &mut [u8] =
+                    bytemuck::cast_slice_mut(&mut hitmap[y * row_px..(y + 1) * row_px]);
+                dst.copy_from_slice(&data[y * padded..y * padded + row_bytes]);
+                if swizzle {
+                    for px in dst.chunks_exact_mut(4) {
+                        px.swap(0, 2);
+                    }
+                }
+            }
+        }
+        pick_target.readback.unmap();
+        self.hitmap_dims = Some((width, height));
+    }
+
+    /// Settle any deferred pick readback before a blocking path reuses the
+    /// buffer.
+    ///
+    /// `map_async` on a buffer with a map already outstanding is a validation
+    /// error, so a renderer that has been driven through
+    /// [`Self::render_to_texture_deferring_pick`] and is then rendered
+    /// blocking has to land the old readback first. Blocking is allowed on
+    /// these paths, so this waits.
+    fn settle_pending_pick(&mut self) -> Result<(), BackendError> {
+        if self.pick_pending.is_some() {
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+            self.try_finish_pick()?;
+        }
+        Ok(())
+    }
+
+    /// Rasterise the pick scene, read it back, and refresh the hitmap.
+    ///
+    /// Uses an encoder of its own and submits it separately from the display
+    /// pass. Both passes go through one renderer, whose per-frame coverage,
+    /// paint and glyph uploads are written while a pass is being *recorded* —
+    /// so sharing a command buffer would let this pass's uploads overwrite the
+    /// display pass's before the GPU consumed them.
+    fn submit_pick_blocking(&mut self, width: u32, height: u32) -> Result<(), BackendError> {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("hephaestus.hybrid.pick"),
+            });
+        let pick_view = self
+            .pick_target
+            .as_ref()
+            .expect("pick target ensured")
+            .view
+            .clone();
+        self.rasterise(&mut encoder, Pass::Pick, &pick_view, width, height)?;
+        {
+            let pick_target = self.pick_target.as_ref().expect("pick target ensured");
+            copy_to_readback(&mut encoder, pick_target, width, height);
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        let pick_target = self.pick_target.as_ref().expect("pick target ensured");
+        let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
+        pick_target
+            .readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |res| {
+                let _ = tx.send(res);
+            });
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        await_map(pollster::block_on(rx.receive()))?;
+        self.read_hitmap(width, height);
+        Ok(())
+    }
+
+    /// Rasterise the pick scene and submit its readback without waiting.
+    ///
+    /// Pair with [`Self::try_finish_pick`]. Assumes the scene has already been
+    /// replayed for this frame.
+    fn submit_pick(&mut self, width: u32, height: u32) -> Result<(), BackendError> {
+        self.ensure_pick_target(width, height);
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("hephaestus.hybrid.pick"),
+            });
+        let pick_view = self
+            .pick_target
+            .as_ref()
+            .expect("pick target ensured")
+            .view
+            .clone();
+        self.rasterise(&mut encoder, Pass::Pick, &pick_view, width, height)?;
+        let pick_target = self.pick_target.as_ref().expect("pick target ensured");
+        copy_to_readback(&mut encoder, pick_target, width, height);
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let sink = std::sync::Arc::clone(&slot);
+        pick_target
+            .readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |res| {
+                if let Ok(mut guard) = sink.lock() {
+                    *guard = Some(res);
+                }
+            });
+        self.pick_pending = Some(PendingPick {
+            slot,
+            width,
+            height,
+        });
+        Ok(())
+    }
+
+    /// Drain a readback submitted by [`Self::submit_pick`] into the hitmap,
+    /// if it has landed.
+    ///
+    /// Returns whether the hitmap was refreshed: `false` means nothing was in
+    /// flight, or the GPU has not finished. Never blocks, so a host that
+    /// cannot park a thread calls this and accepts that the hitmap may lag
+    /// the drawn frame.
+    ///
+    /// Only meaningful after [`Self::render_to_texture_deferring_pick`]; the
+    /// blocking render paths drain their own readback before returning.
+    pub fn try_finish_pick(&mut self) -> Result<bool, BackendError> {
+        let Some(pending) = self.pick_pending.as_ref() else {
+            return Ok(false);
+        };
+        let landed = pending
+            .slot
+            .lock()
+            .map_err(|_| BackendError::Readback("pick readback slot poisoned".into()))?
+            .take();
+        let Some(result) = landed else {
+            return Ok(false);
+        };
+        let PendingPick { width, height, .. } =
+            self.pick_pending.take().expect("checked just above");
+        result.map_err(|e| BackendError::Readback(e.to_string()))?;
+        self.read_hitmap(width, height);
+        Ok(true)
+    }
+
+    /// Rasterise into `view` and submit the pick pass without waiting on it.
+    ///
+    /// The non-blocking counterpart to
+    /// [`WgpuRenderer::render_to_texture`](crate::WgpuRenderer::render_to_texture),
+    /// whose pick readback parks the calling thread until the GPU is done —
+    /// which a browser's main thread cannot do. Pair with
+    /// [`Self::try_finish_pick`]: until that drains, [`Self::pick_at`] keeps
+    /// answering from the last frame that landed.
+    pub fn render_to_texture_deferring_pick(
+        &mut self,
+        view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        background: Color,
+    ) -> Result<(), BackendError> {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("hephaestus.hybrid.render_to_texture"),
+            });
+        let format = self.target_format;
+        self.prepare(width, height, background, format, &mut encoder)?;
+        self.rasterise(&mut encoder, Pass::Display, view, width, height)?;
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        if self.refreshes_pick() {
+            // Drain first: that unmaps the readback buffer, and `map_async`
+            // on a still-mapped buffer is a validation error. Draining also
+            // has to happen before `ensure_pick_target`, which may reallocate
+            // the target the in-flight readback is reading from.
+            self.try_finish_pick()?;
+            // Still in flight — skip this frame rather than queue a second
+            // map on the same buffer. The hitmap lags until it lands, which
+            // `pick_at` already documents.
+            if self.pick_pending.is_none() {
+                self.submit_pick(width, height)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Shared front half of both render entry points: validate the size,
+    /// rebuild size-bound state, upload images, and replay the recording.
+    fn prepare(
+        &mut self,
+        width: u32,
+        height: u32,
+        background: Color,
+        format: wgpu::TextureFormat,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<(), BackendError> {
+        if width == 0 || height == 0 {
+            return Err(BackendError::Other(
+                "cannot render a zero-sized frame".into(),
+            ));
+        }
+        self.ensure_sized(width, height, format)?;
+        self.upload_images(encoder)?;
+        self.replay(background, width, height, self.refresh_pick);
+        Ok(())
     }
 }
 
@@ -773,108 +1121,62 @@ impl Renderer for HybridRenderer {
                 actual: out.len(),
             });
         }
-        if width == 0 || height == 0 {
-            return Err(BackendError::Other(
-                "cannot render a zero-sized frame".into(),
-            ));
-        }
-        self.ensure_sized(width, height)?;
-        if self
-            .target
-            .as_ref()
-            .is_none_or(|t| t.width != width || t.height != height)
-        {
-            self.target = Some(Target::new(&self.device, width, height));
-        }
-        if self.picking
-            && self
-                .pick_target
-                .as_ref()
-                .is_none_or(|t| t.width != width || t.height != height)
-        {
-            self.pick_target = Some(Target::new(&self.device, width, height));
-        }
 
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("hephaestus.hybrid.render"),
             });
-        self.upload_images(&mut encoder)?;
-        self.replay(background, width, height);
-
-        let render_size = RenderSize { width, height };
-        let bindings = TextureBindings::new();
+        self.prepare(
+            width,
+            height,
+            background,
+            wgpu::TextureFormat::Rgba8Unorm,
+            &mut encoder,
+        )?;
+        if self
+            .target
+            .as_ref()
+            .is_none_or(|t| t.width != width || t.height != height)
         {
-            let sized = self.sized.as_mut().expect("sized state ensured");
-            let target = self.target.as_ref().expect("target ensured");
-            sized
-                .renderer
-                .render(
-                    &sized.display,
-                    &mut sized.resources,
-                    &self.device,
-                    &self.queue,
-                    &mut encoder,
-                    &render_size,
-                    &target.view,
-                    &bindings,
-                )
-                .map_err(|e| BackendError::Other(format!("hybrid render: {e}")))?;
-            if let (Some(pick), Some(pick_target)) =
-                (sized.pick.as_ref(), self.pick_target.as_ref())
-            {
-                sized
-                    .renderer
-                    .render(
-                        pick,
-                        &mut sized.resources,
-                        &self.device,
-                        &self.queue,
-                        &mut encoder,
-                        &render_size,
-                        &pick_target.view,
-                        &bindings,
-                    )
-                    .map_err(|e| BackendError::Other(format!("hybrid pick render: {e}")))?;
-            }
+            self.target = Some(Target::new(
+                &self.device,
+                width,
+                height,
+                wgpu::TextureFormat::Rgba8Unorm,
+            ));
+        }
+        let picking = self.refreshes_pick();
+        if picking {
+            self.settle_pending_pick()?;
+            self.ensure_pick_target(width, height);
         }
 
-        // One submit for both passes and both copies, matching the display +
-        // pick round-trip the other backend does.
-        let target = self.target.as_ref().expect("target ensured");
-        copy_to_readback(&mut encoder, target, width, height);
-        let picking = self.picking && self.pick_target.is_some();
-        if picking {
-            let pick_target = self.pick_target.as_ref().expect("pick target ensured");
-            copy_to_readback(&mut encoder, pick_target, width, height);
+        let display_view = self.target.as_ref().expect("target ensured").view.clone();
+        self.rasterise(&mut encoder, Pass::Display, &display_view, width, height)?;
+        {
+            let target = self.target.as_ref().expect("target ensured");
+            copy_to_readback(&mut encoder, target, width, height);
         }
+        // Submit before the pick pass is recorded, not after. Rasterising a
+        // scene writes this frame's coverage, paints and glyphs into
+        // renderer-owned textures, and both passes share one renderer — so
+        // recording them into a single command buffer would let the pick
+        // pass's uploads land before the GPU ran the display pass, and the
+        // display would come out reading the pick pass's binary coverage.
         self.queue.submit(std::iter::once(encoder.finish()));
+        if picking {
+            self.submit_pick_blocking(width, height)?;
+        }
+        let target = self.target.as_ref().expect("target ensured");
 
         let display_slice = target.readback.slice(..);
         let (display_tx, display_rx) = futures_intrusive::channel::shared::oneshot_channel();
         display_slice.map_async(wgpu::MapMode::Read, move |res| {
             let _ = display_tx.send(res);
         });
-        let pick_rx = if picking {
-            let pick_target = self.pick_target.as_ref().expect("pick target ensured");
-            let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
-            pick_target
-                .readback
-                .slice(..)
-                .map_async(wgpu::MapMode::Read, move |res| {
-                    let _ = tx.send(res);
-                });
-            Some(rx)
-        } else {
-            None
-        };
-
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         await_map(pollster::block_on(display_rx.receive()))?;
-        if let Some(rx) = pick_rx.as_ref() {
-            await_map(pollster::block_on(rx.receive()))?;
-        }
 
         let row_bytes = (width as usize) * 4;
         {
@@ -889,25 +1191,38 @@ impl Renderer for HybridRenderer {
         // The rasteriser composites premultiplied; every `Renderer` hands out
         // straight alpha.
         unpremultiply(out);
+        Ok(())
+    }
+}
 
-        if picking {
-            let pick_target = self.pick_target.as_ref().expect("pick target ensured");
-            let total_px = (width as usize) * (height as usize);
-            let hitmap = self.hitmap.get_or_insert_with(Vec::new);
-            hitmap.clear();
-            hitmap.resize(total_px, 0);
-            let row_px = width as usize;
-            {
-                let data = pick_target.readback.slice(..).get_mapped_range();
-                let padded = pick_target.padded_bytes_per_row as usize;
-                for y in 0..height as usize {
-                    let dst: &mut [u8] =
-                        bytemuck::cast_slice_mut(&mut hitmap[y * row_px..(y + 1) * row_px]);
-                    dst.copy_from_slice(&data[y * padded..y * padded + row_bytes]);
-                }
-            }
-            pick_target.readback.unmap();
-            self.hitmap_dims = Some((width, height));
+impl WgpuRenderer for HybridRenderer {
+    const REQUIRED_TARGET_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT;
+
+    const TARGET_IS_PREMULTIPLIED: bool = true;
+
+    fn render_to_texture(
+        &mut self,
+        view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        background: Color,
+    ) -> Result<(), BackendError> {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("hephaestus.hybrid.render_to_texture"),
+            });
+        let format = self.target_format;
+        self.prepare(width, height, background, format, &mut encoder)?;
+        self.rasterise(&mut encoder, Pass::Display, view, width, height)?;
+        // Submitted before the pick pass is recorded — see
+        // `submit_pick_blocking` for why they cannot share a command buffer.
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        if self.refreshes_pick() {
+            self.settle_pending_pick()?;
+            self.ensure_pick_target(width, height);
+            self.submit_pick_blocking(width, height)?;
         }
         Ok(())
     }

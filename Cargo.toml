@@ -67,17 +67,19 @@ webp = ["dep:image-webp"]
 google-fonts = ["dep:ureq", "dep:directories"]
 # Live window presentation: opens an OS window, presents rendered frames
 # through a wgpu surface, and drives an event loop with resize and pointer
-# events. Requires `vello` — the window path presents what a `WgpuRenderer`
-# rasterises. winit stays an implementation detail; the event types are ours.
-window = ["vello", "dep:winit"]
+# events. Requires a rasterising backend — the window path presents what a
+# `WgpuRenderer` rasterises, and `WindowConfig::backend` picks which one.
+# winit stays an implementation detail; the event types are ours.
+window = ["dep:winit"]
 # Presentation onto an existing HTML canvas, for a wasm build embedded in a
 # page. The browser counterpart to `window`: same `WindowApp` / `Frame` /
 # `Event` surface and the same blit path, but the host owns the event loop
-# and feeds resize and pointer events in from JS. Requires `vello`; pulls no
-# winit, which is what keeps a wasm bundle to the web deps wgpu needs anyway.
+# and feeds resize and pointer events in from JS. Requires a rasterising
+# backend; pulls no winit, which is what keeps a wasm bundle to the web deps
+# wgpu needs anyway.
 # Only `wasm32` compiles the host itself — `wgpu::SurfaceTarget::Canvas`
 # exists solely there — so on any other target the gate is inert.
-canvas = ["vello", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys"]
+canvas = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys"]
 # Optional datetime-library interop: `From` impls between our temporal
 # newtypes (`Date` / `DateTime` / `Time` / `Duration`) and the matching
 # types in the named library. All three default off — pick whichever
@@ -540,3 +542,7 @@ required-features = ["vello"]
 [[test]]
 name = "document_roundtrip"
 required-features = ["vello", "document"]
+
+[[example]]
+name = "backend_perf"
+required-features = ["vello", "vello-hybrid", "png"]

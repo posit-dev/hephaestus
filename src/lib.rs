@@ -71,11 +71,11 @@ pub use style_vocab::{HAlign, Length, Margin, Palette, ThemeColor, VAlign};
 
 pub use backend::{BackendError, Renderer};
 
-#[cfg(feature = "vello")]
+#[cfg(any(feature = "vello", feature = "vello-hybrid"))]
 pub use backend::WgpuRenderer;
 
 /// Re-export of the `wgpu` crate version `hephaestus` is built against, so
 /// callers integrating the GPU rendering path (see [`WgpuRenderer`]) can pin
 /// to the exact types the backend expects.
-#[cfg(feature = "vello")]
+#[cfg(any(feature = "vello", feature = "vello-hybrid"))]
 pub use wgpu;

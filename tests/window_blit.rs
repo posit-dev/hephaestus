@@ -27,7 +27,8 @@ fn blitting_the_render_target_into_a_bgra_surface_preserves_the_image() {
     draw(&mut renderer, fill);
 
     // The intermediate texture, with exactly the usage flags the window
-    // surface allocates.
+    // surface allocates: what the backend asks for, plus `TEXTURE_BINDING`
+    // for the blit to sample it.
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("window_blit.target"),
         size: extent(),
@@ -35,7 +36,7 @@ fn blitting_the_render_target_into_a_bgra_surface_preserves_the_image() {
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: VelloRenderer::REQUIRED_TARGET_USAGE | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
