@@ -3,8 +3,16 @@
 use crate::color::Color;
 use crate::scene::SceneBuilder;
 
+#[cfg(any(feature = "vello", feature = "vello-hybrid"))]
+mod convert;
+#[cfg(any(feature = "vello", feature = "vello-hybrid"))]
+mod mesh;
+
 #[cfg(feature = "vello")]
 pub mod vello;
+
+#[cfg(feature = "vello-hybrid")]
+pub mod hybrid;
 
 /// Owns backend resources (GPU device, pipelines, etc.) and rasterizes a scene
 /// to an RGBA8 buffer.

@@ -60,11 +60,19 @@ jobs:
             cargo check --no-default-features --features "$feature"
           done
 
+      # The sparse-strips backend must stand on its own: `--all-features`
+      # builds it beside the compute-shader one, which would hide anything it
+      # reaches for through the other backend's gates.
+      - name: cargo clippy, the sparse-strips backend alone
+        run: |
+          cargo clippy --no-default-features --features vello-hybrid,png \
+            --all-targets -- -D warnings
+
       - name: cargo test --all-features
         run: cargo test --all-features
 
-  # `vello` and `parley` both declare 1.88, so that is the floor for any build
-  # that includes them, whatever `rust-version` says. The jobs above all run on
+  # `vello`, `vello_hybrid` and `parley` all declare 1.88, so that is the floor
+  # for any build that includes them, whatever `rust-version` says. The jobs above all run on
   # stable and would not catch a newer language or std feature creeping in.
   msrv:
     name: MSRV (1.88, --all-features)
@@ -183,6 +191,13 @@ jobs:
       # module claims to compile there, and nothing else proves it.
       - name: cargo check --target wasm32-unknown-unknown --features window
         run: cargo check --target wasm32-unknown-unknown --features window
+
+      # The sparse-strips backend on wasm: no compute stage, so this is the
+      # configuration that can reach a WebGL2 baseline.
+      - name: cargo clippy --target wasm32-unknown-unknown, sparse strips
+        run: |
+          cargo clippy --target wasm32-unknown-unknown --no-default-features \
+            --features vello-hybrid,document-read -- -D warnings
 
   # The wasm bundle a page loads. Its own job because `crates/hephaestus-web`
   # is a separate workspace with its own lock file and release profile, so it

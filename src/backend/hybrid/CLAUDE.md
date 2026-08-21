@@ -1,0 +1,62 @@
+# src/backend/hybrid/CLAUDE.md
+
+Vello Hybrid backend: records draws against a `RecordingScene`, replays them into a `vello_hybrid::Scene` once the frame size is known, and rasterises through a wgpu render pipeline.
+
+## What this module does
+
+`HybridScene` is a recorder, not a rasteriser — it delegates every `SceneBuilder` method to `crate::scene::recording::RecordingScene`. `HybridRenderer` owns the wgpu device and queue, and per frame replays the recording into one or two `vello_hybrid::Scene`s, rasterises them into `Target`s, and reads them back.
+
+`Writer` is the replay sink: a `SceneBuilder` that writes into a `vello_hybrid::Scene`. One instance per pass, chosen by `Pass`:
+
+- **`Pass::Display`** — the caller's brushes, blend modes, layer alpha, and antialiasing.
+- **`Pass::Pick`** — solid encoded ids, blend and layer alpha dropped, hairline strokes widened, and `set_aliasing_threshold(Some(PICK_ALIASING_THRESHOLD))`.
+
+## Why the scene is recorded rather than written straight through
+
+`vello_hybrid::Scene::new` takes the frame's width and height, and strips are generated as each path arrives — so the size has to be known *before the first draw*. `SceneBuilder` carries no size; the size only shows up at `render_to_buffer`. Recording defers the whole scene until that point.
+
+Two things fall out of it, both load-bearing:
+
+- **The pick pass is a second replay, not a second recording.** The compute-shader backend maintains two `vello::Scene`s and encodes every draw twice; here one recording feeds both passes.
+- **A resize replays rather than losing the frame.** `tests/hybrid.rs` pins rendering the same scene at two sizes in a row.
+
+The cost is one extra owned copy of the geometry per frame (`Op` clones paths and brushes). Worth measuring before it is optimised away — the obvious next step is replaying directly out of the plot layer rather than through an op list.
+
+## Quirks worth remembering
+
+- **Aliased picking is the point of this backend.** Coverage is computed CPU-side, so the pick pass can paint with binary coverage: a pixel belongs to exactly one primitive. On two overlapping circles the compute-shader backend yields 28 ids that were never drawn; this one yields two. `tests/hybrid.rs::overlapping_picked_marks_never_blend_into_a_third_id` is that case. Note the geometry has to be *antialiased* to show the difference — axis-aligned rects on integer pixel boundaries have no fringe and both backends agree.
+- **`MIN_PICK_STROKE_WIDTH` is load-bearing here, not a nicety.** With binary coverage a stroke thinner than the threshold covers no pixel at all and vanishes from the hitmap entirely, rather than merely fading.
+- **The pick scene gets no background fill.** An uncovered pick pixel must stay at alpha 0, which is what `pick::decode` reads as a miss.
+- **`RENDER_ATTACHMENT`, not `STORAGE_BINDING`.** Rasterisation goes through a render pipeline, so the target is an ordinary colour attachment. This is the opposite of the compute-shader backend's requirement and is why the `WgpuRenderer` target contract needs generalising before this backend can drive `window`.
+- **Output is premultiplied; `unpremultiply` converts on the way out.** Every `Renderer` hands out straight alpha. `tests/hybrid.rs::output_is_straight_alpha` fails loudly if the conversion goes missing.
+- **The background is a draw, not a parameter.** `render` takes no base colour, so `replay` fills the frame rect first. It has to stay the first draw.
+- **A resize rebuilds the renderer, the scenes, and the image atlas.** `RenderTargetConfig` and `Scene` both fix their dimensions at construction, so `Sized` holds all three together and is replaced wholesale. Uploaded images are invalidated with it.
+- **Image opacity cannot ride on the sampler.** `vello_common`'s paint encoder does `unimplemented!("Applying opacity to image commands")` for any `sampler.alpha != 1.0`. `draw_image`'s alpha becomes a `push_opacity_layer` instead. `tests/hybrid.rs::a_translucent_image_fades_instead_of_panicking` pins it.
+- **Images must be atlas handles.** The paint encoder matches only `ImageSource::OpaqueId` and panics on `ImageSource::Pixmap`, so every image is uploaded before replay can reference it. `ImageSource::from_peniko_image_data` does the format narrowing and premultiply; we take the pixmap back out of it and upload that.
+- **Masks are unreachable, deliberately.** `Scene::push_layer` panics on a mask layer, and our `push_layer` has no mask channel, so `None` is always passed.
+- **Scene dimensions are `u16`.** `MAX_DIMENSION` is the ceiling; `dimension()` reports anything past it as a `BackendError`.
+- **Blend coverage is complete.** All 16 `Mix` and 14 `Compose` variants are mapped upstream, a superset of what `backend/convert.rs` exposes, so no conversion entries are missing.
+
+## The one remaining capacity limit
+
+There is no draw-count ceiling — no `MAX_DRAW_INFO_WORDS` analogue — because GPU buffers are sized to actual content (`create_strips_buffer(device, total_len)`) and grow as needed (`maybe_resize_alphas_tex`). `vello_hybrid::RenderError` has no geometry-capacity variant at all.
+
+The exception is the alpha texture, which holds per-pixel coverage for antialiased strips and is capped at `dim² × 16` bytes where `dim = min(device.max_texture_dimension_2d, 4096)`. 4096 is a vello constant, so better hardware does not raise it and a weak WebGL device reporting 2048 gets a quarter as much. Exceeding it trips an `assert!` — a **panic**, where the compute-shader backend silently blanked the frame. A pre-flight guard belongs here, and unlike the other backend's budget it can be exact: the CPU knows `alphas.len()` before it uploads. Not built yet.
+
+## Dependency version quirks
+
+- **`vello_hybrid` does not re-export the paint types**, so `vello_common` is a direct dependency purely to name `ImageSource` / `PaintType` when building an image paint. Keep its version matched to what `vello_hybrid` resolves.
+- **Neither crate re-exports the glyph type**, so `glifo` is a direct dependency for `glifo::Glyph` alone. Same version-matching caveat. Both would be removable if upstream re-exported them.
+- **`default-features = false` on `vello_hybrid` matters twice.** It drops `wgpu_default`, which would otherwise pull in every wgpu backend and undo the per-platform tables in `Cargo.toml`, and it drops `png`, which nothing here decodes.
+
+## Files
+
+- `mod.rs` — `HybridScene`, `Writer`, `Pass`, `Target`, `Sized`, `HybridRenderer`.
+
+Enum mapping lives in `backend/convert.rs` and mesh decomposition in `backend/mesh.rs`, both shared with the other rasterising backend.
+
+## Cross-references
+
+- `backend/` — the `Renderer` trait and the `WgpuRenderer` target contract this backend does not yet satisfy.
+- `backend/vello/` — the compute-shader backend, and the picking limitations this one lifts.
+- `scene/recording.rs` — `RecordingScene` and `replay`, the mechanism the whole module is built on.

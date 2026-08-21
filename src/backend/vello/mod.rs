@@ -1,8 +1,8 @@
 //! Vello backend. Wraps `vello::Scene` to implement [`SceneBuilder`] and owns
 //! the wgpu device/queue/renderer needed for headless rasterization.
 
-mod convert;
-mod mesh;
+use crate::backend::convert;
+use crate::backend::mesh;
 
 use std::num::NonZeroUsize;
 
@@ -13,17 +13,13 @@ use crate::backend::{BackendError, Renderer, WgpuRenderer};
 use crate::blend::BlendMode;
 use crate::brush::{Brush, Image, Sampling};
 use crate::color::Color;
-use crate::geometry::{Affine, Point};
+use crate::geometry::Affine;
 use crate::mesh::Mesh;
 
 use crate::path::{FillRule, Path};
 use crate::pick::{self, PickId};
 use crate::scene::{GlyphRun, SceneBuilder};
 use crate::stroke::Stroke;
-use mesh::{
-    detect_quad_pair, detect_uniform_fan, polygon_path, quad_gradient_brush, quad_path,
-    triangle_gradient_brush, triangle_path,
-};
 
 /// Minimum stroke width (in pixels) the pick pass uses, so hairline strokes
 /// remain hittable even when the visual stroke is sub-pixel.
@@ -261,97 +257,10 @@ impl SceneBuilder for VelloScene {
     }
 
     fn draw_mesh(&mut self, mesh: &Mesh, transform: Affine, pick_id: PickId) {
-        // Vello (and peniko) has no native indexed-mesh primitive, so
-        // decompose into `fill` calls. To eliminate the AA seam along
-        // the shared diagonal of adjacent triangles forming a quad,
-        // we detect the pattern `[A, B, C, A, C, D]` (the canonical
-        // ribbon emission shape) and emit a single 4-vertex polygon
-        // fill for the merged quad with one gradient brush. Triangles
-        // that don't match this pattern fall back to the per-triangle
-        // path, which is correct but has visible per-triangle bands
-        // for general meshes with three distinct colours per
-        // triangle.
-        let pick_enabled = pick::raw_id(pick_id).is_some();
-        let pick_brush = if pick_enabled && self.pick.is_some() {
-            Some(Brush::Solid(pick::id_to_color(
-                pick::raw_id(pick_id).unwrap_or(0),
-            )))
-        } else {
-            None
-        };
-
-        let mut i = 0;
-        let indices = &mesh.indices;
-        while i + 3 <= indices.len() {
-            // 1. Try a fan of ≥ 2 triangles all sharing a single
-            //    vertex and a uniform colour. Eliminates internal
-            //    fan seams (round caps, round joins).
-            if let Some((boundary, advance)) = detect_uniform_fan(indices, i, &mesh.colors) {
-                let pts: Vec<Point> = boundary
-                    .iter()
-                    .map(|&idx| mesh.vertices[idx as usize])
-                    .collect();
-                let path = polygon_path(&pts);
-                let brush = Brush::Solid(mesh.colors[boundary[0] as usize]);
-                self.inner
-                    .fill(peniko::Fill::NonZero, transform, &brush, None, &path);
-                if let (Some(pick), Some(pb)) = (&mut self.pick, &pick_brush) {
-                    pick.fill(peniko::Fill::NonZero, transform, pb, None, &path);
-                }
-                i += advance;
-                continue;
-            }
-            // 2. Try a quad of two triangles forming `[A, B, C, A, C,
-            //    D]` (canonical ribbon strip emission). Handles
-            //    per-vertex colour via `quad_gradient_brush`.
-            let merged = if i + 6 <= indices.len() {
-                detect_quad_pair(&indices[i..i + 6])
-            } else {
-                None
-            };
-            if let Some([a, b, c, d]) = merged {
-                let pts = [
-                    mesh.vertices[a as usize],
-                    mesh.vertices[b as usize],
-                    mesh.vertices[c as usize],
-                    mesh.vertices[d as usize],
-                ];
-                let colors = [
-                    mesh.colors[a as usize],
-                    mesh.colors[b as usize],
-                    mesh.colors[c as usize],
-                    mesh.colors[d as usize],
-                ];
-                let path = quad_path(&pts);
-                let brush = quad_gradient_brush(&pts, &colors);
-                self.inner
-                    .fill(peniko::Fill::NonZero, transform, &brush, None, &path);
-                if let (Some(pick), Some(pb)) = (&mut self.pick, &pick_brush) {
-                    pick.fill(peniko::Fill::NonZero, transform, pb, None, &path);
-                }
-                i += 6;
-            } else {
-                // 3. Single-triangle fallback.
-                let tri_pts = [
-                    mesh.vertices[indices[i] as usize],
-                    mesh.vertices[indices[i + 1] as usize],
-                    mesh.vertices[indices[i + 2] as usize],
-                ];
-                let tri_colors = [
-                    mesh.colors[indices[i] as usize],
-                    mesh.colors[indices[i + 1] as usize],
-                    mesh.colors[indices[i + 2] as usize],
-                ];
-                let tri_path = triangle_path(&tri_pts);
-                let brush = triangle_gradient_brush(&tri_pts, &tri_colors);
-                self.inner
-                    .fill(peniko::Fill::NonZero, transform, &brush, None, &tri_path);
-                if let (Some(pick), Some(pb)) = (&mut self.pick, &pick_brush) {
-                    pick.fill(peniko::Fill::NonZero, transform, pb, None, &tri_path);
-                }
-                i += 3;
-            }
-        }
+        // Neither vello nor peniko has an indexed-mesh primitive, so the mesh
+        // becomes fills. Routing them back through `self.fill` is what gives
+        // the pick scene its copy of each triangle.
+        mesh::decompose(mesh, transform, pick_id, self);
     }
 
     fn push_layer(&mut self, blend: BlendMode, alpha: f32, transform: Affine, clip: &Path) {
@@ -1091,6 +1000,7 @@ impl WgpuRenderer for VelloRenderer {
 mod tests {
     use super::*;
     use crate::color::rgb8;
+    use crate::geometry::Point;
 
     /// Add `n` flat-coloured triangles, each its own draw object.
     fn solid_fills(scene: &mut VelloScene, n: usize) {

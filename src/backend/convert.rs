@@ -1,17 +1,21 @@
 //! Conversions from our restricted enums to peniko equivalents.
+//!
+//! Shared by every backend that rasterises through peniko. This is where the
+//! intersection-of-backends rule is enforced: when peniko grows a variant we
+//! do not expose, this table is the only place that knows.
 
 use crate::blend::{BlendMode, Compose, Mix};
 use crate::brush::Sampling;
 use crate::path::FillRule;
 
-pub(super) fn fill_rule(rule: FillRule) -> peniko::Fill {
+pub(crate) fn fill_rule(rule: FillRule) -> peniko::Fill {
     match rule {
         FillRule::NonZero => peniko::Fill::NonZero,
         FillRule::EvenOdd => peniko::Fill::EvenOdd,
     }
 }
 
-pub(super) fn blend_mode(mode: BlendMode) -> peniko::BlendMode {
+pub(crate) fn blend_mode(mode: BlendMode) -> peniko::BlendMode {
     peniko::BlendMode {
         mix: mix(mode.mix),
         compose: compose(mode.compose),
@@ -57,7 +61,7 @@ fn compose(c: Compose) -> peniko::Compose {
     }
 }
 
-pub(super) fn sampling_to_quality(s: Sampling) -> peniko::ImageQuality {
+pub(crate) fn sampling_to_quality(s: Sampling) -> peniko::ImageQuality {
     match s {
         Sampling::Nearest => peniko::ImageQuality::Low,
         Sampling::Bilinear => peniko::ImageQuality::Medium,

@@ -11,8 +11,9 @@ exclude = ["crates/hephaestus-web"]
 name = "hephaestus"
 version = "0.1.0"
 edition = "2021"
-# What this crate's own source needs. The `vello` and `parley` dependency
-# trees declare 1.88, so a build that includes them wants that or newer;
+# What this crate's own source needs. The `vello`, `vello_hybrid` and
+# `parley` dependency trees all declare 1.88, so a build that includes any of
+# them wants that or newer;
 # a renderer-free document writer (`--no-default-features --features
 # document-write`) compiles on 1.86, which is what an R package vendoring
 # this crate for CRAN has to hit.
@@ -36,6 +37,21 @@ rustdoc-args = ["--cfg", "docsrs"]
 [features]
 default = ["vello", "png"]
 vello = ["dep:vello", "dep:wgpu", "dep:pollster", "dep:futures-intrusive", "dep:bytemuck"]
+# The sparse-strips GPU backend: path processing and coverage on the CPU, a
+# plain render pipeline on the GPU. Independent of `vello` — either, both, or
+# neither can be enabled. Two capabilities the compute-shader backend cannot
+# offer: rasterising with binary coverage (`set_aliasing_threshold`), which is
+# what an id buffer needs, and GPU buffers sized to actual scene content
+# rather than fixed caps.
+vello-hybrid = [
+    "dep:vello_hybrid",
+    "dep:glifo",
+    "dep:vello_common",
+    "dep:wgpu",
+    "dep:pollster",
+    "dep:futures-intrusive",
+    "dep:bytemuck",
+]
 png = ["dep:png"]
 # Raster output formats. Each gate adds one encoder over the RGBA8 buffer a
 # `Renderer` already produces, so they cost nothing but the encoder itself —
@@ -100,6 +116,24 @@ thiserror = "2"
 # `wgsl` (vello's shaders) + `std`; per-platform backends are added in the
 # `[target.*]` tables below.
 vello = { version = "0.10", optional = true, default-features = false, features = ["wgpu"] }
+# `default-features = false` matters twice over: it drops `wgpu_default`,
+# which would drag in every wgpu backend and undo the per-platform tables
+# below, and it drops `png`, which nothing here decodes.
+vello_hybrid = { version = "0.2", optional = true, default-features = false, features = [
+    "wgpu",
+    "text",
+    "std",
+] }
+# The glyph type `vello_hybrid`'s glyph-run builder consumes. Neither
+# `vello_hybrid` nor `vello_common` re-exports it, so drawing text means naming
+# the crate it comes from; version-locked to what `vello_hybrid` resolves.
+glifo = { version = "0.3", optional = true, default-features = false }
+# `vello_hybrid` re-exports most of what a caller needs but not the paint
+# types, so building an image paint means naming the shared crate directly.
+# Same resolved version `vello_hybrid` depends on.
+vello_common = { version = "0.2", optional = true, default-features = false, features = [
+    "std",
+] }
 wgpu = { version = "29", optional = true, default-features = false, features = ["wgsl", "std"] }
 pollster = { version = "0.4", optional = true }
 futures-intrusive = { version = "0.5", optional = true }
@@ -165,6 +199,10 @@ wgpu = { version = "29", optional = true, default-features = false, features = [
 [[example]]
 name = "hello"
 required-features = ["vello", "png"]
+
+[[example]]
+name = "hello_hybrid"
+required-features = ["vello-hybrid", "png"]
 
 [[example]]
 name = "layout_demo"
@@ -459,6 +497,10 @@ required-features = ["vello"]
 [[test]]
 name = "picking"
 required-features = ["vello"]
+
+[[test]]
+name = "hybrid"
+required-features = ["vello-hybrid"]
 
 [[test]]
 name = "theme_render"

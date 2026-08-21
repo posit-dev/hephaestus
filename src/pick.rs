@@ -15,13 +15,13 @@
 //!
 //! # Limitation: blended ids where picked content meets picked content
 //!
-//! The pick scene is antialiased — vello offers no way to disable it — so a
-//! mark's edge pixels are a coverage blend of what is above and below them.
-//! Over empty space that is harmless: the rasteriser unpremultiplies, so the
-//! fringe divides back out to the mark's exact id. Where a mark's edge falls
-//! on **other picked content**, the blend mixes two ids and the result is a
-//! third, entirely plausible id at full alpha, which [`decode`] cannot tell
-//! from a real hit.
+//! This one depends on the backend. A rasteriser that cannot disable
+//! antialiasing produces a pick pass whose edge pixels are a coverage blend
+//! of what is above and below them. Over empty space that is harmless: the
+//! rasteriser unpremultiplies, so the fringe divides back out to the mark's
+//! exact id. Where a mark's edge falls on **other picked content**, the blend
+//! mixes two ids and the result is a third, entirely plausible id at full
+//! alpha, which [`decode`] cannot tell from a real hit.
 //!
 //! Two arrangements trigger it: overlapping marks (a boundary between ids
 //! 100 and 200 reports values across that range) and a mark drawn over a
@@ -32,6 +32,11 @@
 //! plot layer does for panel backgrounds and gridlines — keeps marks
 //! compositing over nothing and avoids the conflation entirely. The affected
 //! band is one pixel wide at each boundary.
+//!
+//! A backend that computes coverage on the CPU can paint the pick pass with
+//! binary coverage instead, which rules the whole failure out: a pixel is
+//! covered by exactly one primitive, so every id read back is an id that was
+//! drawn. The `backend::hybrid` backend does this.
 //!
 //! # Limitation: alpha-insensitive picking
 //!
