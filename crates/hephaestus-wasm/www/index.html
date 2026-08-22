@@ -77,7 +77,7 @@
 
   const SETUP =
     'Run <code>wasm-pack build --target web --release</code> in ' +
-    '<code>crates/hephaestus-web</code>, then serve that directory ' +
+    '<code>crates/hephaestus-wasm</code>, then serve that directory ' +
     '(<code>python3 -m http.server</code>) and open <code>/www/</code>.';
 
   let mod;
@@ -125,7 +125,7 @@
 
   // Generated, not committed:
   //   cargo run --example document_save --features document-write
-  //   cp examples/document.hplot crates/hephaestus-web/www/
+  //   cp examples/document.hplot crates/hephaestus-wasm/www/
   const docResponse = await fetch('./document.hplot');
   if (!docResponse.ok) {
     fail(

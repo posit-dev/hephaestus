@@ -1,11 +1,11 @@
-# `crates/hephaestus-web` is deliberately its own workspace rather than a
+# `crates/hephaestus-wasm` is deliberately its own workspace rather than a
 # member of this one. Cargo only honours `[profile]` at a workspace root, so
 # a member could not carry its own size-tuned release profile — the size
 # settings a wasm bundle wants (`opt-level = "z"`, `panic = "abort"`) would
 # have to live here and would then apply to this crate's native release
 # builds, where throughput is the whole point.
 [workspace]
-exclude = ["crates/hephaestus-web"]
+exclude = ["crates/hephaestus-wasm"]
 
 [package]
 name = "hephaestus"

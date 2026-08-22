@@ -1,5 +1,5 @@
 [package]
-name = "hephaestus-web"
+name = "hephaestus-wasm"
 version = "0.1.0"
 edition = "2021"
 description = "Render a hephaestus plot document onto a canvas in the browser."

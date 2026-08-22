@@ -69,4 +69,4 @@ Both shapes live behind `WindowSurface::draw_frame`, which acquires the frame, h
 - `backend/` — `WgpuRenderer`, the trait this module hosts, and the texture contract it documents.
 - `backend/vello/` and `backend/hybrid/` — `with_device` / `with_device_and_picking`, and the per-frame pick readback each provides.
 - `examples/window.rs` — the end-to-end demo: resize re-layout plus hover picking.
-- `crates/hephaestus-web/` — the wasm render client built on `CanvasHost`; the page-facing API and the resize / light-dark wiring live there, not here.
+- `crates/hephaestus-wasm/` — the wasm render client built on `CanvasHost`; the page-facing API and the resize / light-dark wiring live there, not here.

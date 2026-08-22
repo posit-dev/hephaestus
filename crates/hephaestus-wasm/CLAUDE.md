@@ -1,4 +1,4 @@
-# crates/hephaestus-web/CLAUDE.md
+# crates/hephaestus-wasm/CLAUDE.md
 
 ## Two backends, chosen at build time
 
@@ -437,9 +437,16 @@ references.
 
 ## Distribution
 
-An npm package, consumed either from a CDN by exact-version URL or through a
-bundler. `publish = false` in `Cargo.toml` refers to crates.io — this crate is
-a `cdylib` artifact, not a library anyone depends on from Rust.
+An npm package — **`hephaestus-wasm`, unscoped** — consumed either from a CDN
+by exact-version URL or through a bundler. `publish = false` in `Cargo.toml`
+refers to crates.io: this crate is a `cdylib` artifact, not a library anyone
+depends on from Rust.
+
+The bare name `hephaestus` on npm belongs to an unrelated project, so the
+`-wasm` suffix does the work a scope otherwise would. `ggsql-wasm` in the
+sibling repo carries the suffix for the same reason, and the crate, this
+directory and the wasm artifacts all share the name so a consumer sees one
+word in the manifest, the import and the network tab.
 
 `./build.sh` assembles `dist/`, which is both what the demo loads and what
 gets published:
@@ -448,15 +455,15 @@ gets published:
 dist/
   hephaestus.js          entry point; the wrapper
   hephaestus.d.ts        hand-written types for it
-  hephaestus_web.js      wasm-bindgen glue
-  hephaestus_web.d.ts    generated types
-  hephaestus_web_bg.wasm
+  hephaestus_wasm.js     wasm-bindgen glue
+  hephaestus_wasm.d.ts   generated types
+  hephaestus_wasm_bg.wasm
   package.json           from package.template.json, version from Cargo.toml
 ```
 
 **One layout for development and publication, deliberately.** Keeping the
 wrapper in `js/` and the glue in `pkg/` meant the wrapper imported the glue as
-`../pkg/hephaestus_web.js` locally and would need `./hephaestus_web.js` once
+`../pkg/hephaestus_wasm.js` locally and would need `./hephaestus_wasm.js` once
 published — a discrepancy that cannot fail until after a release. Now both are
 `./`, and `www/index.html` loads `../dist/hephaestus.js`, the same entry point
 npm serves.
@@ -472,6 +479,26 @@ imports the glue by a package-relative path, every public name is both exported
 and declared in the `.d.ts`. Those are the failures that otherwise surface only
 after publishing.
 
+### Publishing
+
+A `v*` tag is the trigger, and nothing else publishes. The `client` job in
+`ci.yml` assembles `dist/`, runs `verify-dist.mjs`, then `npm pack`, and
+uploads the tarball; `publish-npm` downloads that same tarball and pushes it,
+so what reaches the registry is what CI checked rather than a second build of
+it. A tag containing `-dev` or `-rc` publishes under the `next` dist-tag so
+`npm install hephaestus-wasm` keeps resolving to the last stable release.
+
+`--provenance` is worth its `id-token: write` here: SRI does not work for ES
+module imports, so a verifiable link back to the workflow run is the only
+integrity story a CDN consumer gets. The credential lives in the `npm` GitHub
+environment, not a bare repo secret.
+
+Three things pin the version together, because each alone leaves a gap.
+`build.sh` reads it from `Cargo.toml`, `verify-dist.mjs` fails if the manifest
+and the crate disagree, and `publish-npm` fails if the tag disagrees with the
+tarball — otherwise a mistyped tag publishes whatever `Cargo.toml` happened to
+hold, which on a first publish succeeds under the wrong number.
+
 ### Pinning, and the coupling that matters
 
 For a consumer, the version *is* the URL:
@@ -479,11 +506,11 @@ For a consumer, the version *is* the URL:
 ```html
 <script type="module">
   import init, { PlotView } from
-    'https://cdn.jsdelivr.net/npm/@posit-dev/hephaestus-web@0.1.0/hephaestus.js';
+    'https://cdn.jsdelivr.net/npm/hephaestus-wasm@0.1.0/hephaestus.js';
 </script>
 ```
 
-The glue resolves its wasm through `new URL('hephaestus_web_bg.wasm',
+The glue resolves its wasm through `new URL('hephaestus_wasm_bg.wasm',
 import.meta.url)`, so a CDN needs no configuration and Vite handles the pattern
 natively; a bundler that does not can pass `init({ module_or_path })`.
 
@@ -512,9 +539,9 @@ exact-version URL is the integrity story.
 
 ```sh
 cargo run --example document_save --features document-write   # writes examples/document.hplot
-cp examples/document.hplot crates/hephaestus-web/www/
-cp /path/to/some.ttf crates/hephaestus-web/www/font.ttf       # neither is committed
-cd crates/hephaestus-web
+cp examples/document.hplot crates/hephaestus-wasm/www/
+cp /path/to/some.ttf crates/hephaestus-wasm/www/font.ttf       # neither is committed
+cd crates/hephaestus-wasm
 ./build.sh                           # or ./build.sh --dev for panic messages
 python3 -m http.server 8080          # serve the crate dir, not www/
 ```

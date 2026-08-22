@@ -12,7 +12,7 @@ import init, {
   isSupported,
   registerFont,
   setGenericFamily,
-} from './hephaestus_web.js';
+} from './hephaestus_wasm.js';
 
 export {
   init as default,

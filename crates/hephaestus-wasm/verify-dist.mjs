@@ -30,13 +30,13 @@ else fail(`package.json is ${pkg.version} but Cargo.toml is ${crateVersion}`);
 // 4. The wrapper imports the glue by a package-relative path, not a sibling
 //    directory — the mistake that only breaks once published.
 const wrapper = readFileSync(dir + entry, 'utf8');
-if (/from '\.\/hephaestus_web\.js'/.test(wrapper)) ok('wrapper imports ./hephaestus_web.js');
+if (/from '\.\/hephaestus_wasm\.js'/.test(wrapper)) ok('wrapper imports ./hephaestus_wasm.js');
 else fail('wrapper does not import the glue from ./ — it will not resolve when published');
 
 // 5. It loads, instantiates, and exports what the types claim.
 globalThis.fetch = () => Promise.reject(new Error('no network'));
 const mod = await import(dir + entry);
-await mod.default({ module_or_path: readFileSync(dir + 'hephaestus_web_bg.wasm') });
+await mod.default({ module_or_path: readFileSync(dir + 'hephaestus_wasm_bg.wasm') });
 ok('wasm instantiates from the published bytes');
 
 const expected = ['default', 'isSupported', 'documentFormatVersion', 'hasFonts',
@@ -143,6 +143,6 @@ if (existsSync('/tmp/test-inter.woff2')) {
   else fail(`wrapper calls undefined: ${[...missing].sort().join(', ')}`);
 }
 
-const size = readFileSync(dir + 'hephaestus_web_bg.wasm').length;
+const size = readFileSync(dir + 'hephaestus_wasm_bg.wasm').length;
 console.log(`\nwasm:  ${size} bytes raw`);
 console.log(`fonts: ${fontBytes} bytes raw (fetched on demand, not in the wasm)`);
