@@ -192,20 +192,27 @@ jobs:
       # read-only document reader, and nothing else. Checked on its own
       # because it is the one combination a website actually ships, and
       # because `canvas` compiles a host no other target has.
-      - name: cargo clippy, the wasm render client
+      # The client's default is WebGL2, so that is the configuration checked
+      # first; `wgpu-backend` is the alternative and is checked after it.
+      - name: cargo clippy, the wasm render client (default, WebGL2)
+        working-directory: crates/hephaestus-web
+        run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
+
+      - name: cargo clippy, the wasm render client on wgpu
+        working-directory: crates/hephaestus-web
         run: |
           cargo clippy --target wasm32-unknown-unknown --no-default-features \
-            --features vello,canvas,document-read -- -D warnings
+            --features webfonts,wgpu-backend -- -D warnings
 
       # `window` on wasm has no caller — `run` is desktop-only — but the
       # module claims to compile there, and nothing else proves it.
       - name: cargo check --target wasm32-unknown-unknown --features window
         run: cargo check --target wasm32-unknown-unknown --features window
 
-      # The sparse-strips backend on wasm. It needs no compute stage, which is
-      # what could eventually take the client below WebGPU — but not yet: wgpu's
-      # `webgl` feature is not compiled on wasm and the canvas host asks for
-      # WebGPU only. Today's win is bundle size.
+      # The sparse-strips backend over wgpu on wasm: still WebGPU, because
+      # wgpu's own `webgl` feature is not compiled here (it costs +1.2 MB, being
+      # shader translation). Going below WebGPU is the `webgl` feature's job,
+      # checked separately below.
       - name: cargo clippy --target wasm32-unknown-unknown, sparse strips
         run: |
           cargo clippy --target wasm32-unknown-unknown --no-default-features \
@@ -213,6 +220,13 @@ jobs:
 
       # What the render client would ship on sparse strips. Still WebGPU: see
       # the note above.
+      # The WebGL2 build: no wgpu in the tree at all, so it is the one that
+      # breaks if the scene layer reaches for a wgpu type.
+      - name: cargo clippy --target wasm32-unknown-unknown, webgl
+        run: |
+          cargo clippy --target wasm32-unknown-unknown --no-default-features \
+            --features webgl,document-read -- -D warnings
+
       - name: cargo clippy --target wasm32-unknown-unknown, canvas on each backend
         run: |
           for backend in vello vello-hybrid; do

@@ -94,9 +94,26 @@ The exception is the alpha texture, which holds per-pixel coverage for antialias
 - **Neither crate re-exports the glyph type**, so `glifo` is a direct dependency for `glifo::Glyph` alone. Same version-matching caveat. Both would be removable if upstream re-exported them.
 - **`default-features = false` on `vello_hybrid` matters twice.** It drops `wgpu_default`, which would otherwise pull in every wgpu backend and undo the per-platform tables in `Cargo.toml`, and it drops `png`, which nothing here decodes.
 
+## Two renderers, one scene layer
+
+`mod.rs` holds everything that needs no GPU API — `HybridScene`, `Writer`, `Pass`, the image collection and the alpha conversion — and the renderers sit beside it:
+
+- **`wgpu_renderer.rs`** (`vello-hybrid`) — `HybridRenderer`: renders to a wgpu texture, implements `Renderer` and `WgpuRenderer`, and reads the pick target back through a mapped buffer.
+- **`webgl.rs`** (`webgl`, `wasm32` only) — `HybridWebGlRenderer`: renders to a canvas's WebGL2 default framebuffer through precompiled GLSL, with no wgpu in the build.
+
+Keeping the scene layer GPU-free is what makes the second one possible: a WebGL2 build has no wgpu types to name anywhere.
+
+The WebGL renderer differs in three ways worth knowing:
+
+- **No offscreen target.** Upstream draws to the default framebuffer and nothing else — the field that would redirect it is private — so there is no intermediate texture and no blit. The canvas *is* the target.
+- **Picking draws the id buffer to the canvas and reads it straight back**, then overdraws it with the display. Both happen in one JS task and a canvas is not composited until the task yields, so the id frame is never seen. It does mean the pick pass has to go first, and that `readPixels` is synchronous.
+- **`readPixels` reads bottom-up**, so the hitmap rows are reversed on the way in. It also implements no `Renderer`: that trait rasterises into a caller's buffer, which here would mean drawing to a visible canvas and reading it back — not what the name promises. Use the wgpu renderer for file output.
+
 ## Files
 
-- `mod.rs` — `HybridScene`, `Writer`, `Pass`, `Target`, `Sized`, `HybridRenderer`.
+- `mod.rs` — `HybridScene`, `Writer`, `Pass`, and the shared helpers.
+- `wgpu_renderer.rs` — `Target`, `SizeBound`, `PendingPick`, `HybridRenderer`.
+- `webgl.rs` — `HybridWebGlRenderer`.
 
 Enum mapping lives in `backend/convert.rs` and mesh decomposition in `backend/mesh.rs`, both shared with the other rasterising backend.
 

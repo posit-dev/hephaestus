@@ -51,26 +51,37 @@ mod event;
 // default to fall back on: the two backends differ in what the target texture
 // must be. Naming one is the caller's choice, so say so rather than failing
 // somewhere further in.
-#[cfg(not(any(feature = "vello", feature = "vello-hybrid")))]
+#[cfg(all(
+    any(feature = "window", feature = "canvas"),
+    not(any(feature = "vello", feature = "vello-hybrid"))
+))]
 compile_error!(
-    "the `window` and `canvas` features need a rasterising backend: \
-     enable `vello` (compute shaders) or `vello-hybrid` (sparse strips)"
+    "the `window` and `canvas` features need a wgpu rasterising backend: \
+     enable `vello` (compute shaders) or `vello-hybrid` (sparse strips). \
+     For a WebGL2 build with no wgpu at all, use `webgl` instead."
 );
 
+#[cfg(any(feature = "vello", feature = "vello-hybrid"))]
 mod renderer;
+#[cfg(any(feature = "vello", feature = "vello-hybrid"))]
 mod surface;
+// The WebGL2 host needs no surface and no wgpu: the canvas is the target.
+#[cfg(all(feature = "webgl", target_arch = "wasm32"))]
+mod webgl_host;
 
 #[cfg(all(feature = "canvas", target_arch = "wasm32"))]
 pub use canvas::CanvasHost;
 pub use event::{Event, MouseButton};
+#[cfg(any(feature = "vello", feature = "vello-hybrid"))]
 pub use renderer::Backend;
+#[cfg(all(feature = "webgl", target_arch = "wasm32"))]
+pub use webgl_host::WebGlHost;
 
 use std::cell::Cell;
 
 use crate::color::Color;
 use crate::geometry::{Point, Size};
 use crate::scene::SceneBuilder;
-use renderer::HostRenderer;
 
 /// Dots per inch a scale factor of 1.0 corresponds to.
 const BASE_DPI: f64 = 96.0;
@@ -105,6 +116,7 @@ pub enum PresentMode {
 impl PresentMode {
     /// The wgpu present mode this maps to. Both choices are the `Auto`
     /// variants, which every backend supports.
+    #[cfg(any(feature = "vello", feature = "vello-hybrid"))]
     fn to_wgpu(self) -> wgpu::PresentMode {
         match self {
             PresentMode::Vsync => wgpu::PresentMode::AutoVsync,
@@ -123,6 +135,7 @@ pub struct WindowConfig {
     picking: bool,
     continuous_redraw: bool,
     present_mode: PresentMode,
+    #[cfg(any(feature = "vello", feature = "vello-hybrid"))]
     backend: Backend,
     pick_interval: Option<std::time::Duration>,
 }
@@ -138,6 +151,7 @@ impl WindowConfig {
             picking: false,
             continuous_redraw: false,
             present_mode: PresentMode::default(),
+            #[cfg(any(feature = "vello", feature = "vello-hybrid"))]
             backend: Backend::default(),
             pick_interval: None,
         }
@@ -184,6 +198,7 @@ impl WindowConfig {
     }
 
     /// Choose which rasterising backend draws the window.
+    #[cfg(any(feature = "vello", feature = "vello-hybrid"))]
     ///
     /// Worth setting when picking matters: the sparse-strip backend reports
     /// exactly one id per pixel, where the compute-shader one can blend two
@@ -194,6 +209,7 @@ impl WindowConfig {
     }
 
     /// The rasterising backend this window draws through.
+    #[cfg(any(feature = "vello", feature = "vello-hybrid"))]
     pub fn selected_backend(&self) -> Backend {
         self.backend
     }
@@ -252,9 +268,19 @@ impl Frame<'_> {
     }
 }
 
+/// Anything that can answer a pick query for [`EventCtx`].
+///
+/// An abstraction rather than a concrete renderer because the wgpu hosts and
+/// the WebGL2 one own entirely different renderers — and a WebGL2 build has no
+/// wgpu types at all to name.
+pub(crate) trait PickSource {
+    /// Id at a device-pixel coordinate of the last refreshed hitmap.
+    fn pick_at(&self, x: u32, y: u32) -> Option<u32>;
+}
+
 /// What an event handler can inspect and ask for.
 pub struct EventCtx<'a> {
-    renderer: &'a HostRenderer,
+    renderer: &'a dyn PickSource,
     // A flag rather than a direct call into the windowing backend: it keeps
     // winit out of everything but `app.rs`, and lets the canvas host share
     // this type. The host acts on it once the handler returns.

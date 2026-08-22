@@ -17,6 +17,7 @@ use crate::color::Color;
 use crate::geometry::{Point, Size};
 use crate::window::renderer::HostRenderer;
 use crate::window::surface::WindowSurface;
+use crate::window::PickSource as _;
 use crate::window::BASE_DPI;
 use crate::window::{Event, EventCtx, Frame, WindowApp, WindowConfig, WindowError};
 

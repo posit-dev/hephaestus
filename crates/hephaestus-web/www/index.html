@@ -28,9 +28,11 @@
   code { font-family: ui-monospace, monospace; }
 
   /* The placeholder is an overlay element, never something drawn into the
-     canvas: calling getContext('2d') on it would make getContext('webgpu')
-     return null and there is no way back. #frame is the positioning
-     context; the overlay is removed once the first frame is on screen. */
+     canvas: a canvas's context type is sticky, so calling getContext('2d')
+     on it would make the renderer's later getContext('webgl2') — or
+     'webgpu', on a wgpu build — return null with no way back. #frame is the
+     positioning context; the overlay is removed once the first frame is on
+     screen. */
   #frame { position: relative; }
   #loading {
     position: absolute; inset: 0; display: grid; place-items: center;
@@ -98,11 +100,12 @@
 
   if (!isSupported()) {
     fail(
-      'WebGPU is unavailable in this browser.',
-      'The renderer rasterises through compute shaders, which WebGL2 cannot ' +
-        'run, so there is no fallback. Try a current Chrome, Edge or Safari.',
+      'This browser cannot run the renderer.',
+      'The default build needs only a WebGL2 context, so this is unusual — ' +
+        'check whether WebGL is disabled or blocklisted. A bundle built with ' +
+        'the wgpu backend needs WebGPU instead.',
     );
-    throw new Error('no WebGPU');
+    throw new Error('renderer unsupported');
   }
 
   // A browser enumerates no system fonts, so without this the plot draws its
@@ -133,14 +136,15 @@
     throw new Error('no document');
   }
 
-  // The slow part is GPU init — adapter, device, and vello's compute
-  // pipelines — not the wasm module, which instantiates in single-digit ms.
-  // `PlotView.create` resolves only once the first frame is on the canvas,
-  // so hiding the overlay straight after it needs no extra signal.
+  // `PlotView.create` resolves only once the first frame is on the canvas, so
+  // hiding the overlay straight after it needs no extra signal. The default
+  // WebGL2 build has no adapter or device to request, so startup is dominated
+  // by shader setup rather than the wasm module; a wgpu build additionally
+  // waits on device acquisition and pipeline compilation.
   // `saveOnRightClick` gives the plot an ordinary image's context menu —
   // Save image as…, Copy image, drag-to-save — which a bare <canvas> never
-  // offers. A WebGPU canvas exports as PNG with nothing to configure; the
-  // preserveDrawingBuffer dance is a WebGL concern.
+  // offers. It re-renders synchronously before each capture, which is what
+  // makes it work on a WebGL2 context whose drawing buffer is not preserved.
   const view = await PlotView.create(canvas, new Uint8Array(await docResponse.arrayBuffer()), {
     colorScheme: 'light',
     saveOnRightClick: 'plot.png',

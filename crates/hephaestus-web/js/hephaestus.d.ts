@@ -14,9 +14,10 @@ export default function init(
 /**
  * Whether this browser can run the renderer.
  *
- * A hard gate, not a preference: the backend rasterises through compute
- * shaders, which WebGL2 cannot run, so there is no fallback path. Serve a
- * static image when this is `false`.
+ * What it tests depends on which backend the bundle was built with. The
+ * default needs only a WebGL2 context, so this is very nearly always `true`;
+ * a bundle built with the wgpu backend needs WebGPU, where it is a hard gate.
+ * Either way, serve a static image when it is `false`.
  */
 export function isSupported(): boolean;
 
@@ -89,7 +90,12 @@ export interface PlotViewOptions {
   /** Allocate a pick target and read it back per frame. Default `false`. */
   picking?: boolean;
   /** Overlay an image so right-click offers the usual save entries. */
-  saveOnRightClick?: boolean;
+  /**
+   * Give the canvas the context menu an ordinary image has. A string names
+   * the saved file (`true` means `plot.png`); the name is a hint a browser
+   * may ignore, since a `data:` URL carries no path.
+   */
+  saveOnRightClick?: boolean | string;
   /** Set `false` to skip fetching the bundled font when none is registered. */
   defaultFont?: boolean;
 }

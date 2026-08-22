@@ -26,20 +26,46 @@ use hephaestus::document::{read_composition, read_hints, ReadContext};
 use hephaestus::plot::theme::Theme;
 use hephaestus::plot::PlotComposition;
 use hephaestus::text::GenericFamilyKind;
-use hephaestus::window::{CanvasHost, Frame, WindowApp, WindowConfig};
+use hephaestus::window::{Frame, WindowApp, WindowConfig};
+
+// The two hosts present the same surface; which one is compiled decides
+// whether the bundle carries wgpu.
+#[cfg(feature = "wgpu-backend")]
+use hephaestus::window::CanvasHost as Host;
+#[cfg(all(feature = "webgl", not(feature = "wgpu-backend")))]
+use hephaestus::window::WebGlHost as Host;
 
 /// Whether this browser can run the renderer at all.
 ///
-/// The Vello backend rasterises through compute pipelines, which WebGL2 has
-/// no stage for, so WebGPU is a hard requirement rather than a preference.
+/// What it tests depends on which backend was built. The wgpu build rasterises
+/// through compute pipelines, so WebGPU is a hard requirement rather than a
+/// preference. The WebGL2 build needs only a WebGL2 context, which is available
+/// essentially everywhere — so it is very nearly always `true`, and the check
+/// is kept so a page can use one code path for either bundle.
+///
 /// A page should check this before creating a view and fall back to a static
 /// image when it is `false`.
 #[wasm_bindgen(js_name = isSupported)]
 pub fn is_supported() -> bool {
-    js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("navigator"))
-        .ok()
-        .and_then(|nav| js_sys::Reflect::get(&nav, &JsValue::from_str("gpu")).ok())
-        .is_some_and(|gpu| !gpu.is_undefined() && !gpu.is_null())
+    #[cfg(feature = "wgpu-backend")]
+    {
+        js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("navigator"))
+            .ok()
+            .and_then(|nav| js_sys::Reflect::get(&nav, &JsValue::from_str("gpu")).ok())
+            .is_some_and(|gpu| !gpu.is_undefined() && !gpu.is_null())
+    }
+    // Probe by asking a throwaway canvas for the context, which is the only
+    // answer that accounts for a browser that has the API but cannot give one
+    // out — a blocklisted driver, or too many live contexts.
+    #[cfg(all(feature = "webgl", not(feature = "wgpu-backend")))]
+    {
+        web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.create_element("canvas").ok())
+            .and_then(|el| el.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+            .and_then(|c| c.get_context("webgl2").ok().flatten())
+            .is_some()
+    }
 }
 
 /// Major version of the plot-document format this build reads.
@@ -106,12 +132,10 @@ pub fn has_fonts() -> bool {
 #[cfg(feature = "webfonts")]
 fn decode_webfont(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
     let wrapped = match bytes.get(..4) {
-        Some(b"wOF2") => wuff::decompress_woff2(bytes).map_err(|e| {
-            JsError::new(&format!("could not decode the WOFF2 font: {e:?}"))
-        })?,
-        Some(b"wOFF") => wuff::decompress_woff1(bytes).map_err(|e| {
-            JsError::new(&format!("could not decode the WOFF font: {e:?}"))
-        })?,
+        Some(b"wOF2") => wuff::decompress_woff2(bytes)
+            .map_err(|e| JsError::new(&format!("could not decode the WOFF2 font: {e:?}")))?,
+        Some(b"wOFF") => wuff::decompress_woff1(bytes)
+            .map_err(|e| JsError::new(&format!("could not decode the WOFF font: {e:?}")))?,
         _ => bytes.to_vec(),
     };
     Ok(wrapped)
@@ -201,7 +225,7 @@ impl DocumentApp {
 /// calls through to this.
 #[wasm_bindgen]
 pub struct PlotHandle {
-    host: CanvasHost,
+    host: Host,
     app: DocumentApp,
     hint_size: Option<(f64, f64)>,
     hint_dpi: Option<f64>,
@@ -246,7 +270,11 @@ impl PlotHandle {
             .background(background)
             .picking(picking);
 
-        let host = CanvasHost::new(canvas, config).await.map_err(to_js)?;
+        #[cfg(feature = "wgpu-backend")]
+        let host = Host::new(canvas, config).await.map_err(to_js)?;
+        // WebGL2 needs no device request, so there is nothing to await.
+        #[cfg(all(feature = "webgl", not(feature = "wgpu-backend")))]
+        let host = Host::new(&canvas, config).map_err(to_js)?;
         Ok(PlotHandle {
             host,
             app,
@@ -268,7 +296,10 @@ impl PlotHandle {
     /// draw; call [`Self::render`] after.
     pub fn resize(&mut self, width: u32, height: u32, ratio: f64) {
         let ratio = if ratio > 0.0 { ratio } else { 1.0 };
+        #[cfg(feature = "wgpu-backend")]
         self.host.resize(width, height, 96.0 * ratio);
+        #[cfg(all(feature = "webgl", not(feature = "wgpu-backend")))]
+        let _ = self.host.resize(width, height, 96.0 * ratio);
     }
 
     /// Switch between the document's theme and its inverted form.

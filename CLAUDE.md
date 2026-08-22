@@ -14,6 +14,7 @@ The crate ships two API levels in the same source tree: a low-level scene API (`
 cargo build                                              # default features (vello + png)
 cargo build --no-default-features                        # core types & traits only — no wgpu pulled in
 cargo check --target wasm32-unknown-unknown             # wasm is a supported target; catches GL-backend and dep regressions
+cargo clippy --target wasm32-unknown-unknown --no-default-features --features webgl,document-read -- -D warnings  # the WebGL2 build: no wgpu at all
 cargo build --no-default-features --features vello,png   # explicit feature combination
 cargo build --no-default-features --features vello-hybrid,png  # sparse strips instead of compute shaders
 cargo build --features window                            # adds winit + the presentation surface
@@ -42,7 +43,9 @@ The wasm render client is a separate workspace, so it builds on its own:
 
 ```sh
 cargo clippy --target wasm32-unknown-unknown --no-default-features \
-  --features vello,canvas,document-read -- -D warnings   # the client's exact config
+  --features webgl,document-read -- -D warnings          # the client's default config
+cargo clippy --target wasm32-unknown-unknown --no-default-features \
+  --features vello,canvas,document-read -- -D warnings   # its `wgpu-backend` alternative
 cd crates/hephaestus-web && ./build.sh && node verify-dist.mjs   # assemble + check dist/
 ```
 
@@ -78,6 +81,7 @@ Style rules (apply everywhere, including comments in `tests/` and `examples/`):
 - **`jpeg`**, **`tiff`**, **`webp`** (off by default) — the other raster writers, one encoder each (`jpeg-encoder`, `tiff`, `image-webp`). All four writers live in `src/image/` and consume the same RGBA8 buffer a `Renderer` produces, so a format costs only its encoder — unlike `svg` / `pdf`, which need an alternative render path. All pure Rust and wasm-clean.
 - **`google-fonts`** (off by default) — auto-fetch named Google Fonts families on demand. Synchronous network call on cache miss; cache hits are offline.
 - **`window`** (off by default) — live window presentation: an OS window, a wgpu surface, and an event loop with resize and pointer events (`winit`). Requires a rasterising backend — either one — and `WindowConfig::backend` chooses which. See `src/window/CLAUDE.md`.
+- **`webgl`** (off by default) — the same sparse-strip rasteriser against a canvas's WebGL2 context instead of wgpu, using `vello_hybrid`'s precompiled GLSL renderer. Pulls **no wgpu at all**, and needs no WebGPU: it runs on browsers that have none, which is the point. Independent of `vello-hybrid`, which is the wgpu flavour of the same rasteriser. Only `wasm32` compiles it — a `WebGl2RenderingContext` exists nowhere else. Brings its own presentation host, `window::WebGlHost`, since there is no surface or swap chain to manage: the canvas is the render target. See `src/backend/hybrid/CLAUDE.md`.
 - **`canvas`** (off by default) — presentation onto a `<canvas>` already on a page, for a wasm build embedded in a website. Shares the `WindowApp` / `Frame` / `Event` surface and the blit path with `window`, but the page owns the event loop and feeds resize and pointer events in. Requires a rasterising backend; pulls no winit. Only `wasm32` compiles the host, since `wgpu::SurfaceTarget::Canvas` exists nowhere else. The client built on it is `crates/hephaestus-web`.
 - **`geom-wkt`**, **`geom-wkb`**, **`geom-geojson`** (off by default) — opt-in parsers for `crate::scales::Geometry`. Each gate enables one of `Geometry::from_wkt` / `from_wkb` / `from_geojson`. Hand-rolled and dependency-free, so toggling them only affects what constructors compile, not the dependency tree.
 - **`document-read`**, **`document-write`**, **`document`** (off by default) — plot documents: capture a `PlotComposition` to a self-contained binary file and rebuild it elsewhere, so a wasm build on a website re-solves the layout at whatever size it has rather than scaling a frozen image. Hand-rolled and dependency-free, like the `geom-*` parsers. Split by direction because a consumer only ever reads; `document` enables both. See `src/document/CLAUDE.md`. Adding no dependency of their own, they are also the one useful configuration with no renderer at all: `--no-default-features --features document-write` builds a writer that compiles on rustc 1.86, which `vello` rules out.

@@ -39,7 +39,11 @@ pub mod png;
 // `canvas` only has a host to compile on wasm (`wgpu::SurfaceTarget::Canvas`
 // is web-only), so on any other target that feature leaves the module out
 // entirely rather than pulling in an unreachable one.
-#[cfg(any(feature = "window", all(feature = "canvas", target_arch = "wasm32")))]
+#[cfg(any(
+    feature = "window",
+    all(feature = "canvas", target_arch = "wasm32"),
+    all(feature = "webgl", target_arch = "wasm32")
+))]
 pub mod window;
 
 pub mod text;

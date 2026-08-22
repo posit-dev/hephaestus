@@ -210,8 +210,11 @@ export class PlotView {
    *   `picking` allocates a second render target and reads it back after
    *   every frame, so leave it off unless `pickAt` is going to be called.
    *   `saveOnRightClick` gives the canvas an ordinary image's context menu.
-   *   The browser chooses the suggested filename. See
-   *   {@link PlotView#_installImageOverlay}.
+   *   Pass a string to name the saved file — a bare `true` uses `plot.png`.
+   *   The name is a hint: a `data:` URL has no path for a browser to take a
+   *   filename from, so it travels as a media-type parameter and an engine
+   *   that ignores it falls back to whatever it would have chosen (Safari
+   *   says "Unknown"). See {@link PlotView#_installImageOverlay}.
    *   `defaultFont: false` suppresses fetching the bundled font when nothing
    *   else is registered, for a page that would rather render no text than
    *   pull ~260 kB.
@@ -219,8 +222,9 @@ export class PlotView {
   static async create(canvas, doc, opts = {}) {
     if (!isSupported()) {
       throw new Error(
-        'WebGPU is unavailable. This renderer rasterises through compute ' +
-          'shaders, which WebGL2 cannot run, so there is no fallback path.',
+        'This browser cannot run the renderer. The default build needs a ' +
+          'WebGL2 context; a bundle built with the wgpu backend needs WebGPU ' +
+          'instead. Serve a static image as the fallback.',
       );
     }
     const bytes = doc instanceof Uint8Array ? doc : new Uint8Array(doc);
@@ -274,7 +278,9 @@ export class PlotView {
     this._syncSize();
 
     if (opts.saveOnRightClick) {
-      this._installImageOverlay();
+      this._installImageOverlay(
+        typeof opts.saveOnRightClick === 'string' ? opts.saveOnRightClick : 'plot.png',
+      );
     }
   }
 
@@ -298,7 +304,7 @@ export class PlotView {
    * because a browser gathers the menu's image URL from the hit test, which
    * can precede the `contextmenu` dispatch.
    */
-  _installImageOverlay() {
+  _installImageOverlay(filename) {
     const parent = this.canvas.parentElement;
     if (!parent) return;
     // The overlay is positioned against the canvas's containing block, so
@@ -313,26 +319,53 @@ export class PlotView {
     img.style.cssText =
       'position:absolute;inset:0;width:100%;height:100%;opacity:0;' +
       'pointer-events:auto;touch-action:none';
+    // If the named URL is ever rejected — an engine that dislikes the extra
+    // media-type parameter — fall back to the same bytes unnamed. An overlay
+    // that fails to load is not an image, and a right-click would silently get
+    // the ordinary element menu instead, which is the failure this guards.
+    img.addEventListener('error', () => {
+      const plain = img.src.replace(/;name=[^;,]*/, '');
+      if (plain !== img.src) {
+        this._nameRejected = true;
+        img.src = plain;
+      }
+    });
     parent.appendChild(img);
     this._overlay = img;
 
     const refresh = () => {
       if (this._freed) return;
       try {
-        // Draw first, always. Safari returns an all-black snapshot unless a
-        // render has happened recently — its drawable is consumed once
-        // composited — where Chrome and Firefox retain the presented image.
-        // Verified: capturing without this is black in Safari and correct
-        // with it.
+        // Draw first, always, and synchronously — nothing may await between
+        // the render and the capture. Two separate reasons converge on it:
+        // Safari returns an all-black snapshot unless a render happened
+        // recently, its drawable being consumed once composited; and the
+        // WebGL2 build's context has no `preserveDrawingBuffer`, so its
+        // drawing buffer is cleared after compositing too. Rendering in the
+        // same task as the capture satisfies both.
         this._renderNow();
         const raw = this.canvas.toDataURL('image/png');
         const png = withPngDpi(dataUrlToBytes(raw), this._dpi);
         // Back to a data URL rather than a blob: Safari's image context menu
         // loses its save entries for `blob:` sources. Reuse the canvas's own
         // string when the patch was a no-op.
-        img.src = png === null ? raw : bytesToPngDataUrl(png);
-      } catch {
-        // A tainted or zero-sized canvas; leave the previous src alone.
+        // Name the resource. A `data:` URL has no path for a browser to take
+        // a filename from, which is why Safari offers "Unknown"; a `name`
+        // media-type parameter is the only hint the URL can carry. Ignored by
+        // browsers that do not read it, so it costs nothing to send.
+        const url = png === null ? raw : bytesToPngDataUrl(png);
+        img.src = this._nameRejected ? url : named(url, filename);
+      } catch (e) {
+        // A tainted or zero-sized canvas is the expected reason, and the
+        // previous src is the right thing to keep. But swallowing this
+        // silently once hid a genuinely broken capture path for a long time —
+        // the overlay simply never got a src, and a right-click showed the
+        // wrong menu with nothing logged. Report the first failure and stay
+        // quiet after that, since the handlers fire on every pointer entry.
+        if (!this._overlayWarned) {
+          this._overlayWarned = true;
+          console.warn('hephaestus: could not refresh the save overlay', e);
+        }
       }
     };
     this._refreshOverlay = refresh;
@@ -535,4 +568,152 @@ export class PlotView {
     this._media = null;
     this._onMedia = null;
   }
+}
+
+// ─── PNG dpi patching ───────────────────────────────────────────────────────
+//
+// A canvas writes no `pHYs` chunk, so a viewer assumes 72 dpi and a plot
+// rendered at 2x device pixels claims twice its physical size. These three
+// helpers exist to fix that on the way from `toDataURL` to the overlay image:
+// decode the data URL, insert or replace `pHYs`, re-encode.
+
+/** Bytes behind a `data:` URL. Throws if it is not base64-encoded. */
+function dataUrlToBytes(dataUrl) {
+  const comma = dataUrl.indexOf(',');
+  if (comma < 0 || !dataUrl.slice(0, comma).includes(';base64')) {
+    throw new Error('not a base64 data URL');
+  }
+  const raw = atob(dataUrl.slice(comma + 1));
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
+  return bytes;
+}
+
+/** A `data:image/png;base64,` URL for `bytes`. */
+function bytesToPngDataUrl(bytes) {
+  // Chunked because `String.fromCharCode(...bytes)` blows the argument limit
+  // on anything bigger than a thumbnail.
+  let ascii = '';
+  const step = 0x8000;
+  for (let i = 0; i < bytes.length; i += step) {
+    ascii += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
+  }
+  return `data:image/png;base64,${btoa(ascii)}`;
+}
+
+/**
+ * Add a `name` parameter to a `data:` URL's media type.
+ *
+ * Rewrites only the prefix, so the base64 payload is never re-encoded — this
+ * runs on pointer entry and the payload is the expensive part. A name that
+ * already looks right is left alone.
+ */
+function named(dataUrl, filename) {
+  const comma = dataUrl.indexOf(',');
+  if (comma < 0) return dataUrl;
+  const safe = sanitiseFilename(filename);
+  if (!safe) return dataUrl;
+  let prefix = dataUrl.slice(0, comma);
+  if (prefix.includes(';name=')) return dataUrl;
+  // `;base64` has to stay immediately before the comma.
+  prefix = prefix.replace(/;base64$/, `;name=${safe};base64`);
+  return prefix + dataUrl.slice(comma);
+}
+
+/**
+ * Reduce `filename` to something safe to put in a URL parameter, or `null`.
+ *
+ * Path separators and quotes are dropped rather than escaped: this ends up in
+ * a header-ish position and in a save dialog, and neither wants a path.
+ */
+function sanitiseFilename(filename) {
+  if (typeof filename !== 'string') return null;
+  const base = filename.split(/[\\/]/).pop().replace(/[^\w.\- ]/g, '').trim();
+  if (!base || base === '.' || base === '..') return null;
+  return /\.png$/i.test(base) ? base : `${base}.png`;
+}
+
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+let crcTable = null;
+
+/** CRC-32 as PNG defines it, over `bytes[from..to)`. */
+function crc32(bytes, from, to) {
+  if (crcTable === null) {
+    crcTable = new Int32Array(256);
+    for (let n = 0; n < 256; n += 1) {
+      let c = n;
+      for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      crcTable[n] = c;
+    }
+  }
+  let c = 0xffffffff;
+  for (let i = from; i < to; i += 1) c = crcTable[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+/**
+ * Return `png` with a `pHYs` chunk describing `dpi`, or `null` when the bytes
+ * already say that.
+ *
+ * `null` rather than a copy so the caller can reuse the string it already has
+ * — re-encoding a megabyte of base64 to change nothing is the one cost worth
+ * avoiding on a path that runs on pointer entry.
+ */
+function withPngDpi(png, dpi) {
+  for (let i = 0; i < PNG_SIGNATURE.length; i += 1) {
+    if (png[i] !== PNG_SIGNATURE[i]) throw new Error('not a PNG');
+  }
+  // `pHYs` counts pixels per metre, and one inch is exactly 0.0254 m.
+  const perMetre = Math.round(dpi / 0.0254);
+
+  const chunk = new Uint8Array(21);
+  const view = new DataView(chunk.buffer);
+  view.setUint32(0, 9); // data length
+  chunk[4] = 0x70; // 'p'
+  chunk[5] = 0x48; // 'H'
+  chunk[6] = 0x59; // 'Y'
+  chunk[7] = 0x73; // 's'
+  view.setUint32(8, perMetre);
+  view.setUint32(12, perMetre);
+  chunk[16] = 1; // unit specifier: metre
+  view.setUint32(17, crc32(chunk, 4, 17));
+
+  // Walk the chunk list to find where `pHYs` belongs: after IHDR, and before
+  // the first IDAT. An existing one is replaced rather than duplicated.
+  let offset = PNG_SIGNATURE.length;
+  let insertAt = -1;
+  let replaceEnd = -1;
+  while (offset + 8 <= png.length) {
+    const len = new DataView(png.buffer, png.byteOffset + offset, 4).getUint32(0);
+    const type = String.fromCharCode(png[offset + 4], png[offset + 5], png[offset + 6], png[offset + 7]);
+    const total = 12 + len;
+    if (type === 'pHYs') {
+      // Already correct? Then the caller keeps what it has.
+      let same = true;
+      for (let i = 0; i < 21; i += 1) {
+        if (png[offset + i] !== chunk[i]) {
+          same = false;
+          break;
+        }
+      }
+      if (same) return null;
+      insertAt = offset;
+      replaceEnd = offset + total;
+      break;
+    }
+    if (type === 'IDAT' || type === 'IEND') {
+      insertAt = offset;
+      replaceEnd = offset;
+      break;
+    }
+    offset += total;
+  }
+  if (insertAt < 0) throw new Error('PNG has no IDAT');
+
+  const out = new Uint8Array(png.length - (replaceEnd - insertAt) + chunk.length);
+  out.set(png.subarray(0, insertAt), 0);
+  out.set(chunk, insertAt);
+  out.set(png.subarray(replaceEnd), insertAt + chunk.length);
+  return out;
 }

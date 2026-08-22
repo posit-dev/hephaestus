@@ -197,9 +197,10 @@ impl HostRenderer {
             Self::Hybrid(r) => r.try_finish_pick(),
         }
     }
+}
 
-    /// The pick id at a device-pixel coordinate of the last drawn frame.
-    pub(crate) fn pick_at(&self, x: u32, y: u32) -> Option<u32> {
+impl crate::window::PickSource for HostRenderer {
+    fn pick_at(&self, x: u32, y: u32) -> Option<u32> {
         match self {
             #[cfg(feature = "vello")]
             Self::Vello(r) => r.pick_at(x, y),
