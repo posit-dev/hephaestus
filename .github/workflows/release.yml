@@ -70,9 +70,10 @@ jobs:
     runs-on: ubuntu-latest
     environment: npm
     permissions:
-      # OIDC, for provenance. SRI is not usable for ES module imports, so a
-      # verifiable link back to this workflow run is the integrity story a
-      # consumer loading from a CDN actually gets.
+      # OIDC: both how trusted publishing authenticates — there is no token —
+      # and what signs the provenance attestation. SRI is not usable for ES
+      # module imports, so a verifiable link back to this workflow run is the
+      # integrity story a consumer loading from a CDN actually gets.
       id-token: write
       contents: read
 
@@ -150,19 +151,9 @@ jobs:
             echo "tag=latest" >> "$GITHUB_OUTPUT"
           fi
 
-      # The token authenticates the first release only. npm will not accept a
-      # trusted publisher for a package that does not exist yet, so until
-      # `hephaestus-wasm` is on the registry there is nothing to register one
-      # against. Once it is, register `release.yml` as the trusted publisher
-      # and delete both this `env:` and the secret it reads — OIDC covers
-      # publishing on its own, and a live token that nothing needs is the
-      # thing worth removing.
-      #
-      # `NODE_AUTH_TOKEN` is the name `setup-node`'s generated `.npmrc`
-      # interpolates; it is set on the step rather than the job so no earlier
-      # step can read it.
+      # `--provenance` is implied by trusted publishing, which attests without
+      # being asked. Naming it anyway means a change to that default cannot
+      # drop the attestation silently.
       - name: Publish to npm
         working-directory: crates/hephaestus-wasm/dist
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
         run: npm publish --access=public --provenance --tag ${{ steps.dist-tag.outputs.tag }}
