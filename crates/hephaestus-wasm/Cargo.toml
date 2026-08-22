@@ -1,6 +1,6 @@
 [package]
 name = "hephaestus-wasm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Render a hephaestus plot document onto a canvas in the browser."
 license = "MIT"

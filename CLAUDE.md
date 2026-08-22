@@ -114,7 +114,7 @@ tag matches the version they are about to publish.
 2. **Regenerate `Cargo.lock`.** It is tracked and records this crate's own
    version, so a bump leaves it stale. Any resolving command rewrites it —
    `cargo metadata --no-deps` does not, since it skips resolution.
-3. **Promote `## Unreleased` in `CHANGELOG.md`** to the version and date.
+3. **Promote `## Unreleased` in `CHANGELOG.md`** to the version number.
 4. **Commit, push to `main`, and let `check.yml` finish green.** A tag
    triggers `release.yml` alone, and that runs the test suite but not clippy,
    the feature-isolation passes, or either MSRV job. Those run only on the way
