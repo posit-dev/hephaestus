@@ -21,14 +21,17 @@ crate-type = ["cdylib"]
 # consumer only reads), no `google-fonts` (`ureq` has no wasm target), and
 # no `window` (winit would be dead weight beside `canvas`).
 hephaestus = { path = "../..", default-features = false, features = [
-    "vello",
-    "canvas",
     "document-read",
 ] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
+web-sys = { version = "0.3", features = [
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "Window",
+] }
 
 # Panic messages cost real bytes, so the hook is opt-in and off in the
 # bundle a site ships. Build with `--features debug-panics` while developing.
@@ -40,7 +43,14 @@ console_error_panic_hook = { version = "0.1", optional = true }
 wuff = { version = "0.2", optional = true, default-features = false, features = ["brotli", "z"] }
 
 [features]
-default = ["webfonts"]
+# `webgl` is the default: the sparse-strip rasteriser talking WebGL2 directly,
+# with no wgpu in the bundle and no WebGPU requirement, so it runs wherever a
+# canvas does. `wgpu-backend` swaps in the compute-shader path, which is more
+# mature but needs WebGPU — naming it wins even alongside the default, so
+# `--features wgpu-backend` is enough to switch.
+default = ["webfonts", "webgl"]
+wgpu-backend = ["hephaestus/vello", "hephaestus/canvas"]
+webgl = ["hephaestus/webgl"]
 debug-panics = ["dep:console_error_panic_hook"]
 webfonts = ["dep:wuff"]
 

@@ -60,11 +60,29 @@ jobs:
             cargo check --no-default-features --features "$feature"
           done
 
+      # The sparse-strips backend must stand on its own: `--all-features`
+      # builds it beside the compute-shader one, which would hide anything it
+      # reaches for through the other backend's gates.
+      - name: cargo clippy, the sparse-strips backend alone
+        run: |
+          cargo clippy --no-default-features --features vello-hybrid,png \
+            --all-targets -- -D warnings
+
+      # Presentation must work with either backend behind it, and the
+      # hybrid-only combination is the one that would break if the window host
+      # reached for the other backend's gates.
+      - name: cargo clippy, presentation on each backend
+        run: |
+          for backend in vello vello-hybrid; do
+            cargo clippy --no-default-features \
+              --features "window,$backend,png" --all-targets -- -D warnings
+          done
+
       - name: cargo test --all-features
         run: cargo test --all-features
 
-  # `vello` and `parley` both declare 1.88, so that is the floor for any build
-  # that includes them, whatever `rust-version` says. The jobs above all run on
+  # `vello`, `vello_hybrid` and `parley` all declare 1.88, so that is the floor
+  # for any build that includes them, whatever `rust-version` says. The jobs above all run on
   # stable and would not catch a newer language or std feature creeping in.
   msrv:
     name: MSRV (1.88, --all-features)
@@ -174,15 +192,47 @@ jobs:
       # read-only document reader, and nothing else. Checked on its own
       # because it is the one combination a website actually ships, and
       # because `canvas` compiles a host no other target has.
-      - name: cargo clippy, the wasm render client
+      # The client's default is WebGL2, so that is the configuration checked
+      # first; `wgpu-backend` is the alternative and is checked after it.
+      - name: cargo clippy, the wasm render client (default, WebGL2)
+        working-directory: crates/hephaestus-web
+        run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
+
+      - name: cargo clippy, the wasm render client on wgpu
+        working-directory: crates/hephaestus-web
         run: |
           cargo clippy --target wasm32-unknown-unknown --no-default-features \
-            --features vello,canvas,document-read -- -D warnings
+            --features webfonts,wgpu-backend -- -D warnings
 
       # `window` on wasm has no caller — `run` is desktop-only — but the
       # module claims to compile there, and nothing else proves it.
       - name: cargo check --target wasm32-unknown-unknown --features window
         run: cargo check --target wasm32-unknown-unknown --features window
+
+      # The sparse-strips backend over wgpu on wasm: still WebGPU, because
+      # wgpu's own `webgl` feature is not compiled here (it costs +1.2 MB, being
+      # shader translation). Going below WebGPU is the `webgl` feature's job,
+      # checked separately below.
+      - name: cargo clippy --target wasm32-unknown-unknown, sparse strips
+        run: |
+          cargo clippy --target wasm32-unknown-unknown --no-default-features \
+            --features vello-hybrid,document-read -- -D warnings
+
+      # What the render client would ship on sparse strips. Still WebGPU: see
+      # the note above.
+      # The WebGL2 build: no wgpu in the tree at all, so it is the one that
+      # breaks if the scene layer reaches for a wgpu type.
+      - name: cargo clippy --target wasm32-unknown-unknown, webgl
+        run: |
+          cargo clippy --target wasm32-unknown-unknown --no-default-features \
+            --features webgl,document-read -- -D warnings
+
+      - name: cargo clippy --target wasm32-unknown-unknown, canvas on each backend
+        run: |
+          for backend in vello vello-hybrid; do
+            cargo clippy --target wasm32-unknown-unknown --no-default-features \
+              --features "canvas,$backend,document-read" -- -D warnings
+          done
 
   # The wasm bundle a page loads. Its own job because `crates/hephaestus-web`
   # is a separate workspace with its own lock file and release profile, so it

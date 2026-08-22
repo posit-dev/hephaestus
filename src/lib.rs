@@ -39,7 +39,11 @@ pub mod png;
 // `canvas` only has a host to compile on wasm (`wgpu::SurfaceTarget::Canvas`
 // is web-only), so on any other target that feature leaves the module out
 // entirely rather than pulling in an unreachable one.
-#[cfg(any(feature = "window", all(feature = "canvas", target_arch = "wasm32")))]
+#[cfg(any(
+    feature = "window",
+    all(feature = "canvas", target_arch = "wasm32"),
+    all(feature = "webgl", target_arch = "wasm32")
+))]
 pub mod window;
 
 pub mod text;
@@ -71,11 +75,11 @@ pub use style_vocab::{HAlign, Length, Margin, Palette, ThemeColor, VAlign};
 
 pub use backend::{BackendError, Renderer};
 
-#[cfg(feature = "vello")]
+#[cfg(any(feature = "vello", feature = "vello-hybrid"))]
 pub use backend::WgpuRenderer;
 
 /// Re-export of the `wgpu` crate version `hephaestus` is built against, so
 /// callers integrating the GPU rendering path (see [`WgpuRenderer`]) can pin
 /// to the exact types the backend expects.
-#[cfg(feature = "vello")]
+#[cfg(any(feature = "vello", feature = "vello-hybrid"))]
 pub use wgpu;

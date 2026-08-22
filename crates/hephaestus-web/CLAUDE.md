@@ -1,5 +1,28 @@
 # crates/hephaestus-web/CLAUDE.md
 
+## Two backends, chosen at build time
+
+`webgl` is the **default**: the sparse-strip rasteriser talking WebGL2 directly, with no wgpu in the bundle and no WebGPU requirement, so it runs wherever a canvas does. `wgpu-backend` swaps in the compute-shader path on `hephaestus/vello` + `canvas`, which is the more mature renderer but needs WebGPU. Naming `wgpu-backend` wins even alongside the default, so `--features wgpu-backend` is enough to switch — no `--no-default-features` needed.
+
+`isSupported()` tests whichever applies: `navigator.gpu` on a wgpu build, an actual `webgl2` context request on the default, since a browser can expose the API and still refuse a context. The failure text in the wrapper and the demo page names both cases, because the JS cannot tell which backend it was built against.
+
+Measured on this client, same release and `wasm-opt` settings:
+
+| build | `.wasm` bytes |
+|---|---|
+| `webgl` (default) | 2,914,666 |
+| `vello-hybrid` + `canvas` | 2,941,297 |
+| `wgpu-backend`, i.e. `vello` + `canvas` | 3,252,703 |
+
+Read that carefully: **the default's advantage is reach, not size.** It is ~10% smaller than the wgpu build, and almost all of that comes from swapping the rasteriser rather than from dropping wgpu — wgpu is worth only ~27 kB here, because the bundle is dominated by this crate's own plot, text and document layers. What WebGL2 buys is running at all on the browsers that have no WebGPU.
+
+One consequence of the swap worth knowing: the WebGL2 context is created without `preserveDrawingBuffer`, so its drawing buffer is cleared once composited. `saveOnRightClick` survives that only because it re-renders **synchronously** immediately before each capture — the same thing Safari already required of it. Nothing may `await` between that render and `toDataURL`.
+
+## Why `verify-dist.mjs` scans for undefined calls
+
+Node has no DOM, so nothing here can exercise the canvas paths — which is how three PNG helpers stayed referenced-but-unwritten long enough to ship. The failure was silent twice over: a bare `catch` swallowed the `ReferenceError`, and an `<img>` with no `src` degrades to an ordinary element rather than erroring, so a right-click just showed the wrong menu. The static scan is crude and will flag a false positive if the wrapper ever gains an unusual declaration form, but it catches the whole class, and the alternative was finding out from a user.
+
+
 The wasm render client: a page loads this, points it at a `<canvas>` and a
 `.hplot` document, and gets a plot that reflows on resize and follows
 light/dark.

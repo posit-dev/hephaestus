@@ -1,5 +1,8 @@
 //! Decomposing a [`Mesh`](crate::mesh::Mesh) into fills.
 //!
+//! Shared by every rasterising backend: no backend has a native indexed-mesh
+//! primitive, and the decomposition works purely in this crate's own types.
+//!
 //! Neither vello nor peniko has an indexed-mesh primitive, so a mesh
 //! becomes a sequence of `fill` calls. Emitting one fill per triangle
 //! leaves a visible AA seam along every shared edge, so two patterns
@@ -19,11 +22,14 @@
 
 use crate::brush::Brush;
 use crate::color::Color;
-use crate::geometry::Point;
-use crate::path::Path;
+use crate::geometry::{Affine, Point};
+use crate::mesh::Mesh;
+use crate::path::{FillRule, Path};
+use crate::pick::PickId;
+use crate::scene::SceneBuilder;
 
 /// Build a closed triangle path from three vertices.
-pub(super) fn triangle_path(pts: &[Point; 3]) -> Path {
+pub(crate) fn triangle_path(pts: &[Point; 3]) -> Path {
     let mut p = Path::new();
     p.move_to(pts[0]);
     p.line_to(pts[1]);
@@ -48,7 +54,7 @@ pub(super) fn triangle_path(pts: &[Point; 3]) -> Path {
 ///   which produces a small visible discontinuity along the edge
 ///   between the picked pair and the third vertex — a documented
 ///   limitation.
-pub(super) fn triangle_gradient_brush(pts: &[Point; 3], colors: &[Color; 3]) -> Brush {
+pub(crate) fn triangle_gradient_brush(pts: &[Point; 3], colors: &[Color; 3]) -> Brush {
     let eq01 = colors_eq(&colors[0], &colors[1]);
     let eq12 = colors_eq(&colors[1], &colors[2]);
     let eq20 = colors_eq(&colors[2], &colors[0]);
@@ -136,7 +142,7 @@ pub(super) fn triangle_gradient_brush(pts: &[Point; 3], colors: &[Color; 3]) -> 
 /// Used to collapse round-cap and round-join fans into a single
 /// closed-polygon fill so the internal "wedge" seams between
 /// adjacent fan triangles disappear.
-pub(super) fn detect_uniform_fan(
+pub(crate) fn detect_uniform_fan(
     indices: &[u32],
     start: usize,
     colors: &[Color],
@@ -175,7 +181,7 @@ pub(super) fn detect_uniform_fan(
 }
 
 /// Build a closed polygon path from N vertices in cyclic order.
-pub(super) fn polygon_path(pts: &[Point]) -> Path {
+pub(crate) fn polygon_path(pts: &[Point]) -> Path {
     let mut p = Path::new();
     if pts.is_empty() {
         return p;
@@ -191,7 +197,7 @@ pub(super) fn polygon_path(pts: &[Point]) -> Path {
 /// Detect adjacent triangle pairs that form a quad shaped
 /// `[A, B, C, A, C, D]` — the canonical ribbon-strip emission. Returns
 /// the quad indices `[A, B, C, D]` in CCW cyclic order when matched.
-pub(super) fn detect_quad_pair(six: &[u32]) -> Option<[u32; 4]> {
+pub(crate) fn detect_quad_pair(six: &[u32]) -> Option<[u32; 4]> {
     debug_assert_eq!(six.len(), 6);
     let a = six[0];
     let b = six[1];
@@ -209,7 +215,7 @@ pub(super) fn detect_quad_pair(six: &[u32]) -> Option<[u32; 4]> {
 }
 
 /// Build a closed quad path from four vertices, in cyclic order.
-pub(super) fn quad_path(pts: &[Point; 4]) -> Path {
+pub(crate) fn quad_path(pts: &[Point; 4]) -> Path {
     let mut p = Path::new();
     p.move_to(pts[0]);
     p.line_to(pts[1]);
@@ -228,7 +234,7 @@ pub(super) fn quad_path(pts: &[Point; 4]) -> Path {
 /// emitting per-triangle (re-decomposes via the caller's loop) — but
 /// since the caller already chose to merge, we use a reasonable
 /// default of max-distance pair across all four vertices.
-pub(super) fn quad_gradient_brush(pts: &[Point; 4], colors: &[Color; 4]) -> Brush {
+pub(crate) fn quad_gradient_brush(pts: &[Point; 4], colors: &[Color; 4]) -> Brush {
     let all_same = colors_eq(&colors[0], &colors[1])
         && colors_eq(&colors[1], &colors[2])
         && colors_eq(&colors[2], &colors[3]);
@@ -282,6 +288,80 @@ fn color_distance_sq(a: &Color, b: &Color) -> f32 {
     let dg = ag - bg;
     let db = ab - bb;
     dr * dr + dg * dg + db * db
+}
+
+/// Emit `mesh` into `sink` as a sequence of fills.
+///
+/// Two patterns are merged before falling back to one fill per triangle, so
+/// that adjacent triangles do not leave a seam along their shared edge:
+///
+/// - a **uniform fan** — a run of triangles sharing a hub vertex and one
+///   colour (round caps and joins) — becomes a single polygon over its rim;
+/// - a **quad pair** — the `[A, B, C, A, C, D]` a ribbon segment emits —
+///   becomes one 4-vertex polygon.
+///
+/// Every fill carries the mesh's `pick_id`, so whatever `sink` does about
+/// picking happens once per emitted fill rather than being duplicated here.
+pub(crate) fn decompose(
+    mesh: &Mesh,
+    transform: Affine,
+    pick_id: PickId,
+    sink: &mut dyn SceneBuilder,
+) {
+    let indices = &mesh.indices;
+    let mut i = 0;
+    while i + 3 <= indices.len() {
+        // A fan of two or more triangles sharing a hub vertex and a colour.
+        if let Some((boundary, advance)) = detect_uniform_fan(indices, i, &mesh.colors) {
+            let pts: Vec<Point> = boundary
+                .iter()
+                .map(|&idx| mesh.vertices[idx as usize])
+                .collect();
+            let path = polygon_path(&pts);
+            let brush = Brush::Solid(mesh.colors[boundary[0] as usize]);
+            sink.fill(FillRule::NonZero, transform, &brush, None, &path, pick_id);
+            i += advance;
+            continue;
+        }
+        let merged = if i + 6 <= indices.len() {
+            detect_quad_pair(&indices[i..i + 6])
+        } else {
+            None
+        };
+        if let Some([a, b, c, d]) = merged {
+            let pts = [
+                mesh.vertices[a as usize],
+                mesh.vertices[b as usize],
+                mesh.vertices[c as usize],
+                mesh.vertices[d as usize],
+            ];
+            let colors = [
+                mesh.colors[a as usize],
+                mesh.colors[b as usize],
+                mesh.colors[c as usize],
+                mesh.colors[d as usize],
+            ];
+            let path = quad_path(&pts);
+            let brush = quad_gradient_brush(&pts, &colors);
+            sink.fill(FillRule::NonZero, transform, &brush, None, &path, pick_id);
+            i += 6;
+        } else {
+            let pts = [
+                mesh.vertices[indices[i] as usize],
+                mesh.vertices[indices[i + 1] as usize],
+                mesh.vertices[indices[i + 2] as usize],
+            ];
+            let colors = [
+                mesh.colors[indices[i] as usize],
+                mesh.colors[indices[i + 1] as usize],
+                mesh.colors[indices[i + 2] as usize],
+            ];
+            let path = triangle_path(&pts);
+            let brush = triangle_gradient_brush(&pts, &colors);
+            sink.fill(FillRule::NonZero, transform, &brush, None, &path, pick_id);
+            i += 3;
+        }
+    }
 }
 
 #[cfg(test)]

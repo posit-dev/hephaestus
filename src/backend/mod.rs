@@ -3,8 +3,16 @@
 use crate::color::Color;
 use crate::scene::SceneBuilder;
 
+#[cfg(any(feature = "vello", feature = "vello-hybrid", feature = "webgl"))]
+mod convert;
+#[cfg(any(feature = "vello", feature = "vello-hybrid", feature = "webgl"))]
+mod mesh;
+
 #[cfg(feature = "vello")]
 pub mod vello;
+
+#[cfg(any(feature = "vello-hybrid", feature = "webgl"))]
+pub mod hybrid;
 
 /// Owns backend resources (GPU device, pipelines, etc.) and rasterizes a scene
 /// to an RGBA8 buffer.
@@ -49,25 +57,53 @@ pub trait Renderer {
 /// [`crate::window`].
 ///
 /// **Target constraints.** The supplied `view` must wrap a texture with
-/// format `Rgba8Unorm` and usage including `STORAGE_BINDING` — the backend
-/// writes via a compute shader (Vello), so a render-attachment-only swap
-/// chain texture cannot be used directly. Whatever the host does with the
-/// result adds its own flag: `TEXTURE_BINDING` to blit the view onto a
-/// surface, `COPY_SRC` to copy it back. Hosts whose presentation surface uses
-/// a different format (typical for swap chains) are responsible for blitting
+/// format `Rgba8Unorm` and usage including [`Self::REQUIRED_TARGET_USAGE`],
+/// which the backend states because backends differ: a compute-shader
+/// rasteriser writes through `STORAGE_BINDING`, a render-pipeline one needs
+/// `RENDER_ATTACHMENT`. Either way a swap-chain texture cannot serve as the
+/// direct target, since it carries neither the right format nor, for the
+/// compute path, the right usage. Whatever the host does with the result adds
+/// its own flag: `TEXTURE_BINDING` to blit the view onto a surface,
+/// `COPY_SRC` to copy it back. Hosts whose presentation surface uses a
+/// different format (typical for swap chains) are responsible for blitting
 /// from this view to the surface.
 ///
-/// **Alpha.** The view receives straight (un-premultiplied) alpha, matching
-/// [`Renderer::render_to_buffer`]. A host presenting translucent content
-/// through `CompositeAlphaMode::PreMultiplied`, or blending the view with a
-/// standard SrcOver pipeline, must premultiply in its blit shader.
+/// **Alpha.** Which convention the view receives is backend-defined and
+/// stated by [`Self::TARGET_IS_PREMULTIPLIED`]; unlike
+/// [`Renderer::render_to_buffer`], this path does not normalise it. A host
+/// presenting translucent content, or blending the view through a SrcOver
+/// pipeline, has to consult that flag and convert in its blit shader. Opaque
+/// content is unaffected — the two conventions coincide at alpha 255.
 ///
 /// **Picking.** Picking (when enabled at construction) still rasterises the
 /// parallel pick scene into the backend's own pick target and reads it back
 /// to CPU, so [`pick_at`](crate::backend::vello::VelloRenderer::pick_at)
 /// remains valid after a `render_to_texture` call.
-#[cfg(feature = "vello")]
+#[cfg(any(feature = "vello", feature = "vello-hybrid"))]
 pub trait WgpuRenderer: Renderer {
+    /// Usage flags the texture behind `view` must carry.
+    ///
+    /// Backends disagree about this, so a host allocating the target asks
+    /// instead of assuming: a compute-shader rasteriser writes through a
+    /// storage binding, a render-pipeline one needs a colour attachment. The
+    /// host unions in whatever its own use of the result needs —
+    /// `TEXTURE_BINDING` to blit from it, `COPY_SRC` to read it back.
+    const REQUIRED_TARGET_USAGE: wgpu::TextureUsages;
+
+    /// Whether [`render_to_texture`](Self::render_to_texture) leaves
+    /// premultiplied alpha in the target.
+    ///
+    /// Backends disagree here too, and for the same reason — it follows from
+    /// how the rasteriser composites. A host blending the result has to know:
+    /// treating premultiplied content as straight (or the reverse) shifts
+    /// every partially transparent pixel. It makes no difference when the
+    /// content is opaque, which is how the in-crate window host presents
+    /// under either backend.
+    ///
+    /// [`Renderer::render_to_buffer`] is not affected — that path always
+    /// converts to straight alpha, whatever the rasteriser does.
+    const TARGET_IS_PREMULTIPLIED: bool;
+
     /// Render the current scene into `view`. See trait docs for the
     /// format / usage requirements `view` must satisfy.
     fn render_to_texture(

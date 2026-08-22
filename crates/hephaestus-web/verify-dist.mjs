@@ -97,6 +97,52 @@ if (existsSync('/tmp/test-inter.woff2')) {
   console.log('skip: no /tmp/test-inter.woff2 to try');
 }
 
+// 12. The wrapper calls nothing it does not define. Node cannot exercise the
+//     canvas paths — no DOM — so a helper that was never written stays
+//     invisible until a user right-clicks and gets the wrong menu, which is
+//     exactly how `withPngDpi` and friends went missing. A static scan is
+//     crude but catches the whole class.
+{
+  let src = readFileSync(dir + 'hephaestus.js', 'utf8');
+  // Strip comments and literals so their contents cannot look like code.
+  src = src
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, ' ')
+    .replace(/`(?:\\.|[^`\\])*`/g, '""')
+    .replace(/'(?:\\.|[^'\\\n])*'/g, '""')
+    .replace(/"(?:\\.|[^"\\\n])*"/g, '""');
+
+  const declared = new Set();
+  const add = (re, group = 1) => {
+    for (const m of src.matchAll(re)) declared.add(m[group]);
+  };
+  add(/\b(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/g);
+  add(/\bclass\s+([A-Za-z_$][\w$]*)/g);
+  add(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g);
+  add(/\bcatch\s*\(\s*([A-Za-z_$][\w$]*)/g);
+  for (const m of src.matchAll(/import[^;]*?from/gs)) {
+    for (const id of m[0].matchAll(/[A-Za-z_$][\w$]*/g)) declared.add(id[0]);
+  }
+  // Parameters, and every `name(args) {` which covers class methods too.
+  for (const re of [/\(([^()]*)\)\s*=>/g, /function\s*[A-Za-z_$\w]*\s*\(([^()]*)\)/g, /\b[A-Za-z_$][\w$]*\s*\(([^()]*)\)\s*\{/g]) {
+    for (const m of src.matchAll(re)) {
+      for (const id of (m[1] || '').matchAll(/[A-Za-z_$][\w$]*/g)) declared.add(id[0]);
+    }
+  }
+  // Method definitions are also call-shaped, so treat them as declared.
+  add(/^\s{2}(?:async\s+|static\s+|get\s+|set\s+)*([A-Za-z_$][\w$]*)\s*\(/gm);
+
+  const globals = new Set(['window','document','console','Math','Object','Array','String','Number','Boolean','JSON','Promise','Set','Map','Uint8Array','Int32Array','DataView','ArrayBuffer','Error','TypeError','fetch','atob','btoa','setTimeout','clearTimeout','requestAnimationFrame','cancelAnimationFrame','ResizeObserver','getComputedStyle','matchMedia','Image','Blob','URL','globalThis','Reflect','isNaN','parseFloat','parseInt','performance','structuredClone','if','for','while','switch','catch','return','typeof','function','class','new','await','super','this','do','else','try','throw','delete','void','in','of','instanceof','constructor']);
+
+  const missing = new Set();
+  for (const m of src.matchAll(/(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(/g)) {
+    const name = m[1];
+    if (!declared.has(name) && !globals.has(name)) missing.add(name);
+  }
+  if (missing.size === 0) ok('wrapper calls nothing it does not define');
+  else fail(`wrapper calls undefined: ${[...missing].sort().join(', ')}`);
+}
+
 const size = readFileSync(dir + 'hephaestus_web_bg.wasm').length;
 console.log(`\nwasm:  ${size} bytes raw`);
 console.log(`fonts: ${fontBytes} bytes raw (fetched on demand, not in the wasm)`);

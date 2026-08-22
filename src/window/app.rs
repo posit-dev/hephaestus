@@ -15,12 +15,11 @@ use winit::event_loop::ActiveEventLoop;
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
-use crate::backend::vello::VelloRenderer;
 use crate::geometry::{Point, Size};
+use crate::window::renderer::HostRenderer;
 use crate::window::surface::WindowSurface;
 use crate::window::BASE_DPI;
 use crate::window::{Event, EventCtx, Frame, MouseButton, WindowApp, WindowConfig, WindowError};
-use crate::{Renderer, SceneBuilder, WgpuRenderer};
 
 /// Open the window and pump events until the app exits or something fails.
 #[cfg(not(target_arch = "wasm32"))]
@@ -49,7 +48,9 @@ pub(crate) fn run<A: WindowApp>(config: WindowConfig, app: A) -> Result<(), Wind
 struct State {
     window: Arc<Window>,
     surface: WindowSurface,
-    renderer: VelloRenderer,
+    renderer: HostRenderer,
+    /// When the hitmap was last refreshed, for `WindowConfig::pick_interval`.
+    last_pick: Option<std::time::Instant>,
     dpi: f64,
 }
 
@@ -90,13 +91,21 @@ impl<A: WindowApp> Driver<A> {
             physical.width,
             physical.height,
             self.config.present_mode,
+            // `None` asks for no intermediate texture: this backend writes the
+            // acquired swap-chain texture itself.
+            (!self.config.backend.can_present_directly())
+                .then(|| self.config.backend.target_usage()),
         )?;
 
-        let renderer = if self.config.picking {
-            VelloRenderer::with_device_and_picking(surface.device(), surface.queue())?
-        } else {
-            VelloRenderer::with_device(surface.device(), surface.queue())?
-        };
+        let mut renderer = HostRenderer::new(
+            self.config.backend,
+            surface.device(),
+            surface.queue(),
+            self.config.picking,
+        )?;
+        if self.config.backend.can_present_directly() {
+            renderer.set_target_format(surface.format());
+        }
 
         let dpi = BASE_DPI * window.scale_factor();
         Ok(State {
@@ -104,6 +113,7 @@ impl<A: WindowApp> Driver<A> {
             surface,
             renderer,
             dpi,
+            last_pick: None,
         })
     }
 
@@ -115,6 +125,20 @@ impl<A: WindowApp> Driver<A> {
         let (width, height) = state.surface.size();
         let size = Size::new(width as f64, height as f64);
 
+        // Decide before drawing: on the sparse-strip backend the pick pass is
+        // skipped during the *replay*, not just at rasterisation, so this has
+        // to be known before any draw reaches the scene.
+        if let Some(interval) = self.config.pick_interval {
+            let now = std::time::Instant::now();
+            let due = state
+                .last_pick
+                .is_none_or(|last| now.duration_since(last) >= interval);
+            state.renderer.set_refresh_pick(due);
+            if due {
+                state.last_pick = Some(now);
+            }
+        }
+
         state.renderer.scene().clear();
         {
             let mut frame = Frame {
@@ -125,15 +149,17 @@ impl<A: WindowApp> Driver<A> {
             self.app.draw(&mut frame);
         }
 
-        state.renderer.render_to_texture(
-            state.surface.target_view(),
-            width,
-            height,
-            self.config.background,
+        let background = self.config.background;
+        let renderer = &mut state.renderer;
+        let window = &state.window;
+        state.surface.draw_frame(
+            |view| {
+                renderer
+                    .render_to_texture(view, width, height, background)
+                    .map_err(WindowError::from)
+            },
+            || window.pre_present_notify(),
         )?;
-        state
-            .surface
-            .present(|| state.window.pre_present_notify())?;
 
         if self.config.continuous_redraw {
             state.window.request_redraw();

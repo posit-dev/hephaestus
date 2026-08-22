@@ -13,13 +13,13 @@
 
 use std::cell::Cell;
 
-use crate::backend::vello::VelloRenderer;
 use crate::color::Color;
 use crate::geometry::{Point, Size};
+use crate::window::renderer::HostRenderer;
 use crate::window::surface::WindowSurface;
+use crate::window::PickSource as _;
 use crate::window::BASE_DPI;
 use crate::window::{Event, EventCtx, Frame, WindowApp, WindowConfig, WindowError};
-use crate::{Renderer, SceneBuilder};
 
 /// A canvas set up to present rendered frames, driven by the page.
 ///
@@ -27,7 +27,7 @@ use crate::{Renderer, SceneBuilder};
 /// a frame is wanted and [`Self::resize`] whenever the canvas changes size.
 pub struct CanvasHost {
     surface: WindowSurface,
-    renderer: VelloRenderer,
+    renderer: HostRenderer,
     background: Color,
     dpi: f64,
     cursor: Option<Point>,
@@ -67,13 +67,24 @@ impl CanvasHost {
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
             .map_err(|e| WindowError::Surface(e.to_string()))?;
 
-        let surface =
-            WindowSurface::new_async(&instance, target, width, height, config.present_mode).await?;
-        let renderer = if config.picking {
-            VelloRenderer::with_device_and_picking(surface.device(), surface.queue())?
-        } else {
-            VelloRenderer::with_device(surface.device(), surface.queue())?
-        };
+        let surface = WindowSurface::new_async(
+            &instance,
+            target,
+            width,
+            height,
+            config.present_mode,
+            (!config.backend.can_present_directly()).then(|| config.backend.target_usage()),
+        )
+        .await?;
+        let mut renderer = HostRenderer::new(
+            config.backend,
+            surface.device(),
+            surface.queue(),
+            config.picking,
+        )?;
+        if config.backend.can_present_directly() {
+            renderer.set_target_format(surface.format());
+        }
 
         let dpi = BASE_DPI * device_pixel_ratio();
         Ok(Self {
@@ -106,13 +117,16 @@ impl CanvasHost {
 
         // Deferring rather than `render_to_texture`: the trait method blocks
         // on the pick readback, which a browser main thread cannot do.
-        self.renderer.render_to_texture_deferring_pick(
-            self.surface.target_view(),
-            width,
-            height,
-            self.background,
+        let renderer = &mut self.renderer;
+        let background = self.background;
+        self.surface.draw_frame(
+            |view| {
+                renderer
+                    .render_to_texture_deferring_pick(view, width, height, background)
+                    .map_err(WindowError::from)
+            },
+            || {},
         )?;
-        self.surface.present(|| {})?;
         Ok(())
     }
 

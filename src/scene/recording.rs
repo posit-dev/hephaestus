@@ -86,6 +86,68 @@ impl RecordingScene {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Issue every recorded op against `scene`, in order.
+    ///
+    /// The inverse of recording. A backend whose rasteriser needs the
+    /// frame's dimensions before it will accept draws records first and
+    /// replays once the size is known; a backend that rasterises a second
+    /// scene from the same draws (a pick pass) replays twice.
+    pub fn replay(&self, scene: &mut dyn SceneBuilder) {
+        for op in &self.ops {
+            match op {
+                Op::Fill {
+                    rule,
+                    transform,
+                    brush,
+                    brush_transform,
+                    path,
+                    pick_id,
+                } => scene.fill(*rule, *transform, brush, *brush_transform, path, *pick_id),
+                Op::Stroke {
+                    stroke,
+                    transform,
+                    brush,
+                    brush_transform,
+                    path,
+                    pick_id,
+                } => scene.stroke(stroke, *transform, brush, *brush_transform, path, *pick_id),
+                Op::DrawImage {
+                    image,
+                    transform,
+                    sampling,
+                    alpha,
+                    pick_id,
+                } => scene.draw_image(image, *transform, *sampling, *alpha, *pick_id),
+                Op::DrawGlyphs(run) => scene.draw_glyphs(
+                    &GlyphRun {
+                        font: &run.font,
+                        font_size: run.font_size,
+                        transform: run.transform,
+                        glyph_transform: run.glyph_transform,
+                        brush: &run.brush,
+                        brush_alpha: run.brush_alpha,
+                        hint: run.hint,
+                        glyphs: &run.glyphs,
+                        style: run.style.as_ref(),
+                    },
+                    run.pick_id,
+                ),
+                Op::DrawMesh {
+                    mesh,
+                    transform,
+                    pick_id,
+                } => scene.draw_mesh(mesh, *transform, *pick_id),
+                Op::PushLayer {
+                    blend,
+                    alpha,
+                    transform,
+                    clip,
+                } => scene.push_layer(*blend, *alpha, *transform, clip),
+                Op::PopLayer => scene.pop_layer(),
+            }
+        }
+    }
 }
 
 impl SceneBuilder for RecordingScene {
