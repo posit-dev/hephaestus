@@ -101,28 +101,58 @@ The `plot/` module is in-scope: it is the high-level layer inside this crate tha
 
 ## Releasing
 
-A `v*` tag publishes to both registries, from `release.yml` — its own
-workflow, which does nothing else. The `crate` job sends this crate to
-crates.io; the `npm` job sends the wasm client to npm as `hephaestus-wasm`.
-Both authenticate by OIDC — no stored tokens — and both refuse to run unless
-the tag matches the version they are about to publish.
+A `v*` tag publishes to both registries from `release.yml`, a workflow that
+does nothing else. Its `crate` job sends this crate to crates.io and its
+`npm` job sends the wasm client to npm as `hephaestus-wasm`. Both
+authenticate by OIDC — no stored tokens — and both refuse to run unless the
+tag matches the version they are about to publish.
 
-Releasing lives apart from `check.yml` because npm and crates.io both
-register a trusted publisher by *workflow filename*. A publish job inside the
-everyday check workflow would mean every change to that file touches
-something that can publish.
+### Cutting a release
 
-**That last part couples two version numbers to one tag.** The crate's version
-lives in `Cargo.toml` and the npm package's in
-`crates/hephaestus-wasm/Cargo.toml`, and they are separate files: a `v0.2.0`
-tag requires both to read `0.2.0` or the mismatched job fails. They are
-deliberately in lockstep rather than independently versioned, since the wasm
-client is a view onto this crate rather than a thing with its own release
+1. **Bump the version in both manifests**, to the same number: `Cargo.toml`
+   and `crates/hephaestus-wasm/Cargo.toml`.
+2. **Regenerate `Cargo.lock`.** It is tracked and records this crate's own
+   version, so a bump leaves it stale. Any resolving command rewrites it —
+   `cargo metadata --no-deps` does not, since it skips resolution.
+3. **Promote `## Unreleased` in `CHANGELOG.md`** to the version and date.
+4. **Commit, push to `main`, and let `check.yml` finish green.** A tag
+   triggers `release.yml` alone, and that runs the test suite but not clippy,
+   the feature-isolation passes, or either MSRV job. Those run only on the way
+   to main, so tagging an unchecked commit skips them entirely.
+5. **Tag, and push the tag:**
+
+   ```sh
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+
+   A GitHub Release is not required — `push: tags` is the trigger. Creating
+   one works too, since it pushes a tag.
+
+### One version, two manifests
+
+The crate's version and the npm package's live in separate files, and both
+guards check against the tag: `v0.2.0` needs both manifests to read `0.2.0`
+or the mismatched job fails. They are in lockstep deliberately, since the wasm
+client is a view onto this crate rather than something with its own release
 cycle.
 
-The two publishes are independent of each other — the client depends on this
-crate by path, not by version — so neither ordering nor a partial failure
-leaves the other registry wrong.
+The two publishes are otherwise independent — the client depends on this
+crate by path, not by version — so ordering does not matter. It does mean
+half a release is a reachable state, and not one a retry fixes: crates.io
+refuses a version it already has, and an npm version cannot be reused.
+Recovering means publishing the failed half by hand, or bumping both and
+cutting again.
+
+### Why releasing is its own workflow
+
+npm and crates.io both register a trusted publisher by *workflow filename*. A
+publish job inside `check.yml` would mean every change to the everyday check
+workflow touches something that can publish. `release.yml` runs on nothing but
+a tag, which keeps that surface as small as the trust model allows.
+
+Each registry needs one-time setup: a GitHub environment — `crates-io` and
+`npm` — and a trusted publisher naming `release.yml`.
 
 See `crates/hephaestus-wasm/CLAUDE.md` for the npm side in detail.
 

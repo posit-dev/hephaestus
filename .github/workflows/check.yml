@@ -262,6 +262,23 @@ jobs:
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@v0.4.0
 
+      # wasm-pack uses a `wasm-opt` from PATH and downloads its own copy only
+      # when it finds none. That download failing is not an error to it — it
+      # warns and emits an unoptimized binary — and wasm-opt is worth about a
+      # quarter of the bundle, so installing it here keeps a network hiccup
+      # from silently shipping 3.9 MB in place of 2.9 MB.
+      - name: Install wasm-opt (binaryen)
+        env:
+          BINARYEN: version_132
+          BINARYEN_SHA256: 195ddc94f9bc89f45abdabb0b9eea86023d727ba90eac8b35b80f2544fc30572
+        run: |
+          curl -fsSL -o binaryen.tar.gz \
+            "https://github.com/WebAssembly/binaryen/releases/download/$BINARYEN/binaryen-$BINARYEN-x86_64-linux.tar.gz"
+          echo "$BINARYEN_SHA256  binaryen.tar.gz" | sha256sum -c -
+          tar -xzf binaryen.tar.gz
+          "$PWD/binaryen-$BINARYEN/bin/wasm-opt" --version
+          echo "$PWD/binaryen-$BINARYEN/bin" >> "$GITHUB_PATH"
+
       - name: assemble the package
         working-directory: crates/hephaestus-wasm
         run: ./build.sh
