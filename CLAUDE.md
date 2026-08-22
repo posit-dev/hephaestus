@@ -99,6 +99,33 @@ The following belong in higher layers or other crates and should not land here:
 
 The `plot/` module is in-scope: it is the high-level layer inside this crate that builds on the low-level surface. Out-of-scope means "not in this crate", not "not in this layer".
 
+## Releasing
+
+A `v*` tag publishes to both registries, from `release.yml` — its own
+workflow, which does nothing else. The `crate` job sends this crate to
+crates.io; the `npm` job sends the wasm client to npm as `hephaestus-wasm`.
+Both authenticate by OIDC — no stored tokens — and both refuse to run unless
+the tag matches the version they are about to publish.
+
+Releasing lives apart from `check.yml` because npm and crates.io both
+register a trusted publisher by *workflow filename*. A publish job inside the
+everyday check workflow would mean every change to that file touches
+something that can publish.
+
+**That last part couples two version numbers to one tag.** The crate's version
+lives in `Cargo.toml` and the npm package's in
+`crates/hephaestus-wasm/Cargo.toml`, and they are separate files: a `v0.2.0`
+tag requires both to read `0.2.0` or the mismatched job fails. They are
+deliberately in lockstep rather than independently versioned, since the wasm
+client is a view onto this crate rather than a thing with its own release
+cycle.
+
+The two publishes are independent of each other — the client depends on this
+crate by path, not by version — so neither ordering nor a partial failure
+leaves the other registry wrong.
+
+See `crates/hephaestus-wasm/CLAUDE.md` for the npm side in detail.
+
 ## Where to look next
 
 - **`src/CLAUDE.md`** — code architecture: API levels, two-trait split, intersection-of-backends rule, picking model, module map.

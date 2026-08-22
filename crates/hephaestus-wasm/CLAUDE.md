@@ -481,11 +481,15 @@ after publishing.
 
 ### Publishing
 
-A `v*` tag is the trigger, and nothing else publishes. The `client` job in
-`ci.yml` assembles `dist/`, runs `verify-dist.mjs`, then `npm pack`, and
-uploads the tarball; `publish-npm` downloads that same tarball and pushes it,
-so what reaches the registry is what CI checked rather than a second build of
-it. A tag containing `-dev` or `-rc` publishes under the `next` dist-tag so
+A `v*` tag is the trigger, and nothing else publishes. The `npm` job in
+`release.yml` assembles `dist/`, runs `verify-dist.mjs`, and publishes from
+that same directory, so nothing is rebuilt between the check and the upload.
+It is a separate workflow from `check.yml` because npm registers a trusted
+publisher by workflow filename, and a release file that does nothing else is
+a narrower thing to trust. `check.yml` still assembles and verifies the
+package on every push — it just stops at `npm pack --dry-run`.
+
+A tag containing `-dev` or `-rc` publishes under the `next` dist-tag so
 `npm install hephaestus-wasm` keeps resolving to the last stable release.
 
 `--provenance` is worth its `id-token: write` here: SRI does not work for ES
@@ -495,9 +499,10 @@ environment, not a bare repo secret.
 
 Three things pin the version together, because each alone leaves a gap.
 `build.sh` reads it from `Cargo.toml`, `verify-dist.mjs` fails if the manifest
-and the crate disagree, and `publish-npm` fails if the tag disagrees with the
-tarball — otherwise a mistyped tag publishes whatever `Cargo.toml` happened to
-hold, which on a first publish succeeds under the wrong number.
+and the crate disagree, and `release.yml` fails — before it builds
+anything — if the tag disagrees with `Cargo.toml`. Otherwise a mistyped tag
+publishes whatever the manifest happened to hold, which on a first publish
+succeeds under the wrong number.
 
 ### Pinning, and the coupling that matters
 

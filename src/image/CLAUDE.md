@@ -40,7 +40,7 @@ Every writer takes the same thing: RGBA8, **straight (un-premultiplied) alpha**,
 4. Add the feature to the `any(..)` gate on `pub mod image;` in `src/lib.rs`.
 5. Unit tests in the writer: container magic bytes, `encode_*` and `write_*` agreeing byte-for-byte, wrong-length rejection with an untouched sink. Round-trip the pixels if the dependency ships a decoder.
 6. Add a `#[cfg(feature = "<format>")]` case to `tests/image_writers.rs` so real rendered pixels go through it.
-7. Register it: the per-feature loop in `.github/workflows/ci.yml`, the README feature table, the root `CLAUDE.md` feature list, `CHANGELOG.md`, and `examples/image_formats.rs`.
+7. Register it: the per-feature loop in `.github/workflows/check.yml`, the README feature table, the root `CLAUDE.md` feature list, `CHANGELOG.md`, and `examples/image_formats.rs`.
 
 ## Cross-references
 

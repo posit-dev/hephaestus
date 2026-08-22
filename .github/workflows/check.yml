@@ -1,9 +1,8 @@
-name: CI
+name: Check
 
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
     branches: [main]
 
@@ -276,13 +275,11 @@ jobs:
         working-directory: crates/hephaestus-wasm
         run: node verify-dist.mjs
 
-      # `npm pack` is the last word on what would actually ship, and the
-      # tarball it writes here is the one `publish-npm` pushes — nothing is
-      # rebuilt between verification and release.
-      - name: pack and report the tarball
+      # `npm pack` is the last word on what would actually ship.
+      - name: report the published tarball
         working-directory: crates/hephaestus-wasm/dist
         run: |
-          npm pack --json > /tmp/pack.json
+          npm pack --dry-run --json > /tmp/pack.json
           node -e "
             const p = require('/tmp/pack.json')[0];
             const names = p.files.map((f) => f.path).sort().join(', ');
@@ -293,71 +290,3 @@ jobs:
           wasm=hephaestus_wasm_bg.wasm
           echo "wasm: $(stat -c%s $wasm) raw; $(brotli -q 11 -c $wasm | wc -c) brotli" \
             | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload npm tarball
-        uses: actions/upload-artifact@v4
-        with:
-          name: hephaestus-wasm-npm
-          path: crates/hephaestus-wasm/dist/*.tgz
-          retention-days: 30
-
-  # Publishes on a `v*` tag and nowhere else. It pushes the tarball `client`
-  # already built and `verify-dist.mjs` already checked, rather than building
-  # its own, so what reaches the registry is what CI saw.
-  publish-npm:
-    name: Publish to npm
-    needs: [client]
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    environment: npm
-    permissions:
-      # OIDC, for `--provenance`. SRI is not usable for ES module imports, so
-      # a verifiable link back to this workflow run is the integrity story a
-      # consumer loading from a CDN actually gets.
-      id-token: write
-      contents: read
-
-    steps:
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          registry-url: "https://registry.npmjs.org"
-
-      - name: Download npm tarball
-        uses: actions/download-artifact@v4
-        with:
-          name: hephaestus-wasm-npm
-          path: npm-tarball
-
-      - name: Update npm for OIDC support
-        # Install v10.9.8 first as a workaround for nodejs/node#62425.
-        run: |
-          npm install -g npm@10.9.8
-          npm install -g npm@latest
-
-      # A prerelease tag lands on `next`, so `npm install hephaestus-wasm`
-      # keeps resolving to the last stable release.
-      - name: Determine npm dist-tag
-        id: dist-tag
-        run: |
-          if [[ "$GITHUB_REF_NAME" == *"-dev"* || "$GITHUB_REF_NAME" == *"-rc"* ]]; then
-            echo "tag=next" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=latest" >> "$GITHUB_OUTPUT"
-          fi
-
-      # `verify-dist.mjs` ties the manifest to the crate version; this ties
-      # both to the tag. Without it a mistyped tag publishes whatever
-      # `Cargo.toml` held, which on a first publish succeeds under the wrong
-      # number.
-      - name: Check the tag matches the package version
-        run: |
-          version=$(basename ./npm-tarball/*.tgz .tgz | sed 's/^hephaestus-wasm-//')
-          if [[ "v$version" != "$GITHUB_REF_NAME" ]]; then
-            echo "tag $GITHUB_REF_NAME does not match packaged version $version" >&2
-            exit 1
-          fi
-
-      - name: Publish to npm
-        run: npm publish ./npm-tarball/*.tgz --access=public --provenance --tag ${{ steps.dist-tag.outputs.tag }}
