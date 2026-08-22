@@ -1,0 +1,34 @@
+{
+  "name": "@posit-dev/hephaestus-web",
+  "version": "0.0.0",
+  "description": "Render a hephaestus plot document onto a canvas in the browser.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/posit-dev/hephaestus"
+  },
+  "keywords": [
+    "visualization",
+    "plotting",
+    "webgpu",
+    "wasm",
+    "canvas"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./hephaestus.d.ts",
+      "default": "./hephaestus.js"
+    }
+  },
+  "types": "./hephaestus.d.ts",
+  "files": [
+    "hephaestus.js",
+    "hephaestus.d.ts",
+    "hephaestus_web.js",
+    "hephaestus_web.d.ts",
+    "hephaestus_web_bg.wasm",
+    "fonts/"
+  ],
+  "sideEffects": false
+}

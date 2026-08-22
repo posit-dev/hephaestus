@@ -84,11 +84,51 @@ pub(crate) fn font_context() -> &'static Mutex<FontContext> {
 /// A blob that contains no recognisable faces returns `0`; this
 /// function never panics on malformed input.
 pub fn register_font_bytes(bytes: impl Into<Vec<u8>>) -> usize {
-    let owned: Arc<Vec<u8>> = Arc::new(bytes.into());
+    register_blob(bytes.into())
+        .iter()
+        .map(|(_, faces)| faces)
+        .sum()
+}
+
+/// Register every font face in `bytes` and report the family names they
+/// landed under, best-first, with no duplicates.
+///
+/// The counterpart to [`register_font_bytes`] for a caller that has to
+/// name the family afterwards — [`set_generic_family`] takes names, and
+/// the only place a family's name exists is inside the file. A host with
+/// no system fonts (a browser) has to make `sans-serif` resolve to
+/// something before any text will shape, and guessing the name from a
+/// filename does not survive contact with a real font.
+///
+/// Empty when the blob holds no recognisable faces; never panics on
+/// malformed input.
+pub fn register_font_families(bytes: impl Into<Vec<u8>>) -> Vec<String> {
+    register_blob(bytes.into())
+        .into_iter()
+        .map(|(family, _)| family)
+        .collect()
+}
+
+/// Register a blob, reporting `(family name, face count)` per family.
+fn register_blob(bytes: Vec<u8>) -> Vec<(String, usize)> {
+    let owned: Arc<Vec<u8>> = Arc::new(bytes);
     let blob = parley::fontique::Blob::new(owned);
     let mut fcx = font_context().lock().expect("font context poisoned");
     let registered = fcx.collection.register_fonts(blob, None);
-    registered.iter().map(|(_, fonts)| fonts.len()).sum()
+    // The ids have to be resolved to names while the lock is held, and
+    // `register_fonts` borrows the collection, so collect first.
+    let counted: Vec<(parley::fontique::FamilyId, usize)> = registered
+        .iter()
+        .map(|(id, fonts)| (*id, fonts.len()))
+        .collect();
+    counted
+        .into_iter()
+        .filter_map(|(id, faces)| {
+            fcx.collection
+                .family_name(id)
+                .map(|name| (name.to_string(), faces))
+        })
+        .collect()
 }
 
 /// The font files backing `family`, as `(bytes, first face index)`
@@ -142,6 +182,18 @@ pub fn generic_family_names(kind: GenericFamilyKind) -> Vec<String> {
     ids.into_iter()
         .filter_map(|id| fcx.collection.family_name(id).map(str::to_string))
         .collect()
+}
+
+/// Names of every font family the context knows, in no particular order.
+///
+/// Empty on a host with no system fonts and nothing registered — a browser,
+/// where the collection starts bare — which is what makes this the question to
+/// ask before deciding whether a fallback font is needed. On a desktop it
+/// enumerates the whole system set, so treat it as "is there anything here",
+/// not as a cheap call.
+pub fn registered_families() -> Vec<String> {
+    let mut fcx = font_context().lock().expect("font context poisoned");
+    fcx.collection.family_names().map(str::to_string).collect()
 }
 
 /// Point `kind` at `families`, replacing whatever it resolved to.

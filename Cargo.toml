@@ -1,3 +1,12 @@
+# `crates/hephaestus-web` is deliberately its own workspace rather than a
+# member of this one. Cargo only honours `[profile]` at a workspace root, so
+# a member could not carry its own size-tuned release profile — the size
+# settings a wasm bundle wants (`opt-level = "z"`, `panic = "abort"`) would
+# have to live here and would then apply to this crate's native release
+# builds, where throughput is the whole point.
+[workspace]
+exclude = ["crates/hephaestus-web"]
+
 [package]
 name = "hephaestus"
 version = "0.1.0"
@@ -45,6 +54,14 @@ google-fonts = ["dep:ureq", "dep:directories"]
 # events. Requires `vello` — the window path presents what a `WgpuRenderer`
 # rasterises. winit stays an implementation detail; the event types are ours.
 window = ["vello", "dep:winit"]
+# Presentation onto an existing HTML canvas, for a wasm build embedded in a
+# page. The browser counterpart to `window`: same `WindowApp` / `Frame` /
+# `Event` surface and the same blit path, but the host owns the event loop
+# and feeds resize and pointer events in from JS. Requires `vello`; pulls no
+# winit, which is what keeps a wasm bundle to the web deps wgpu needs anyway.
+# Only `wasm32` compiles the host itself — `wgpu::SurfaceTarget::Canvas`
+# exists solely there — so on any other target the gate is inert.
+canvas = ["vello", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys"]
 # Optional datetime-library interop: `From` impls between our temporal
 # newtypes (`Date` / `DateTime` / `Time` / `Duration`) and the matching
 # types in the named library. All three default off — pick whichever
@@ -96,6 +113,20 @@ bytemuck = { version = "1", optional = true }
 # Windowing — feature-gated; pulled in by `window`. 0.30 is the series that
 # uses raw-window-handle 0.6, which is what wgpu 29 resolves to.
 winit = { version = "0.30", optional = true }
+
+# Web bindings — feature-gated; pulled in by `canvas`. Only meaningful on
+# `wasm32`, but declared unconditionally so `--features canvas` still builds
+# (inertly) on a native target rather than failing to resolve.
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "CssStyleDeclaration",
+] }
 parley = "0.9"
 # CommonMark parser for rich text. `default-features = false` drops the
 # optional HTML-rendering helpers we don't use.
@@ -123,8 +154,13 @@ wgpu = { version = "29", optional = true, default-features = false, features = [
 [target.'cfg(windows)'.dependencies]
 wgpu = { version = "29", optional = true, default-features = false, features = ["dx12"] }
 
+# WebGPU only, deliberately. On wasm `wgpu` exists solely to serve `vello`,
+# which rasterises through compute pipelines — and WebGL2 has no compute
+# stage, so a WebGL adapter could never run this backend. Enabling `webgl`
+# would compile `glow` and the GL hal into every wasm bundle to back an
+# adapter that is found and then fails inside pipeline creation.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wgpu = { version = "29", optional = true, default-features = false, features = ["webgpu", "webgl"] }
+wgpu = { version = "29", optional = true, default-features = false, features = ["webgpu"] }
 
 [[example]]
 name = "hello"

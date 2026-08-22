@@ -55,10 +55,16 @@ fn main() {
     scatter
         .add_axis(Axis::rail("value", AxisPlacement::Cartesian(AxisSide::Left)).title("reading"));
 
+    // Both captions sit at patch level, so each wraps inside its own panel's
+    // band. A caption on the *composition* spans the full drawing width
+    // instead — correct for a figure-wide note, but it would then share the
+    // bottom band with this one and the two would overlap as the figure
+    // narrows.
     let mut trend = Plot::new(&comp(), "trend")
         .bind("x", "t")
         .bind("y", "value")
-        .title("Trend");
+        .title("Trend")
+        .caption("laid out per size by document_load");
     trend.add_geom(
         LineGeom::builder()
             .keys(groups)
@@ -73,7 +79,6 @@ fn main() {
 
     let view = PlotComposition::new(&comp())
         .theme(Theme::minimal())
-        .caption("saved once by examples/document_save.rs, laid out per size by document_load")
         .with_plot(scatter)
         .with_plot(trend)
         .add_scale("t", scale::continuous(0.0..=32.0))

@@ -1,0 +1,14 @@
+# Assembled package (see build.sh) and this crate's own build/lock state. It
+# is a separate workspace (see ../../Cargo.toml), so it carries its own lock
+# file. `dist/` is generated wholesale — the sources are js/ and
+# package.template.json.
+/dist/
+/pkg/
+/target/
+/Cargo.lock
+# Both supplied locally by whoever runs the demo; see www/index.html.
+# The document is generated — `cargo run --example document_save
+# --features document-write` writes examples/document.hplot, which is
+# itself gitignored.
+/www/font.ttf
+/www/document.hplot

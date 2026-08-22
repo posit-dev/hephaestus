@@ -27,6 +27,9 @@ pub(crate) struct WindowSurface {
 impl WindowSurface {
     /// Pick an adapter compatible with `surface`, open a device on it, and
     /// configure the swap chain at `width` × `height`.
+    ///
+    /// Blocks on both requests, so this is the desktop path's constructor;
+    /// see [`Self::new_async`] for the one a browser can use.
     pub(crate) fn new(
         instance: &wgpu::Instance,
         surface: wgpu::Surface<'static>,
@@ -34,22 +37,47 @@ impl WindowSurface {
         height: u32,
         present_mode: PresentMode,
     ) -> Result<Self, WindowError> {
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        }))
-        .map_err(|_| WindowError::NoAdapter)?;
+        pollster::block_on(Self::new_async(
+            instance,
+            surface,
+            width,
+            height,
+            present_mode,
+        ))
+    }
 
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("hephaestus.window.device"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
-            memory_hints: wgpu::MemoryHints::default(),
-            trace: wgpu::Trace::Off,
-            experimental_features: wgpu::ExperimentalFeatures::default(),
-        }))
-        .map_err(|e| WindowError::DeviceRequest(e.to_string()))?;
+    /// The body of [`Self::new`], awaiting adapter and device rather than
+    /// blocking on them.
+    ///
+    /// This is the form a browser needs: there is no thread to park on the
+    /// main event loop, so both requests have to be awaited.
+    pub(crate) async fn new_async(
+        instance: &wgpu::Instance,
+        surface: wgpu::Surface<'static>,
+        width: u32,
+        height: u32,
+        present_mode: PresentMode,
+    ) -> Result<Self, WindowError> {
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .map_err(|_| WindowError::NoAdapter)?;
+
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("hephaestus.window.device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: wgpu::MemoryHints::default(),
+                trace: wgpu::Trace::Off,
+                experimental_features: wgpu::ExperimentalFeatures::default(),
+            })
+            .await
+            .map_err(|e| WindowError::DeviceRequest(e.to_string()))?;
 
         let capabilities = surface.get_capabilities(&adapter);
         let format = pick_surface_format(&capabilities.formats)

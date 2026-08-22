@@ -169,3 +169,74 @@ jobs:
       # `ureq`, which has no wasm target.
       - name: cargo check --target wasm32-unknown-unknown --features jpeg,tiff,webp
         run: cargo check --target wasm32-unknown-unknown --features jpeg,tiff,webp
+
+      # The render client's exact configuration: the canvas host plus a
+      # read-only document reader, and nothing else. Checked on its own
+      # because it is the one combination a website actually ships, and
+      # because `canvas` compiles a host no other target has.
+      - name: cargo clippy, the wasm render client
+        run: |
+          cargo clippy --target wasm32-unknown-unknown --no-default-features \
+            --features vello,canvas,document-read -- -D warnings
+
+      # `window` on wasm has no caller — `run` is desktop-only — but the
+      # module claims to compile there, and nothing else proves it.
+      - name: cargo check --target wasm32-unknown-unknown --features window
+        run: cargo check --target wasm32-unknown-unknown --features window
+
+  # The wasm bundle a page loads. Its own job because `crates/hephaestus-web`
+  # is a separate workspace with its own lock file and release profile, so it
+  # shares no artifacts with the checks above.
+  web:
+    name: wasm render client (wasm-pack)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry, git, and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/hephaestus-web/target
+          key: ${{ runner.os }}-cargo-web-${{ hashFiles('crates/hephaestus-web/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-web-
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+
+      - name: assemble the package
+        working-directory: crates/hephaestus-web
+        run: ./build.sh
+
+      # Loads the assembled package the way a consumer meets it and checks the
+      # manifest against what is on disk: a renamed export, a file missing
+      # from `files[]`, a version out of step with the crate, or a wrapper
+      # importing the glue by the wrong path all fail here rather than after
+      # publishing.
+      - name: verify the package
+        working-directory: crates/hephaestus-web
+        run: node verify-dist.mjs
+
+      # `npm pack` is the last word on what would actually ship.
+      - name: report the published tarball
+        working-directory: crates/hephaestus-web/dist
+        run: |
+          npm pack --dry-run --json > /tmp/pack.json
+          node -e "
+            const p = require('/tmp/pack.json')[0];
+            const names = p.files.map((f) => f.path).sort().join(', ');
+            console.log('tarball: ' + p.filename);
+            console.log('files:   ' + names);
+            console.log('size:    ' + p.size + ' packed / ' + p.unpackedSize + ' unpacked');
+          " | tee -a "$GITHUB_STEP_SUMMARY"
+          wasm=hephaestus_web_bg.wasm
+          echo "wasm: $(stat -c%s $wasm) raw; $(brotli -q 11 -c $wasm | wc -c) brotli" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
