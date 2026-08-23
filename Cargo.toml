@@ -83,7 +83,7 @@ png = ["dep:png"]
 # `Renderer` already produces, so they cost nothing but the encoder itself —
 # unlike `svg` / `pdf`, which need a whole alternative render path. All three
 # encoders are pure Rust and build for wasm.
-jpeg = ["dep:jpeg-encoder"]
+jpeg = ["dep:jpeg-encoder", "dep:jpeg-decoder"]
 tiff = ["dep:tiff"]
 webp = ["dep:image-webp"]
 # Auto-fetch named Google Fonts families on demand. Hits the Google Fonts
@@ -163,6 +163,11 @@ pollster = { version = "0.4", optional = true }
 futures-intrusive = { version = "0.5", optional = true }
 png = { version = "0.18", optional = true }
 jpeg-encoder = { version = "0.7", optional = true }
+# The decode half of the `jpeg` feature — `jpeg-encoder` is write-only, so
+# this is the one format whose two directions come from two crates.
+# `default-features = false` drops `rayon`: a plot places one image at a
+# time, and a thread pool does not build for wasm.
+jpeg-decoder = { version = "0.3", optional = true, default-features = false }
 # `default-features = false` drops the fax and jpeg decode paths; we keep only
 # the two compressors the writer offers beyond uncompressed and packbits.
 tiff = { version = "0.11", optional = true, default-features = false, features = ["deflate", "lzw"] }
@@ -307,6 +312,10 @@ required-features = ["vello", "png"]
 
 [[example]]
 name = "wedge"
+required-features = ["vello", "png"]
+
+[[example]]
+name = "image_geom"
 required-features = ["vello", "png"]
 
 [[example]]

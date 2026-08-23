@@ -1,14 +1,17 @@
-//! TIFF writer.
+//! TIFF reader and writer.
 
 use std::fs::File;
-use std::io::{self, BufWriter, Seek, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, Write};
 use std::path::Path;
 
+use tiff::decoder::DecodingResult;
 use tiff::encoder::{colortype, Compression, DeflateLevel, TiffEncoder};
 use tiff::tags::{ExtraSamples, Tag};
+use tiff::ColorType;
 use tiff::TiffError;
 
-use super::check_pixels;
+use super::{check_pixels, expand_to_rgba8, from_rgba8};
+use crate::brush::Image;
 
 /// How a TIFF writer compresses image data.
 ///
@@ -103,15 +106,87 @@ pub fn write_tiff(
     write_tiff_to(BufWriter::new(file), width, height, pixels, compression)
 }
 
+/// Read a TIFF from `reader`.
+///
+/// The first image in the file, normalised to RGBA8 with straight alpha.
+/// Grayscale and RGB gain an opaque alpha channel; anything whose samples
+/// are not 8-bit, or whose colour model needs a conversion this module does
+/// not do (CMYK, YCbCr, Lab), is refused rather than guessed at.
+pub fn read_tiff_from<R: Read + Seek>(reader: R) -> io::Result<Image> {
+    let mut decoder = tiff::decoder::Decoder::new(reader).map_err(decode_err)?;
+    let (width, height) = decoder.dimensions().map_err(decode_err)?;
+    let color = decoder.colortype().map_err(decode_err)?;
+    let channels = match color {
+        ColorType::Gray(8) => 1,
+        ColorType::GrayA(8) => 2,
+        ColorType::RGB(8) => 3,
+        ColorType::RGBA(8) => 4,
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("cannot read a TIFF of color type {other:?} as RGBA8"),
+            ))
+        }
+    };
+    let samples = match decoder.read_image().map_err(decode_err)? {
+        DecodingResult::U8(v) => v,
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "TIFF decoded to {} samples, not the 8-bit ones its color type promised",
+                    sample_kind(&other)
+                ),
+            ))
+        }
+    };
+    let pixels = expand_to_rgba8(&samples, channels, width, height)?;
+    from_rgba8(width, height, pixels)
+}
+
+/// Read a TIFF from bytes already in memory.
+pub fn decode_tiff(bytes: &[u8]) -> io::Result<Image> {
+    read_tiff_from(io::Cursor::new(bytes))
+}
+
+/// Read a TIFF from `path`.
+pub fn read_tiff(path: impl AsRef<Path>) -> io::Result<Image> {
+    let file = File::open(path)?;
+    read_tiff_from(BufReader::new(file))
+}
+
 fn io_err(e: TiffError) -> io::Error {
     io::Error::other(e)
+}
+
+fn decode_err(e: TiffError) -> io::Error {
+    match e {
+        TiffError::IoError(e) => e,
+        other => io::Error::new(io::ErrorKind::InvalidData, other),
+    }
+}
+
+/// Name a decoded sample type, for the error a non-8-bit TIFF produces.
+fn sample_kind(r: &DecodingResult) -> &'static str {
+    match r {
+        DecodingResult::U8(_) => "u8",
+        DecodingResult::U16(_) => "u16",
+        DecodingResult::U32(_) => "u32",
+        DecodingResult::U64(_) => "u64",
+        DecodingResult::F16(_) => "f16",
+        DecodingResult::F32(_) => "f32",
+        DecodingResult::F64(_) => "f64",
+        DecodingResult::I8(_) => "i8",
+        DecodingResult::I16(_) => "i16",
+        DecodingResult::I32(_) => "i32",
+        DecodingResult::I64(_) => "i64",
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tiff::decoder::{Decoder, DecodingResult};
-    use tiff::ColorType;
+    use tiff::decoder::Decoder;
 
     const ALL: [TiffCompression; 4] = [
         TiffCompression::None,
@@ -145,17 +220,37 @@ mod tests {
         let pixels = gradient(16, 9);
         for compression in ALL {
             let bytes = encode_tiff(16, 9, &pixels, compression).expect("encode");
-            let mut decoder = Decoder::new(io::Cursor::new(bytes)).expect("decode");
+            let image = decode_tiff(&bytes).expect("decode");
 
-            assert_eq!(decoder.dimensions().expect("dimensions"), (16, 9));
-            assert_eq!(decoder.colortype().expect("colortype"), ColorType::RGBA(8));
-            match decoder.read_image().expect("read") {
-                DecodingResult::U8(got) => {
-                    assert_eq!(got, pixels, "{compression:?} altered the pixels")
-                }
-                other => panic!("{compression:?} decoded as {other:?}, expected 8-bit samples"),
-            }
+            assert_eq!((image.width, image.height), (16, 9));
+            assert_eq!(image.format, crate::brush::ImageFormat::Rgba8);
+            assert_eq!(image.alpha_type, crate::brush::ImageAlphaType::Alpha);
+            assert_eq!(
+                image.data.as_ref(),
+                pixels.as_slice(),
+                "{compression:?} altered the pixels"
+            );
         }
+    }
+
+    /// A TIFF whose file holds fewer than four samples per pixel still
+    /// reads as RGBA8 — grey replicates across the colour channels and the
+    /// missing alpha becomes opaque.
+    #[test]
+    fn a_grayscale_tiff_widens_to_opaque_rgba() {
+        let mut out = Vec::new();
+        {
+            let mut encoder = TiffEncoder::new(io::Cursor::new(&mut out)).expect("encoder");
+            encoder
+                .write_image::<colortype::Gray8>(2, 2, &[0u8, 64, 128, 255])
+                .expect("write");
+        }
+        let image = decode_tiff(&out).expect("decode");
+        assert_eq!((image.width, image.height), (2, 2));
+        assert_eq!(
+            image.data.as_ref(),
+            &[0, 0, 0, 255, 64, 64, 64, 255, 128, 128, 128, 255, 255, 255, 255, 255]
+        );
     }
 
     #[test]

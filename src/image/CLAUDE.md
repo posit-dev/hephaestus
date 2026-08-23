@@ -1,16 +1,31 @@
 # src/image/CLAUDE.md
 
-Raster writers. One cargo feature per format, one encoder each, nothing else.
+Raster readers and writers. One cargo feature per format, one codec each, nothing else.
 
 ## What this module does
 
-Turns the pixel buffer a `Renderer` fills into an encoded image. Four formats, each behind its own feature: `png`, `jpeg`, `tiff`, `webp`. Every format offers the same three entry points, and `src/image/png.rs` is the template for a new one:
+Turns the pixel buffer a `Renderer` fills into an encoded image, and an encoded image back into pixels. Four formats, each behind its own feature: `png`, `jpeg`, `tiff`, `webp`. Every format offers the same three entry points per direction, and `src/image/png.rs` is the template for a new one:
 
 - `write_X_to<W: Write>(writer, width, height, pixels, ..)` — the primitive; the other two call it.
 - `encode_X(width, height, pixels, ..)` — the bytes in memory, for an HTTP response body, a base64 data URL, a clipboard payload.
 - `write_X(path, width, height, pixels, ..)` — `File::create` plus a `BufWriter`.
+- `read_X_from<R: BufRead + Seek>(reader)` — the primitive on the read side.
+- `decode_X(bytes)` — bytes already in memory.
+- `read_X(path)` — `File::open` plus a `BufReader`.
 
 Per-format submodules are private; `mod.rs` re-exports their functions flat, so callers write `hephaestus::image::write_jpeg`. `src/png.rs` at the crate root aliases the PNG three so `hephaestus::png::write_png` also resolves.
+
+## Reading
+
+A reader hands back a `crate::brush::Image` — the type `SceneBuilder::draw_image` and `plot::ImageGeom` consume — normalised to the same buffer contract the writers enforce. `from_rgba8` in `mod.rs` is the single construction point (and is public, for a caller holding pixels from somewhere else); `expand_to_rgba8` is the single widening point.
+
+Three normalisations, applied by every format:
+
+- **Grey replicates** across the colour channels rather than staying one sample.
+- **A missing alpha channel becomes opaque**, so an RGB or grey file does not read back invisible.
+- **Deep samples narrow to 8 bits.** PNG asks its decoder for this via `STRIP_16`; TIFF and JPEG *refuse* anything that isn't 8-bit rather than guessing, and so does any colour model needing a conversion this module won't do without a profile (CMYK, YCbCr, Lab).
+
+`BufRead + Seek` is the reader bound on all four, which is what the container formats actually need — the PNG and WebP decoders demand it outright. `BufReader<File>` and `io::Cursor` both satisfy it. Only JPEG could take less; it takes the same bound so the four read the same way.
 
 ## The buffer contract
 
@@ -26,7 +41,8 @@ Every writer takes the same thing: RGBA8, **straight (un-premultiplied) alpha**,
 
 ## Format gotchas
 
-- **JPEG has no alpha channel.** `jpeg_encoder::ColorType::Rgba` silently *discards* it, which turns a transparent-background render black. So `write_jpeg` composites onto an explicit `background` and encodes `ColorType::Rgb`. Compositing happens in the encoded sRGB byte space, the space the renderer itself blends in; a fully opaque buffer is bit-exact passthrough. The background's own alpha is ignored.
+- **JPEG has no alpha channel.** `jpeg_encoder::ColorType::Rgba` silently *discards* it, which turns a transparent-background render black. So `write_jpeg` composites onto an explicit `background` and encodes `ColorType::Rgb`. Compositing happens in the encoded sRGB byte space, the space the renderer itself blends in; a fully opaque buffer is bit-exact passthrough. The background's own alpha is ignored. Reading is the same story from the other side: `decode_jpeg` always returns a fully opaque image, and the pixels are not the ones that went in, so the JPEG test asserts the shape rather than equality.
+- **JPEG is the one format whose two directions come from two crates.** `jpeg-encoder` is write-only, so the `jpeg` feature also pulls `jpeg-decoder` — with `default-features = false`, which drops `rayon`: a plot places one image at a time, and a thread pool does not build for wasm.
 - **JPEG dimensions are `u16`.** The frame header cannot express more than 65535, so the writer rejects larger images itself rather than surfacing an opaque encoder error.
 - **TIFF needs `Write + Seek`.** The tag directory records offsets into the image data that follows it. `encode_tiff` therefore goes through an `io::Cursor`, and `write_tiff` relies on `BufWriter<File>` being `Seek`.
 - **TIFF alpha must be declared.** The `tiff` crate's `colortype::RGBA8` writes four samples but no `ExtraSamples` tag, leaving the fourth undefined. The writer sets it to `UnassociatedAlpha` through `image.encoder().write_tag(..)` — deliberately not `ImageEncoder::extra_samples`, which also bumps the per-row sample count and would double-count the alpha RGBA8 already declares.
@@ -36,11 +52,12 @@ Every writer takes the same thing: RGBA8, **straight (un-premultiplied) alpha**,
 
 1. Add the feature and its optional dependency in `Cargo.toml`, next to the other three.
 2. Add `src/image/<format>.rs` with the three entry points, using `super::check_pixels` first and `super::check_dimension_limit` if the format has a cap.
-3. Declare the private `mod` and the gated flat re-export in `mod.rs`, with the `#[cfg_attr(docsrs, doc(cfg(..)))]` badge.
-4. Add the feature to the `any(..)` gate on `pub mod image;` in `src/lib.rs`.
-5. Unit tests in the writer: container magic bytes, `encode_*` and `write_*` agreeing byte-for-byte, wrong-length rejection with an untouched sink. Round-trip the pixels if the dependency ships a decoder.
-6. Add a `#[cfg(feature = "<format>")]` case to `tests/image_writers.rs` so real rendered pixels go through it.
-7. Register it: the per-feature loop in `.github/workflows/check.yml`, the README feature table, the root `CLAUDE.md` feature list, `CHANGELOG.md`, and `examples/image_formats.rs`.
+3. Add the three read entry points beside them, normalising through `super::expand_to_rgba8` and `super::from_rgba8`. If the dependency has no decoder, that is a second optional dependency on the same feature gate — see the JPEG note above.
+4. Declare the private `mod` and the gated flat re-export in `mod.rs`, with the `#[cfg_attr(docsrs, doc(cfg(..)))]` badge.
+5. Add the feature to the `any(..)` gate on `pub mod image;` in `src/lib.rs`. That gate is also why `from_rgba8` is not reachable with no format feature at all — a build that decodes nothing constructs a `brush::Image` directly.
+6. Unit tests in the writer: container magic bytes, `encode_*` and `write_*` agreeing byte-for-byte, wrong-length rejection with an untouched sink, an `encode_* → decode_*` pixel round-trip, a fewer-than-four-channel file widening to opaque RGBA, and garbage bytes reported as `InvalidData` rather than panicking.
+7. Add a `#[cfg(feature = "<format>")]` case to `tests/image_writers.rs` so real rendered pixels go through it.
+8. Register it: the per-feature loop in `.github/workflows/check.yml`, the README feature table, the root `CLAUDE.md` feature list, `CHANGELOG.md`, and `examples/image_formats.rs`.
 
 ## Cross-references
 

@@ -26,6 +26,7 @@ pub mod chrome;
 pub mod composition;
 pub mod diff;
 pub mod geom;
+pub mod image_registry;
 #[allow(clippy::module_inception)]
 pub mod plot;
 pub mod projection;
@@ -39,10 +40,11 @@ pub use composition::{PlotComposition, ValidationIssue};
 pub use diff::{diff_columns, diff_positional, KeyIndex};
 pub use geom::{
     linetype, BSplineGeom, BuildableGeom, Channel, ChannelDecl, EllipseGeom, ExpectedOutput, Geom,
-    GeomBuilder, GeomContext, GeometryGeom, Keys, LineGeom, PointGeom, PolygonGeom, Raw, RectGeom,
-    RibbonBSplineGeom, RibbonGeom, ScaleResolver, SegmentGeom, WedgeGeom,
+    GeomBuilder, GeomContext, GeometryGeom, ImageGeom, Keys, LineGeom, PointGeom, PolygonGeom, Raw,
+    RectGeom, RibbonBSplineGeom, RibbonGeom, ScaleResolver, SegmentGeom, WedgeGeom,
 };
 pub use geom::{TextFitGeom, TextGeom, TextPathGeom};
+pub use image_registry::ImageRegistry;
 pub use plot::{AspectMode, GeomId, Plot};
 pub use projection::{ChromeStrategy, CustomProjection, Projection};
 pub use scale::{

@@ -12,7 +12,7 @@ For tests and one-off renders, `Plot` is independently usable with a hand-built 
 
 ## Subdirectories
 
-- **`geom/`** — vectorised drawing primitives (`PointGeom`, `LineGeom`, `PolygonGeom`, `RectGeom`, `EllipseGeom`, `SegmentGeom`, `WedgeGeom`, plus `TextGeom` / `TextFitGeom` / `TextPathGeom`). See `src/plot/geom/CLAUDE.md`.
+- **`geom/`** — vectorised drawing primitives (`PointGeom`, `LineGeom`, `PolygonGeom`, `RectGeom`, `EllipseGeom`, `SegmentGeom`, `WedgeGeom`, `ImageGeom`, plus `TextGeom` / `TextFitGeom` / `TextPathGeom`). See `src/plot/geom/CLAUDE.md`.
 - **`chrome/`** — axis and legend rendering. The scale layer (in `crate::scales`) defines what to draw; this module draws it against `SceneBuilder`.
 
 ## Scale bundle and re-export shims
@@ -27,9 +27,10 @@ The algorithms `Scale` delegates to live in [`crate::scales`]; see `src/scales/C
 ## Core types (this folder, not in subdirectories)
 
 - **`PlotComposition`** (`composition.rs`) — the orchestrator. Construct with `PlotComposition::new(&composition)`; register scales with `add_scale("name", scale)`; attach plots with `with_plot(plot)` / `attach_plot(plot)`. Composition-level chrome — a title / subtitle / caption, shared axis titles, and legends that serve every facet — is set directly on it (`title`, `axis_title`, `add_legend`), mirroring the same methods on `Plot`. Mutations flow through closures (`view.update_scale("time", |s| ...)`, `view.update_plot("price", |p| ...)`) so dirty-tracking stays accurate. The dirty model is conservative: any mutation flips `layout_dirty` and the next `render` re-solves. Per-plot / per-scale dirty bits are plumbed but only used by v1.5+ partial-repaint heuristics.
-- **`Plot`** (`plot.rs`) — bound to a patch id. Stores channel → scale-name bindings, geom list (`Vec<(GeomId, Box<dyn Geom>)>`), chrome text (title / subtitle / caption / axis titles), and a `ShapeRegistry`. Three lifecycle methods used by the orchestrator: `wire(patch, registry, dpi)` (drop chrome cells + panel into named slots; full version is `text`-gated, `wire_panel` is always available), `draw_chrome_into(scene, layout)`, `draw_panel_into(scene, layout, registry)`.
+- **`Plot`** (`plot.rs`) — bound to a patch id. Stores channel → scale-name bindings, geom list (`Vec<(GeomId, Box<dyn Geom>)>`), chrome text (title / subtitle / caption / axis titles), a `ShapeRegistry` and an `ImageRegistry`. Three lifecycle methods used by the orchestrator: `wire(patch, registry, dpi)` (drop chrome cells + panel into named slots; full version is `text`-gated, `wire_panel` is always available), `draw_chrome_into(scene, layout)`, `draw_panel_into(scene, layout, registry)`.
 - **`GeomId`** — opaque handle returned by `Plot::add_geom`; used with `Plot::update_geom` / `remove_geom`.
 - **`KeyIndex`** / **`diff_columns`** / **`diff_positional`** (`diff.rs`) — key-based columnar diff producing `(enter: Vec<usize>, update: Vec<(prev_idx, new_idx)>, exit: Vec<Value>)` for identity-preserving animation.
+- **`ImageRegistry`** (`image_registry.rs`) — the name → `brush::Image` map `ImageGeom` resolves its `"image"` channel against. Under `plot/` rather than the crate root because a name-keyed image table is plot-specific, unlike `Shape`, which `text::rich` also reaches for. `Plot` owns one (`image_registry` / `image_registry_ref` / `set_image_registry`) and threads it into `GeomContext::images`; `GeomContext::new` defaults to `ImageRegistry::shared_empty()`, so a context nobody handed a registry to draws no images rather than panicking.
 - **`ValidationIssue`** — issue returned by composition / plot validation.
 
 (`Value` / `DataColumn` / `Date` / `DateTime` / `Time` / `Duration` / `LinetypeStep` live in `crate::scales::value` — moved alongside `Scale` since they're the data the scales operate on.)

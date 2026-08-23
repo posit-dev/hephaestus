@@ -33,7 +33,8 @@ use hephaestus::geometry::Size;
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::theme::Theme;
 use hephaestus::plot::{
-    scale, LineGeom, Plot, PlotComposition, PointGeom, Projection, RectGeom, TextGeom,
+    scale, ImageGeom, ImageRegistry, LineGeom, Plot, PlotComposition, PointGeom, Projection,
+    RectGeom, TextGeom,
 };
 use hephaestus::scales::chrome::AxisSide;
 use hephaestus::scales::value::Value;
@@ -261,11 +262,13 @@ fn a_reloaded_composition_emits_the_same_draw_calls_at_sizes_the_writer_never_sa
         for (i, (a, b)) in want.iter().zip(&got).enumerate() {
             // `Op: PartialEq` compares fonts by the face they name, not by
             // which blob handed it over — font resolution loads one file
-            // more than once, and CI caught exactly that. The same is not
-            // true of `Op::DrawImage`: `peniko::ImageData` is foreign and
-            // compares its blob by identity, so a plot that draws images
-            // would need that handled before this comparison means
-            // anything. Nothing in `build` draws one.
+            // more than once, and CI caught exactly that. `Op::DrawImage`
+            // is stricter: `peniko::ImageData` is foreign and compares its
+            // blob by identity. That costs nothing here because a document
+            // carries image *names*, so the reloaded plot samples the very
+            // handle the caller re-registered —
+            // `an_image_geom_round_trips_once_its_registry_is_restored`
+            // is where that is pinned. Nothing in `build` draws one.
             assert!(
                 a == b,
                 "at {w}x{h} draw call {i} differs:\n  original: {a:?}\n  reloaded: {b:?}"
@@ -598,4 +601,102 @@ fn hints_read_from_the_head_alone_without_the_chunks_behind_it() {
         read_composition(truncated, &ReadContext::new()).is_err(),
         "a head-only document has no composition to rebuild"
     );
+}
+
+// ─── Images ──────────────────────────────────────────────────────────────────
+
+/// A document names the images a plot draws; it does not carry their
+/// pixels, exactly as it names font families rather than embedding them by
+/// default. So the reloaded plot needs its
+/// [`ImageRegistry`](hephaestus::plot::ImageRegistry) restored before it
+/// can draw, and once it is, the draw calls match the original's — the
+/// blob-identity comparison in `Op::DrawImage` is satisfied because both
+/// sides sample the one handle the caller registered.
+#[test]
+fn an_image_geom_round_trips_once_its_registry_is_restored() {
+    let swatch = |side: u32| {
+        let px = vec![200u8; (side as usize) * (side as usize) * 4];
+        hephaestus::image::from_rgba8(side, side, px).expect("valid buffer")
+    };
+    let registry_of = |side: u32| {
+        let mut r = ImageRegistry::new();
+        r.insert("swatch", swatch(side));
+        r
+    };
+    let registry = registry_of(8);
+
+    let comp = || {
+        hephaestus::composition::Composition::empty(1, 1).place(
+            1,
+            1,
+            hephaestus::composition::Span::cell(),
+            Patch::new("panel"),
+        )
+    };
+    let source_plot = |registry: ImageRegistry| {
+        let mut plot = Plot::new(&comp(), "panel")
+            .bind("x", "x")
+            .bind("y", "y")
+            .image_registry(registry);
+        plot.add_geom(
+            ImageGeom::builder()
+                .set("image", "swatch")
+                .set("x", vec![2.0_f64])
+                .set("y", vec![2.0_f64])
+                .set("x2", vec![8.0_f64])
+                .set("y2", vec![8.0_f64])
+                .build(),
+        );
+        plot
+    };
+    let view = |plot: Plot| {
+        PlotComposition::new(&comp())
+            .add_scale("x", scale::continuous(0.0..=10.0))
+            .add_scale("y", scale::continuous(0.0..=10.0))
+            .with_plot(plot)
+    };
+
+    let mut original = view(source_plot(registry.clone()));
+    let bytes = write_composition(&original, &WriteOptions::new()).expect("a writable plot");
+
+    // Names, not pixels: the document is the same size whether the image
+    // it names is 8x8 or 512x512. This is the property the whole registry
+    // design exists for — a basemap tile costs a document nothing.
+    let big = write_composition(&view(source_plot(registry_of(512))), &WriteOptions::new())
+        .expect("a writable plot");
+    assert_eq!(
+        bytes.len(),
+        big.len(),
+        "document grew from {} to {} bytes when the image it names got 4096x larger",
+        bytes.len(),
+        big.len()
+    );
+
+    // Without the registry the geom finds no image and draws none.
+    let mut bare = read_composition(&bytes, &ReadContext::new()).expect("a readable document");
+    let bare_calls = draw_calls(&mut bare, 400, 300);
+    assert!(
+        !bare_calls
+            .iter()
+            .any(|op| matches!(op, Op::DrawImage { .. })),
+        "a reloaded plot whose registry was never restored should draw no image"
+    );
+
+    // With it restored, the draw calls match the original exactly.
+    let mut reloaded = read_composition(&bytes, &ReadContext::new()).expect("a readable document");
+    reloaded.update_plot("panel", |p| p.set_image_registry(registry.clone()));
+
+    let want = draw_calls(&mut original, 400, 300);
+    let got = draw_calls(&mut reloaded, 400, 300);
+    assert_eq!(want.len(), got.len(), "draw call count changed");
+    assert!(
+        want.iter().any(|op| matches!(op, Op::DrawImage { .. })),
+        "the original drew no image, so this proves nothing"
+    );
+    for (i, (a, b)) in want.iter().zip(&got).enumerate() {
+        assert!(
+            a == b,
+            "draw call {i} differs:\n  original: {a:?}\n  reloaded: {b:?}"
+        );
+    }
 }

@@ -1,12 +1,14 @@
-//! JPEG writer.
+//! JPEG reader and writer.
 
 use std::fs::File;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Seek, Write};
 use std::path::Path;
 
+use jpeg_decoder::PixelFormat;
 use jpeg_encoder::{ColorType, Encoder, EncodingError};
 
-use super::{check_dimension_limit, check_pixels};
+use super::{check_dimension_limit, check_pixels, expand_to_rgba8, from_rgba8};
+use crate::brush::Image;
 use crate::color::Color;
 
 /// The largest width or height a JPEG frame header can express.
@@ -96,8 +98,56 @@ fn flatten_onto(pixels: &[u8], background: Color) -> Vec<u8> {
     out
 }
 
+/// Read a JPEG from `reader`.
+///
+/// The format carries no alpha channel, so the result is fully opaque.
+/// Grayscale expands to grey RGB; CMYK is refused rather than converted
+/// without a colour profile to convert through.
+pub fn read_jpeg_from<R: BufRead + Seek>(reader: R) -> io::Result<Image> {
+    let mut decoder = jpeg_decoder::Decoder::new(reader);
+    let samples = decoder.decode().map_err(decode_err)?;
+    let info = decoder.info().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "JPEG decoded without reporting its dimensions",
+        )
+    })?;
+    let channels = match info.pixel_format {
+        PixelFormat::L8 => 1,
+        PixelFormat::RGB24 => 3,
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("cannot read a JPEG in pixel format {other:?} as RGBA8"),
+            ))
+        }
+    };
+    let width = u32::from(info.width);
+    let height = u32::from(info.height);
+    let pixels = expand_to_rgba8(&samples, channels, width, height)?;
+    from_rgba8(width, height, pixels)
+}
+
+/// Read a JPEG from bytes already in memory.
+pub fn decode_jpeg(bytes: &[u8]) -> io::Result<Image> {
+    read_jpeg_from(io::Cursor::new(bytes))
+}
+
+/// Read a JPEG from `path`.
+pub fn read_jpeg(path: impl AsRef<Path>) -> io::Result<Image> {
+    let file = File::open(path)?;
+    read_jpeg_from(BufReader::new(file))
+}
+
 fn io_err(e: EncodingError) -> io::Error {
     io::Error::other(e)
+}
+
+fn decode_err(e: jpeg_decoder::Error) -> io::Error {
+    match e {
+        jpeg_decoder::Error::Io(e) => e,
+        other => io::Error::new(io::ErrorKind::InvalidData, other),
+    }
 }
 
 #[cfg(test)]
@@ -142,6 +192,31 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(in_memory, on_disk);
+    }
+
+    /// JPEG is lossy, so the pixels cannot round-trip exactly. What must
+    /// survive is the shape: the right dimensions, and an opaque alpha
+    /// channel the format itself never stored.
+    #[test]
+    fn a_written_jpeg_reads_back_at_the_same_size_and_opaque() {
+        let pixels = checkerboard(16, 9);
+        let bytes = encode_jpeg(16, 9, &pixels, 90, Color::WHITE).expect("encode");
+        let image = decode_jpeg(&bytes).expect("decode");
+
+        assert_eq!((image.width, image.height), (16, 9));
+        assert_eq!(image.format, crate::brush::ImageFormat::Rgba8);
+        assert_eq!(image.alpha_type, crate::brush::ImageAlphaType::Alpha);
+        assert_eq!(image.data.as_ref().len(), 16 * 9 * 4);
+        assert!(
+            image.data.as_ref().chunks_exact(4).all(|px| px[3] == 255),
+            "JPEG carries no alpha, so every pixel must read back opaque"
+        );
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_jpeg_are_rejected() {
+        let err = decode_jpeg(b"not a jpeg at all").expect_err("should refuse");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

@@ -31,6 +31,7 @@ use crate::plot::chrome::text::{
 use crate::shape::ShapeRegistry;
 
 use super::geom::{Geom, GeomContext, ScaleResolver};
+use super::image_registry::ImageRegistry;
 use super::scale::{Scale, ScaleRegistry};
 use crate::scales::input::InputRange;
 
@@ -157,6 +158,7 @@ pub struct Plot {
     caption: Option<String>,
 
     shapes: ShapeRegistry,
+    images: ImageRegistry,
 
     /// Axes attached to this plot. Composed explicitly via
     /// [`Self::add_axis`]; no axis is rendered unless the caller
@@ -289,6 +291,7 @@ impl Plot {
             subtitle: None,
             caption: None,
             shapes: ShapeRegistry::with_builtins(),
+            images: ImageRegistry::new(),
             axes: Vec::new(),
             next_axis_id: 0,
             legends: Vec::new(),
@@ -590,6 +593,27 @@ impl Plot {
     /// Borrow the shape registry geoms resolve marker names against.
     pub fn shape_registry_ref(&self) -> &ShapeRegistry {
         &self.shapes
+    }
+
+    /// Replace this plot's [`ImageRegistry`].
+    /// [`ImageGeom`](crate::plot::ImageGeom) uses the registry to look
+    /// up raster images by name at draw time. Empty by default, so a
+    /// plot that draws no images carries no pixels.
+    pub fn image_registry(mut self, r: ImageRegistry) -> Self {
+        self.images = r;
+        self
+    }
+
+    /// Borrow the image registry geoms resolve image names against.
+    pub fn image_registry_ref(&self) -> &ImageRegistry {
+        &self.images
+    }
+
+    /// Replace this plot's [`ImageRegistry`] in place, for use inside a
+    /// [`PlotComposition::update_plot`](crate::plot::PlotComposition::update_plot)
+    /// closure.
+    pub fn set_image_registry(&mut self, r: ImageRegistry) {
+        self.images = r;
     }
 
     // ── Mutators ──
@@ -1022,7 +1046,8 @@ impl Plot {
         };
         let ctx =
             GeomContext::with_projection(panel, dpi, &self.shapes, &resolver, &self.projection)
-                .with_theme(theme);
+                .with_theme(theme)
+                .with_images(&self.images);
 
         let clip_path: Option<crate::path::Path> = if self.clip {
             {

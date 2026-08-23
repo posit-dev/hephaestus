@@ -1,9 +1,9 @@
-//! PNG writer.
+//! PNG reader and writer.
 //!
 //! Aliases for the PNG entry points in [`crate::image`], the module that
-//! carries every raster writer.
+//! carries every raster codec.
 
-pub use crate::image::{encode_png, write_png, write_png_to};
+pub use crate::image::{decode_png, encode_png, read_png, read_png_from, write_png, write_png_to};
 
 #[cfg(test)]
 mod tests {
@@ -15,5 +15,7 @@ mod tests {
             &bytes[..8],
             &[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']
         );
+        let image = crate::png::decode_png(&bytes).expect("decode");
+        assert_eq!((image.width, image.height), (2, 2));
     }
 }

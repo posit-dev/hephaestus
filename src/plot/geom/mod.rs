@@ -28,6 +28,7 @@ use std::sync::Arc;
 
 use crate::color::Color;
 use crate::geometry::Rect;
+use crate::plot::image_registry::ImageRegistry;
 use crate::plot::scale::Scale;
 use crate::plot::value::{DataColumn, Date, DateTime, Duration, Time, Value};
 use crate::scales::geometry::Geometry;
@@ -38,6 +39,7 @@ pub mod bspline;
 pub(crate) mod bspline_eval;
 pub mod ellipse;
 pub mod geometry;
+pub mod image;
 pub mod line;
 pub(crate) mod marks;
 pub(crate) mod outline;
@@ -59,6 +61,7 @@ pub mod wedge;
 pub use bspline::BSplineGeom;
 pub use ellipse::EllipseGeom;
 pub use geometry::GeometryGeom;
+pub use image::ImageGeom;
 pub use line::LineGeom;
 pub use point::PointGeom;
 pub use polygon::PolygonGeom;
@@ -385,6 +388,12 @@ pub struct GeomContext<'a> {
     pub panel_rect: Rect,
     pub dpi: f64,
     pub shapes: &'a ShapeRegistry,
+    /// Named raster images, keyed by the name an `"image"` channel
+    /// resolves to. Defaults to
+    /// [`ImageRegistry::shared_empty`](crate::plot::ImageRegistry::shared_empty)
+    /// for callers that construct a context via [`Self::new`], so a
+    /// geom looking a name up in it finds nothing and draws nothing.
+    pub images: &'a ImageRegistry,
     pub scales: &'a dyn ScaleResolver,
     /// Coordinate projection. Geoms route their final fraction→pixel
     /// conversion through
@@ -416,6 +425,7 @@ impl<'a> GeomContext<'a> {
             panel_rect,
             dpi,
             shapes,
+            images: ImageRegistry::shared_empty(),
             scales,
             projection: &crate::plot::projection::Projection::Cartesian,
             theme: default_theme_ref(),
@@ -436,6 +446,7 @@ impl<'a> GeomContext<'a> {
             panel_rect,
             dpi,
             shapes,
+            images: ImageRegistry::shared_empty(),
             scales,
             projection,
             theme: default_theme_ref(),
@@ -448,6 +459,15 @@ impl<'a> GeomContext<'a> {
     /// every geom's `draw` call.
     pub fn with_theme(mut self, theme: &'a crate::plot::theme::Theme) -> Self {
         self.theme = theme;
+        self
+    }
+
+    /// Builder-style override of the context's image registry.
+    /// Returns the context with `images` swapped in. Used by the
+    /// orchestrator to thread the plot's registry through to every
+    /// geom's `draw` call.
+    pub fn with_images(mut self, images: &'a ImageRegistry) -> Self {
+        self.images = images;
         self
     }
 
@@ -762,9 +782,9 @@ mod tests {
     #[test]
     fn every_builtin_geom_has_a_distinct_kind_tag() {
         use crate::plot::geom::{
-            BSplineGeom, EllipseGeom, GeometryGeom, LineGeom, PointGeom, PolygonGeom, RectGeom,
-            RibbonBSplineGeom, RibbonGeom, SegmentGeom, TextFitGeom, TextGeom, TextPathGeom,
-            WedgeGeom,
+            BSplineGeom, EllipseGeom, GeometryGeom, ImageGeom, LineGeom, PointGeom, PolygonGeom,
+            RectGeom, RibbonBSplineGeom, RibbonGeom, SegmentGeom, TextFitGeom, TextGeom,
+            TextPathGeom, WedgeGeom,
         };
         use crate::scales::geometry::Geometry;
 
@@ -799,6 +819,7 @@ mod tests {
                 Geometry::Point((0.0, 0.0)),
                 Geometry::Point((1.0, 1.0)),
             ]),
+            built!(ImageGeom, "x" => xs(), "y" => ys(), "image" => text()),
             built!(TextGeom, "x" => xs(), "y" => ys(), "text" => text()),
             built!(TextFitGeom, "x" => xs(), "y" => ys(), "x2" => x2s(), "y2" => y2s(), "text" => text()),
             built!(TextPathGeom, "x" => xs(), "y" => ys(), "text" => text()),

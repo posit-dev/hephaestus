@@ -23,6 +23,7 @@ cargo +1.86 check --no-default-features --features document-write --ignore-rust-
 cargo test                                               # all tests
 cargo test --test smoke                                  # the GPU smoke test (requires a working wgpu adapter)
 cargo test --test picking                                # picking round-trip
+cargo test --test image_geom                             # raster images through PlotComposition
 cargo test --no-default-features --features vello-hybrid --test hybrid  # the sparse-strips backend, end to end
 cargo test --test window_blit                            # the window presentation blit, headless
 cargo check --no-default-features --features window,vello-hybrid,png  # presentation with no compute-shader backend
@@ -33,6 +34,7 @@ cargo fmt                                                # rustfmt; always run b
 
 cargo run --example hello                                # renders examples/hello.png — visual sanity check
 cargo run --example image_formats --features jpeg,tiff,webp  # all four raster writers
+cargo run --example image_geom                           # raster images placed in a panel
 cargo run --example window --features window             # live window: resize + hover picking
 cargo run --release --example window --features window -- 100000  # same scene at N points
 cargo run --release --example window --features window,vello-hybrid -- 200000 hybrid  # sparse strips: no draw cap
@@ -77,8 +79,8 @@ Style rules (apply everywhere, including comments in `tests/` and `examples/`):
 
 - **`vello`** (default) — the compute-shader GPU rasterising backend (wgpu + vello + pollster + futures-intrusive + bytemuck).
 - **`vello-hybrid`** (off by default) — the sparse-strips GPU backend (wgpu + vello_hybrid + vello_common + glifo + the same support crates). Independent of `vello`: either, both, or neither. Two things it can do that the compute-shader backend cannot — rasterise with binary coverage, which is what an id buffer needs, and size GPU buffers to actual scene content instead of fixed caps, so there is no draw-count ceiling. Measured less than half the wasm bundle size of `vello`. See `src/backend/hybrid/CLAUDE.md`.
-- **`png`** (default) — PNG writer (`png` crate).
-- **`jpeg`**, **`tiff`**, **`webp`** (off by default) — the other raster writers, one encoder each (`jpeg-encoder`, `tiff`, `image-webp`). All four writers live in `src/image/` and consume the same RGBA8 buffer a `Renderer` produces, so a format costs only its encoder — unlike `svg` / `pdf`, which need an alternative render path. All pure Rust and wasm-clean.
+- **`png`** (default) — PNG reader and writer (`png` crate).
+- **`jpeg`**, **`tiff`**, **`webp`** (off by default) — the other raster codecs (`jpeg-encoder` + `jpeg-decoder`, `tiff`, `image-webp`). All four live in `src/image/`. Writing consumes the same RGBA8 buffer a `Renderer` produces, so a format costs only its codec — unlike `svg` / `pdf`, which need an alternative render path. Reading normalises whatever the file holds to that same buffer and hands back a `brush::Image`, which is what `SceneBuilder::draw_image` and `plot::ImageGeom` consume. JPEG is the one format needing two crates, since `jpeg-encoder` cannot decode. All pure Rust and wasm-clean.
 - **`google-fonts`** (off by default) — auto-fetch named Google Fonts families on demand. Synchronous network call on cache miss; cache hits are offline.
 - **`window`** (off by default) — live window presentation: an OS window, a wgpu surface, and an event loop with resize and pointer events (`winit`). Requires a rasterising backend — either one — and `WindowConfig::backend` chooses which. See `src/window/CLAUDE.md`.
 - **`webgl`** (off by default) — the same sparse-strip rasteriser against a canvas's WebGL2 context instead of wgpu, using `vello_hybrid`'s precompiled GLSL renderer. Pulls **no wgpu at all**, and needs no WebGPU: it runs on browsers that have none, which is the point. Independent of `vello-hybrid`, which is the wgpu flavour of the same rasteriser. Only `wasm32` compiles it — a `WebGl2RenderingContext` exists nowhere else. Brings its own presentation host, `window::WebGlHost`, since there is no surface or swap chain to manage: the canvas is the render target. See `src/backend/hybrid/CLAUDE.md`.

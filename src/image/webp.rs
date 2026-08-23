@@ -1,12 +1,13 @@
-//! WebP writer.
+//! WebP reader and writer.
 
 use std::fs::File;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Seek, Write};
 use std::path::Path;
 
-use image_webp::{ColorType, EncodingError, WebPEncoder};
+use image_webp::{ColorType, DecodingError, EncodingError, WebPDecoder, WebPEncoder};
 
-use super::{check_dimension_limit, check_pixels};
+use super::{check_dimension_limit, check_pixels, expand_to_rgba8, from_rgba8};
+use crate::brush::Image;
 
 /// The largest width or height a lossless WebP bitstream can express.
 const MAX_DIMENSION: u32 = 16384;
@@ -55,6 +56,44 @@ pub fn write_webp(
     write_webp_to(BufWriter::new(file), width, height, pixels)
 }
 
+/// Read a WebP from `reader`.
+///
+/// The first frame, normalised to RGBA8 with straight alpha — a file without
+/// an alpha channel comes back opaque. An animation reads as its first frame.
+pub fn read_webp_from<R: BufRead + Seek>(reader: R) -> io::Result<Image> {
+    let mut decoder = WebPDecoder::new(reader).map_err(decode_err)?;
+    let (width, height) = decoder.dimensions();
+    let channels = if decoder.has_alpha() { 4 } else { 3 };
+    let size = decoder.output_buffer_size().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "WebP frame is too large to buffer on this platform",
+        )
+    })?;
+    let mut buf = vec![0u8; size];
+    decoder.read_image(&mut buf).map_err(decode_err)?;
+    let pixels = expand_to_rgba8(&buf, channels, width, height)?;
+    from_rgba8(width, height, pixels)
+}
+
+/// Read a WebP from bytes already in memory.
+pub fn decode_webp(bytes: &[u8]) -> io::Result<Image> {
+    read_webp_from(io::Cursor::new(bytes))
+}
+
+/// Read a WebP from `path`.
+pub fn read_webp(path: impl AsRef<Path>) -> io::Result<Image> {
+    let file = File::open(path)?;
+    read_webp_from(BufReader::new(file))
+}
+
+fn decode_err(e: DecodingError) -> io::Error {
+    match e {
+        DecodingError::IoError(err) => err,
+        other => io::Error::new(io::ErrorKind::InvalidData, other),
+    }
+}
+
 fn io_err(e: EncodingError) -> io::Error {
     match e {
         EncodingError::IoError(err) => err,
@@ -65,7 +104,6 @@ fn io_err(e: EncodingError) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image_webp::WebPDecoder;
 
     fn gradient(width: u32, height: u32) -> Vec<u8> {
         let mut px = Vec::with_capacity((width as usize) * (height as usize) * 4);
@@ -88,14 +126,25 @@ mod tests {
     fn pixels_including_alpha_round_trip_exactly() {
         let pixels = gradient(16, 9);
         let bytes = encode_webp(16, 9, &pixels).expect("encode");
+        let image = decode_webp(&bytes).expect("decode");
 
-        let mut decoder = WebPDecoder::new(io::Cursor::new(bytes)).expect("decode");
-        assert_eq!(decoder.dimensions(), (16, 9));
-        assert!(decoder.has_alpha(), "alpha channel should survive");
+        assert_eq!((image.width, image.height), (16, 9));
+        assert_eq!(image.format, crate::brush::ImageFormat::Rgba8);
+        assert_eq!(image.alpha_type, crate::brush::ImageAlphaType::Alpha);
+        assert_eq!(image.data.as_ref(), pixels.as_slice());
+    }
 
-        let mut got = vec![0u8; decoder.output_buffer_size().expect("buffer size")];
-        decoder.read_image(&mut got).expect("read");
-        assert_eq!(got, pixels);
+    /// A file with no alpha channel reads back opaque rather than
+    /// transparent — the widening fills the missing samples with 255.
+    #[test]
+    fn an_opaque_webp_reads_back_opaque() {
+        let mut pixels = gradient(8, 8);
+        for px in pixels.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+        let bytes = encode_webp(8, 8, &pixels).expect("encode");
+        let image = decode_webp(&bytes).expect("decode");
+        assert!(image.data.as_ref().chunks_exact(4).all(|px| px[3] == 255));
     }
 
     #[test]

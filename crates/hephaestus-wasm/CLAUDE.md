@@ -434,6 +434,13 @@ references.
   rendering a prepared plot rather than accepting draw commands.
 - **Multiple documents per handle.** One `PlotHandle` is one document; a page
   with several plots creates several.
+- **`ImageRegistry` population.** A document names the images an `ImageGeom`
+  draws rather than carrying their pixels, exactly as it names font families,
+  so the reader has to supply them — and nothing here does. A document holding
+  an `ImageGeom` therefore loads and renders, minus its images. Fonts are the
+  precedent for the fix: a `registerImage(name, bytes)` alongside
+  `registerGoogleFont`, decoding through `hephaestus::image` and landing in
+  `Plot::set_image_registry`.
 
 ## Distribution
 

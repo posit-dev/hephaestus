@@ -1361,9 +1361,10 @@ fn expected_output_for_channel(channel: &str) -> Option<super::geom::ExpectedOut
     use super::geom::ExpectedOutput::*;
     Some(match channel {
         "x" | "y" | "size" | "linewidth" | "fill_opacity" | "stroke_opacity" | "x_offset"
-        | "y_offset" | "x_band" | "y_band" | "dash_offset" => Numbers,
+        | "y_offset" | "x_band" | "y_band" | "dash_offset" | "width" | "height" | "opacity"
+        | "anchor_x" | "anchor_y" => Numbers,
         "fill" | "stroke" => Colors,
-        "shape" | "cap" | "join" => Strings,
+        "shape" | "cap" | "join" | "image" | "fit" | "sampling" => Strings,
         "linetype" => Linetypes,
         _ => return None,
     })

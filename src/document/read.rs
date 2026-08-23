@@ -102,7 +102,7 @@ impl ReadContext {
 
     fn register_builtin_geoms(&mut self) {
         use crate::plot::geom::{
-            BSplineGeom, BuildableGeom, EllipseGeom, GeometryGeom, LineGeom, PointGeom,
+            BSplineGeom, BuildableGeom, EllipseGeom, GeometryGeom, ImageGeom, LineGeom, PointGeom,
             PolygonGeom, RectGeom, RibbonBSplineGeom, RibbonGeom, SegmentGeom, TextFitGeom,
             TextGeom, TextPathGeom, WedgeGeom,
         };
@@ -119,8 +119,8 @@ impl ReadContext {
         ///
         /// The tags are repeated here rather than read off the impls,
         /// which needs an instance. `every_builtin_geom_is_registered`
-        /// builds all fourteen and looks each one up, so a tag that
-        /// drifts from its impl fails there.
+        /// builds every one and looks it up here, so a tag that drifts
+        /// from its impl fails there.
         macro_rules! register {
             ($($tag:literal => $ty:ty),+ $(,)?) => {
                 $( self.geoms.insert($tag.to_string(), build::<$ty> as GeomFactory); )+
@@ -139,6 +139,7 @@ impl ReadContext {
             "ribbon-bspline" => RibbonBSplineGeom,
             "wedge" => WedgeGeom,
             "geometry" => GeometryGeom,
+            "image" => ImageGeom,
             "text" => TextGeom,
             "text-fit" => TextFitGeom,
             "text-path" => TextPathGeom,
@@ -150,4 +151,77 @@ impl ReadContext {
 pub(crate) fn default_context() -> &'static ReadContext {
     static CTX: OnceLock<ReadContext> = OnceLock::new();
     CTX.get_or_init(ReadContext::new)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plot::geom::Geom;
+
+    /// Every geom this crate ships has a factory registered under the
+    /// exact tag its `Geom::kind` reports. The tag list in
+    /// `register_builtin_geoms` is written by hand, so nothing but this
+    /// test stops one from drifting away from the impl it names — and a
+    /// drifted tag writes a document no reader can open.
+    #[test]
+    fn every_builtin_geom_is_registered() {
+        use crate::plot::geom::{
+            BSplineGeom, EllipseGeom, GeometryGeom, ImageGeom, LineGeom, PointGeom, PolygonGeom,
+            RectGeom, RibbonBSplineGeom, RibbonGeom, SegmentGeom, TextFitGeom, TextGeom,
+            TextPathGeom, WedgeGeom,
+        };
+        use crate::scales::geometry::Geometry;
+
+        /// Build a geom from the minimum channels its `build_from`
+        /// demands, erased for uniform iteration.
+        macro_rules! built {
+            ($ty:ty $(, $ch:expr => $v:expr)* $(,)?) => {{
+                let mut b = <$ty>::builder();
+                $( b.set($ch, $v); )*
+                Box::new(b.build()) as Box<dyn Geom>
+            }};
+        }
+
+        let xs = || vec![0.0, 1.0];
+        let ys = || vec![0.0, 1.0];
+        let x2s = || vec![1.0, 2.0];
+        let y2s = || vec![1.0, 2.0];
+        let text = || vec!["a", "b"];
+
+        let geoms: Vec<Box<dyn Geom>> = vec![
+            built!(PointGeom, "x" => xs(), "y" => ys()),
+            built!(LineGeom, "x" => xs(), "y" => ys()),
+            built!(BSplineGeom, "x" => xs(), "y" => ys()),
+            built!(SegmentGeom, "x" => xs(), "y" => ys(), "x2" => x2s(), "y2" => y2s()),
+            built!(RectGeom, "x" => xs(), "y" => ys(), "x2" => x2s(), "y2" => y2s()),
+            built!(EllipseGeom, "x" => xs(), "y" => ys(), "x2" => x2s(), "y2" => y2s()),
+            built!(PolygonGeom, "x" => xs(), "y" => ys()),
+            built!(RibbonGeom, "x" => xs(), "y" => ys(), "y2" => y2s()),
+            built!(RibbonBSplineGeom, "x" => xs(), "y" => ys(), "y2" => y2s()),
+            built!(WedgeGeom, "x" => xs(), "y" => ys()),
+            built!(GeometryGeom, "geometry" => vec![
+                Geometry::Point((0.0, 0.0)),
+                Geometry::Point((1.0, 1.0)),
+            ]),
+            built!(ImageGeom, "x" => xs(), "y" => ys(), "image" => text()),
+            built!(TextGeom, "x" => xs(), "y" => ys(), "text" => text()),
+            built!(TextFitGeom, "x" => xs(), "y" => ys(), "x2" => x2s(), "y2" => y2s(), "text" => text()),
+            built!(TextPathGeom, "x" => xs(), "y" => ys(), "text" => text()),
+        ];
+
+        let ctx = ReadContext::new();
+        for g in &geoms {
+            let tag = g.kind().expect("every builtin geom names itself");
+            assert!(
+                ctx.geom_factory(tag).is_some(),
+                "geom kind {tag:?} has no factory registered in `register_builtin_geoms`"
+            );
+        }
+
+        assert_eq!(
+            ctx.geoms.len(),
+            geoms.len(),
+            "the factory table and the builtin geom list disagree on how many geoms exist"
+        );
+    }
 }

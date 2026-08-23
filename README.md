@@ -17,7 +17,7 @@ Hephaestus is written to make it easy and convenient to create high-level visual
 * Markdown parsing and rendering for rich text support
 * Native wasm support for embedding on websites
 * Scales and projections
-* Render to png, jpeg, tiff, webp, canvas, or a window buffer
+* Render to png, jpeg, tiff, webp, canvas, or a window buffer — and read those four formats back in, to place raster images inside a plot
 * Theming system
 
 ## Install
@@ -102,6 +102,7 @@ cargo run --example point         # plot API, shared scales across panels
 cargo run --example polar         # polar projection
 cargo run --example legends       # legend and colorbar variants
 cargo run --example theme_dark    # theming
+cargo run --example image_geom    # raster images placed in a panel
 
 cargo run --example image_formats --features jpeg,tiff,webp  # all four raster writers
 ```
