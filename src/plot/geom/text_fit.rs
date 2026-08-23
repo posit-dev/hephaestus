@@ -24,6 +24,22 @@
 //! - `"text"` — string content (required).
 //! - `"family"`, `"weight"`, `"italic"` — font style (no `"size"`
 //!   channel; the geom computes it).
+//! - `"letter_spacing"` — extra advance between glyphs in pt.
+//! - `"underline"`, `"strikethrough"` — booleans.
+//! - `"text_stroke"`, `"text_linewidth"` — per-glyph outline colour and
+//!   thickness in pt, drawn behind the fill.
+//! - `"markdown"` — boolean; default `false`. When true the label is
+//!   read as marquee-flavoured markdown and shaped through
+//!   [`crate::text::rich`], and the fit measures that layout — block
+//!   structure, span chrome and per-span fonts all take part in
+//!   deciding the size, and all of them draw, since a rect is the
+//!   shape rich text is laid out for. The row's `"text_stroke"` /
+//!   `"text_linewidth"` fold onto the style sheet's root selector so
+//!   every span inherits the halo; a span that sets its own
+//!   `text_stroke` wins. `with_rich_sheet` installs a per-geom style
+//!   sheet, as on [`TextGeom`](super::TextGeom). Unlike the other text
+//!   channels this one has no theme default — the channel is the only
+//!   switch.
 //! - `"min_font_size"` — pt; lower bound on the binary search.
 //!   Default `6.0`.
 //! - `"max_font_size"` — pt; upper bound. Default `96.0`.
@@ -47,15 +63,28 @@
 //! glyph shape rebuild) — one per binary-search step plus the final
 //! draw run. At default `[6, 96]` font-size bounds and `MAX_ITERS = 4`,
 //! the final size is within `(96 - 6) / 2^4 ≈ 5.6` pt of the optimum.
+//! A markdown row shapes through the geom's [`RichShapeCache`] instead,
+//! one entry per probe, so a redraw at an unchanged rect walks the
+//! search on cache hits alone.
+//!
+//! [`RichShapeCache`]: crate::text::rich::RichShapeCache
+
+use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::brush::Brush;
 use crate::geometry::{Affine, Point, Rect};
 use crate::path::FillRule;
+use crate::pick::PickId;
 use crate::plot::theme::HAlign;
 use crate::plot::value::Value;
 use crate::primitives::{rect as rect_path, rounded_rect};
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
+use crate::text::rich::{
+    draw_rich_text, HAnchor, RichAnchor, RichKey, RichShapeCache, RichTextRun, RichTextStyleSheet,
+    RichTextWidth, VAnchor,
+};
 use crate::text::{draw_text, TextRun, TextStyle};
 
 use super::resolve::{
@@ -63,6 +92,7 @@ use super::resolve::{
     resolve_color_channel, resolve_color_channel_or_theme, resolve_number_channel,
     resolve_number_channel_or, resolve_pick_id, resolve_position,
 };
+use super::rich::{panel_space_transform, OutlineSheets};
 use super::state::{
     finalize_state, require_data_column, require_x_and_siblings, GeomState, KeysStrategy,
 };
@@ -99,6 +129,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("weight", ExpectedOutput::Numbers),
     ("italic", ExpectedOutput::Any),
     ("letter_spacing", ExpectedOutput::Numbers),
+    ("markdown", ExpectedOutput::Any),
     ("underline", ExpectedOutput::Any),
     ("strikethrough", ExpectedOutput::Any),
     ("text_stroke", ExpectedOutput::Colors),
@@ -120,14 +151,151 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("pick_id", ExpectedOutput::Numbers),
 ];
 
+// ─── The fitted label ────────────────────────────────────────────────────────
+
+/// A label shaped by whichever text path its row asked for. Both arms
+/// answer the questions the fit search asks, so the search itself is
+/// written once.
+enum Fitted {
+    Plain(Box<TextRun>),
+    Rich(Rc<RichTextRun>),
+}
+
+impl Fitted {
+    /// Width of the widest line at the current break.
+    fn content_width(&self) -> f64 {
+        match self {
+            Fitted::Plain(run) => run.content_width(),
+            Fitted::Rich(run) => run.content_width(),
+        }
+    }
+
+    /// Stacked height at the current break.
+    fn height(&self) -> f64 {
+        match self {
+            Fitted::Plain(run) => run.current_height(),
+            Fitted::Rich(run) => run.current_height(),
+        }
+    }
+
+    /// Font descender of the last line — the background rect's padding
+    /// rebalance reads it.
+    fn last_line_descender(&self) -> f64 {
+        match self {
+            Fitted::Plain(run) => run.last_line_descender(),
+            Fitted::Rich(run) => run.last_line_descender(),
+        }
+    }
+
+    /// Draw the label with its box's top-left corner at `(x, y)`.
+    ///
+    /// `brush` paints the plain arm; a markdown label carries the
+    /// colours its spans resolved to, so the rich arm ignores it.
+    fn draw(
+        &self,
+        scene: &mut dyn SceneBuilder,
+        x: f64,
+        y: f64,
+        brush: &Brush,
+        transform: Affine,
+        pick: PickId,
+    ) {
+        match self {
+            Fitted::Plain(run) => draw_text(scene, run.as_ref(), x, y, brush, transform, pick),
+            Fitted::Rich(run) => draw_rich_text(
+                scene,
+                run,
+                x,
+                y,
+                RichAnchor {
+                    h: HAnchor::Left,
+                    v: VAnchor::Top,
+                },
+                panel_space_transform(transform, x, y),
+                pick,
+            ),
+        }
+    }
+
+    /// Stroke-only pass behind the fill, for the row's `"text_stroke"`.
+    ///
+    /// Only the plain arm draws anything: a markdown label's outline is
+    /// folded onto its style sheet before shaping, so the rich draw
+    /// pass has already emitted it.
+    fn draw_outline(
+        &self,
+        scene: &mut dyn SceneBuilder,
+        x: f64,
+        y: f64,
+        brush: &Brush,
+        stroke: &Stroke,
+        transform: Affine,
+    ) {
+        if let Fitted::Plain(run) = self {
+            crate::text::draw_text_outline(
+                scene,
+                run.as_ref(),
+                x,
+                y,
+                brush,
+                stroke,
+                transform,
+                PickId::Skip,
+            );
+        }
+    }
+}
+
 // ─── TextFitGeom ─────────────────────────────────────────────────────────────
 
 /// A vectorised fit-text-to-rect geom. One fitted label per row.
 pub struct TextFitGeom {
     pub(crate) state: GeomState,
+    /// Optional per-geom style sheet used when the `"markdown"`
+    /// channel resolves `true`. `None` falls back to the theme's
+    /// `rich_text` sheet.
+    pub(crate) rich_sheet: Option<Arc<RichTextStyleSheet>>,
+    /// Shaped markdown rows, reused across frames — including the
+    /// intermediate sizes the fit search probes, so a redraw at an
+    /// unchanged rect re-walks the search without reshaping.
+    pub(crate) rich_cache: RichShapeCache,
+    /// Sheets derived from the base one by folding a row's
+    /// `text_stroke` / `text_linewidth` onto its root selector.
+    pub(crate) rich_outline_sheets: OutlineSheets,
 }
 
 crate::impl_geom_inherents!(TextFitGeom);
+
+impl TextFitGeom {
+    /// Install a rich-text style sheet used for every row this geom
+    /// renders as markdown. Overrides the theme's default sheet.
+    /// Chains for builder-style construction.
+    pub fn with_rich_sheet(mut self, sheet: Arc<RichTextStyleSheet>) -> Self {
+        self.rich_sheet = Some(sheet);
+        self
+    }
+
+    /// Same as [`Self::with_rich_sheet`] for mutation through
+    /// `Plot::update_geom(&mut TextFitGeom)`.
+    pub fn set_rich_sheet(&mut self, sheet: Arc<RichTextStyleSheet>) {
+        self.rich_sheet = Some(sheet);
+    }
+
+    /// Clear any per-geom rich-text sheet override — falls back to
+    /// the theme default.
+    pub fn clear_rich_sheet(&mut self) {
+        self.rich_sheet = None;
+    }
+
+    /// Clear the shaped-markdown caches. The keys cover the sheet's
+    /// identity, so swapping sheets doesn't require this — it exists
+    /// for callers that mutate a sheet in place despite the
+    /// immutable-once-installed convention.
+    pub fn clear_rich_cache(&mut self) {
+        self.rich_cache.clear();
+        self.rich_outline_sheets.clear();
+    }
+}
 
 // ─── BuildableGeom impl ──────────────────────────────────────────────────────
 
@@ -144,7 +312,12 @@ impl BuildableGeom for TextFitGeom {
             CHANNELS,
             "TextFitGeom",
         );
-        TextFitGeom { state }
+        TextFitGeom {
+            state,
+            rich_sheet: None,
+            rich_cache: RichShapeCache::new(),
+            rich_outline_sheets: OutlineSheets::new(),
+        }
     }
 }
 
@@ -165,6 +338,11 @@ impl Geom for TextFitGeom {
 
     fn kind(&self) -> Option<&'static str> {
         Some("text-fit")
+    }
+
+    fn invalidate_caches(&mut self) {
+        self.rich_cache.clear();
+        self.rich_outline_sheets.clear();
     }
 
     fn draw(&self, scene: &mut dyn SceneBuilder, ctx: &GeomContext<'_>) {
@@ -196,6 +374,7 @@ impl Geom for TextFitGeom {
         let weight_scale = ctx.scale_for("weight");
         let italic_scale = ctx.scale_for("italic");
         let letter_spacing_scale = ctx.scale_for("letter_spacing");
+        let markdown_scale = ctx.scale_for("markdown");
         let underline_scale = ctx.scale_for("underline");
         let strikethrough_scale = ctx.scale_for("strikethrough");
         let text_stroke_scale = ctx.scale_for("text_stroke");
@@ -243,6 +422,10 @@ impl Geom for TextFitGeom {
         let weight_ch = channels.get("weight");
         let italic_ch = channels.get("italic");
         let letter_spacing_ch = channels.get("letter_spacing");
+        let markdown_ch = channels.get("markdown");
+        // Kept as an `Arc` so the shape cache can key on its identity.
+        let rich_sheet: &Arc<RichTextStyleSheet> =
+            self.rich_sheet.as_ref().unwrap_or(&ctx.theme.rich_text);
         let underline_ch = channels.get("underline");
         let strikethrough_ch = channels.get("strikethrough");
         let text_stroke_ch = channels.get("text_stroke");
@@ -373,6 +556,42 @@ impl Geom for TextFitGeom {
             let justify_x = resolve_justify_x(justify_x_ch, justify_x_scale, i);
             let justify_y_frac = resolve_justify_y_frac(justify_y_ch, justify_y_scale, i);
 
+            // ── Markdown, the outline sheet, and the fill colour are
+            // all needed before shaping: the rich path bakes the fill
+            // in as its base brush and takes its outline from the
+            // sheet, both of which the shape cache keys on. ──
+            let markdown = resolve_bool_channel_or(markdown_ch, markdown_scale, i, false);
+            let fill_color = override_alpha(
+                resolve_color_channel_or_theme(
+                    fill_ch,
+                    fill_scale,
+                    i,
+                    ctx.theme.geom.text_fit.fill.as_ref(),
+                    &ctx.theme.palette,
+                ),
+                resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i),
+            )
+            .unwrap_or_else(default_fill);
+            let text_stroke_color = resolve_color_channel_or_theme(
+                text_stroke_ch,
+                text_stroke_scale,
+                i,
+                ctx.theme.geom.text_fit.text_stroke.as_ref(),
+                &ctx.theme.palette,
+            );
+            let text_linewidth_pt = resolve_number_channel_or(
+                text_linewidth_ch,
+                text_linewidth_scale,
+                i,
+                ctx.theme.geom.text_fit.text_linewidth_pt,
+            );
+            let row_sheet = if markdown {
+                self.rich_outline_sheets
+                    .resolve(rich_sheet, text_stroke_color, text_linewidth_pt)
+            } else {
+                Arc::clone(rich_sheet)
+            };
+
             // ── Binary-search the font size. ──
             let make_style = |size_pt: f32| {
                 let mut s = TextStyle::new(size_pt)
@@ -389,11 +608,40 @@ impl Geom for TextFitGeom {
 
             let measure = |size_pt: f32| {
                 let style = make_style(size_pt);
-                let run = TextRun::new(&text, &style, ctx.dpi);
-                run.set_max_width(rect_w as f32, justify_x);
-                let w = run.content_width();
-                let h = run.current_height();
-                (run, w, h)
+                let fitted = if markdown {
+                    // Every probe is its own cache entry, so a redraw
+                    // at an unchanged rect walks the search on cache
+                    // hits alone.
+                    let key = RichKey::new(
+                        &text,
+                        &style,
+                        fill_color,
+                        &row_sheet,
+                        &ctx.theme.palette,
+                        ctx.dpi,
+                        RichTextWidth::Fixed(rect_w as f32),
+                        justify_x,
+                    );
+                    let run = self.rich_cache.get_or_shape(key, || {
+                        RichTextRun::new(
+                            &text,
+                            &style,
+                            fill_color,
+                            &row_sheet,
+                            &ctx.theme.palette,
+                            ctx.dpi,
+                        )
+                    });
+                    run.set_max_width(rect_w as f32, justify_x);
+                    Fitted::Rich(run)
+                } else {
+                    let run = TextRun::new(&text, &style, ctx.dpi);
+                    run.set_max_width(rect_w as f32, justify_x);
+                    Fitted::Plain(Box::new(run))
+                };
+                let w = fitted.content_width();
+                let h = fitted.height();
+                (fitted, w, h)
             };
 
             // The maximum is tried first. The midpoint of a half-open
@@ -401,7 +649,7 @@ impl Geom for TextFitGeom {
             // `max_font_size` itself attainable — and text that already
             // fits at full size skips the search entirely.
             let (run_at_max, w_at_max, h_at_max) = measure(max_pt_f32);
-            let mut best: Option<(TextRun, f64, f64, f32)> =
+            let mut best: Option<(Fitted, f64, f64, f32)> =
                 if w_at_max <= rect_w && h_at_max <= rect_h {
                     Some((run_at_max, w_at_max, h_at_max, max_pt_f32))
                 } else {
@@ -426,11 +674,7 @@ impl Geom for TextFitGeom {
             let (run, content_w, content_h, _size_pt, fits) = match best {
                 Some((r, w, h, s)) => (r, w, h, s, true),
                 None => {
-                    let style = make_style(min_pt_f32);
-                    let run = TextRun::new(&text, &style, ctx.dpi);
-                    run.set_max_width(rect_w as f32, justify_x);
-                    let w = run.content_width();
-                    let h = run.current_height();
+                    let (run, w, h) = measure(min_pt_f32);
                     (run, w, h, min_pt_f32, false)
                 }
             };
@@ -446,34 +690,6 @@ impl Geom for TextFitGeom {
             let draw_x = rect.x0;
             let vslack = (rect_h - content_h).max(0.0);
             let draw_y = rect.y0 + justify_y_frac * vslack;
-
-            // ── Fill colour. ──
-            let fill_color = override_alpha(
-                resolve_color_channel_or_theme(
-                    fill_ch,
-                    fill_scale,
-                    i,
-                    ctx.theme.geom.text_fit.fill.as_ref(),
-                    &ctx.theme.palette,
-                ),
-                resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i),
-            )
-            .unwrap_or_else(default_fill);
-
-            // ── Per-glyph outline. ──
-            let text_stroke_color = resolve_color_channel_or_theme(
-                text_stroke_ch,
-                text_stroke_scale,
-                i,
-                ctx.theme.geom.text_fit.text_stroke.as_ref(),
-                &ctx.theme.palette,
-            );
-            let text_linewidth_pt = resolve_number_channel_or(
-                text_linewidth_ch,
-                text_linewidth_scale,
-                i,
-                ctx.theme.geom.text_fit.text_linewidth_pt,
-            );
 
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
 
@@ -580,23 +796,20 @@ impl Geom for TextFitGeom {
             if let Some(stroke_color) = text_stroke_color {
                 let stroke_width_px = pt_to_px(text_linewidth_pt, ctx.dpi);
                 if stroke_width_px > 0.0 {
-                    let stroke = crate::stroke::Stroke::new(stroke_width_px);
-                    crate::text::draw_text_outline(
+                    let stroke = Stroke::new(stroke_width_px);
+                    run.draw_outline(
                         scene,
-                        &run,
                         draw_x,
                         draw_y,
                         &Brush::Solid(stroke_color),
                         &stroke,
                         glyph_xform,
-                        crate::pick::PickId::Skip,
                     );
                 }
             }
 
-            draw_text(
+            run.draw(
                 scene,
-                &run,
                 draw_x,
                 draw_y,
                 &Brush::Solid(fill_color),
@@ -983,5 +1196,208 @@ mod tests {
         assert!(matches!(align("justified"), HAlign::Justify));
         assert!(matches!(align("sideways"), HAlign::Start));
         assert!(matches!(resolve_justify_x(None, None, 0), HAlign::Start));
+    }
+
+    // ── Markdown labels ──
+
+    /// Draw one row into a 600×200 panel and hand back the scene.
+    fn drained(g: &TextFitGeom) -> RecordingScene {
+        let panel = Rect::new(0.0, 0.0, 600.0, 200.0);
+        let shapes = shapes();
+        let resolver = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(&mut scene, &ctx(panel, &shapes, &resolver));
+        scene
+    }
+
+    /// One row filling most of the panel, with `markdown` on or off.
+    fn fit_geom(text: &'static str, markdown: bool) -> TextFitGeom {
+        TextFitGeom::builder()
+            .set("x", vec![0.1_f64])
+            .set("y", vec![0.3_f64])
+            .set("x2", vec![0.9_f64])
+            .set("y2", vec![0.7_f64])
+            .set("text", vec![text])
+            .set("markdown", markdown)
+            .set("fill", Color::new([0.0, 0.0, 0.0, 1.0]))
+            .build()
+    }
+
+    fn glyph_count(scene: &RecordingScene) -> usize {
+        scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::DrawGlyphs(run) => Some(run.glyphs.len()),
+                _ => None,
+            })
+            .sum()
+    }
+
+    #[test]
+    fn markdown_consumes_the_inline_markup() {
+        // `**AB**` is six glyphs read literally, two as markdown.
+        assert_eq!(glyph_count(&drained(&fit_geom("**AB**", false))), 6);
+        assert_eq!(glyph_count(&drained(&fit_geom("**AB**", true))), 2);
+    }
+
+    #[test]
+    fn a_markdown_span_paints_its_own_background() {
+        // Block and span chrome work in a rect — the thing a curve
+        // cannot have. The `code` selector carries a background, so a
+        // code span fills one behind its glyphs.
+        let plain = drained(&fit_geom("a `b` c", false));
+        let rich = drained(&fit_geom("a `b` c", true));
+        let fills = |scene: &RecordingScene| {
+            scene
+                .ops
+                .iter()
+                .filter(|op| matches!(op, Op::Fill { .. }))
+                .count()
+        };
+        assert_eq!(fills(&plain), 0, "no background without markdown");
+        assert!(
+            fills(&rich) >= 1,
+            "the code span should paint a background rect"
+        );
+    }
+
+    #[test]
+    fn markdown_fits_the_rect_by_shrinking() {
+        // A long markdown label in the same rect has to come out at a
+        // smaller size than a short one, which shows the search is
+        // measuring the rich layout rather than ignoring it.
+        let font_size = |text: &'static str| {
+            let scene = drained(&fit_geom(text, true));
+            scene
+                .ops
+                .iter()
+                .filter_map(|op| match op {
+                    Op::DrawGlyphs(run) => Some(run.font_size),
+                    _ => None,
+                })
+                .fold(0.0_f32, f32::max)
+        };
+        let short = font_size("**hi**");
+        let long = font_size(
+            "**a** much longer label that has to shrink a good deal to fit inside the same rect",
+        );
+        assert!(short > 0.0 && long > 0.0, "{short} / {long}");
+        assert!(
+            long < short,
+            "the longer label should fit at a smaller size: {long} vs {short}"
+        );
+    }
+
+    #[test]
+    fn markdown_that_never_fits_is_clipped() {
+        let g = TextFitGeom::builder()
+            .set("x", vec![0.45_f64])
+            .set("y", vec![0.45_f64])
+            .set("x2", vec![0.55_f64])
+            .set("y2", vec![0.55_f64])
+            .set("text", vec!["**far** too much text for this tiny rect"])
+            .set("markdown", true)
+            .set("min_font_size", vec![20.0_f64])
+            .build();
+        let scene = drained(&g);
+        let push_layers = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::PushLayer { .. }))
+            .count();
+        assert!(push_layers >= 1, "expected a clip layer for the overflow");
+    }
+
+    #[test]
+    fn justify_y_end_shifts_markdown_to_the_bottom() {
+        let baseline_of = |justify_y: &'static str| {
+            let g = TextFitGeom::builder()
+                .set("x", vec![0.1_f64])
+                .set("y", vec![0.1_f64])
+                .set("x2", vec![0.9_f64])
+                .set("y2", vec![0.9_f64])
+                .set("text", vec!["*hi*"])
+                .set("markdown", true)
+                .set("max_font_size", vec![12.0_f64])
+                .set("justify_y", vec![justify_y])
+                .build();
+            let scene = drained(&g);
+            // The rich path carries its position in the run transform
+            // rather than in glyph coordinates, so the screen baseline
+            // is the sum of the two.
+            scene
+                .ops
+                .iter()
+                .filter_map(|op| match op {
+                    Op::DrawGlyphs(run) => {
+                        Some(run.transform.as_coeffs()[5] + run.glyphs[0].y as f64)
+                    }
+                    _ => None,
+                })
+                .next()
+                .expect("a glyph")
+        };
+        let top = baseline_of("start");
+        let bottom = baseline_of("end");
+        assert!(
+            bottom > top + 10.0,
+            "justify_y = end should push the block down: {top} → {bottom}"
+        );
+    }
+
+    #[test]
+    fn a_rotated_markdown_label_lands_where_the_plain_one_does() {
+        // Rotation pivots on the target rect's centre for both paths,
+        // and a plain string shapes the same either way, so the glyphs
+        // have to end up in the same place.
+        let extent = |markdown: bool| {
+            let g = TextFitGeom::builder()
+                .set("x", vec![0.1_f64])
+                .set("y", vec![0.3_f64])
+                .set("x2", vec![0.9_f64])
+                .set("y2", vec![0.7_f64])
+                .set("text", vec!["abc"])
+                .set("markdown", markdown)
+                .set("max_font_size", vec![24.0_f64])
+                .set("angle", vec![std::f64::consts::FRAC_PI_2])
+                .build();
+            let scene = drained(&g);
+            let mut points: Vec<(f64, f64)> = Vec::new();
+            for op in &scene.ops {
+                if let Op::DrawGlyphs(run) = op {
+                    let c = run.transform.as_coeffs();
+                    for glyph in &run.glyphs {
+                        let (gx, gy) = (glyph.x as f64, glyph.y as f64);
+                        points.push((c[0] * gx + c[2] * gy + c[4], c[1] * gx + c[3] * gy + c[5]));
+                    }
+                }
+            }
+            assert!(!points.is_empty(), "expected glyphs");
+            let x0 = points.iter().map(|p| p.0).fold(f64::MAX, f64::min);
+            let y0 = points.iter().map(|p| p.1).fold(f64::MAX, f64::min);
+            (x0, y0)
+        };
+        let (px, py) = extent(false);
+        let (rx, ry) = extent(true);
+        assert!(
+            (px - rx).abs() < 2.0 && (py - ry).abs() < 2.0,
+            "rotated markdown should land with the plain text: ({px}, {py}) vs ({rx}, {ry})"
+        );
+    }
+
+    #[test]
+    fn the_shape_cache_survives_a_redraw_and_clears_with_the_data() {
+        let mut g = fit_geom("**AB** *cd*", true);
+        assert!(g.rich_cache.is_empty());
+        let first = drained(&g);
+        let cached = g.rich_cache.len();
+        assert!(cached > 0, "the fit should have cached its probes");
+        // A second draw reuses the entries rather than adding more.
+        let second = drained(&g);
+        assert_eq!(g.rich_cache.len(), cached, "a redraw should not re-shape");
+        assert_eq!(first.ops.len(), second.ops.len());
+        g.invalidate_caches();
+        assert!(g.rich_cache.is_empty(), "new data drops the shaped runs");
     }
 }

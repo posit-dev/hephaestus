@@ -10,6 +10,11 @@
 //!   clip-on-overflow path: the geom draws at `min_font_size` with a
 //!   clip rect at the target.
 //!
+//! - `text_fit_4_markdown.png` — markdown labels fitted into rects:
+//!   inline emphasis, a coloured span, a heading with a paragraph
+//!   under it, and a list. Block structure takes part in the fit and
+//!   draws in full, since a rect is what rich text lays out for.
+//!
 //! - `text_fit_3_justify.png` — justification combinations:
 //!   `justify_x` ∈ {start, center, end} × `justify_y` ∈ {start,
 //!   center, end} demonstrated by placing the same fitted string in
@@ -40,6 +45,95 @@ fn main() {
     render_aspect_grid(&mut renderer, &comp, w, h, dpi, bg);
     render_clip(&mut renderer, &comp, w, h, dpi, bg);
     render_justify(&mut renderer, &comp, w, h, dpi, bg);
+    render_markdown(&mut renderer, &comp, w, h, dpi, bg);
+}
+
+/// Render 4: markdown labels fitted into rects. The fit measures the
+/// rich layout, so a heading's larger font and a block's own padding
+/// take part in choosing the size.
+fn render_markdown(
+    renderer: &mut VelloRenderer,
+    comp: &impl Fn() -> Composition,
+    w: u32,
+    h: u32,
+    dpi: f64,
+    bg: Color,
+) {
+    let labels = [
+        "plain, **bold**, *italic*, `code`",
+        "{#c02020 warming} of 1.5 ^oC^ above the pre-industrial mean",
+        "# Heading\n\nwith a paragraph under it, wrapped to the rect",
+        "- first item\n- second item\n- third",
+    ];
+    let mut xs0: Vec<f64> = Vec::new();
+    let mut xs1: Vec<f64> = Vec::new();
+    let mut ys0: Vec<f64> = Vec::new();
+    let mut ys1: Vec<f64> = Vec::new();
+    let mut text: Vec<&'static str> = Vec::new();
+    let cell_w = 0.44_f64;
+    let cell_h = 0.4_f64;
+    for (i, label) in labels.iter().enumerate() {
+        let col = (i % 2) as f64;
+        let row = (i / 2) as f64;
+        let x0 = 0.04 + col * (cell_w + 0.04);
+        let y_top = 0.96 - row * (cell_h + 0.06);
+        xs0.push(x0);
+        xs1.push(x0 + cell_w);
+        ys0.push(y_top - cell_h);
+        ys1.push(y_top);
+        text.push(label);
+    }
+
+    let mut plot = Plot::new(&comp(), "panel")
+        .title("TextFitGeom — markdown labels fitted to their rects")
+        .bind("x", "x_axis")
+        .bind("y", "y_axis");
+
+    plot.add_geom(
+        RectGeom::builder()
+            .set("x", xs0.clone())
+            .set("x2", xs1.clone())
+            .set("y", ys0.clone())
+            .set("y2", ys1.clone())
+            .set("stroke", rgb8(180, 180, 200))
+            .set("linewidth", 1.0_f64)
+            .build(),
+    );
+    plot.add_geom(
+        TextFitGeom::builder()
+            .set("x", xs0)
+            .set("x2", xs1)
+            .set("y", ys0)
+            .set("y2", ys1)
+            .set("text", text)
+            .set("markdown", true)
+            .set("fill", rgb8(30, 40, 70))
+            .set("max_font_size", 28.0_f64)
+            .build(),
+    );
+
+    plot.add_axis(Axis::rail(
+        "x_axis",
+        AxisPlacement::Cartesian(AxisSide::Bottom),
+    ));
+    plot.add_axis(Axis::rail(
+        "y_axis",
+        AxisPlacement::Cartesian(AxisSide::Left),
+    ));
+
+    let mut view = PlotComposition::new(&comp())
+        .add_scale("x_axis", scale::continuous(0.0..=1.0))
+        .add_scale("y_axis", scale::continuous(0.0..=1.0))
+        .with_plot(plot);
+    render_to(
+        renderer,
+        &mut view,
+        w,
+        h,
+        dpi,
+        bg,
+        "examples/text_fit_4_markdown.png",
+    );
 }
 
 /// Render 1: a grid of rects with varying aspect ratios; the same

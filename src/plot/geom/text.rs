@@ -94,8 +94,6 @@
 //! Hit-testing falls out of the standard rasterised-pick path (alpha
 //! coverage in the pick scene).
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::brush::Brush;
@@ -106,10 +104,9 @@ use crate::plot::value::Value;
 use crate::primitives::{rect as rect_path, rounded_rect};
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
-use crate::style_vocab::ThemeColor;
 use crate::text::rich::{
-    draw_rich_text, pt as rich_pt, HAnchor, RichAnchor, RichKey, RichShapeCache, RichTextRun,
-    RichTextStyleSheet, RichTextWidth, StyleDelta as RichStyleDelta, VAnchor,
+    draw_rich_text, HAnchor, RichAnchor, RichKey, RichShapeCache, RichTextRun, RichTextStyleSheet,
+    RichTextWidth, VAnchor,
 };
 use crate::text::{draw_text, TextRun, TextStyle};
 
@@ -118,6 +115,7 @@ use super::resolve::{
     resolve_color_channel, resolve_color_channel_or_theme, resolve_number_channel,
     resolve_number_channel_or, resolve_pick_id, resolve_position,
 };
+use super::rich::{panel_space_transform, OutlineSheets};
 use super::state::{
     finalize_state, require_data_column, require_x_and_siblings, GeomState, KeysStrategy,
 };
@@ -180,12 +178,8 @@ pub struct TextGeom {
     /// the geom's data is replaced.
     pub(crate) rich_cache: RichShapeCache,
     /// Sheets derived from the base one by folding a row's
-    /// `text_stroke` / `text_linewidth` onto its root selector, keyed
-    /// by `(base sheet identity, colour, width)`. Held so the derived
-    /// sheet keeps one identity across frames — [`RichShapeCache`]
-    /// keys on that identity, and a fresh `Arc` per frame would miss
-    /// every time.
-    pub(crate) rich_outline_sheets: RefCell<HashMap<(usize, u128, u64), Arc<RichTextStyleSheet>>>,
+    /// `text_stroke` / `text_linewidth` onto its root selector.
+    pub(crate) rich_outline_sheets: OutlineSheets,
 }
 
 crate::impl_geom_inherents!(TextGeom);
@@ -239,7 +233,7 @@ impl BuildableGeom for TextGeom {
             state,
             rich_sheet: None,
             rich_cache: RichShapeCache::new(),
-            rich_outline_sheets: RefCell::new(HashMap::new()),
+            rich_outline_sheets: OutlineSheets::new(),
         }
     }
 }
@@ -265,7 +259,7 @@ impl Geom for TextGeom {
 
     fn invalidate_caches(&mut self) {
         self.rich_cache.clear();
-        self.rich_outline_sheets.borrow_mut().clear();
+        self.rich_outline_sheets.clear();
     }
 
     fn draw(&self, scene: &mut dyn SceneBuilder, ctx: &GeomContext<'_>) {
@@ -465,41 +459,16 @@ impl Geom for TextGeom {
                     ctx.theme.geom.text.text_stroke.as_ref(),
                     &ctx.theme.palette,
                 );
-                let row_sheet = match row_stroke {
-                    None => Arc::clone(rich_sheet),
-                    Some(c) => {
-                        let width_pt = resolve_number_channel_or(
-                            text_linewidth_ch,
-                            text_linewidth_scale,
-                            i,
-                            ctx.theme.geom.text.text_linewidth_pt,
-                        );
-                        let [r, g, b, a] = c.components;
-                        let color_bits = (r.to_bits() as u128) << 96
-                            | (g.to_bits() as u128) << 64
-                            | (b.to_bits() as u128) << 32
-                            | a.to_bits() as u128;
-                        let key = (
-                            Arc::as_ptr(rich_sheet) as usize,
-                            color_bits,
-                            width_pt.to_bits(),
-                        );
-                        let mut sheets = self.rich_outline_sheets.borrow_mut();
-                        Arc::clone(sheets.entry(key).or_insert_with(|| {
-                            let mut s = (**rich_sheet).clone();
-                            let base = s.get("base").cloned().unwrap_or_default();
-                            s.set(
-                                "base",
-                                RichStyleDelta {
-                                    text_stroke: Some(ThemeColor::Fixed(c)),
-                                    text_stroke_width: Some(rich_pt(width_pt)),
-                                    ..base
-                                },
-                            );
-                            Arc::new(s)
-                        }))
-                    }
-                };
+                let row_sheet = self.rich_outline_sheets.resolve(
+                    rich_sheet,
+                    row_stroke,
+                    resolve_number_channel_or(
+                        text_linewidth_ch,
+                        text_linewidth_scale,
+                        i,
+                        ctx.theme.geom.text.text_linewidth_pt,
+                    ),
+                );
                 // Wrap.
                 let x_raw = x_col.get(i);
                 let x_band_width_px = band_width_at(x_scale, &x_raw) * panel_w;
@@ -653,7 +622,7 @@ impl Geom for TextGeom {
                         h: HAnchor::Left,
                         v: VAnchor::Top,
                     },
-                    xform,
+                    panel_space_transform(xform, draw_x, draw_y),
                     pick,
                 );
                 continue;
@@ -1919,5 +1888,45 @@ mod tests {
         assert!(!geom.rich_cache.is_empty());
         geom.invalidate_caches();
         assert!(geom.rich_cache.is_empty());
+    }
+
+    /// A rotated markdown label pivots on the same point the plain path
+    /// does. The rich draw pass composes its transform inside the
+    /// layout's own frame, so the rotation has to be re-ordered on the
+    /// way in or the label lands hundreds of pixels away.
+    #[test]
+    fn a_rotated_markdown_label_lands_where_the_plain_one_does() {
+        let corner = |markdown: bool| {
+            let g = TextGeom::builder()
+                .set("x", crate::plot::geom::Raw(vec![0.5_f64]))
+                .set("y", crate::plot::geom::Raw(vec![0.5_f64]))
+                .set("text", vec!["abc"])
+                .set("markdown", markdown)
+                .set("size", 20.0_f64)
+                .set("angle", vec![std::f64::consts::FRAC_PI_2])
+                .build();
+            let scene = draw_text_geom_to_scene(g);
+            let mut points: Vec<(f64, f64)> = Vec::new();
+            for op in &scene.ops {
+                if let Op::DrawGlyphs(run) = op {
+                    let c = run.transform.as_coeffs();
+                    for glyph in &run.glyphs {
+                        let (gx, gy) = (glyph.x as f64, glyph.y as f64);
+                        points.push((c[0] * gx + c[2] * gy + c[4], c[1] * gx + c[3] * gy + c[5]));
+                    }
+                }
+            }
+            assert!(!points.is_empty(), "expected glyphs");
+            (
+                points.iter().map(|p| p.0).fold(f64::MAX, f64::min),
+                points.iter().map(|p| p.1).fold(f64::MAX, f64::min),
+            )
+        };
+        let (px, py) = corner(false);
+        let (rx, ry) = corner(true);
+        assert!(
+            (px - rx).abs() < 2.0 && (py - ry).abs() < 2.0,
+            "rotated markdown should land with the plain text: ({px}, {py}) vs ({rx}, {ry})"
+        );
     }
 }

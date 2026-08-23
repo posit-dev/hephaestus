@@ -48,6 +48,7 @@ pub mod rect;
 pub mod resolve;
 pub mod ribbon;
 pub mod ribbon_bspline;
+pub(crate) mod rich;
 pub mod segment;
 pub mod state;
 pub mod text;

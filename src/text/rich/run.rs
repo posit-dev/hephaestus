@@ -377,6 +377,23 @@ impl RichTextRun {
         self.with_derived(|d| (d.ink_bottom - d.ink_top).max(0.0) as f64)
     }
 
+    /// Font descender of the last line of the last block, in pixels.
+    /// Counterpart to [`crate::text::TextRun::last_line_descender`],
+    /// and used for the same thing: the `geom_label`-style padding
+    /// rebalance that keeps visible glyphs centred in a background
+    /// rect whether or not the last line has descenders.
+    pub fn last_line_descender(&self) -> f64 {
+        let blocks = self.blocks.borrow();
+        blocks
+            .iter()
+            .rev()
+            .find_map(|bl| {
+                let layout = bl.continuation_layout.as_ref().unwrap_or(&bl.layout);
+                layout.lines().last().map(|l| l.metrics().descent as f64)
+            })
+            .unwrap_or(0.0)
+    }
+
     /// Cap-height of the run's first glyph run, in pixels — distance
     /// from the baseline to the top of capital letters. Falls back to
     /// `x_height`, then `0.7 × ascent`, the same ladder
