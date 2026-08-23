@@ -10,12 +10,14 @@ Provides the text infrastructure that chrome (axis labels, legends, plot titles)
 - **`TextRun`** — shaped string + cached parley `Layout`. Implements `crate::layout::Measure`, so it drops directly into a `Cell::measured(run)` and participates in Auto-track sizing in `layout/`. Constructed via `TextRun::new(text, &style, dpi)` — the DPI converts the style's `size_pt` to pixels before shaping. `set_max_width(px)` re-breaks lines cheaply (parley keeps the shaping result; only line breaking re-runs).
 - **`draw_text`** — bridge from a positioned `TextRun` to `SceneBuilder::draw_glyphs`.
 
+`run_layout_glyphs` and `run_layout_rules` are the alternative to `draw_text` for a caller that places each glyph itself — text on a curve. One yields every glyph with its advance, the other the decoration rules the style asks for, both positioned relative to the run's first baseline. A caller that takes them owns the drawing, so it also owns whatever `draw_text` would have done for it.
+
 Line justification is expressed with `crate::style_vocab::HAlign` — the same four-variant vocabulary the theme and the rich path use. Geom-facing string aliases (`"start"`, `"center"`, `"end"`, `"justify"`) parse through the `justify_x` channel. Parley's own `Alignment` stays inside the module: `halign_to_parley` maps to its logical variants for the plain path, and `hal_to_alignment` resolves the physical `Left` / `Right` against text direction for the rich path. No parley type appears in a public signature, so parley's version is an implementation detail.
 
 ## Submodules
 
 - **`rich/`** — marquee-flavoured markdown: parse → reduce → shape → draw, with its own style-sheet and length vocabulary. See `src/text/rich/CLAUDE.md`.
-- **`shape_common.rs`** — the parley pieces both the plain and rich paths use: `push_style_defaults` (every `TextStyle` property, including features and variations), the generic-family translation, `glyphs_of_run`, and the underline / strikethrough rule emitter. Anything both paths need goes here rather than being written twice; the rich path shares these free functions, it does not wrap `TextRun`.
+- **`shape_common.rs`** — the parley pieces both the plain and rich paths use: `push_style_defaults` (every `TextStyle` property, including features and variations), the generic-family translation, `glyphs_of_run`, and the underline / strikethrough emitters — `rule_spans` resolves a run's decorations to baseline-relative centrelines, which `emit_decoration_rect` paints as rectangles and a curve-walking caller strokes along its path. Anything both paths need goes here rather than being written twice; the rich path shares these free functions, it does not wrap `TextRun`.
 
 ## Host-supplied shaper (optional extension)
 

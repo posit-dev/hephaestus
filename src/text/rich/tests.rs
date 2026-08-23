@@ -3,6 +3,7 @@
 use parley::Alignment;
 
 use super::draw::*;
+use super::flat::flatten_rich_run;
 use super::length::{pt, RichMargin};
 use super::run::*;
 use super::shape::*;
@@ -1362,5 +1363,93 @@ fn the_ink_band_follows_the_current_break() {
     assert!(
         narrow > wide,
         "a narrower break must measure taller ({wide} → {narrow})"
+    );
+}
+
+// ─── Flattening for per-glyph callers ────────────────────────────────
+
+/// A single paragraph of inline markup flattens to the same line the
+/// shaper laid out: one line's worth of metrics and the run's own
+/// width.
+#[test]
+fn flattening_one_paragraph_preserves_its_metrics() {
+    let run = make("plain **bold** *italic*");
+    let flat = flatten_rich_run(&run);
+    assert!(!flat.glyphs.is_empty());
+    assert!(
+        (flat.width as f64 - run.natural_width()).abs() < 1.0,
+        "width {} should match the run's {}",
+        flat.width,
+        run.natural_width()
+    );
+    assert!(
+        ((flat.ascent + flat.descent) as f64 - run.natural_height()).abs() < 1.0,
+        "ascent + descent {} should match the line box {}",
+        flat.ascent + flat.descent,
+        run.natural_height()
+    );
+    // Glyph x is monotonic across the style changes, so a caller can
+    // read it as distance travelled.
+    let mut prev = f32::MIN;
+    for g in &flat.glyphs {
+        assert!(g.x >= prev, "glyph x went backwards at {}", g.x);
+        prev = g.x;
+    }
+}
+
+/// Block structure collapses into one line, each segment separated by
+/// a space of the base style rather than butted against its neighbour.
+#[test]
+fn flattening_joins_blocks_with_a_space() {
+    let joined = flatten_rich_run(&make("a\n\nb"));
+    let contiguous = flatten_rich_run(&make("ab"));
+    assert_eq!(joined.glyphs.len(), 2);
+    assert_eq!(contiguous.glyphs.len(), 2);
+    let gap = joined.glyphs[1].x - joined.glyphs[0].x;
+    let tight = contiguous.glyphs[1].x - contiguous.glyphs[0].x;
+    assert!(
+        gap > tight + 2.0,
+        "expected a joining space: {gap} vs {tight}"
+    );
+    // Both blocks share one baseline — block y is dropped.
+    assert!(
+        (joined.glyphs[0].dy - joined.glyphs[1].dy).abs() < 0.01,
+        "flattened blocks must share a baseline"
+    );
+}
+
+/// A superscript arrives as a negative `dy` — lifted off the baseline
+/// in screen coordinates — and a subscript as a positive one.
+#[test]
+fn flattening_carries_baseline_shifts() {
+    let sup = flatten_rich_run(&make("a ^2^ b"));
+    let lifted = sup.glyphs.iter().map(|g| g.dy).fold(f32::MAX, f32::min);
+    assert!(lifted < -1.0, "superscript should lift: {lifted}");
+    let sub = flatten_rich_run(&make("a ~2~ b"));
+    let dropped = sub.glyphs.iter().map(|g| g.dy).fold(f32::MIN, f32::max);
+    assert!(dropped > 1.0, "subscript should drop: {dropped}");
+}
+
+/// Underline and strikethrough spans come back as rules covering only
+/// the span they decorate, at the font's own thickness.
+#[test]
+fn flattening_reports_decoration_rules() {
+    let flat = flatten_rich_run(&make("plain _under_"));
+    assert_eq!(flat.rules.len(), 1, "expected one underline rule");
+    let rule = flat.rules[0];
+    assert!(rule.thickness > 0.0, "thickness {}", rule.thickness);
+    assert!(rule.dy > 0.0, "an underline sits below the baseline");
+    assert!(
+        rule.x0 > 0.0 && rule.x1 <= flat.width + 0.01,
+        "rule {}..{} should cover only the span, within {}",
+        rule.x0,
+        rule.x1,
+        flat.width
+    );
+    let struck = flatten_rich_run(&make("plain ~~gone~~"));
+    assert_eq!(struck.rules.len(), 1);
+    assert!(
+        struck.rules[0].dy < 0.0,
+        "a strikethrough crosses above the baseline"
     );
 }

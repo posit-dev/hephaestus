@@ -8,8 +8,9 @@
 //!
 //! Limitations:
 //!
-//! - Single line only. No `max_width` / wrapping; multi-line text on a
-//!   curve is not supported.
+//! - One line per label. No `max_width` / wrapping, and a markdown
+//!   source that produced block structure is flattened rather than
+//!   stacked (see `"markdown"` below).
 //! - Glyphs whose computed arc-length distance falls outside the
 //!   `[0, total_length]` range are dropped (no partial stamping).
 //! - The mark must contribute at least two finite vertices; otherwise
@@ -32,7 +33,32 @@
 //! - `"italic"` — boolean (optional; default false; per mark). Accepts a
 //!   `Value::Bool` or the conventional `"italic"` / `"normal"` strings.
 //! - `"family"` — font family name (optional; per mark).
-//! - `"fill"` — glyph colour (optional; default black; per mark).
+//! - `"letter_spacing"` — extra advance between glyphs in pt
+//!   (optional; per mark). Widens the arc length each glyph occupies.
+//! - `"underline"` / `"strikethrough"` — booleans (optional; per
+//!   mark). Drawn as a stroke that follows the curve at the font's own
+//!   rule offset and thickness, so the rule bends with the text
+//!   instead of rotating with `"angle"`.
+//! - `"markdown"` — boolean (optional; per mark). When true the label
+//!   is read as marquee-flavoured markdown and shaped through
+//!   [`crate::text::rich`], then flattened to one line: per-span
+//!   font, size, weight, italic, colour, superscript / subscript
+//!   shift, and underline / strikethrough all survive. Block-level
+//!   constructs do not — a source that produced several blocks or
+//!   lines (headings, list items, paragraph breaks, hard breaks) has
+//!   its segments joined into one line with a space between them,
+//!   dropping block indents, margins, list markers, span backgrounds
+//!   and borders, none of which have a meaning on a curve. Per-span
+//!   `text_stroke` from the style sheet is not honoured either; the
+//!   `"text_stroke"` / `"text_linewidth"` channels below outline every
+//!   glyph. `with_rich_sheet` installs a per-geom style sheet, as on
+//!   [`TextGeom`](super::TextGeom).
+//! - `"text_stroke"` — per-glyph outline colour (optional; per mark).
+//!   Drawn behind the fill.
+//! - `"text_linewidth"` — outline thickness in pt (optional; per
+//!   mark). No effect without `"text_stroke"`.
+//! - `"fill"` — glyph colour (optional; default black; per mark). A
+//!   markdown span that sets its own colour overrides it.
 //! - `"fill_opacity"` — overrides the alpha component of `"fill"` (optional;
 //!   `0..=1`; per mark).
 //! - `"offset"` — pt offset along the path where the text layout starts
@@ -66,13 +92,19 @@
 //! - `"pick_id"` — per-mark pick ticket (optional). Every glyph in the
 //!   mark shares the same id; the mark's first row supplies the value.
 
+use std::sync::Arc;
+
 use crate::brush::Brush;
 use crate::color::Color;
 use crate::geometry::{Affine, Point, Vec2};
+use crate::plot::theme::HAlign;
 use crate::plot::value::Value;
 use crate::primitives::PolylineSampler;
-use crate::scene::{Glyph, GlyphRun, SceneBuilder};
-use crate::text::{run_layout_glyphs, TextRun, TextStyle};
+use crate::scene::{Font, Glyph, GlyphRun, SceneBuilder};
+use crate::text::rich::{
+    flatten_rich_run, RichKey, RichShapeCache, RichTextRun, RichTextStyleSheet, RichTextWidth,
+};
+use crate::text::{run_layout_glyphs, run_layout_rules, TextRun, TextStyle};
 
 use super::marks::{build_marks_from_column, unique_values_at_first_rows, MarkSlot};
 use super::resolve::{
@@ -105,6 +137,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("italic", ExpectedOutput::Any),
     ("family", ExpectedOutput::Strings),
     ("letter_spacing", ExpectedOutput::Numbers),
+    ("markdown", ExpectedOutput::Any),
     ("underline", ExpectedOutput::Any),
     ("strikethrough", ExpectedOutput::Any),
     ("text_stroke", ExpectedOutput::Colors),
@@ -119,6 +152,40 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("pick_id", ExpectedOutput::Numbers),
 ];
 
+// ─── Shaped intermediates ────────────────────────────────────────────────────
+
+/// One glyph ready to be stamped on the curve. Both shapers — plain
+/// [`TextRun`] and flattened markdown — reduce to this, so the
+/// placement walk below is written once.
+struct Stamp {
+    /// Glyph id in `font`.
+    id: u32,
+    /// Distance from the label's start along the flow axis.
+    x: f64,
+    /// Flow distance the glyph occupies.
+    advance: f64,
+    /// Offset from the label's baseline, screen y-down — a
+    /// superscript's lift, for instance.
+    dy: f64,
+    font: Font,
+    font_size: f32,
+    color: Color,
+}
+
+/// One underline or strikethrough rule over a span of the label,
+/// stroked along the curve rather than as a rectangle.
+struct Rule {
+    /// Start of the rule along the flow axis.
+    x0: f64,
+    /// End of the rule along the flow axis.
+    x1: f64,
+    /// Centreline offset from the label's baseline, screen y-down.
+    dy: f64,
+    /// Stroke width, taken from the font's own rule thickness.
+    thickness: f64,
+    color: Color,
+}
+
 // ─── TextPathGeom ────────────────────────────────────────────────────────────
 
 /// A vectorised text-on-curve geom. One label per mark, positioned
@@ -126,6 +193,13 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
 pub struct TextPathGeom {
     pub(crate) state: GeomState,
     pub(crate) marks: Vec<MarkSlot>,
+    /// Optional per-geom style sheet used when the `"markdown"`
+    /// channel resolves `true`. `None` falls back to the theme's
+    /// `rich_text` sheet.
+    pub(crate) rich_sheet: Option<Arc<RichTextStyleSheet>>,
+    /// Shaped markdown labels, reused across frames. Cleared whenever
+    /// the geom's data is replaced.
+    pub(crate) rich_cache: RichShapeCache,
 }
 
 crate::impl_geom_inherents_grouped!(TextPathGeom);
@@ -135,6 +209,34 @@ impl TextPathGeom {
     /// contiguous run of equal keys becomes one mark.
     pub(crate) fn build_marks(&self) -> Vec<MarkSlot> {
         super::marks::build_marks(&self.state.keys)
+    }
+
+    /// Install a rich-text style sheet used for every label this geom
+    /// renders as markdown. Overrides the theme's default sheet.
+    /// Chains for builder-style construction.
+    pub fn with_rich_sheet(mut self, sheet: Arc<RichTextStyleSheet>) -> Self {
+        self.rich_sheet = Some(sheet);
+        self
+    }
+
+    /// Same as [`Self::with_rich_sheet`] for mutation through
+    /// `Plot::update_geom(&mut TextPathGeom)`.
+    pub fn set_rich_sheet(&mut self, sheet: Arc<RichTextStyleSheet>) {
+        self.rich_sheet = Some(sheet);
+    }
+
+    /// Clear any per-geom rich-text sheet override — falls back to
+    /// the theme default.
+    pub fn clear_rich_sheet(&mut self) {
+        self.rich_sheet = None;
+    }
+
+    /// Clear the shaped-markdown cache. The key covers the sheet's
+    /// identity, so swapping sheets doesn't require this — it exists
+    /// for callers that mutate a sheet in place despite the
+    /// immutable-once-installed convention.
+    pub fn clear_rich_cache(&mut self) {
+        self.rich_cache.clear();
     }
 }
 
@@ -161,6 +263,8 @@ impl BuildableGeom for TextPathGeom {
         TextPathGeom {
             state,
             marks: Vec::new(),
+            rich_sheet: None,
+            rich_cache: RichShapeCache::new(),
         }
     }
 }
@@ -193,6 +297,7 @@ impl Geom for TextPathGeom {
 
     fn invalidate_caches(&mut self) {
         self.marks.clear();
+        self.rich_cache.clear();
     }
 
     fn rebuild_diff_against_previous(&mut self) {
@@ -261,6 +366,7 @@ impl Geom for TextPathGeom {
         let italic_scale = ctx.scale_for("italic");
         let family_scale = ctx.scale_for("family");
         let letter_spacing_scale = ctx.scale_for("letter_spacing");
+        let markdown_scale = ctx.scale_for("markdown");
         let underline_scale = ctx.scale_for("underline");
         let strikethrough_scale = ctx.scale_for("strikethrough");
         let text_stroke_scale = ctx.scale_for("text_stroke");
@@ -296,6 +402,10 @@ impl Geom for TextPathGeom {
         let italic_ch = channels.get("italic");
         let family_ch = channels.get("family");
         let letter_spacing_ch = channels.get("letter_spacing");
+        let markdown_ch = channels.get("markdown");
+        // Kept as an `Arc` so the shape cache can key on its identity.
+        let rich_sheet: &Arc<RichTextStyleSheet> =
+            self.rich_sheet.as_ref().unwrap_or(&ctx.theme.rich_text);
         let underline_ch = channels.get("underline");
         let strikethrough_ch = channels.get("strikethrough");
         let text_stroke_ch = channels.get("text_stroke");
@@ -348,6 +458,12 @@ impl Geom for TextPathGeom {
                 strikethrough_scale,
                 i0,
                 ctx.theme.geom.text_path.strikethrough,
+            );
+            let markdown = resolve_bool_channel_or(
+                markdown_ch,
+                markdown_scale,
+                i0,
+                ctx.theme.geom.text_path.markdown,
             );
             let text_stroke_color = resolve_color_channel_or_theme(
                 text_stroke_ch,
@@ -444,7 +560,9 @@ impl Geom for TextPathGeom {
                 continue;
             }
 
-            // ── Shape the text. Single-line only — no set_max_width. ──
+            // ── Shape the text. One line either way: the plain path
+            //    never sets a wrap width, and a markdown source is
+            //    flattened to a single line of glyphs. ──
             let mut style = TextStyle::new(size_pt as f32)
                 .weight(weight)
                 .italic(italic)
@@ -454,24 +572,109 @@ impl Geom for TextPathGeom {
             if let Some(fam) = family {
                 style = style.family(fam);
             }
-            let run = TextRun::new(&text, &style, ctx.dpi);
-            let text_w = run.natural_width();
-            let glyphs = run_layout_glyphs(&run);
-            if glyphs.is_empty() {
+            let (stamps, rules, text_w, ascent_px, descent_px) = if markdown {
+                let key = RichKey::new(
+                    &text,
+                    &style,
+                    fill_color,
+                    rich_sheet,
+                    &ctx.theme.palette,
+                    ctx.dpi,
+                    RichTextWidth::Natural,
+                    HAlign::Start,
+                );
+                let rich = self.rich_cache.get_or_shape(key, || {
+                    RichTextRun::new(
+                        &text,
+                        &style,
+                        fill_color,
+                        rich_sheet,
+                        &ctx.theme.palette,
+                        ctx.dpi,
+                    )
+                });
+                let flat = flatten_rich_run(&rich);
+                let stamps: Vec<Stamp> = flat
+                    .glyphs
+                    .iter()
+                    .map(|g| Stamp {
+                        id: g.id,
+                        x: g.x as f64,
+                        advance: g.advance as f64,
+                        dy: g.dy as f64,
+                        font: g.font.clone(),
+                        font_size: g.font_size,
+                        color: g.color,
+                    })
+                    .collect();
+                let rules: Vec<Rule> = flat
+                    .rules
+                    .iter()
+                    .map(|r| Rule {
+                        x0: r.x0 as f64,
+                        x1: r.x1 as f64,
+                        dy: r.dy as f64,
+                        thickness: r.thickness as f64,
+                        color: r.color,
+                    })
+                    .collect();
+                (
+                    stamps,
+                    rules,
+                    flat.width as f64,
+                    flat.ascent as f64,
+                    flat.descent as f64,
+                )
+            } else {
+                let run = TextRun::new(&text, &style, ctx.dpi);
+                let glyphs = run_layout_glyphs(&run);
+                if glyphs.is_empty() {
+                    continue;
+                }
+                // Parley's `g.y` includes the line's baseline offset from
+                // the layout's top. For text-on-path we want
+                // `offset_perp = 0` to mean "glyph baseline sits on the
+                // curve", so subtract the line baseline (taken from the
+                // first glyph; with single-line single-style text every
+                // glyph's y matches).
+                let baseline_ref = glyphs[0].y as f64;
+                let stamps: Vec<Stamp> = glyphs
+                    .iter()
+                    .map(|g| Stamp {
+                        id: g.id,
+                        x: g.x as f64,
+                        advance: g.advance as f64,
+                        dy: g.y as f64 - baseline_ref,
+                        font: g.font.clone(),
+                        font_size: g.font_size,
+                        color: fill_color,
+                    })
+                    .collect();
+                let rules: Vec<Rule> = run_layout_rules(&run)
+                    .iter()
+                    .map(|r| Rule {
+                        x0: r.x0 as f64,
+                        x1: r.x1 as f64,
+                        dy: r.dy as f64,
+                        thickness: r.thickness as f64,
+                        color: fill_color,
+                    })
+                    .collect();
+                // Body metrics for the upright-flip baseline shift. The
+                // body extends from y = -ascent (top) to y = +descent
+                // (bottom) in glyph-local y-down coords.
+                let descent = run.last_line_descender();
+                (
+                    stamps,
+                    rules,
+                    run.natural_width(),
+                    run.natural_height() - descent,
+                    descent,
+                )
+            };
+            if stamps.is_empty() {
                 continue;
             }
-            // Parley's `g.y` includes the line's baseline offset from the
-            // layout's top. For text-on-path we want `offset_perp = 0` to mean
-            // "glyph baseline sits on the curve", so subtract the line
-            // baseline (taken from the first glyph; with single-line
-            // single-style text every glyph's y matches).
-            let baseline_ref = glyphs[0].y as f64;
-            // Body metrics for the upright-flip baseline shift.
-            // The body extends from y = -ascent (top) to y = +descent
-            // (bottom) in glyph-local y-down coords; its centre is at
-            // y = (descent - ascent) / 2.
-            let descent_px = run.last_line_descender();
-            let ascent_px = run.natural_height() - descent_px;
 
             // ── Compute global shifts. ──
             let offset_px = pt_to_px(offset_pt, ctx.dpi);
@@ -498,9 +701,9 @@ impl Geom for TextPathGeom {
                 let natural_shift = justify_x * (path_length - text_w);
                 let mut upside_down = 0usize;
                 let mut counted = 0usize;
-                for g in &glyphs {
-                    let half_advance = g.advance as f64 * 0.5;
-                    let d = offset_px + natural_shift + g.x as f64 + half_advance;
+                for g in &stamps {
+                    let half_advance = g.advance * 0.5;
+                    let d = offset_px + natural_shift + g.x + half_advance;
                     if !d.is_finite() {
                         continue;
                     }
@@ -549,12 +752,24 @@ impl Geom for TextPathGeom {
                 ascent_px - anchor_y * body_h_px
             };
 
-            let brush = Brush::Solid(fill_color);
+            // ── Decoration rules, drawn under the glyphs. Each one
+            //    follows the curve at its own perpendicular offset,
+            //    stroked at the thickness the font reports. ──
+            let geometry = RuleGeometry {
+                path_length,
+                flipped,
+                baseline_perp: perp_px,
+                shift: offset_px + hjust_shift,
+            };
+            for rule in &rules {
+                emit_curved_rule(scene, &sampler, &geometry, rule, pick);
+            }
 
             // ── Per-glyph emission. ──
-            for g in &glyphs {
-                let half_advance = g.advance as f64 * 0.5;
-                let d_glyph = offset_px + hjust_shift + g.x as f64 + half_advance;
+            for g in &stamps {
+                let brush = Brush::Solid(g.color);
+                let half_advance = g.advance * 0.5;
+                let d_glyph = offset_px + hjust_shift + g.x + half_advance;
                 if !d_glyph.is_finite() || d_glyph < 0.0 || d_glyph > path_length {
                     continue;
                 }
@@ -582,10 +797,9 @@ impl Geom for TextPathGeom {
                 // inverts that → negate.
                 let theta = theta_tangent + (-angle_user);
 
-                let y_above_baseline = g.y as f64 - baseline_ref;
                 let xform = Affine::translate(Vec2::new(sample.point.x, sample.point.y))
                     * Affine::rotate(theta)
-                    * Affine::translate(Vec2::new(-half_advance, perp_px + y_above_baseline));
+                    * Affine::translate(Vec2::new(-half_advance, perp_px + g.dy));
 
                 let glyph = Glyph {
                     id: g.id,
@@ -622,6 +836,86 @@ impl Geom for TextPathGeom {
             }
         }
     }
+}
+
+// ─── Decoration rules ────────────────────────────────────────────────────────
+
+/// Where a label ended up on its curve — everything its decoration
+/// rules need beyond the rule itself.
+struct RuleGeometry {
+    /// Arc length available on the curve.
+    path_length: f64,
+    /// Whether the upright flip reversed the reading direction.
+    flipped: bool,
+    /// Perpendicular offset of the label's baseline from the curve.
+    baseline_perp: f64,
+    /// Arc-length shift every glyph of the label received — the
+    /// `"offset"` channel plus the justification slack.
+    shift: f64,
+}
+
+/// Stroke one underline / strikethrough rule along the curve.
+///
+/// The rule bends with the path rather than rotating with the per-mark
+/// `"angle"`, so it stays parallel to the curve the text sits on. Its
+/// span is clamped to the path, and the polyline keeps every original
+/// vertex inside it so a corner stays a corner.
+fn emit_curved_rule(
+    scene: &mut dyn SceneBuilder,
+    sampler: &PolylineSampler,
+    geometry: &RuleGeometry,
+    rule: &Rule,
+    pick: crate::pick::PickId,
+) {
+    let RuleGeometry {
+        path_length,
+        flipped,
+        baseline_perp,
+        shift,
+    } = *geometry;
+    let thickness = rule.thickness;
+    let perp = baseline_perp + rule.dy;
+    let (d0, d1) = (shift + rule.x0, shift + rule.x1);
+    if !thickness.is_finite() || thickness <= 0.0 || !d0.is_finite() || !d1.is_finite() {
+        return;
+    }
+    let lo = d0.clamp(0.0, path_length);
+    let hi = d1.clamp(0.0, path_length);
+    if hi <= lo {
+        return;
+    }
+    // Reversing the reading direction also reverses the normal the
+    // glyph transforms are offset along, so the rule mirrors with it.
+    let (s0, s1, sign) = if flipped {
+        (path_length - hi, path_length - lo, -1.0)
+    } else {
+        (lo, hi, 1.0)
+    };
+    let mut distances = Vec::with_capacity(4);
+    distances.push(s0);
+    distances.extend(sampler.segment_boundaries_between(s0, s1));
+    distances.push(s1);
+    let mut points: Vec<Point> = Vec::with_capacity(distances.len());
+    for d in distances {
+        let Some(sample) = sampler.sample_at(d) else {
+            continue;
+        };
+        let t = sample.tangent;
+        let normal = Vec2::new(-t.y, t.x);
+        points.push(sample.point + normal * (sign * perp));
+    }
+    if points.len() < 2 {
+        return;
+    }
+    let path = crate::primitives::polyline_path(&points);
+    scene.stroke(
+        &crate::stroke::Stroke::new(thickness),
+        Affine::IDENTITY,
+        &Brush::Solid(rule.color),
+        None,
+        &path,
+        pick,
+    );
 }
 
 // ─── Channel helpers (mirrored from TextGeom) ────────────────────────────────
@@ -711,6 +1005,38 @@ mod tests {
             .collect()
     }
 
+    /// Every stroked decoration rule in the scene, as
+    /// `(stroke width, vertices)`.
+    fn rule_ops(scene: &RecordingScene) -> Vec<(f64, Vec<Point>)> {
+        scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Stroke { stroke, path, .. } => Some((
+                    stroke.width,
+                    path.elements()
+                        .iter()
+                        .filter_map(|el| match el {
+                            crate::path::PathEl::MoveTo(p) | crate::path::PathEl::LineTo(p) => {
+                                Some(*p)
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Baseline y of every emitted glyph, in scene order.
+    fn glyph_baselines(scene: &RecordingScene) -> Vec<f64> {
+        glyph_ops(scene)
+            .iter()
+            .map(|r| r.transform.as_coeffs()[5])
+            .collect()
+    }
+
     // ── build() validation ──
 
     #[test]
@@ -751,6 +1077,20 @@ mod tests {
             .set("y", Raw(vec![0.5_f64, 0.5]))
             .set("text", text)
             .set("size", 20.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        g
+    }
+
+    /// Same path as [`horizontal_path_geom`], with the label read as
+    /// markdown.
+    fn markdown_path_geom(text: &'static str) -> TextPathGeom {
+        let mut g = TextPathGeom::builder()
+            .set("x", Raw(vec![0.25_f64, 0.75]))
+            .set("y", Raw(vec![0.5_f64, 0.5]))
+            .set("text", text)
+            .set("size", 20.0_f64)
+            .set("markdown", true)
             .build();
         g.rebuild_diff_against_previous();
         g
@@ -1158,6 +1498,181 @@ mod tests {
                 other => panic!("expected PickId::Id(42), got {other:?}"),
             }
         }
+    }
+
+    // ── Markdown labels ──
+
+    #[test]
+    fn markdown_consumes_the_inline_markup() {
+        // `**AB**` is six characters plain, two glyphs as markdown.
+        let plain = drained(&horizontal_path_geom("**AB**"));
+        let rich = drained(&markdown_path_geom("**AB**"));
+        assert_eq!(glyph_ops(&plain).len(), 6);
+        assert_eq!(glyph_ops(&rich).len(), 2);
+    }
+
+    #[test]
+    fn markdown_span_colour_reaches_the_glyph_brush() {
+        let scene = drained(&markdown_path_geom("{#ff0000 A}"));
+        let runs = glyph_ops(&scene);
+        assert_eq!(runs.len(), 1);
+        let Brush::Solid(c) = &runs[0].brush else {
+            panic!("expected a solid brush, got {:?}", runs[0].brush);
+        };
+        assert!(
+            c.components[0] > 0.9 && c.components[1] < 0.1 && c.components[2] < 0.1,
+            "expected red, got {:?}",
+            c.components
+        );
+    }
+
+    #[test]
+    fn markdown_blocks_join_with_a_space() {
+        // Two paragraphs flatten onto one line, separated by a space —
+        // so the gap between the two glyphs exceeds the first glyph's
+        // own advance.
+        let joined = drained(&markdown_path_geom("a\n\nb"));
+        let contiguous = drained(&markdown_path_geom("ab"));
+        let gap = |scene: &RecordingScene| {
+            let runs = glyph_ops(scene);
+            assert_eq!(runs.len(), 2);
+            runs[1].transform.as_coeffs()[4] - runs[0].transform.as_coeffs()[4]
+        };
+        let joined_gap = gap(&joined);
+        let contiguous_gap = gap(&contiguous);
+        assert!(
+            joined_gap > contiguous_gap + 3.0,
+            "block join should insert a space: {joined_gap} vs {contiguous_gap}"
+        );
+    }
+
+    #[test]
+    fn superscript_lifts_its_glyph_off_the_baseline() {
+        // Pulldown-cmark wants word boundaries around the carets.
+        let scene = drained(&markdown_path_geom("a ^2^ b"));
+        let baselines = glyph_baselines(&scene);
+        assert!(baselines.len() >= 3, "got {baselines:?}");
+        let body = baselines.iter().cloned().fold(f64::MIN, f64::max);
+        let lifted = baselines.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(
+            lifted < body - 3.0,
+            "the superscript should sit above the body baseline: {baselines:?}"
+        );
+    }
+
+    // ── Decoration rules ──
+
+    #[test]
+    fn underline_strokes_one_rule_along_the_path() {
+        let mut g = TextPathGeom::builder()
+            .set("x", Raw(vec![0.25_f64, 0.75]))
+            .set("y", Raw(vec![0.5_f64, 0.5]))
+            .set("text", "AB")
+            .set("size", 20.0_f64)
+            .set("underline", true)
+            .build();
+        g.rebuild_diff_against_previous();
+        let scene = drained(&g);
+        let rules = rule_ops(&scene);
+        assert_eq!(rules.len(), 1, "expected exactly one underline");
+        let (width, points) = &rules[0];
+        // Thickness comes from the font, so it is positive and well
+        // under the em size.
+        assert!(
+            *width > 0.0 && *width < 20.0 * 96.0 / 72.0,
+            "unexpected rule thickness {width}"
+        );
+        assert!(points.len() >= 2, "got {points:?}");
+        // The rule starts where the text starts and sits below the
+        // baseline the glyphs were stamped on.
+        assert!(
+            (points[0].x - 100.0).abs() < 1.0,
+            "rule should start at the path start, got {:?}",
+            points[0]
+        );
+        let baseline = glyph_baselines(&scene)[0];
+        assert!(
+            points[0].y > baseline,
+            "underline {:?} should sit below the baseline {baseline}",
+            points[0]
+        );
+    }
+
+    #[test]
+    fn underline_and_strikethrough_emit_a_rule_each() {
+        let mut g = TextPathGeom::builder()
+            .set("x", Raw(vec![0.25_f64, 0.75]))
+            .set("y", Raw(vec![0.5_f64, 0.5]))
+            .set("text", "AB")
+            .set("size", 20.0_f64)
+            .set("underline", true)
+            .set("strikethrough", true)
+            .build();
+        g.rebuild_diff_against_previous();
+        let scene = drained(&g);
+        let rules = rule_ops(&scene);
+        assert_eq!(rules.len(), 2);
+        // The strikethrough crosses the body, the underline sits under
+        // it, so they land on opposite sides of the baseline.
+        let baseline = glyph_baselines(&scene)[0];
+        let above = rules.iter().filter(|(_, p)| p[0].y < baseline).count();
+        let below = rules.iter().filter(|(_, p)| p[0].y > baseline).count();
+        assert_eq!((above, below), (1, 1), "rules at {rules:?}");
+    }
+
+    #[test]
+    fn a_markdown_rule_covers_only_its_own_span() {
+        // Only the trailing span is underlined. On a straight path the
+        // rule's start therefore lands on the left edge of the span's
+        // first glyph — glyph 3 of `A A space B B` — rather than under
+        // the whole label.
+        let scene = drained(&markdown_path_geom("AA _BB_"));
+        let rules = rule_ops(&scene);
+        assert_eq!(rules.len(), 1);
+        let glyphs = glyph_ops(&scene);
+        assert_eq!(glyphs.len(), 5, "expected `AA BB` to shape to 5 glyphs");
+        let span_start = glyphs[3].transform.as_coeffs()[4];
+        assert!(
+            (rules[0].1[0].x - span_start).abs() < 2.0,
+            "rule should start at the span, not the label: {:?} vs {span_start}",
+            rules[0].1[0]
+        );
+        // …and end at the label's end, since the span runs to it.
+        let last = rules[0].1.last().unwrap();
+        assert!(
+            last.x > span_start,
+            "rule should run forward from {span_start}, got {last:?}"
+        );
+    }
+
+    #[test]
+    fn an_upright_flip_keeps_the_rule_on_the_same_side() {
+        // Forward path: the underline sits a fixed distance under the
+        // baseline. A backwards path with `upright` reverses reading
+        // direction, and the rule has to mirror with the glyphs so it
+        // stays on the same side of the curve.
+        let rule_offset = |xs: Vec<f64>, upright: bool| {
+            let mut g = TextPathGeom::builder()
+                .set("x", Raw(xs))
+                .set("y", Raw(vec![0.5_f64, 0.5]))
+                .set("text", "AB")
+                .set("size", 20.0_f64)
+                .set("underline", true)
+                .set("upright", upright)
+                .build();
+            g.rebuild_diff_against_previous();
+            let scene = drained(&g);
+            let rules = rule_ops(&scene);
+            assert_eq!(rules.len(), 1);
+            let baseline = glyph_baselines(&scene)[0];
+            rules[0].1[0].y - baseline
+        };
+        let forward = rule_offset(vec![0.25, 0.75], false);
+        let flipped = rule_offset(vec![0.75, 0.25], true);
+        assert!(
+            (forward - flipped).abs() < 0.5,
+            "rule offset should survive the flip: {forward} vs {flipped}"
+        );
     }
 
     #[test]

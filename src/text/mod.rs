@@ -796,6 +796,58 @@ pub fn run_layout_glyphs(run: &TextRun) -> Vec<LaidGlyph> {
     out
 }
 
+/// One underline or strikethrough rule over a span of a laid-out run.
+///
+/// `x0` / `x1` are cumulative offsets from the run origin, in the same
+/// units as [`LaidGlyph::x`]; `dy` locates the rule's centreline
+/// relative to the run's first baseline in screen (y-down) pixels.
+#[derive(Clone, Copy)]
+pub struct LaidRule {
+    /// Start of the rule along the flow axis.
+    pub x0: f32,
+    /// End of the rule along the flow axis.
+    pub x1: f32,
+    /// Centreline offset from the run's first baseline, screen y-down.
+    pub dy: f32,
+    /// Rule thickness in pixels, from the font's metrics.
+    pub thickness: f32,
+}
+
+/// Walk `run`'s laid-out lines and yield every underline /
+/// strikethrough rule its style asks for.
+///
+/// Positioned in the same frame as [`run_layout_glyphs`], so a caller
+/// that stamps glyphs individually — text on a curve — can draw the
+/// decorations itself rather than relying on [`draw_text`]'s
+/// axis-aligned rectangles.
+pub fn run_layout_rules(run: &TextRun) -> Vec<LaidRule> {
+    let layout = run.layout.borrow();
+    let mut out = Vec::new();
+    let mut first_baseline: Option<f32> = None;
+    for line in layout.lines() {
+        let baseline = line.metrics().baseline;
+        let origin = *first_baseline.get_or_insert(baseline);
+        let line_dy = baseline - origin;
+        for item in line.items() {
+            let PositionedLayoutItem::GlyphRun(gr) = item else {
+                continue;
+            };
+            let prun = gr.run();
+            let x0 = gr.offset();
+            let x1 = x0 + gr.advance();
+            for span in shape_common::rule_spans(gr.style(), prun.metrics(), x0, x1, line_dy) {
+                out.push(LaidRule {
+                    x0: span.x0,
+                    x1: span.x1,
+                    dy: span.dy,
+                    thickness: span.thickness,
+                });
+            }
+        }
+    }
+    out
+}
+
 // ─── Glyph markers ──────────────────────────────────────────────────────────
 
 /// Shape `text` with `style` and return a single-glyph [`Shape`]

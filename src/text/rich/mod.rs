@@ -45,6 +45,7 @@ pub mod block;
 mod border;
 pub mod cache;
 pub mod draw;
+pub mod flat;
 pub mod length;
 pub mod parser;
 pub mod reduce;
@@ -60,6 +61,7 @@ pub use anchor::{AnchorOffsets, HAnchor, LayoutBounds, RichAnchor, VAnchor};
 pub use block::{BlockBorder, BlockPaint};
 pub use cache::{RichKey, RichShapeCache};
 pub use draw::draw_rich_text;
+pub use flat::{flatten_rich_run, RichFlatGlyph, RichFlatRule, RichFlatText};
 pub use length::{
     em, pt, relative, rem, FieldSet, LengthSpec, LineHeightSpec, RichMargin, StyleField,
 };

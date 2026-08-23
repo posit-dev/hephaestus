@@ -481,7 +481,7 @@ fn emit_marker(
 }
 /// The accumulated baseline shift (pt) covering `run_range`. Nested
 /// shifts are emitted innermost-first, so the first overlap wins.
-fn baseline_shift_for_range(shifts: &[BaselineRun], run_range: &Range<usize>) -> f64 {
+pub(super) fn baseline_shift_for_range(shifts: &[BaselineRun], run_range: &Range<usize>) -> f64 {
     for bs in shifts {
         if run_range.start < bs.range.end && bs.range.start < run_range.end {
             return bs.shift_pt;

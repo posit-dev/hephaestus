@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- **`TextPathGeom` reads markdown.** A label whose `"markdown"` channel resolves `true` shapes through `text::rich` and follows the curve with its inline styling intact — per-span font, size, weight, slant, colour, and superscript / subscript. Block-level markup has no reading on a curve, so a source that produced several blocks or lines is joined into one line with a space between segments, dropping indents, margins, list markers, span backgrounds and borders. `with_rich_sheet` / `set_rich_sheet` / `clear_rich_sheet` install a per-geom style sheet, as on `TextGeom`, and the geom holds a `RichShapeCache` so a redraw reuses the shaped label.
+- **`text::rich::flatten_rich_run`** — reduce a shaped `RichTextRun` to one line of positioned glyphs (`RichFlatGlyph`) plus decoration rules (`RichFlatRule`), for callers that stamp glyphs individually rather than drawing a laid-out box.
+- **`text::run_layout_rules`** — the underline / strikethrough rules of a plain `TextRun`, positioned like `run_layout_glyphs`' glyphs, for the same kind of caller.
+
+### Fixed
+
+- **`TextPathGeom`'s `"underline"` and `"strikethrough"` channels now draw.** They were resolved into the shaping style but never rendered, since the geom emits glyphs one at a time and no decoration was emitted alongside them. Each rule is stroked along the curve at the font's own offset and thickness, so it bends with the text instead of rotating with `"angle"`.
+
 ## 0.2.0
 
 ### Added

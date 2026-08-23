@@ -9,6 +9,9 @@
 //!   `anchor_y = 1`, `0.5`, `0` showing how the anchor fraction moves
 //!   the text across the curve
 //!   relative to the curve.
+//! - `text_path_4_markdown.png` — markdown labels on sine waves:
+//!   inline emphasis, a coloured span with a superscript, and an
+//!   underlined span whose rule follows the curve.
 
 use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
@@ -296,6 +299,97 @@ fn main() {
             dpi,
             bg,
             "examples/text_path_3_anchor_y.png",
+        );
+    }
+
+    // ── Render 4: markdown labels ────────────────────────────────────
+    //
+    // The `"markdown"` channel reads each label as marquee-flavoured
+    // markdown. Inline styling follows the curve — emphasis, per-span
+    // colour and size, superscripts — and an underline is stroked
+    // along the path rather than drawn as a straight rule. The third
+    // label is two paragraphs, which flatten onto one line with a
+    // space between them.
+    {
+        let n = 80usize;
+        let xs: Vec<f64> = (0..n)
+            .map(|i| (i as f64) * 100.0 / (n as f64 - 1.0))
+            .collect();
+        let make_sine = |y_centre: f64, amplitude: f64| -> Vec<f64> {
+            xs.iter()
+                .map(|x| y_centre + amplitude * (x * 0.18).sin())
+                .collect()
+        };
+        let labels = [
+            "plain, **bold**, *italic*, `code`",
+            "{#c02020 warming} of 1.5 ^oC^ above",
+            "first _underlined_\n\nsecond",
+        ];
+        let mut all_x: Vec<f64> = Vec::new();
+        let mut all_y: Vec<f64> = Vec::new();
+        let mut all_keys: Vec<&'static str> = Vec::new();
+        let mut text_per_row: Vec<&'static str> = Vec::new();
+        for (key, (label, y_centre)) in ["inline", "span", "blocks"]
+            .iter()
+            .zip(labels.iter().zip([80.0_f64, 50.0, 20.0]))
+        {
+            let ys = make_sine(y_centre, 8.0);
+            for (x, y) in xs.iter().zip(ys.iter()) {
+                all_x.push(*x);
+                all_y.push(*y);
+                all_keys.push(*key);
+                text_per_row.push(label);
+            }
+        }
+
+        let comp = || Composition::empty(1, 1).place(1, 1, Span::cell(), Patch::new("panel"));
+        let mut plot = Plot::new(&comp(), "panel")
+            .bind("x", "x_axis")
+            .bind("y", "y_axis");
+
+        plot.add_geom(
+            LineGeom::builder()
+                .keys(all_keys.clone())
+                .set("x", all_x.clone())
+                .set("y", all_y.clone())
+                .set("stroke", rgb8(180, 180, 190))
+                .set("linewidth", 1.0_f64)
+                .build(),
+        );
+        plot.add_geom(
+            TextPathGeom::builder()
+                .keys(all_keys)
+                .set("x", all_x)
+                .set("y", all_y)
+                .set("text", text_per_row)
+                .set("markdown", true)
+                .set("size", 20.0_f64)
+                .set("fill", rgb8(30, 40, 70))
+                .set("anchor_y", 1.0_f64)
+                .build(),
+        );
+
+        plot.add_axis(Axis::rail(
+            "x_axis",
+            AxisPlacement::Cartesian(AxisSide::Bottom),
+        ));
+        plot.add_axis(Axis::rail(
+            "y_axis",
+            AxisPlacement::Cartesian(AxisSide::Left),
+        ));
+
+        let mut view = PlotComposition::new(&comp())
+            .add_scale("x_axis", scale::continuous(0.0..=100.0))
+            .add_scale("y_axis", scale::continuous(0.0..=100.0))
+            .with_plot(plot);
+        render_to(
+            &mut renderer,
+            &mut view,
+            w,
+            h,
+            dpi,
+            bg,
+            "examples/text_path_4_markdown.png",
         );
     }
 }

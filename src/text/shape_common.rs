@@ -152,6 +152,62 @@ pub(crate) fn glyphs_of_run<B: parley::style::Brush>(
         .collect()
 }
 
+/// One underline or strikethrough rule over a span of the flow axis,
+/// with its centreline offset from the baseline.
+///
+/// The medium-independent form of a decoration: [`DecorationRect`]
+/// paints it as an axis-aligned rectangle, a caller walking a curve
+/// strokes it along the curve instead.
+#[derive(Clone, Copy)]
+pub(crate) struct RuleSpan {
+    /// Start along the flow axis.
+    pub x0: f32,
+    /// End along the flow axis.
+    pub x1: f32,
+    /// Centreline offset from the baseline, screen y-down.
+    pub dy: f32,
+    /// Rule thickness in pixels.
+    pub thickness: f32,
+}
+
+/// Every decoration rule one glyph run's style asks for, as
+/// centreline spans measured from `dy_base`.
+///
+/// Skrifa reports decoration offsets in typographic convention (y-up
+/// from the baseline), so a rule's centreline in screen y-down is
+/// `-offset + thickness / 2`. Both callers need that flip, and both
+/// need the style's explicit metrics to win over the font's.
+pub(crate) fn rule_spans<B: parley::style::Brush>(
+    style: &parley::layout::Style<B>,
+    metrics: &parley::layout::RunMetrics,
+    x0: f32,
+    x1: f32,
+    dy_base: f32,
+) -> Vec<RuleSpan> {
+    let mut out = Vec::new();
+    if let Some(deco) = &style.underline {
+        let thickness = deco.size.unwrap_or(metrics.underline_size).max(0.0);
+        let offset = deco.offset.unwrap_or(metrics.underline_offset);
+        out.push(RuleSpan {
+            x0,
+            x1,
+            dy: dy_base - offset + thickness * 0.5,
+            thickness,
+        });
+    }
+    if let Some(deco) = &style.strikethrough {
+        let thickness = deco.size.unwrap_or(metrics.strikethrough_size).max(0.0);
+        let offset = deco.offset.unwrap_or(metrics.strikethrough_offset);
+        out.push(RuleSpan {
+            x0,
+            x1,
+            dy: dy_base - offset + thickness * 0.5,
+            thickness,
+        });
+    }
+    out
+}
+
 /// One filled axis-aligned rectangle representing an underline or
 /// strikethrough decoration. Bundled as a struct to keep
 /// [`emit_decoration_rect`] from accumulating positional args.

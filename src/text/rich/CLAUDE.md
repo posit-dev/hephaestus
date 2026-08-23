@@ -13,7 +13,36 @@ Four stages, each in its own file, each consuming the previous stage's output an
 3. **`shape.rs`** — `BuiltRuns` → `RichTextRun`. One `parley::Layout<RichBrush>` per top-level *leaf* block, shaped at its effective content width; container blocks contribute insets, spacing chains and list markers to the leaves inside them. `wrap.rs::stack_blocks` then positions the leaves vertically.
 4. **`draw.rs`** / **`border.rs`** — a positioned `RichTextRun` → `SceneBuilder` calls: block paints first, then list markers, then glyph runs with their span chrome and decorations.
 
-Supporting files: `length.rs` (the measurement vocabulary), `style.rs` (`StyleDelta` / `ResolvedStyle` / `RichTextStyleSheet` / `css_color`), `block.rs` (block paints), `anchor.rs` (`RichAnchor` positioning), `cache.rs` (`RichShapeCache`), `tests.rs` (shape / wrap / draw tests).
+Supporting files: `length.rs` (the measurement vocabulary), `style.rs` (`StyleDelta` / `ResolvedStyle` / `RichTextStyleSheet` / `css_color`), `block.rs` (block paints), `anchor.rs` (`RichAnchor` positioning), `cache.rs` (`RichShapeCache`), `flat.rs` (flattening, below), `tests.rs` (shape / wrap / draw tests).
+
+## Flattening: what survives leaving the box
+
+`flat.rs::flatten_rich_run` is the alternative to `draw.rs` for a caller
+that stamps glyphs one at a time instead of drawing a laid-out box —
+`TextPathGeom` walking a curve is the case it exists for. It returns
+every glyph with its advance, its colour, its font and its offset from
+one common baseline, plus the underline / strikethrough rules as
+`RichFlatRule` centrelines.
+
+Every line of every block is appended in document order, separated by
+one space of the base style — measured as the difference between `"a a"`
+and `"aa"`, since parley trims a lone space, and measured lazily so a
+single-paragraph run never pays for it. A heading followed by a
+paragraph therefore reads as one string, keeping its per-span sizes.
+
+**The block geometry is what gets dropped**: block `y`, indents,
+margins, list markers, span backgrounds and borders. None of them
+survive because none of them mean anything on a curve — a rect cannot
+bend. Per-span `text_stroke` goes too, since attributing it needs the
+`InlineRun` brush matching that only `draw.rs` does. What survives is
+everything carried by a glyph: font, size, weight, slant, colour, and
+the `sup` / `sub` baseline shift, which arrives as a per-glyph `dy` a
+caller adds to its own perpendicular offset.
+
+Ascent and descent split the line box at the baseline — half the
+leading on each side — so `ascent + descent` matches what the plain
+shaper reports for the same string, and a caller anchoring on the text's
+own height gets the same box either way.
 
 ## Metrics mirror the plain shaper
 
