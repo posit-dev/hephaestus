@@ -1,12 +1,24 @@
 # hephaestus
 
-A backend-agnostic 2D scene renderer for data visualization, written in Rust.
+[![Crates.io](https://img.shields.io/crates/v/hephaestus.svg)](https://crates.io/crates/hephaestus)
+[![Docs.rs](https://docs.rs/hephaestus/badge.svg)](https://docs.rs/hephaestus)
+[![Check](https://github.com/posit-dev/hephaestus/actions/workflows/check.yml/badge.svg)](https://github.com/posit-dev/hephaestus/actions/workflows/check.yml)
+[![MSRV](https://img.shields.io/badge/rustc-1.86+-blue.svg)](https://github.com/posit-dev/hephaestus)
+[![npm](https://img.shields.io/npm/v/hephaestus-wasm)](https://www.npmjs.com/package/hephaestus-wasm)
 
-`hephaestus` ships two API levels in one crate. The **scene API** (`SceneBuilder` + primitives + layout) is a backend-neutral drawing surface. The **plot API** (`plot::*` — geoms, scales, themes, and the `PlotComposition` orchestrator) is a grammar-of-graphics layer built on top of it. Use whichever level fits; they are layered, not alternatives.
+A backend-agnostic, high performant, 2D scene renderer for data visualization, written in Rust.
 
-The public surface is deliberately the *intersection* of what Vello and Blend2D natively support, so drawing code runs unchanged as backends are added. The initial backend is [Vello](https://github.com/linebender/vello) (GPU compute via wgpu); Blend2D (CPU raster), SVG, and PDF are planned.
+Hephaestus is written to make it easy and convenient to create high-level visualization APIs without having to worry about the actual display of data. It provides a vectorized high-level API along with a low-level api for full control. Both APIs are composable so it is not a question of either or. In general, the high-level API is still flexible and "low-level" enough to serve almost all needs while still providing tangible benefits for the user.
 
-Performance on dense, interactively-updated plots is the design driver. WASM is supported but is not the primary target.
+### Features
+
+* A rich vectorised set of different geometries
+* A Layout system that supports easy plot composition with easy resizing
+* Markdown parsing and rendering for rich text support
+* Native wasm support for embedding on websites
+* Scales and projections
+* Render to png, jpeg, tiff, webp, canvas, or a window buffer
+* Theming system
 
 ## Install
 
@@ -79,38 +91,6 @@ let mut renderer = VelloRenderer::new().expect("vello init");
     scene.fill(FillRule::NonZero, Affine::IDENTITY, &brush, None, &path, PickId::Skip);
 }
 ```
-
-The renderer produces RGBA8 buffers for file output. The optional `window` feature presents those frames live instead — an OS window, resize, and pointer events wired to picking. Animation scheduling stays the host's problem by design.
-
-## What's in the box
-
-- **Geoms** — point, line, segment, rect, ellipse, polygon, wedge, ribbon, B-spline, ribbon-B-spline, geometry (WKT / WKB / GeoJSON), and three text geoms (mark, fit-to-box, along-path).
-- **Scales** — continuous, discrete, binned, temporal, identity; log / sqrt / custom transforms; automatic and pinned breaks for both majors and minors; locale-aware label formatting.
-- **Projections** — cartesian and polar, plus a `CustomProjection` hook. Non-linear projections densify edges so straight lines in data space curve correctly.
-- **Chrome** — axes, legends, colorbars, facet strips, titles, captions, all theme-driven.
-- **Themes** — every chrome element is a themed element; no hardcoded constants in the render path.
-- **Rich text** — a marquee-flavoured markdown subset with inline styling, block borders, and backgrounds.
-- **Picking** — opt-in per renderer; emits pixel ids for hit-testing without a CPU post-pass.
-- **Live window** — optional `window` feature: presents frames on screen, re-lays-out on resize, and reports the pick id under the cursor.
-
-## Features
-
-| Feature | Default | What it does |
-|---|---|---|
-| `vello` | ✅ | GPU rasterizer via wgpu. |
-| `png` | ✅ | PNG writer. Lossless, alpha preserved. |
-| `jpeg` | | JPEG writer. Lossy, and the format has no alpha channel, so the buffer is composited onto a background color. |
-| `tiff` | | TIFF writer. Lossless, alpha preserved, choice of compressor. |
-| `webp` | | WebP writer. Lossless, alpha preserved, and smaller than PNG on most plots. |
-| `window` | | Live window presentation: OS window, wgpu surface, event loop with resize and pointer events (`winit`). Requires `vello`. |
-| `google-fonts` | | Fetch named Google Fonts families on demand. Network call on cache miss; cache hits are offline. |
-| `chrono` / `time` / `jiff` | | `From` impls between the temporal newtypes and the matching datetime library. Pick whichever your code already uses. |
-| `geom-wkt` / `geom-wkb` / `geom-geojson` | | Parsers for `scales::Geometry`. Hand-rolled and dependency-free, so toggling them only changes what constructors compile. |
-| `blend2d` / `svg` / `pdf` | | Placeholders. Wired through cargo so dependent crates can name them; no backend code behind them yet. |
-
-The core types and traits build with `--no-default-features`, pulling in no wgpu, so downstream crates can target `SceneBuilder` without GPU dependencies.
-
-The four writer features are encoders over the RGBA8 buffer a renderer already produces, so each one costs only its own encoder — all four are pure Rust and build for wasm. They live together in `hephaestus::image`.
 
 ## Examples
 
