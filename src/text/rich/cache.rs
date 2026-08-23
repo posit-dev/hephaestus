@@ -116,7 +116,7 @@ fn hash_style(style: &TextStyle, h: &mut DefaultHasher) {
     style.width.to_bits().hash(h);
     format!("{:?}", style.style).hash(h);
     format!("{:?}", style.line_height).hash(h);
-    style.letter_spacing_pt.to_bits().hash(h);
+    style.tracking.to_bits().hash(h);
     style.underline.hash(h);
     style.strikethrough.hash(h);
     for f in &style.families {

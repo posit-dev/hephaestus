@@ -141,7 +141,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("weight", ExpectedOutput::Numbers),
     ("italic", ExpectedOutput::Any),
     ("family", ExpectedOutput::Strings),
-    ("letter_spacing", ExpectedOutput::Numbers),
+    ("tracking", ExpectedOutput::Numbers),
     ("underline", ExpectedOutput::Any),
     ("strikethrough", ExpectedOutput::Any),
     ("markdown", ExpectedOutput::Any),
@@ -285,7 +285,7 @@ impl Geom for TextGeom {
         let weight_scale = ctx.scale_for("weight");
         let italic_scale = ctx.scale_for("italic");
         let family_scale = ctx.scale_for("family");
-        let letter_spacing_scale = ctx.scale_for("letter_spacing");
+        let tracking_scale = ctx.scale_for("tracking");
         let underline_scale = ctx.scale_for("underline");
         let strikethrough_scale = ctx.scale_for("strikethrough");
         let markdown_scale = ctx.scale_for("markdown");
@@ -328,7 +328,7 @@ impl Geom for TextGeom {
         let weight_ch = channels.get("weight");
         let italic_ch = channels.get("italic");
         let family_ch = channels.get("family");
-        let letter_spacing_ch = channels.get("letter_spacing");
+        let tracking_ch = channels.get("tracking");
         let underline_ch = channels.get("underline");
         let strikethrough_ch = channels.get("strikethrough");
         let markdown_ch = channels.get("markdown");
@@ -390,11 +390,11 @@ impl Geom for TextGeom {
                 .unwrap_or(ctx.theme.geom.text.weight);
             let italic = resolve_bool_or_italic_string(italic_ch, italic_scale, i);
             let family = resolve_str_channel(family_ch, family_scale, i);
-            let letter_spacing_pt = resolve_number_channel_or(
-                letter_spacing_ch,
-                letter_spacing_scale,
+            let tracking = resolve_number_channel_or(
+                tracking_ch,
+                tracking_scale,
                 i,
-                ctx.theme.geom.text.letter_spacing_pt,
+                ctx.theme.geom.text.tracking,
             );
             let underline = resolve_bool_channel_or(
                 underline_ch,
@@ -413,7 +413,7 @@ impl Geom for TextGeom {
             let mut style = TextStyle::new(size_pt as f32)
                 .weight(weight)
                 .italic(italic)
-                .letter_spacing_pt(letter_spacing_pt as f32)
+                .tracking(tracking as f32)
                 .underline(underline)
                 .strikethrough(strikethrough);
             if let Some(fam) = family {
@@ -1677,14 +1677,14 @@ mod tests {
     }
 
     #[test]
-    fn letter_spacing_channel_widens_emitted_glyphs() {
+    fn tracking_channel_widens_emitted_glyphs() {
         let make = |spacing: f64| {
             let g = TextGeom::builder()
                 .set("x", vec![0.5_f64])
                 .set("y", vec![0.5_f64])
                 .set("text", vec!["MMMM"])
                 .set("fill", red())
-                .set("letter_spacing", spacing)
+                .set("tracking", spacing)
                 .build();
             let shapes = shapes();
             let scales = DirectScaleResolver::new();
@@ -1697,10 +1697,11 @@ mod tests {
             (hi - lo) as f64
         };
         let base = make(0.0);
-        let loose = make(8.0);
+        // 600 per-mille em at the default 12pt = 7.2pt per gap.
+        let loose = make(600.0);
         assert!(
             loose > base + 5.0,
-            "letter_spacing=8pt should widen glyph extent: base={base}, loose={loose}"
+            "tracking=600 should widen glyph extent: base={base}, loose={loose}"
         );
     }
 

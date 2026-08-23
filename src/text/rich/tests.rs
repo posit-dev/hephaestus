@@ -1453,3 +1453,53 @@ fn flattening_reports_decoration_rules() {
         "a strikethrough crosses above the baseline"
     );
 }
+
+/// Tracking is 1/1000 em on both sides of the boundary, so a base
+/// style carries into the rich cascade untouched and a plain string
+/// measures the same through either shaper.
+#[test]
+fn tracking_crosses_into_the_cascade_unchanged() {
+    let sheet = RichTextStyleSheet::new();
+    let style = base_style().tracking(200.0);
+    let rich = RichTextRun::new(
+        "nnnnn",
+        &style,
+        Color::from_rgba8(0, 0, 0, 255),
+        &sheet,
+        &palette(),
+        96.0,
+    );
+    let plain = crate::text::TextRun::new("nnnnn", &style, 96.0);
+    assert!(
+        (rich.natural_width() - plain.natural_width()).abs() < 0.01,
+        "tracked widths should agree: {} vs {}",
+        rich.natural_width(),
+        plain.natural_width()
+    );
+    // An element at a different size tracks against its own em, which
+    // is the whole point of the unit.
+    let heading = RichTextRun::new(
+        "# nnnnn",
+        &style,
+        Color::from_rgba8(0, 0, 0, 255),
+        &sheet,
+        &palette(),
+        96.0,
+    );
+    let untracked = RichTextRun::new(
+        "# nnnnn",
+        &base_style(),
+        Color::from_rgba8(0, 0, 0, 255),
+        &sheet,
+        &palette(),
+        96.0,
+    );
+    let head_added = heading.natural_width() - untracked.natural_width();
+    let plain_added = plain.natural_width()
+        - crate::text::TextRun::new("nnnnn", &base_style(), 96.0).natural_width();
+    // h1 is 2.25x the base size, so its tracking is 2.25x as wide.
+    assert!(
+        (head_added / plain_added - 2.25).abs() < 0.05,
+        "heading tracking should follow its own em: {plain_added} → {head_added}"
+    );
+}

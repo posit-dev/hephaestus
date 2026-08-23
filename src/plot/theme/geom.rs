@@ -201,9 +201,10 @@ pub struct TextDefaults {
     /// Background outline stroke width in pt when no `"bg_linewidth"`
     /// channel is bound.
     pub bg_linewidth_pt: f64,
-    /// Letter spacing in pt when no `"letter_spacing"` channel is
-    /// bound. `0.0` is the natural font advance.
-    pub letter_spacing_pt: f64,
+    /// Letter spacing (tracking) in 1/1000 em when no `"tracking"`
+    /// channel is bound — `20.0` is `0.02 em`. `0.0` is the natural
+    /// font advance.
+    pub tracking: f64,
     /// Underline the text when no `"underline"` channel is bound.
     pub underline: bool,
     /// Strike through the text when no `"strikethrough"` channel is
@@ -240,7 +241,7 @@ impl Default for TextDefaults {
             bg_fill: None,
             bg_stroke: None,
             bg_linewidth_pt: 1.0,
-            letter_spacing_pt: 0.0,
+            tracking: 0.0,
             underline: false,
             strikethrough: false,
             text_stroke: None,
@@ -267,9 +268,10 @@ pub struct TextFitDefaults {
     pub bg_stroke: Option<ThemeColor>,
     /// Background outline stroke width in pt.
     pub bg_linewidth_pt: f64,
-    /// Letter spacing in pt when no `"letter_spacing"` channel is
-    /// bound.
-    pub letter_spacing_pt: f64,
+    /// Letter spacing (tracking) in 1/1000 em when no `"tracking"`
+    /// channel is bound — `20.0` is `0.02 em`. `0.0` is the natural
+    /// font advance.
+    pub tracking: f64,
     /// Underline the text when no `"underline"` channel is bound.
     pub underline: bool,
     /// Strike through the text when no `"strikethrough"` channel is
@@ -294,7 +296,7 @@ impl Default for TextFitDefaults {
             bg_fill: None,
             bg_stroke: None,
             bg_linewidth_pt: 1.0,
-            letter_spacing_pt: 0.0,
+            tracking: 0.0,
             underline: false,
             strikethrough: false,
             text_stroke: None,

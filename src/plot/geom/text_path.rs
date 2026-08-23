@@ -33,8 +33,8 @@
 //! - `"italic"` — boolean (optional; default false; per mark). Accepts a
 //!   `Value::Bool` or the conventional `"italic"` / `"normal"` strings.
 //! - `"family"` — font family name (optional; per mark).
-//! - `"letter_spacing"` — extra advance between glyphs in pt
-//!   (optional; per mark). Widens the arc length each glyph occupies.
+//! - `"tracking"` — letter spacing in 1/1000 em (optional; per mark).
+//!   `20.0` is `0.02 em`. Widens the arc length each glyph occupies.
 //! - `"underline"` / `"strikethrough"` — booleans (optional; per
 //!   mark). Drawn as a stroke that follows the curve at the font's own
 //!   rule offset and thickness, so the rule bends with the text
@@ -136,7 +136,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("weight", ExpectedOutput::Numbers),
     ("italic", ExpectedOutput::Any),
     ("family", ExpectedOutput::Strings),
-    ("letter_spacing", ExpectedOutput::Numbers),
+    ("tracking", ExpectedOutput::Numbers),
     ("markdown", ExpectedOutput::Any),
     ("underline", ExpectedOutput::Any),
     ("strikethrough", ExpectedOutput::Any),
@@ -365,7 +365,7 @@ impl Geom for TextPathGeom {
         let weight_scale = ctx.scale_for("weight");
         let italic_scale = ctx.scale_for("italic");
         let family_scale = ctx.scale_for("family");
-        let letter_spacing_scale = ctx.scale_for("letter_spacing");
+        let tracking_scale = ctx.scale_for("tracking");
         let markdown_scale = ctx.scale_for("markdown");
         let underline_scale = ctx.scale_for("underline");
         let strikethrough_scale = ctx.scale_for("strikethrough");
@@ -401,7 +401,7 @@ impl Geom for TextPathGeom {
         let weight_ch = channels.get("weight");
         let italic_ch = channels.get("italic");
         let family_ch = channels.get("family");
-        let letter_spacing_ch = channels.get("letter_spacing");
+        let tracking_ch = channels.get("tracking");
         let markdown_ch = channels.get("markdown");
         // Kept as an `Arc` so the shape cache can key on its identity.
         let rich_sheet: &Arc<RichTextStyleSheet> =
@@ -441,11 +441,11 @@ impl Geom for TextPathGeom {
                 .unwrap_or(ctx.theme.geom.text_path.weight);
             let italic = resolve_italic(italic_ch, italic_scale, i0);
             let family = resolve_str_opt(family_ch, family_scale, i0);
-            let letter_spacing_pt = resolve_number_channel_or(
-                letter_spacing_ch,
-                letter_spacing_scale,
+            let tracking = resolve_number_channel_or(
+                tracking_ch,
+                tracking_scale,
                 i0,
-                ctx.theme.geom.text_path.letter_spacing_pt,
+                ctx.theme.geom.text_path.tracking,
             ) as f32;
             let underline = resolve_bool_channel_or(
                 underline_ch,
@@ -566,7 +566,7 @@ impl Geom for TextPathGeom {
             let mut style = TextStyle::new(size_pt as f32)
                 .weight(weight)
                 .italic(italic)
-                .letter_spacing_pt(letter_spacing_pt)
+                .tracking(tracking)
                 .underline(underline)
                 .strikethrough(strikethrough);
             if let Some(fam) = family {

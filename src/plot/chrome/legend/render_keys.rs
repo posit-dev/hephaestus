@@ -151,11 +151,7 @@ fn text_key_run(
     let mut style = TextStyle::new(size_pt as f32)
         .weight(resolved.weight.unwrap_or(geom.text.weight))
         .italic(resolved.italic.unwrap_or(false))
-        .letter_spacing_pt(
-            resolved
-                .letter_spacing_pt
-                .unwrap_or(geom.text.letter_spacing_pt) as f32,
-        )
+        .tracking(resolved.tracking.unwrap_or(geom.text.tracking) as f32)
         .underline(resolved.underline.unwrap_or(geom.text.underline))
         .strikethrough(resolved.strikethrough.unwrap_or(geom.text.strikethrough));
     if let Some(family) = resolved.family.as_deref() {

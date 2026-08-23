@@ -358,11 +358,14 @@ pub struct TextStyle {
     pub style: FontStyleKind,
     /// Line height — relative-to-size multiplier or absolute pt.
     pub line_height: LineHeight,
-    /// Letter spacing (tracking) in points — extra horizontal advance
-    /// inserted between every pair of glyphs. `0.0` is the natural
-    /// font advance; positive values loosen, negative values tighten.
-    /// DPI-independent; converted to pixels at shape time.
-    pub letter_spacing_pt: f32,
+    /// Letter spacing (tracking) in 1/1000 em — extra horizontal
+    /// advance inserted between every pair of glyphs, as a fraction of
+    /// the font size, so `20.0` is `0.02 em` and reads the same at
+    /// every size. `0.0` is the natural font advance; positive values
+    /// loosen, negative values tighten. Marquee's unit, and the one
+    /// [`rich::StyleDelta`](crate::text::rich::StyleDelta) uses, so a
+    /// value crosses between the two shapers unchanged.
+    pub tracking: f32,
     /// Underline the text. Drawn at the font's reported underline
     /// position and thickness; the brush passed to [`draw_text`] is
     /// reused for the decoration line.
@@ -388,7 +391,7 @@ impl TextStyle {
             width: 1.0,
             style: FontStyleKind::Normal,
             line_height: LineHeight::default(),
-            letter_spacing_pt: 0.0,
+            tracking: 0.0,
             underline: false,
             strikethrough: false,
             features: Vec::new(),
@@ -450,11 +453,12 @@ impl TextStyle {
         self
     }
 
-    /// Set the letter spacing (tracking) in points. Positive values
-    /// loosen the glyph advance, negative values tighten it; `0.0` is
-    /// the natural advance. DPI-independent.
-    pub fn letter_spacing_pt(mut self, pt: f32) -> Self {
-        self.letter_spacing_pt = pt;
+    /// Set the letter spacing (tracking) in 1/1000 em — `20.0` is
+    /// `0.02 em`. Positive values loosen the glyph advance, negative
+    /// values tighten it; `0.0` is the natural advance. Relative to the
+    /// font size, so it survives a change of size.
+    pub fn tracking(mut self, per_mille_em: f32) -> Self {
+        self.tracking = per_mille_em;
         self
     }
 
@@ -893,7 +897,7 @@ pub fn glyph_marker(text: &str, style: &TextStyle) -> Shape {
         width: style.width,
         style: style.style,
         line_height: style.line_height,
-        letter_spacing_pt: style.letter_spacing_pt,
+        tracking: style.tracking,
         underline: false,
         strikethrough: false,
         features: style.features.clone(),
@@ -1341,10 +1345,11 @@ mod tests {
     }
 
     #[test]
-    fn letter_spacing_widens_the_layout() {
+    fn tracking_widens_the_layout() {
         let base = TextStyle::new(16.0);
-        let loose = TextStyle::new(16.0).letter_spacing_pt(4.0);
-        let tight = TextStyle::new(16.0).letter_spacing_pt(-1.0);
+        // 250 / -62.5 per-mille em at 16pt = +4pt / -1pt.
+        let loose = TextStyle::new(16.0).tracking(250.0);
+        let tight = TextStyle::new(16.0).tracking(-62.5);
         let r_base = TextRun::new("Hello", &base, 96.0).natural_width();
         let r_loose = TextRun::new("Hello", &loose, 96.0).natural_width();
         let r_tight = TextRun::new("Hello", &tight, 96.0).natural_width();
@@ -1355,6 +1360,24 @@ mod tests {
         assert!(
             r_tight < r_base,
             "negative letter spacing should narrow: base={r_base}, tight={r_tight}"
+        );
+    }
+
+    /// Tracking is a fraction of the em, so the same value produces
+    /// proportionally more advance at a larger size — which is what
+    /// lets a fitted or re-sized label keep its letter spacing looking
+    /// the same.
+    #[test]
+    fn tracking_scales_with_the_font_size() {
+        let width_at = |size_pt: f32, tracking: f32| {
+            TextRun::new("nnnnn", &TextStyle::new(size_pt).tracking(tracking), 96.0).natural_width()
+        };
+        let small_added = width_at(10.0, 200.0) - width_at(10.0, 0.0);
+        let large_added = width_at(20.0, 200.0) - width_at(20.0, 0.0);
+        assert!(small_added > 0.0, "tracking should widen: {small_added}");
+        assert!(
+            (large_added / small_added - 2.0).abs() < 0.05,
+            "doubling the size should double the added advance: {small_added} → {large_added}"
         );
     }
 

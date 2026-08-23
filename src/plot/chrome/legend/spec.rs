@@ -64,7 +64,7 @@ pub enum LegendKey {
     Rect,
     /// Glyph sample centred in the swatch cell — what a text layer's
     /// scales read as. Consumes: text, size (as the font size),
-    /// weight, italic, family, letter_spacing, underline,
+    /// weight, italic, family, tracking, underline,
     /// strikethrough, fill, fill_opacity, text_stroke,
     /// text_linewidth, angle. An unbound `text` draws
     /// [`DEFAULT_KEY_TEXT`](super::DEFAULT_KEY_TEXT). Background-rect
@@ -630,8 +630,8 @@ pub struct ResolvedKey {
     /// `"family"` channel.
     pub family: Option<Arc<str>>,
     /// Extra advance between glyphs in pt, from the geom's
-    /// `"letter_spacing"` channel.
-    pub letter_spacing_pt: Option<f64>,
+    /// `"tracking"` channel.
+    pub tracking: Option<f64>,
     /// Underline decoration for [`LegendKey::Text`], from the geom's
     /// `"underline"` channel.
     pub underline: Option<bool>,
@@ -755,9 +755,9 @@ impl ResolvedKey {
                     self.family = Some(Arc::from(s));
                 }
             }
-            "letter_spacing" => {
+            "tracking" => {
                 if let Some(n) = value.as_number() {
-                    self.letter_spacing_pt = Some(n);
+                    self.tracking = Some(n);
                 }
             }
             "underline" => {
@@ -909,7 +909,7 @@ mod tests {
             .fixed("text", Value::String(Arc::from("Aa")))
             .fixed("weight", 700.0_f64)
             .fixed("family", Value::String(Arc::from("Helvetica")))
-            .fixed("letter_spacing", 1.5_f64)
+            .fixed("tracking", 1.5_f64)
             .fixed("underline", Value::Bool(true))
             .fixed("strikethrough", Value::Bool(true))
             .fixed("text_stroke", Value::Color(rgb(1.0, 0.0, 0.0)))
@@ -918,7 +918,7 @@ mod tests {
         assert_eq!(resolved.text.as_deref(), Some("Aa"));
         assert_eq!(resolved.weight, Some(700));
         assert_eq!(resolved.family.as_deref(), Some("Helvetica"));
-        assert_eq!(resolved.letter_spacing_pt, Some(1.5));
+        assert_eq!(resolved.tracking, Some(1.5));
         assert_eq!(resolved.underline, Some(true));
         assert_eq!(resolved.strikethrough, Some(true));
         assert_eq!(resolved.text_stroke, Some(rgb(1.0, 0.0, 0.0)));

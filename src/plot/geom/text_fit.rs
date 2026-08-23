@@ -24,7 +24,8 @@
 //! - `"text"` — string content (required).
 //! - `"family"`, `"weight"`, `"italic"` — font style (no `"size"`
 //!   channel; the geom computes it).
-//! - `"letter_spacing"` — extra advance between glyphs in pt.
+//! - `"tracking"` — letter spacing in 1/1000 em (`20.0` = `0.02 em`),
+//!   so it stays proportional as the fit scales the text.
 //! - `"underline"`, `"strikethrough"` — booleans.
 //! - `"text_stroke"`, `"text_linewidth"` — per-glyph outline colour and
 //!   thickness in pt, drawn behind the fill.
@@ -128,7 +129,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("family", ExpectedOutput::Strings),
     ("weight", ExpectedOutput::Numbers),
     ("italic", ExpectedOutput::Any),
-    ("letter_spacing", ExpectedOutput::Numbers),
+    ("tracking", ExpectedOutput::Numbers),
     ("markdown", ExpectedOutput::Any),
     ("underline", ExpectedOutput::Any),
     ("strikethrough", ExpectedOutput::Any),
@@ -373,7 +374,7 @@ impl Geom for TextFitGeom {
         let family_scale = ctx.scale_for("family");
         let weight_scale = ctx.scale_for("weight");
         let italic_scale = ctx.scale_for("italic");
-        let letter_spacing_scale = ctx.scale_for("letter_spacing");
+        let tracking_scale = ctx.scale_for("tracking");
         let markdown_scale = ctx.scale_for("markdown");
         let underline_scale = ctx.scale_for("underline");
         let strikethrough_scale = ctx.scale_for("strikethrough");
@@ -421,7 +422,7 @@ impl Geom for TextFitGeom {
         let family_ch = channels.get("family");
         let weight_ch = channels.get("weight");
         let italic_ch = channels.get("italic");
-        let letter_spacing_ch = channels.get("letter_spacing");
+        let tracking_ch = channels.get("tracking");
         let markdown_ch = channels.get("markdown");
         // Kept as an `Arc` so the shape cache can key on its identity.
         let rich_sheet: &Arc<RichTextStyleSheet> =
@@ -515,11 +516,11 @@ impl Geom for TextFitGeom {
                 .unwrap_or(ctx.theme.geom.text_fit.weight);
             let italic = resolve_bool_or_italic_string(italic_ch, italic_scale, i);
             let family = resolve_str_channel(family_ch, family_scale, i);
-            let letter_spacing_pt = resolve_number_channel_or(
-                letter_spacing_ch,
-                letter_spacing_scale,
+            let tracking = resolve_number_channel_or(
+                tracking_ch,
+                tracking_scale,
                 i,
-                ctx.theme.geom.text_fit.letter_spacing_pt,
+                ctx.theme.geom.text_fit.tracking,
             ) as f32;
             let underline = resolve_bool_channel_or(
                 underline_ch,
@@ -597,7 +598,7 @@ impl Geom for TextFitGeom {
                 let mut s = TextStyle::new(size_pt)
                     .weight(weight)
                     .italic(italic)
-                    .letter_spacing_pt(letter_spacing_pt)
+                    .tracking(tracking)
                     .underline(underline)
                     .strikethrough(strikethrough);
                 if let Some(f) = &family {

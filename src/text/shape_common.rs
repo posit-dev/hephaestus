@@ -49,9 +49,12 @@ pub(crate) fn push_style_defaults<B: parley::style::Brush>(
         LineHeight::Absolute(pt) => parley::LineHeight::Absolute((pt as f64 * dpi / 72.0) as f32),
     };
     builder.push_default(StyleProperty::LineHeight(line_height));
-    if style.letter_spacing_pt != 0.0 {
-        let letter_spacing_px = (style.letter_spacing_pt as f64 * dpi / 72.0) as f32;
-        builder.push_default(StyleProperty::LetterSpacing(letter_spacing_px));
+    if style.tracking != 0.0 {
+        // Tracking is 1/1000 em, so it resolves against the style's own
+        // size — the same arithmetic the rich path applies per run.
+        let tracking_px =
+            (style.tracking as f64 / 1000.0 * style.size_pt as f64 * dpi / 72.0) as f32;
+        builder.push_default(StyleProperty::LetterSpacing(tracking_px));
     }
     if style.underline {
         builder.push_default(StyleProperty::Underline(true));
@@ -354,10 +357,11 @@ mod tests {
     }
 
     #[test]
-    fn letter_spacing_widens_the_run_by_its_pixel_equivalent() {
+    fn tracking_widens_the_run_by_its_pixel_equivalent() {
         let plain = layout_for(&TextStyle::new(12.0), 96.0).width();
-        let tracked = layout_for(&TextStyle::new(12.0).letter_spacing_pt(9.0), 96.0).width();
-        // 9pt at 96dpi = 12px of extra advance per inter-glyph gap.
+        let tracked = layout_for(&TextStyle::new(12.0).tracking(750.0), 96.0).width();
+        // 750/1000 em at 12pt = 9pt = 12px of extra advance per gap at
+        // 96dpi.
         assert!(
             tracked >= plain + 12.0,
             "expected at least one 12px gap: {plain} → {tracked}"

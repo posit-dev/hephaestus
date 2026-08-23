@@ -320,13 +320,7 @@ impl ResolvedStyle {
             width: base.width,
             size_pt: base.size_pt as f64,
             color: None,
-            // The base style carries letter spacing in pt; convert to
-            // the 1/1000-em unit the delta model uses.
-            tracking: if base.size_pt > 0.0 {
-                base.letter_spacing_pt / base.size_pt * 1000.0
-            } else {
-                0.0
-            },
+            tracking: base.tracking,
             underline: base.underline,
             strikethrough: base.strikethrough,
             baseline_pt: 0.0,

@@ -107,15 +107,15 @@ pub(crate) fn text_style_from(
         Length::Rel(mult) => LineHeight::Relative(mult as f32),
         Length::Abs(pt) => LineHeight::Absolute(pt as f32),
     });
-    let letter_spacing = el
-        .letter_spacing
-        .or(defaults.letter_spacing)
-        .expect("letter_spacing default");
-    let letter_spacing_pt = match letter_spacing {
-        Length::Abs(pt) => pt,
-        Length::Rel(mult) => mult * size as f64,
+    let tracking = el.tracking.or(defaults.tracking).expect("tracking default");
+    // The shaper takes 1/1000 em: `Rel(m)` is m em already, and an
+    // absolute pt value becomes the fraction of this size that it is.
+    let tracking_per_mille = match tracking {
+        Length::Rel(mult) => mult * 1000.0,
+        Length::Abs(pt) if size > 0.0 => pt / size as f64 * 1000.0,
+        Length::Abs(_) => 0.0,
     };
-    style = style.letter_spacing_pt(letter_spacing_pt as f32);
+    style = style.tracking(tracking_per_mille as f32);
     let underline = el
         .underline
         .or(defaults.underline)

@@ -75,6 +75,8 @@ Marquee's four-way model, in `length.rs`. Every measurement on a `StyleDelta` is
 
 `size` resolves first (its `Em` is degenerate and reads as `Relative`), then every other field resolves against that new own size. `LineHeightSpec` is separate because its natural reading is "multiple of the font size" rather than "multiple of the parent's line height". `StyleDelta::skip_inherit` is a `FieldSet` of fields that read the **grandparent** instead of the parent — marquee's mechanism for keeping `sup` inside `sup` from shrinking without bound.
 
+**Tracking is the one measurement outside this vocabulary.** `StyleDelta::tracking` is a bare `f32` in 1/1000 em rather than a `LengthSpec`, because that is marquee's unit and there is no useful absolute reading of it — letter spacing that doesn't follow the em is a bug, not a feature. `TextStyle::tracking` uses the same unit, so `ResolvedStyle::from_base` copies it rather than converting, and `shape.rs` expands it against each element's own resolved size: a heading at `Relative(2.25)` tracks 2.25× as wide as the body around it.
+
 **Do not extend `style_vocab::Length` for this.** Its two-variant `resolve(parent_pt)` is the plot theme's contract, and the theme cascade depends on that shape.
 
 ## Inheritance: one deliberate divergence
