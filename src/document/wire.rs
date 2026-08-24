@@ -23,7 +23,7 @@ pub(crate) const VERSION_MAJOR: u16 = 1;
 /// Only the writer names it: a reader accepts any minor, which is what
 /// makes such a change additive.
 #[cfg(feature = "document-write")]
-pub(crate) const VERSION_MINOR: u16 = 0;
+pub(crate) const VERSION_MINOR: u16 = 1;
 
 /// Header: root composition id and the render hints a consumer can use
 /// as defaults.
@@ -44,6 +44,10 @@ pub(crate) const CHUNK_SCALES: &[u8; 4] = b"SCAL";
 pub(crate) const CHUNK_COMPOSITION: &[u8; 4] = b"COMP";
 /// The plots, with their geoms.
 pub(crate) const CHUNK_PLOTS: &[u8; 4] = b"PLOT";
+/// Marker shapes a plot's registry holds beyond the built-ins.
+pub(crate) const CHUNK_SHAPES: &[u8; 4] = b"SHPS";
+/// Embedded raster images, PNG-encoded.
+pub(crate) const CHUNK_IMAGES: &[u8; 4] = b"IMGS";
 
 /// One chunk's tag and body, as found in a document.
 #[cfg(feature = "document-read")]

@@ -16,12 +16,20 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-# Exactly the three features a render client needs. No `png` / `jpeg` /
-# `tiff` / `webp` (nothing here writes a file), no `document-write` (a
-# consumer only reads), no `google-fonts` (`ureq` has no wasm target), and
-# no `window` (winit would be dead weight beside `canvas`).
+# What a render client needs and no more. `png` is here for the decode
+# half alone: a document can embed the images an `ImageGeom` names, and
+# they travel PNG-encoded, so without it such a plot would render minus
+# its images. Measured at +41 kB brotli — less than the WOFF2 decoder
+# below, and the alternative was carrying raw RGBA8, which is ~70x
+# larger on the wire.
+#
+# Still absent: `jpeg` / `tiff` / `webp` (a document only ever embeds
+# PNG), `document-write` (a consumer only reads), `google-fonts` (`ureq`
+# has no wasm target), and `window` (winit would be dead weight beside
+# `canvas`).
 hephaestus = { path = "../..", default-features = false, features = [
     "document-read",
+    "png",
 ] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

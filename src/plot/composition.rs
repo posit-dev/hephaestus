@@ -1016,6 +1016,26 @@ impl PlotComposition {
         self
     }
 
+    /// Replace the composition-level shape registry in place. Flags the
+    /// layout dirty, since a legend key's glyph can change its measure.
+    pub fn set_shape_registry(&mut self, r: ShapeRegistry) {
+        self.shapes = r;
+        self.layout_dirty = true;
+    }
+
+    /// Mutably borrow the composition-level shape registry, to add or
+    /// replace entries without discarding the built-ins. Flags the
+    /// layout dirty.
+    pub fn shape_registry_mut(&mut self) -> &mut ShapeRegistry {
+        self.layout_dirty = true;
+        &mut self.shapes
+    }
+
+    /// Borrow the composition-level shape registry.
+    pub fn shape_registry_ref(&self) -> &ShapeRegistry {
+        &self.shapes
+    }
+
     // ── Scale registry ────────────────────────────────────────────────
 
     /// Insert a scale under `name`, replacing any previous entry.

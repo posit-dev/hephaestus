@@ -31,13 +31,63 @@ Two things follow, both easy to break:
 
 The read half is gated the same way and checked on 1.86 too, but a reader with no renderer only round-trips — rendering a loaded document needs a backend.
 
+## Registries: shapes always, images on request
+
+Two of the things a plot carries are name-keyed registries rather than
+configuration: `ShapeRegistry` (marker glyphs) and `ImageRegistry` (raster
+images). The geoms resolve *names* against them, so a document that carried
+neither would load fine and silently draw nothing for those rows. Both are
+carried now, in their own chunks, and the two are treated differently because
+their costs differ by three orders of magnitude.
+
+- **`SHPS` — always written, and usually empty.** Every reader rebuilds the
+  built-ins itself, so only the *delta* travels: an entry whose name is not a
+  built-in, or one that replaces a built-in with something else. The delta is
+  computed by comparing shapes, not names, which is what makes overriding
+  `"circle"` travel — hence `Shape: PartialEq`, added for this. A custom shape
+  is a handful of Bézier subpaths, so there is no flag to weigh.
+- **`IMGS` — off by default, behind `WriteOptions::embed_images`.** Pixels are
+  payload, not configuration, which is the line the whole format draws; the
+  reasoning is the same one that keeps `embed_fonts` off. Images travel
+  PNG-encoded: measured 66x–96x smaller than the raw buffer on rendered plot
+  content, and a synthetic 256x256 gradient embeds in 874 bytes against
+  262,144 raw. Photographic content compresses far less, and is the case where
+  naming stays the better answer.
+
+**Both need `png`, and neither half pulls it in.** `document-read` and
+`document-write` stay dependency-free, so a build without `png` reports every
+image through `UnsupportedItem::UnembeddableImage` on write and skips the
+chunk on read. `crates/hephaestus-wasm` enables it deliberately (+46 kB
+brotli); a renderer-free writer on rustc 1.86 does not, and still compiles.
+
+**A glyph-backed shape travels as text, not as a glyph id.** `Shape::glyph`
+holds a resolved face and glyph id because the draw path must not shape per
+frame, but neither survives a trip: an id means nothing outside its own face,
+and a family resolves differently on different machines, so a carried id would
+index some arbitrary other glyph — a failure that renders something plausible.
+So `glyph_marker` records a `GlyphSource { text, style }` and the reader re-runs
+`try_glyph_marker` on it. This is not a workaround; it is the rule stated at the
+top of this file applied to shapes. `try_glyph_marker` exists because the
+panicking original would take down a document load when the reader's fonts
+happen not to ligate a sequence. A shape built straight through `Shape::glyph`
+has no source and is refused as `UnsupportedItem::UnnameableShape`.
+
+**Registry entries are addressed by `(patch id, ordinal)`.** A patch can hold
+several plots, so the position within the patch is part of the address —
+`update_plot_at` is what the read side uses. Both chunks apply *after*
+`from_document`, inserting into registries that already hold what the reader
+rebuilt, so `shape_registry_mut` / `image_registry_mut` rather than the
+replacing setters.
+
 ## Conventions
 
 - **Adding a field to `Theme`, `Scale`, `Plot` or the composition template means adding a line to the matching `impls_*.rs`.** Nothing catches the omission at compile time — a macro invocation lists field *names*, so a new field is silently skipped rather than rejected. `tests/document_roundtrip.rs` catches it only if the field changes pixels.
 - **Discriminants are part of the file format.** Adding an enum variant takes the next free number. Renumbering an existing one silently reinterprets every document already written.
+- **A new chunk is a minor bump; a new field in an existing chunk is a major one.** `parse` returns every chunk including tags it doesn't know and the callers ignore them, and the reader never inspects the minor — that is the whole mechanism. Appending to `Plot::encode`, by contrast, makes an older reader misparse the body it already knows. So content that has to be additive goes in its own chunk, keyed back to what it belongs to, rather than inline. `SHPS` and `IMGS` are the worked examples, and why `VERSION_MINOR` is 1.
+- **An optional chunk is written unconditionally and read tolerantly.** The writer emits an empty table when the payload is off, so byte layout never depends on a flag; the reader treats absence as empty rather than as `MissingChunk`. `FONT` set the pattern and `SHPS` / `IMGS` follow it.
 - **`impl_codec!` for types whose fields this module can name; hand-written impls for encapsulated ones.** `Scale`, `PolarProjection`, `Axis` and `Plot` are read through their accessors and rebuilt through their builders, so decoding runs the same validation as ordinary construction — a document with non-increasing bin edges is refused by `Scale::try_set_bins`, not accepted into a scale that would misplace rows.
 - **There is deliberately no blanket `impl Encode for Arc<T>`.** Whether a shared value is written inline or interned is a decision per type: `Arc<str>` and `Arc<[LinetypeStep]>` are values whose sharing saves only memory, while `Arc<Geometry>` and `Arc<RichTextStyleSheet>` carry *identity* that live code compares by pointer. Omitting the blanket impl forces each new shared type to say which it is.
-- **Encoding is infallible; validation is a separate pass.** `write::unsupported_items` runs first and reports everything at once. That is what lets `Encode::encode` return nothing to check.
+- **Encoding is infallible; validation is a separate pass.** `write::unsupported_items_for` runs first and reports everything at once. That is what lets `Encode::encode` return nothing to check. It exists beside the options-free `unsupported_items` because one problem — an image the caller asked to embed and this build cannot — depends on the `WriteOptions`, and that public signature predates it.
 
 ## Interning and identity
 

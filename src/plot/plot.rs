@@ -595,6 +595,25 @@ impl Plot {
         &self.shapes
     }
 
+    /// Replace this plot's [`ShapeRegistry`] in place, for use inside a
+    /// [`PlotComposition::update_plot`](crate::plot::PlotComposition::update_plot)
+    /// closure.
+    pub fn set_shape_registry(&mut self, r: ShapeRegistry) {
+        self.shapes = r;
+    }
+
+    /// Mutably borrow the shape registry, to add or replace entries
+    /// without discarding the built-ins already in it.
+    pub fn shape_registry_mut(&mut self) -> &mut ShapeRegistry {
+        &mut self.shapes
+    }
+
+    /// Mutably borrow the image registry, to add entries without
+    /// replacing the whole table.
+    pub fn image_registry_mut(&mut self) -> &mut ImageRegistry {
+        &mut self.images
+    }
+
     /// Replace this plot's [`ImageRegistry`].
     /// [`ImageGeom`](crate::plot::ImageGeom) uses the registry to look
     /// up raster images by name at draw time. Empty by default, so a

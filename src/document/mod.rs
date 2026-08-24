@@ -28,6 +28,7 @@
 
 pub(crate) mod codec;
 pub(crate) mod fonts;
+pub(crate) mod images;
 pub(crate) mod impls_core;
 pub(crate) mod impls_plot;
 pub(crate) mod impls_scale;
@@ -35,6 +36,7 @@ pub(crate) mod impls_theme;
 pub(crate) mod intern;
 #[cfg(feature = "document-read")]
 mod read;
+pub(crate) mod shapes;
 pub(crate) mod wire;
 #[cfg(feature = "document-write")]
 mod write;
@@ -42,7 +44,7 @@ mod write;
 #[cfg(feature = "document-read")]
 pub use read::{GeomFactory, ReadContext};
 #[cfg(feature = "document-write")]
-pub use write::{unsupported_items, UnsupportedItem, WriteOptions};
+pub use write::{unsupported_items, unsupported_items_for, UnsupportedItem, WriteOptions};
 
 /// Major version of the document format this build speaks.
 ///
@@ -169,7 +171,7 @@ pub fn write_composition(
 ) -> Result<Vec<u8>, DocumentError> {
     use codec::{Encode, Writer};
 
-    let problems = unsupported_items(comp);
+    let problems = write::unsupported_items_for(comp, opts);
     if !problems.is_empty() && !opts.lossy {
         return Err(DocumentError::Unsupported(problems));
     }
@@ -221,6 +223,16 @@ pub fn write_composition(
             g.as_ref().encode(w);
         }
     });
+    // Marker shapes a caller registered or replaced. Encoded before the
+    // string table because a glyph shape's style names font families.
+    let shape_bytes = w.detached(|w| {
+        shapes::collect(comp).encode(w);
+    });
+    // Raster images, PNG-encoded. Off by default and gated on a codec,
+    // so the common shape of this chunk is an empty table.
+    let image_bytes = w.detached(|w| {
+        images::collect_if(comp, opts.embed_images).encode(w);
+    });
     let strings = w.detached(|w| {
         let table = w.tables().strings().to_vec();
         w.varint(table.len() as u64);
@@ -263,6 +275,8 @@ pub fn write_composition(
             (wire::CHUNK_SCALES, scales),
             (wire::CHUNK_COMPOSITION, composition),
             (wire::CHUNK_PLOTS, plots),
+            (wire::CHUNK_SHAPES, shape_bytes),
+            (wire::CHUNK_IMAGES, image_bytes),
         ],
     );
     Ok(w.finish())
@@ -435,7 +449,7 @@ pub fn read_composition(
         (plots, order)
     };
 
-    Ok(crate::plot::PlotComposition::from_document(
+    let mut composition = crate::plot::PlotComposition::from_document(
         template,
         root_id,
         scales,
@@ -444,5 +458,21 @@ pub fn read_composition(
         plot_order,
         chrome,
         chrome_order,
-    ))
+    );
+
+    // Shapes come last: every registry they add to already holds the
+    // built-ins, so this inserts rather than replaces. An older document
+    // has no such chunk, which reads as no customisation.
+    if let Some(body) = wire::chunk(&chunks, wire::CHUNK_SHAPES) {
+        let mut r = Reader::with_tables(body, ctx, tables.clone());
+        let embedded = shapes::EmbeddedShapes::decode(&mut r)?;
+        shapes::apply(&embedded, &mut composition);
+    }
+    if let Some(body) = wire::chunk(&chunks, wire::CHUNK_IMAGES) {
+        let mut r = Reader::with_tables(body, ctx, tables.clone());
+        let embedded = images::EmbeddedImages::decode(&mut r)?;
+        images::apply_if_supported(&embedded, &mut composition);
+    }
+
+    Ok(composition)
 }

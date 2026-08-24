@@ -427,6 +427,23 @@ and `GeomTheme`'s colour fields default to `None`, so a geom given an explicit
 `fill` keeps it. Marks adapt only when the plot expressed them as palette
 references.
 
+## Images and shapes arrive with the document
+
+A `.hplot` carries the marker shapes a plot registered (always) and, when the
+writer asked for it, the raster images an `ImageGeom` names. Both land in the
+right plot's registry during `read_composition`, so nothing here has to
+participate.
+
+Shapes are free — a custom shape is a few Bézier subpaths, and a document that
+customises nothing pays two varints. Images are not, which is why embedding is
+opt-in on the writing side. Decoding them is what `hephaestus/png` buys, at a
+measured **+46 kB brotli (+5.2%)** for the whole bundle — less than the WOFF2
+decoder already here, and against the alternative of raw RGBA8 on the wire,
+which measured ~70x larger. A glyph-backed marker shape travels as its source
+text rather than a glyph id, so it re-resolves against whatever fonts the page
+registered; where the family is missing it is dropped and those rows draw
+nothing, the same degradation any unresolved name produces.
+
 ## Not built yet
 
 - **`ReadContext` customisation.** Custom geoms and named formatters are not
@@ -434,13 +451,19 @@ references.
   rendering a prepared plot rather than accepting draw commands.
 - **Multiple documents per handle.** One `PlotHandle` is one document; a page
   with several plots creates several.
-- **`ImageRegistry` population.** A document names the images an `ImageGeom`
-  draws rather than carrying their pixels, exactly as it names font families,
-  so the reader has to supply them — and nothing here does. A document holding
-  an `ImageGeom` therefore loads and renders, minus its images. Fonts are the
-  precedent for the fix: a `registerImage(name, bytes)` alongside
-  `registerGoogleFont`, decoding through `hephaestus::image` and landing in
-  `Plot::set_image_registry`.
+- **Page-supplied images.** A document that *embeds* its images renders them
+  here with no help — that is what `hephaestus/png` is in the dependency list
+  for. What is missing is the other direction: a document that only *names* an
+  image has no way for the page to supply it, so those rows draw nothing.
+  Fonts are the precedent for the fix — a `registerImage(name, bytes)` beside
+  `registerGoogleFont`, decoding in JS through `createImageBitmap` +
+  `OffscreenCanvas` (never `getContext('2d')` on the render canvas) and
+  landing in `Plot::image_registry_mut` via `hephaestus::image::from_rgba8`,
+  which needs no codec in the wasm at all.
+- **Page-supplied marker shapes.** Same asymmetry, without the same urgency:
+  custom shapes *are* carried by the document, so a plot authored in Rust
+  arrives complete. Only a page wanting to invent a shape at runtime is stuck,
+  and that needs a path wire format designing — the crate has no path parser.
 
 ## Distribution
 

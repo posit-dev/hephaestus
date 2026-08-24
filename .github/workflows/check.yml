@@ -60,6 +60,16 @@ jobs:
             cargo check --no-default-features --features "$feature"
           done
 
+      # Image embedding gates on `png` *and* on a document direction, so the
+      # two axes have to be crossed. A codec-only helper reachable from the
+      # read half, or a collector reachable from the write half, passes every
+      # single-feature build above and fails exactly one of these.
+      - name: cargo check, document directions crossed with the image codec
+        run: |
+          for feature in document-write,png document-read,png document,png; do
+            cargo check --no-default-features --features "$feature" --all-targets
+          done
+
       # The sparse-strips backend must stand on its own: `--all-features`
       # builds it beside the compute-shader one, which would hide anything it
       # reaches for through the other backend's gates.

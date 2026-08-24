@@ -884,6 +884,31 @@ pub fn run_layout_rules(run: &TextRun) -> Vec<LaidRule> {
 /// will trip this — marker shapes are intentionally restricted to a
 /// single glyph.
 pub fn glyph_marker(text: &str, style: &TextStyle) -> Shape {
+    match glyph_marker_inner(text, style) {
+        Ok(shape) => shape,
+        Err(count) => panic!(
+            "glyph_marker({text:?}): shaped to {count} glyphs, but markers require exactly 1 \
+             (multi-codepoint inputs must ligate to a single composite glyph in the resolved \
+             font)"
+        ),
+    }
+}
+
+/// [`glyph_marker`] without the panic: `None` when `text` does not shape
+/// to exactly one glyph.
+///
+/// Whether a sequence ligates depends on the fonts the running process
+/// happens to have, so a caller rebuilding a shape it did not resolve
+/// itself — loading a plot document, say — cannot know in advance that
+/// it will succeed. Such a caller wants to carry on without the marker
+/// rather than take down the load.
+pub fn try_glyph_marker(text: &str, style: &TextStyle) -> Option<Shape> {
+    glyph_marker_inner(text, style).ok()
+}
+
+/// The shared body. `Err` carries the glyph count, which is what makes
+/// [`glyph_marker`]'s panic say how far off the input was.
+fn glyph_marker_inner(text: &str, style: &TextStyle) -> Result<Shape, usize> {
     // Probe shapes at a known pixel size so the returned em-space
     // bbox divides cleanly back to em units; the marker is resampled
     // to the caller's `size_pt` at draw time. Shape with DPI = 96 so
@@ -905,13 +930,9 @@ pub fn glyph_marker(text: &str, style: &TextStyle) -> Shape {
     };
     let run = TextRun::new(text, &probe, 96.0);
     let laid = run_layout_glyphs(&run);
-    assert_eq!(
-        laid.len(),
-        1,
-        "glyph_marker({text:?}): shaped to {} glyphs, but markers require exactly 1 \
-         (multi-codepoint inputs must ligate to a single composite glyph in the resolved font)",
-        laid.len()
-    );
+    if laid.len() != 1 {
+        return Err(laid.len());
+    }
     let g = &laid[0];
     let s = PROBE_PX as f64;
     let em_origin = Point::new(g.x as f64 / s, g.y as f64 / s);
@@ -937,7 +958,17 @@ pub fn glyph_marker(text: &str, style: &TextStyle) -> Shape {
     let h = em_origin.y;
     let em_bbox = Rect::new(0.0, centre_y - h / 2.0, advance_em, centre_y + h / 2.0);
     let anchor = Point::new(-0.5, 0.0);
-    Shape::glyph(g.font.clone(), g.id, em_bbox, em_origin, anchor)
+    Ok(Shape::glyph_with_source(
+        g.font.clone(),
+        g.id,
+        em_bbox,
+        em_origin,
+        anchor,
+        crate::shape::GlyphSource {
+            text: text.to_string(),
+            style: style.clone(),
+        },
+    ))
 }
 
 // ─── Drawing ────────────────────────────────────────────────────────────────

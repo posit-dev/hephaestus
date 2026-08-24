@@ -38,6 +38,30 @@ pub enum UnsupportedItem {
         /// Where the reference was found.
         location: String,
     },
+
+    /// A registered marker shape is a font glyph built from an
+    /// already-resolved face, so it carries no source text to
+    /// re-resolve from — and a glyph id means nothing outside the face
+    /// it came from. Build it with
+    /// [`glyph_marker`](crate::text::glyph_marker) instead, which
+    /// remembers what it shaped.
+    UnnameableShape {
+        /// Patch of the plot holding it, or empty for the
+        /// composition's own registry.
+        patch: String,
+        /// Name the shape is registered under.
+        name: String,
+    },
+
+    /// [`WriteOptions::embed_images`] is on but this build cannot encode
+    /// the image — the `png` feature is off, or the registry holds a
+    /// pixel format the writer's contract excludes.
+    UnembeddableImage {
+        /// Patch of the plot holding it.
+        patch: String,
+        /// Name the image is registered under.
+        name: String,
+    },
 }
 
 impl std::fmt::Display for UnsupportedItem {
@@ -57,6 +81,18 @@ impl std::fmt::Display for UnsupportedItem {
                 f,
                 "{location} is sized relative to another grid's track, which is \
                  identified by a per-solve id and cannot be carried"
+            ),
+            Self::UnnameableShape { patch, name } => write!(
+                f,
+                "shape {name:?} on patch {patch:?} is a glyph built from a resolved \
+                 face, so it carries no source text; build it with \
+                 `text::glyph_marker` so it can be re-resolved"
+            ),
+            Self::UnembeddableImage { patch, name } => write!(
+                f,
+                "image {name:?} on patch {patch:?} cannot be embedded by this build; \
+                 enable the `png` feature, or leave `embed_images` off and let the \
+                 consumer register it"
             ),
         }
     }
@@ -110,6 +146,30 @@ pub struct WriteOptions {
     /// [`register_font_bytes`]: crate::text::register_font_bytes
     /// [`set_generic_family`]: crate::text::set_generic_family
     pub embed_fonts: bool,
+
+    /// Embed the raster images the plot's [`ImageGeom`]s name. **Off**
+    /// by default.
+    ///
+    /// Images are payload rather than configuration, which is what the
+    /// rest of the format carries, so a document names them and the
+    /// consumer supplies them — the same division fonts follow. A page
+    /// embedding a plot usually serves its own art already, and shipping
+    /// the pixels twice buys nothing.
+    ///
+    /// Turn it on when self-containment matters. The cost is bounded:
+    /// images travel PNG-encoded, which on rendered plot content is
+    /// between 66x and 96x smaller than the raw buffer, so an embedded
+    /// image is kilobytes. Photographic content compresses far less, and
+    /// is the case where naming stays the better answer.
+    ///
+    /// Requires the `png` feature on both halves — `document-read` and
+    /// `document-write` are otherwise dependency-free. Without it a
+    /// writer reports every image through
+    /// [`UnsupportedItem::UnembeddableImage`] and a reader skips the
+    /// section, leaving rows that name an image drawing nothing.
+    ///
+    /// [`ImageGeom`]: crate::plot::ImageGeom
+    pub embed_images: bool,
 }
 
 impl WriteOptions {
@@ -122,6 +182,13 @@ impl WriteOptions {
     /// [`Self::lossy`].
     pub fn lossy(mut self, lossy: bool) -> Self {
         self.lossy = lossy;
+        self
+    }
+
+    /// Embed the raster images the plot names. See
+    /// [`Self::embed_images`].
+    pub fn embed_images(mut self, embed: bool) -> Self {
+        self.embed_images = embed;
         self
     }
 
@@ -178,7 +245,28 @@ pub fn unsupported_items(comp: &PlotComposition) -> Vec<UnsupportedItem> {
         }
     }
 
+    for (patch, name) in super::shapes::unnameable(comp) {
+        out.push(UnsupportedItem::UnnameableShape { patch, name });
+    }
+
     check_template_tracks(&comp.template, &mut out);
+    out
+}
+
+/// [`unsupported_items`], plus the problems that depend on how the
+/// document is being written.
+///
+/// Only [`WriteOptions::embed_images`] adds any: an image is a problem
+/// exactly when the caller asked to carry it and this build cannot. The
+/// options-free entry point stays the one to call when the question is
+/// "can this plot be written at all".
+pub fn unsupported_items_for(comp: &PlotComposition, opts: &WriteOptions) -> Vec<UnsupportedItem> {
+    let mut out = unsupported_items(comp);
+    if opts.embed_images {
+        for (patch, name) in super::images::unembeddable(comp) {
+            out.push(UnsupportedItem::UnembeddableImage { patch, name });
+        }
+    }
     out
 }
 

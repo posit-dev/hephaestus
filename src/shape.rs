@@ -92,7 +92,16 @@ pub enum ShapeStyle {
 /// See the [module documentation](self) for the two placement modes and the
 /// anchor convention. Path and glyph variants are exposed via
 /// [`Shape::kind`] returning a [`ShapeKind`].
-#[derive(Debug, Clone)]
+/// Two shapes are equal when they would draw the same mark: the same
+/// subpaths and style, or the same glyph of the same face.
+///
+/// `bbox` is derived from the rest, so it takes no part. Comparing two
+/// glyph-backed shapes can read both font files — see the note on
+/// [`Font`]'s own `PartialEq` — so this is not for a hot path. What it
+/// is for is deciding whether a registry entry differs from the built-in
+/// of the same name, which is what lets a plot document write only the
+/// shapes a caller actually customised.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Shape {
     content: ShapeContent,
     anchor: Point,
@@ -102,7 +111,7 @@ pub struct Shape {
     bbox: crate::geometry::Rect,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum ShapeContent {
     Paths {
         paths: Vec<Path>,
@@ -113,7 +122,30 @@ enum ShapeContent {
         glyph_id: u32,
         em_bbox: crate::geometry::Rect,
         em_origin: Point,
+        /// What this glyph was resolved from, when it came through
+        /// [`glyph_marker`](crate::text::glyph_marker). Carried so a
+        /// consumer can re-resolve the glyph against its own fonts
+        /// rather than trusting a face-specific id — see
+        /// [`Shape::glyph_source`].
+        source: Option<GlyphSource>,
     },
+}
+
+/// The text and style a glyph-backed [`Shape`] was resolved from.
+///
+/// A glyph id means nothing outside the face it came from, and a family
+/// name resolves to different faces on different machines. The source
+/// text and the style that selected the face are what travel: re-running
+/// [`glyph_marker`](crate::text::glyph_marker) on them reproduces the
+/// shape wherever the same characters can be shaped, which is the same
+/// contract every other piece of text in this crate keeps.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlyphSource {
+    /// The characters that were shaped — usually one, but a ligating
+    /// sequence such as a country-flag emoji is also one glyph.
+    pub text: String,
+    /// The style the face was selected with.
+    pub style: crate::text::TextStyle,
 }
 
 /// Borrowed view of a [`Shape`]'s contents — returned by [`Shape::kind`].
@@ -176,9 +208,53 @@ impl Shape {
                 glyph_id,
                 em_bbox,
                 em_origin,
+                source: None,
             },
             anchor,
             bbox: em_bbox,
+        }
+    }
+
+    /// Construct a glyph-backed shape that remembers what it was
+    /// resolved from, so a consumer can rebuild it against its own
+    /// fonts. [`glyph_marker`](crate::text::glyph_marker) is the caller.
+    pub(crate) fn glyph_with_source(
+        font: Font,
+        glyph_id: u32,
+        em_bbox: crate::geometry::Rect,
+        em_origin: Point,
+        anchor: Point,
+        source: GlyphSource,
+    ) -> Self {
+        Self {
+            content: ShapeContent::Glyph {
+                font,
+                glyph_id,
+                em_bbox,
+                em_origin,
+                source: Some(source),
+            },
+            anchor,
+            bbox: em_bbox,
+        }
+    }
+
+    /// Set the shape's anchor, the point that lands on a placement
+    /// point in mode (B). See the [module documentation](self).
+    pub fn with_anchor(mut self, anchor: Point) -> Self {
+        self.anchor = anchor;
+        self
+    }
+
+    /// What a glyph-backed shape was resolved from, when it is known.
+    ///
+    /// `None` for a path-backed shape, and for a glyph shape built
+    /// through [`Self::glyph`] with an already-resolved id — that
+    /// caller has a face in hand and no source text to offer.
+    pub fn glyph_source(&self) -> Option<&GlyphSource> {
+        match &self.content {
+            ShapeContent::Glyph { source, .. } => source.as_ref(),
+            ShapeContent::Paths { .. } => None,
         }
     }
 
@@ -194,6 +270,7 @@ impl Shape {
                 glyph_id,
                 em_bbox,
                 em_origin,
+                ..
             } => ShapeKind::Glyph {
                 font,
                 glyph_id: *glyph_id,

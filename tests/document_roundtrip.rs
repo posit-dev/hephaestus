@@ -700,3 +700,431 @@ fn an_image_geom_round_trips_once_its_registry_is_restored() {
         );
     }
 }
+
+// ─── Marker shapes ───────────────────────────────────────────────────────────
+
+/// A composition with one plot, bound so `PointGeom` draws a marker per
+/// row and nothing else varies.
+fn shape_case(registry: hephaestus::shape::ShapeRegistry, marker: &str) -> PlotComposition {
+    let marker = Value::String(std::sync::Arc::from(marker));
+    let comp = || {
+        hephaestus::composition::Composition::empty(1, 1).place(
+            1,
+            1,
+            hephaestus::composition::Span::cell(),
+            Patch::new("panel"),
+        )
+    };
+    let mut plot = Plot::new(&comp(), "panel")
+        .bind("x", "x")
+        .bind("y", "y")
+        .shape_registry(registry);
+    plot.add_geom(
+        PointGeom::builder()
+            .set("x", vec![1.0_f64, 2.0, 3.0])
+            .set("y", vec![1.0_f64, 2.0, 3.0])
+            .set("shape", marker)
+            .set("size", 12.0_f64)
+            .set("fill", rgb8(200, 60, 60))
+            .build(),
+    );
+    PlotComposition::new(&comp())
+        .add_scale("x", scale::continuous(0.0..=4.0))
+        .add_scale("y", scale::continuous(0.0..=4.0))
+        .with_plot(plot)
+}
+
+/// A registry holding nothing but the built-ins writes no shape payload:
+/// the reader rebuilds those itself, so a document that customises
+/// nothing pays nothing.
+#[test]
+fn a_builtin_only_registry_costs_the_document_nothing() {
+    use hephaestus::shape::ShapeRegistry;
+
+    let builtin_only = shape_case(ShapeRegistry::with_builtins(), "circle");
+    let bytes = write_composition(&builtin_only, &WriteOptions::new()).expect("writable");
+
+    // The same plot with one extra registered shape, to prove the
+    // comparison is sensitive to a shape actually being carried.
+    let mut extended = ShapeRegistry::with_builtins();
+    extended.insert("wedge-ish", triangle_shape());
+    let customised = shape_case(extended, "circle");
+    let bigger = write_composition(&customised, &WriteOptions::new()).expect("writable");
+
+    assert!(
+        bigger.len() > bytes.len(),
+        "a registered custom shape should add bytes; {} vs {}",
+        bigger.len(),
+        bytes.len()
+    );
+}
+
+/// A hand-built path shape round-trips, and the reloaded plot draws with
+/// it rather than falling back or skipping the row.
+#[test]
+fn a_custom_path_shape_round_trips() {
+    use hephaestus::shape::ShapeRegistry;
+
+    let mut registry = ShapeRegistry::with_builtins();
+    registry.insert("spike", triangle_shape());
+    let mut original = shape_case(registry, "spike");
+
+    let bytes = write_composition(&original, &WriteOptions::new()).expect("writable");
+    let mut reloaded = read_composition(&bytes, &ReadContext::new()).expect("readable");
+
+    // The registry itself came back.
+    let restored = reloaded
+        .plot("panel")
+        .expect("panel plot")
+        .shape_registry_ref()
+        .get("spike")
+        .cloned();
+    assert_eq!(
+        restored.as_ref(),
+        Some(&triangle_shape()),
+        "the custom shape did not survive the round trip"
+    );
+
+    // And the draw calls match, which is what proves the reloaded plot
+    // resolves the name rather than skipping the row.
+    let want = draw_calls(&mut original, 400, 300);
+    let got = draw_calls(&mut reloaded, 400, 300);
+    assert_eq!(want.len(), got.len(), "draw call count changed");
+    for (i, (a, b)) in want.iter().zip(&got).enumerate() {
+        assert!(a == b, "draw call {i} differs:\n  {a:?}\n  {b:?}");
+    }
+}
+
+/// Replacing a built-in travels too. Writing only the names absent from
+/// `builtin::NAMES` would silently drop this, which is why the delta is
+/// computed by comparing shapes rather than names.
+#[test]
+fn overriding_a_builtin_travels() {
+    use hephaestus::shape::ShapeRegistry;
+
+    let mut registry = ShapeRegistry::with_builtins();
+    registry.insert("circle", triangle_shape());
+    let original = shape_case(registry, "circle");
+
+    let bytes = write_composition(&original, &WriteOptions::new()).expect("writable");
+    let reloaded = read_composition(&bytes, &ReadContext::new()).expect("readable");
+
+    let got = reloaded
+        .plot("panel")
+        .expect("panel plot")
+        .shape_registry_ref()
+        .get("circle")
+        .cloned();
+    assert_eq!(
+        got.as_ref(),
+        Some(&triangle_shape()),
+        "an overridden built-in should not revert to the built-in"
+    );
+}
+
+/// A glyph marker travels as its source text and style, not as a
+/// face-specific glyph id, and comes back drawing the same glyph.
+#[test]
+fn a_glyph_shape_travels_as_its_text() {
+    use hephaestus::shape::ShapeRegistry;
+    use hephaestus::text::{glyph_marker, TextStyle};
+
+    let style = TextStyle::default();
+    let arrow = glyph_marker("A", &style);
+    // The source is what makes it carryable.
+    let source = arrow
+        .glyph_source()
+        .expect("glyph_marker records its source");
+    assert_eq!(source.text, "A");
+
+    let mut registry = ShapeRegistry::with_builtins();
+    registry.insert("letter", arrow);
+    let mut original = shape_case(registry, "letter");
+
+    let bytes = write_composition(&original, &WriteOptions::new()).expect("writable");
+    let mut reloaded = read_composition(&bytes, &ReadContext::new()).expect("readable");
+
+    let restored = reloaded
+        .plot("panel")
+        .expect("panel plot")
+        .shape_registry_ref()
+        .get("letter")
+        .cloned()
+        .expect("the glyph shape should have been rebuilt");
+    assert_eq!(
+        restored.glyph_source().map(|s| s.text.as_str()),
+        Some("A"),
+        "the rebuilt shape lost its source text"
+    );
+
+    let want = draw_calls(&mut original, 400, 300);
+    let got = draw_calls(&mut reloaded, 400, 300);
+    assert_eq!(want.len(), got.len(), "draw call count changed");
+    for (i, (a, b)) in want.iter().zip(&got).enumerate() {
+        assert!(a == b, "draw call {i} differs:\n  {a:?}\n  {b:?}");
+    }
+}
+
+/// A glyph shape built straight from a resolved face has no source text,
+/// so it cannot be carried — and the writer says so rather than dropping
+/// it silently.
+#[test]
+fn a_source_less_glyph_shape_is_reported() {
+    use hephaestus::document::UnsupportedItem;
+    use hephaestus::shape::{Shape, ShapeRegistry};
+
+    // Borrow a real face off a resolved glyph marker, then rebuild the
+    // shape through the raw constructor so the source is dropped.
+    let resolved = hephaestus::text::glyph_marker("A", &hephaestus::text::TextStyle::default());
+    let bare = match resolved.kind() {
+        hephaestus::shape::ShapeKind::Glyph {
+            font,
+            glyph_id,
+            em_bbox,
+            em_origin,
+        } => Shape::glyph(
+            font.clone(),
+            glyph_id,
+            em_bbox,
+            em_origin,
+            resolved.anchor(),
+        ),
+        _ => panic!("glyph_marker should produce a glyph shape"),
+    };
+    assert!(bare.glyph_source().is_none());
+
+    let mut registry = ShapeRegistry::with_builtins();
+    registry.insert("bare", bare);
+    let comp = shape_case(registry, "bare");
+
+    let problems = hephaestus::document::unsupported_items(&comp);
+    assert!(
+        problems.iter().any(|p| matches!(
+            p,
+            UnsupportedItem::UnnameableShape { name, .. } if name == "bare"
+        )),
+        "expected an UnnameableShape report, got {problems:?}"
+    );
+
+    // Strict mode refuses; lossy mode drops it and writes.
+    assert!(write_composition(&comp, &WriteOptions::new()).is_err());
+    let bytes = write_composition(&comp, &WriteOptions::new().lossy(true)).expect("lossy writes");
+    let reloaded = read_composition(&bytes, &ReadContext::new()).expect("readable");
+    assert!(
+        reloaded
+            .plot("panel")
+            .expect("panel plot")
+            .shape_registry_ref()
+            .get("bare")
+            .is_none(),
+        "a dropped shape should not reappear"
+    );
+}
+
+/// A three-spike triangle, distinguishable from every built-in.
+fn triangle_shape() -> hephaestus::shape::Shape {
+    use hephaestus::geometry::Point;
+    use hephaestus::path::Path;
+    use hephaestus::shape::{Shape, ShapeStyle};
+
+    let mut p = Path::new();
+    p.move_to((0.0, -0.6));
+    p.line_to((0.55, 0.5));
+    p.line_to((-0.55, 0.5));
+    p.close_path();
+    Shape::new(vec![p], ShapeStyle::Fill, Point::new(-0.8, 0.0))
+}
+
+// ─── Embedded images ─────────────────────────────────────────────────────────
+
+/// A composition whose one plot draws `name` across a data-space rect,
+/// with `registry` supplying the pixels.
+fn image_case(registry: ImageRegistry, name: &str) -> PlotComposition {
+    let comp = || {
+        hephaestus::composition::Composition::empty(1, 1).place(
+            1,
+            1,
+            hephaestus::composition::Span::cell(),
+            Patch::new("panel"),
+        )
+    };
+    let name = Value::String(std::sync::Arc::from(name));
+    let mut plot = Plot::new(&comp(), "panel")
+        .bind("x", "x")
+        .bind("y", "y")
+        .image_registry(registry);
+    plot.add_geom(
+        ImageGeom::builder()
+            .set("image", name)
+            .set("x", vec![2.0_f64])
+            .set("y", vec![2.0_f64])
+            .set("x2", vec![8.0_f64])
+            .set("y2", vec![8.0_f64])
+            .build(),
+    );
+    PlotComposition::new(&comp())
+        .add_scale("x", scale::continuous(0.0..=10.0))
+        .add_scale("y", scale::continuous(0.0..=10.0))
+        .with_plot(plot)
+}
+
+/// A gradient of `side` x `side`, compressible but not trivially so.
+fn gradient_image(side: u32) -> hephaestus::brush::Image {
+    let mut px = Vec::with_capacity((side as usize) * (side as usize) * 4);
+    for y in 0..side {
+        for x in 0..side {
+            px.extend_from_slice(&[(x % 256) as u8, (y % 256) as u8, 128, 255]);
+        }
+    }
+    hephaestus::image::from_rgba8(side, side, px).expect("valid buffer")
+}
+
+fn image_registry_of(side: u32) -> ImageRegistry {
+    let mut r = ImageRegistry::new();
+    r.insert("swatch", gradient_image(side));
+    r
+}
+
+/// With embedding on, the pixels come back — so a reloaded plot draws
+/// its image with no registry restored by hand.
+///
+/// Asserted on the decoded pixels rather than on `Op` equality: a
+/// document-decoded image is a fresh blob, and `Op::DrawImage` compares
+/// blobs by identity.
+#[test]
+fn an_embedded_image_comes_back_without_the_reader_supplying_it() {
+    let source = image_case(image_registry_of(16), "swatch");
+    let bytes = write_composition(&source, &WriteOptions::new().embed_images(true))
+        .expect("a writable plot");
+
+    let reloaded = read_composition(&bytes, &ReadContext::new()).expect("a readable document");
+    let got = reloaded
+        .plot("panel")
+        .expect("panel plot")
+        .image_registry_ref()
+        .get("swatch")
+        .cloned()
+        .expect("the embedded image should have been decoded");
+
+    let want = gradient_image(16);
+    assert_eq!((got.width, got.height), (want.width, want.height));
+    assert_eq!(
+        got.data.as_ref(),
+        want.data.as_ref(),
+        "PNG embedding must be lossless"
+    );
+}
+
+/// Embedding is off by default, and a document that only names an image
+/// stays the same size however large the image is. This is the property
+/// the whole registry design exists for.
+#[test]
+fn naming_an_image_costs_the_document_nothing() {
+    let small = write_composition(
+        &image_case(image_registry_of(8), "swatch"),
+        &WriteOptions::new(),
+    )
+    .expect("writable");
+    let large = write_composition(
+        &image_case(image_registry_of(512), "swatch"),
+        &WriteOptions::new(),
+    )
+    .expect("writable");
+    assert_eq!(
+        small.len(),
+        large.len(),
+        "a named image must not put its pixels in the document"
+    );
+
+    // And a reload draws nothing, since nothing supplied the pixels.
+    let mut reloaded = read_composition(&small, &ReadContext::new()).expect("readable");
+    assert!(
+        !draw_calls(&mut reloaded, 400, 300)
+            .iter()
+            .any(|op| matches!(op, Op::DrawImage { .. })),
+        "a reader given no pixels should draw no image"
+    );
+}
+
+/// Embedding costs far less than the raw buffer. A gradient is a
+/// pessimistic case next to a rendered plot, and still lands well under
+/// half.
+#[test]
+fn embedding_costs_far_less_than_the_raw_pixels() {
+    let side = 256u32;
+    let raw = (side * side * 4) as usize;
+    let embedded = write_composition(
+        &image_case(image_registry_of(side), "swatch"),
+        &WriteOptions::new().embed_images(true),
+    )
+    .expect("writable");
+    let named = write_composition(
+        &image_case(image_registry_of(side), "swatch"),
+        &WriteOptions::new(),
+    )
+    .expect("writable");
+    let payload = embedded.len() - named.len();
+    assert!(
+        payload < raw / 2,
+        "embedded payload is {payload} bytes against {raw} raw"
+    );
+    println!("embedded {payload} bytes for a {side}x{side} image; raw would be {raw}");
+}
+
+/// Embedding twice must produce the same bytes, which the PNG encoder
+/// and the sorted registry walk together guarantee.
+#[test]
+fn an_embedded_document_is_stable_across_a_second_write() {
+    let opts = WriteOptions::new().embed_images(true);
+    let first =
+        write_composition(&image_case(image_registry_of(32), "swatch"), &opts).expect("writable");
+    let reloaded = read_composition(&first, &ReadContext::new()).expect("readable");
+    let second = write_composition(&reloaded, &opts).expect("writable");
+    assert_eq!(
+        first, second,
+        "write -> read -> write changed the bytes of an embedded document"
+    );
+}
+
+/// An older reader — one built without the codec — skips the section
+/// rather than failing, exactly as it would an unknown chunk.
+#[test]
+fn an_embedded_document_still_loads_for_a_reader_that_cannot_decode() {
+    // Simulated by naming an image the writer embedded and confirming
+    // the document is otherwise intact: the chunk is additive, so the
+    // rest of the plot must read the same as the un-embedded form.
+    let embedded = write_composition(
+        &image_case(image_registry_of(16), "swatch"),
+        &WriteOptions::new().embed_images(true),
+    )
+    .expect("writable");
+    let mut with = read_composition(&embedded, &ReadContext::new()).expect("readable");
+
+    let named = write_composition(
+        &image_case(image_registry_of(16), "swatch"),
+        &WriteOptions::new(),
+    )
+    .expect("writable");
+    let mut without = read_composition(&named, &ReadContext::new()).expect("readable");
+
+    // The embedded one draws its image; the named one does not. Every
+    // other draw call is shared, which is what proves the chunk is
+    // purely additive.
+    let a = draw_calls(&mut with, 400, 300);
+    let b = draw_calls(&mut without, 400, 300);
+    let images_a = a
+        .iter()
+        .filter(|o| matches!(o, Op::DrawImage { .. }))
+        .count();
+    let images_b = b
+        .iter()
+        .filter(|o| matches!(o, Op::DrawImage { .. }))
+        .count();
+    assert_eq!(images_a, 1, "the embedded document should draw its image");
+    assert_eq!(images_b, 0, "the named document has no pixels to draw");
+    assert_eq!(
+        a.len() - images_a,
+        b.len() - images_b,
+        "the two documents should agree on every non-image draw call"
+    );
+}

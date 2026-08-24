@@ -572,6 +572,10 @@ name = "image_writers"
 required-features = ["vello"]
 
 [[test]]
+name = "image_geom"
+required-features = ["vello", "png"]
+
+[[test]]
 name = "document_roundtrip"
 required-features = ["vello", "document"]
 
