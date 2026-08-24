@@ -122,6 +122,73 @@ pub fn from_rgba8(width: u32, height: u32, pixels: Vec<u8>) -> io::Result<crate:
     })
 }
 
+/// Which format a byte buffer holds, as far as its signature says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Signature {
+    Png,
+    Jpeg,
+    Tiff,
+    WebP,
+}
+
+/// Read a buffer's format from its leading bytes. `None` when the bytes match
+/// no format this module knows, whether or not its codec is compiled in.
+fn signature(bytes: &[u8]) -> Option<Signature> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return Some(Signature::Png);
+    }
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Some(Signature::Jpeg);
+    }
+    if bytes.starts_with(b"II\x2a\x00") || bytes.starts_with(b"MM\x00\x2a") {
+        return Some(Signature::Tiff);
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some(Signature::WebP);
+    }
+    None
+}
+
+/// Decode image bytes of any format this build reads.
+///
+/// Dispatch is on the buffer's signature rather than on a filename, so a
+/// `.png` holding a JPEG still decodes and a location with no extension is no
+/// obstacle. A format whose codec is not compiled in reports
+/// [`io::ErrorKind::Unsupported`] — which is the distinction a caller needs to
+/// tell "this build cannot read that" from "those bytes are not an image".
+pub fn decode_image(bytes: &[u8]) -> io::Result<crate::brush::Image> {
+    let Some(signature) = signature(bytes) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bytes match no supported image format",
+        ));
+    };
+    match signature {
+        #[cfg(feature = "png")]
+        Signature::Png => decode_png(bytes),
+        #[cfg(feature = "jpeg")]
+        Signature::Jpeg => decode_jpeg(bytes),
+        #[cfg(feature = "tiff")]
+        Signature::Tiff => decode_tiff(bytes),
+        #[cfg(feature = "webp")]
+        Signature::WebP => decode_webp(bytes),
+        #[allow(unreachable_patterns)]
+        other => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("{other:?} images need a codec this build was not compiled with"),
+        )),
+    }
+}
+
+/// Read an image file of any format this build reads.
+///
+/// The whole file is read before dispatch, since the signature decides which
+/// decoder gets it. See [`decode_image`] for how a format this build cannot
+/// decode is reported.
+pub fn read_image(path: impl AsRef<std::path::Path>) -> io::Result<crate::brush::Image> {
+    decode_image(&std::fs::read(path)?)
+}
+
 /// Widen interleaved 8-bit samples to RGBA8.
 ///
 /// `channels` counts samples per pixel: 1 grey, 2 grey + alpha, 3 RGB, 4

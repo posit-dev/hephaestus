@@ -158,7 +158,9 @@ pub struct Plot {
     caption: Option<String>,
 
     shapes: ShapeRegistry,
-    images: ImageRegistry,
+    /// Behind an `Arc` so the chrome layer can carry it into every
+    /// markdown slot without a borrow that outlives the draw call.
+    images: std::sync::Arc<ImageRegistry>,
 
     /// Axes attached to this plot. Composed explicitly via
     /// [`Self::add_axis`]; no axis is rendered unless the caller
@@ -291,7 +293,7 @@ impl Plot {
             subtitle: None,
             caption: None,
             shapes: ShapeRegistry::with_builtins(),
-            images: ImageRegistry::new(),
+            images: std::sync::Arc::new(ImageRegistry::new()),
             axes: Vec::new(),
             next_axis_id: 0,
             legends: Vec::new(),
@@ -611,7 +613,7 @@ impl Plot {
     /// Mutably borrow the image registry, to add entries without
     /// replacing the whole table.
     pub fn image_registry_mut(&mut self) -> &mut ImageRegistry {
-        &mut self.images
+        std::sync::Arc::make_mut(&mut self.images)
     }
 
     /// Replace this plot's [`ImageRegistry`].
@@ -619,7 +621,7 @@ impl Plot {
     /// up raster images by name at draw time. Empty by default, so a
     /// plot that draws no images carries no pixels.
     pub fn image_registry(mut self, r: ImageRegistry) -> Self {
-        self.images = r;
+        self.images = std::sync::Arc::new(r);
         self
     }
 
@@ -632,7 +634,7 @@ impl Plot {
     /// [`PlotComposition::update_plot`](crate::plot::PlotComposition::update_plot)
     /// closure.
     pub fn set_image_registry(&mut self, r: ImageRegistry) {
-        self.images = r;
+        self.images = std::sync::Arc::new(r);
     }
 
     // ── Mutators ──
@@ -1279,7 +1281,7 @@ impl Plot {
                     r,
                     c,
                     crate::composition::Span::rc(rs, cs),
-                    text_cell_for_element(t, &el, root_pt, dpi, theme),
+                    text_cell_for_element(t, &el, root_pt, dpi, theme, &self.images),
                 );
             }
         }
@@ -1315,7 +1317,7 @@ impl Plot {
             let Some(text) = self.strip_at(side) else {
                 continue;
             };
-            let Some(measure) = StripMeasure::new(text, side, theme, dpi) else {
+            let Some(measure) = StripMeasure::new(text, side, theme, dpi, &self.images) else {
                 continue;
             };
             patch = patch.slot(strip_slot(side), Cell::measured(measure));
@@ -1345,7 +1347,13 @@ impl Plot {
                             patch = patch.slot(
                                 slot,
                                 Cell::measured(BoxMeasure::new(
-                                    crate::plot::chrome::axis::measure(scale, side, dpi, theme),
+                                    crate::plot::chrome::axis::measure(
+                                        scale,
+                                        side,
+                                        dpi,
+                                        theme,
+                                        &self.images,
+                                    ),
                                 )),
                             );
                         }
@@ -1367,7 +1375,8 @@ impl Plot {
                             crate::plot::theme::TitleLocation::Outside
                         ) {
                             let slot = cartesian_axis_title_slot(side);
-                            patch = patch.slot(slot, axis_title_cell(title, side, theme, dpi));
+                            patch = patch
+                                .slot(slot, axis_title_cell(title, side, theme, dpi, &self.images));
                         }
                     }
                 }
@@ -1442,6 +1451,7 @@ impl Plot {
                 theme,
                 dpi,
                 root_pt,
+                &self.images,
             )
             .text_style
         };
@@ -1562,7 +1572,8 @@ impl Plot {
         if axes.is_empty() {
             return patch;
         }
-        let bleed = crate::plot::chrome::polar::compute_polar_bleed(&axes, dpi, theme);
+        let bleed =
+            crate::plot::chrome::polar::compute_polar_bleed(&axes, dpi, theme, &self.images);
         for side in [
             AxisSide::Top,
             AxisSide::Right,
@@ -1610,7 +1621,14 @@ impl Plot {
                             let slot = cartesian_axis_slot(side);
                             if let Some(slot_rect) = layout.get(&self.patch_id, slot) {
                                 crate::plot::chrome::axis::draw(
-                                    scale, scene, slot_rect, panel_rect, side, dpi, theme,
+                                    scale,
+                                    scene,
+                                    slot_rect,
+                                    panel_rect,
+                                    side,
+                                    dpi,
+                                    theme,
+                                    &self.images,
                                 );
                             }
                         }
@@ -1634,6 +1652,7 @@ impl Plot {
                                 dpi,
                                 axis.title_ref(),
                                 theme,
+                                &self.images,
                             );
                         }
                     }
@@ -1656,6 +1675,7 @@ impl Plot {
                                 dpi,
                                 axis.title_ref(),
                                 theme,
+                                &self.images,
                             );
                         }
                     }
@@ -1679,7 +1699,7 @@ impl Plot {
             let Some(rect) = layout.get(&self.patch_id, strip_slot(side)) else {
                 continue;
             };
-            draw_strip(scene, text, rect, side, theme, dpi);
+            draw_strip(scene, text, rect, side, theme, dpi, &self.images);
         }
     }
 
@@ -1704,6 +1724,7 @@ impl Plot {
                         side,
                         registry,
                         &self.shapes,
+                        &self.images,
                         dpi,
                         theme,
                     ),
@@ -1752,6 +1773,7 @@ impl Plot {
                     rect,
                     registry,
                     &self.shapes,
+                    &self.images,
                     scene,
                     dpi,
                     theme,
@@ -1772,6 +1794,7 @@ impl Plot {
                     &group,
                     registry,
                     &self.shapes,
+                    &self.images,
                     dpi,
                     theme,
                 );
@@ -1786,6 +1809,7 @@ impl Plot {
                     slot_rect,
                     registry,
                     &self.shapes,
+                    &self.images,
                     scene,
                     dpi,
                     theme,
@@ -1823,6 +1847,7 @@ impl Plot {
                 dpi,
                 crate::pick::PickId::Skip,
                 Some(&theme.rich_text),
+                &self.images,
             );
         }
 
@@ -1875,6 +1900,7 @@ impl Plot {
                                 fill_col,
                                 &theme.palette,
                                 &theme.rich_text,
+                                &self.images,
                                 dpi,
                                 rect,
                                 side,
@@ -1973,6 +1999,7 @@ impl Plot {
                         dpi,
                         crate::pick::PickId::Skip,
                         Some(&theme.rich_text),
+                        &self.images,
                     );
                 }
             }
@@ -2266,6 +2293,7 @@ mod tests {
             96.0,
             crate::pick::PickId::Id(7),
             None,
+            &crate::image_registry::no_images(),
         );
         scene
     }
@@ -2337,6 +2365,7 @@ mod tests {
             96.0,
             crate::pick::PickId::Skip,
             Some(&sheet),
+            &crate::image_registry::no_images(),
         );
         use crate::scene::recording::Op;
         let runs: Vec<_> = scene
@@ -2376,6 +2405,7 @@ mod tests {
             96.0,
             crate::pick::PickId::Skip,
             Some(&sheet),
+            &crate::image_registry::no_images(),
         );
         use crate::scene::recording::Op;
         // Every glyph run has the same font_size on the plain path.

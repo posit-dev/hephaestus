@@ -185,6 +185,15 @@ pub enum RichEvent {
     InlineMath(String),
     /// Display `$$math$$`, passed through as its source text.
     DisplayMath(String),
+    /// An image, identified by the location its tag names.
+    ///
+    /// Alt text is dropped, following marquee: the location is the
+    /// element's whole payload, and the register it resolves against is
+    /// keyed on it.
+    Image {
+        /// The image's location, verbatim from the tag.
+        dest: String,
+    },
     /// A soft line break (single newline in the source).
     SoftBreak,
     /// A hard line break (trailing `\` or two spaces before newline).
@@ -245,6 +254,7 @@ fn translate_chunk(md: &str, out: &mut Vec<RichEvent>) {
         spans: Vec::new(),
         code_block_depth: 0,
         emphasis_underscore: Vec::new(),
+        image_depth: 0,
     };
     for (event, range) in Parser::new_ext(md, opts).into_offset_iter() {
         translate_event(event, range, md, out, &mut state);
@@ -266,6 +276,10 @@ struct ChunkState {
     /// One entry per open `Tag::Emphasis`, recording whether its
     /// delimiter was `_` (underline) rather than `*` (italic).
     emphasis_underscore: Vec<bool>,
+    /// Nesting depth of image tags. Everything inside one is
+    /// suppressed — the location is the element's whole content, so
+    /// alt text and any markup in it render nothing.
+    image_depth: usize,
 }
 
 /// One piece of the source, produced by [`split_divs`].
@@ -386,7 +400,24 @@ fn translate_event(
     out: &mut Vec<RichEvent>,
     state: &mut ChunkState,
 ) {
+    // Inside an image tag nothing but the tag's own boundaries
+    // matters: alt text, nested emphasis and nested images alike are
+    // the tag's payload, and the payload we keep is the location.
+    if state.image_depth > 0 {
+        match event {
+            Event::Start(Tag::Image { .. }) => state.image_depth += 1,
+            Event::End(TagEnd::Image) => state.image_depth -= 1,
+            _ => {}
+        }
+        return;
+    }
     match event {
+        Event::Start(Tag::Image { dest_url, .. }) => {
+            state.image_depth += 1;
+            out.push(RichEvent::Image {
+                dest: dest_url.into_string(),
+            });
+        }
         Event::Start(Tag::Emphasis) => {
             // CommonMark forbids intraword `_`, so the byte at the
             // tag's start is always the opening delimiter.
@@ -478,9 +509,10 @@ fn translate_start_tag(tag: Tag<'_>, out: &mut Vec<RichEvent>) {
             dest: dest_url.into_string(),
         }),
         // Ignored / out-of-scope tags: HtmlBlock, FootnoteDefinition,
-        // DefinitionList (+ friends), Table (+ friends), Image,
-        // MetadataBlock. `Emphasis` is handled by the caller, which
-        // needs the source range to tell `*` from `_`.
+        // DefinitionList (+ friends), Table (+ friends),
+        // MetadataBlock. `Emphasis` and `Image` are handled by the
+        // caller — the first needs the source range to tell `*` from
+        // `_`, the second suppresses its own contents.
         _ => {}
     }
 }

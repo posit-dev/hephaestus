@@ -30,8 +30,10 @@
 //! Channels consumed:
 //!
 //! - `"image"` — registry name (required). May be a constant, which covers
-//!   "one image behind the whole panel". A name the registry doesn't hold
-//!   draws nothing for that row.
+//!   "one image behind the whole panel". A name the registry doesn't hold is
+//!   read as a location — a file path, or a URL with the `image-url` feature —
+//!   so a column of paths works without registering anything. A name that
+//!   resolves neither way draws nothing for that row.
 //! - `"x"`, `"y"` — the image's anchor (required; data; numeric).
 //! - `"x2"`, `"y2"` — the opposite edge, switching that axis to a data-space
 //!   extent.
@@ -294,12 +296,11 @@ impl Geom for ImageGeom {
         let pick_id_ch = channels.get("pick_id");
 
         for i in 0..n {
-            // ── The image itself. A name the registry doesn't hold draws
+            // ── The image itself. A name that resolves to nothing draws
             // nothing, matching how PointGeom treats an unknown shape name.
             let name = resolve_str_channel_or(image_ch, image_scale, i, "");
-            let image = match ctx.images.get(&name) {
-                Some(im) => im,
-                None => continue,
+            let Some(image) = ctx.images.resolve(&name) else {
+                continue;
             };
             let img_w = f64::from(image.width);
             let img_h = f64::from(image.height);
@@ -509,7 +510,7 @@ impl Geom for ImageGeom {
                     &rect_path(target),
                 );
             }
-            scene.draw_image(image, xform, sampling, opacity, pick);
+            scene.draw_image(&image, xform, sampling, opacity, pick);
             if clipped {
                 scene.pop_layer();
             }

@@ -9,6 +9,10 @@
 //!   to `0.0` rather than assuming bar-chart intent.
 //! - `image_geom_3_fit.png` — the same non-square image in three
 //!   identical boxes under `"stretch"`, `"contain"` and `"cover"`.
+//! - `image_geom_4_markdown.png` — images inside markdown: one inline in
+//!   a title, one inline in a text row, one alone in its paragraph (so it
+//!   fills the column), and a location that resolves to nothing, which
+//!   draws the placeholder.
 //!
 //! Every image here is generated in-process and round-tripped through the
 //! PNG codec in `hephaestus::image`, so the example also exercises the
@@ -22,7 +26,9 @@ use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{Composition, Patch, Span};
 use hephaestus::geometry::Size;
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
-use hephaestus::plot::{scale, ImageGeom, ImageRegistry, Plot, PlotComposition, RectGeom};
+use hephaestus::plot::{
+    scale, ImageGeom, ImageRegistry, Plot, PlotComposition, RectGeom, TextGeom,
+};
 use hephaestus::scales::chrome::AxisSide;
 use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
@@ -206,6 +212,65 @@ fn main() {
             dpi,
             bg,
             "examples/image_geom_3_fit.png",
+        );
+    }
+
+    // ── Render 4: images inside markdown ─────────────────────────────
+    {
+        let mut registry = ImageRegistry::new();
+        registry.insert("arrow", arrow(48, 48));
+        registry.insert("wide", grid(96, 32));
+
+        let mut theme = hephaestus::plot::theme::Theme::default();
+        // Chrome text parses markdown, so the title's tags resolve.
+        theme.text.markdown = Some(true);
+
+        let mut plot = Plot::new(&comp(), "panel")
+            .bind("x", "x_axis")
+            .bind("y", "y_axis")
+            .image_registry(registry)
+            .title("Inline ![](arrow) in a title, and a broken one ![](nope.png)");
+        plot.add_geom(
+            TextGeom::builder()
+                .set("x", vec![2.0_f64, 5.5])
+                .set("y", vec![3.0_f64, 1.5])
+                .set(
+                    "text",
+                    vec![
+                        "one em tall: ![](arrow) then more text".to_string(),
+                        // A tag alone in its paragraph is a block image,
+                        // so it fills the width it is broken to.
+                        "![](wide)".to_string(),
+                    ],
+                )
+                .set("markdown", true)
+                .set("size", 11.0_f64)
+                .set("width", 120.0_f64)
+                .build(),
+        );
+        plot.add_axis(Axis::rail(
+            "x_axis",
+            AxisPlacement::Cartesian(AxisSide::Bottom),
+        ));
+        plot.add_axis(Axis::rail(
+            "y_axis",
+            AxisPlacement::Cartesian(AxisSide::Left),
+        ));
+
+        let mut view = PlotComposition::new(&comp())
+            .add_scale("x_axis", scale::continuous(0.0..=9.0))
+            .add_scale("y_axis", scale::continuous(0.0..=4.0))
+            .theme(theme)
+            .with_plot(plot);
+
+        render_to(
+            &mut renderer,
+            &mut view,
+            800,
+            500,
+            dpi,
+            bg,
+            "examples/image_geom_4_markdown.png",
         );
     }
 }

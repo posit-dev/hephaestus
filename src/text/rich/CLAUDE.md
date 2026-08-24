@@ -9,11 +9,11 @@ Modelled on the R package [marquee](https://marquee.r-lib.org). Where this modul
 Four stages, each in its own file, each consuming the previous stage's output and nothing else:
 
 1. **`parser.rs`** — markdown → `Vec<RichEvent>`. Wraps `pulldown-cmark` (strikethrough / superscript / subscript / math enabled) and layers on two extensions: a line-based pre-pass for `:::class` fenced divs, and a per-`Text`-payload post-pass for `{selector body}` inline spans.
-2. **`reduce.rs`** — events → `BuiltRuns { text, inline, baseline_shifts, blocks }`. Flattens the document into one `String` plus byte-ranged side tables. This is where the style cascade happens: the reducer keeps a stack of `ResolvedStyle` and hands every inline run and every block a fully resolved style, lengths already in points.
+2. **`reduce.rs`** — events → `BuiltRuns { text, inline, baseline_shifts, blocks, objects }`. Flattens the document into one `String` plus byte-ranged side tables. This is where the style cascade happens: the reducer keeps a stack of `ResolvedStyle` and hands every inline run and every block a fully resolved style, lengths already in points.
 3. **`shape.rs`** — `BuiltRuns` → `RichTextRun`. One `parley::Layout<RichBrush>` per top-level *leaf* block, shaped at its effective content width; container blocks contribute insets, spacing chains and list markers to the leaves inside them. `wrap.rs::stack_blocks` then positions the leaves vertically.
 4. **`draw.rs`** / **`border.rs`** — a positioned `RichTextRun` → `SceneBuilder` calls: block paints first, then list markers, then glyph runs with their span chrome and decorations.
 
-Supporting files: `length.rs` (the measurement vocabulary), `style.rs` (`StyleDelta` / `ResolvedStyle` / `RichTextStyleSheet` / `css_color`), `block.rs` (block paints), `anchor.rs` (`RichAnchor` positioning), `cache.rs` (`RichShapeCache`), `flat.rs` (flattening, below), `tests.rs` (shape / wrap / draw tests).
+Supporting files: `image.rs` (image tags — resolution, box sizing, the placeholder), `length.rs` (the measurement vocabulary), `style.rs` (`StyleDelta` / `ResolvedStyle` / `RichTextStyleSheet` / `css_color`), `block.rs` (block paints), `anchor.rs` (`RichAnchor` positioning), `cache.rs` (`RichShapeCache`), `flat.rs` (flattening, below), `tests.rs` (shape / wrap / draw tests).
 
 ## Flattening: what survives leaving the box
 
@@ -31,10 +31,13 @@ single-paragraph run never pays for it. A heading followed by a
 paragraph therefore reads as one string, keeping its per-span sizes.
 
 **The block geometry is what gets dropped**: block `y`, indents,
-margins, list markers, span backgrounds and borders. None of them
-survive because none of them mean anything on a curve — a rect cannot
-bend. Per-span `text_stroke` goes too, since attributing it needs the
-`InlineRun` brush matching that only `draw.rs` does. What survives is
+margins, list markers, span backgrounds and borders, and images. None of
+them survive because none of them mean anything on a curve — a rect
+cannot bend, which puts an image in the same set as a background. The
+advance an image's box reserved does stay, so a flattened run has a gap
+where the picture would have been. Per-span `text_stroke` goes too,
+since attributing it needs the `InlineRun` brush matching that only
+`draw.rs` does. What survives is
 everything carried by a glyph: font, size, weight, slant, colour, and
 the `sup` / `sub` baseline shift, which arrives as a per-glyph `dy` a
 caller adds to its own perpendicular offset.
@@ -134,9 +137,70 @@ Two layers:
 
 Every *unwrapped* slot is cached: break labels, legend and colorbar titles, polar labels, legend text swatches. They shape at natural width and never re-break, so `RichTextWidth::Natural` is the whole of their width key. `plot::chrome::text` owns that cache and hands out `ChromeRun`s from it; see `src/plot/CLAUDE.md` for why it's thread-local rather than owned by a `Plot`.
 
+## Images
+
+`![alt](location)` renders. The alt text does not: marquee's parser
+records the location as the element's whole payload and suppresses
+everything inside the tag, so nested markup in the alt renders nothing
+either. The location is the only thing the tag carries, which is what
+makes it the key.
+
+**Resolution** goes through an `ImageRegistry` (`crate::image_registry`,
+lifted to the crate root so `src/text/` can reach it without importing
+`src/plot/`). A registered name wins; otherwise the name is read as a
+location — a filesystem path, or an `http(s)` URL with the `image-url`
+feature — and cached back into the register, both the hit and the miss.
+That fallback is what makes `![](logo.png)` work with no setup, and
+registration-wins is what makes the same document work in a browser,
+where the pixels arrive embedded in the document under the same name.
+
+Resolution happens **once, at shape time**: the pixels and the box live
+on the run, so a re-break needs no register and `draw_rich_text` takes
+none. `RichKey` carries the register's address for the same reason it
+carries the sheet's — two plots on one thread can name different pixels
+with the same markdown.
+
+**Sizing follows marquee** (`R/grob.R:397-480`):
+
+- **Inline**: one em tall — the em of the `img` element, so `{.24
+  ![](logo.png)}` is a 24pt logo — and the pixel aspect ratio wide.
+- **Block**, meaning a tag that was the whole content of its paragraph:
+  fills the block's width, height from the aspect ratio. The paragraph
+  takes the `img` style on top of its own, which is how marquee lets
+  `align` centre the picture. A block image re-shapes on a width change
+  rather than re-breaking, since its box is baked into the layout.
+- With no column to fill — a run shaped at natural width, which is every
+  unwrapped chrome slot — a block image falls back to its own pixels read
+  as pt. This is the one deviation: marquee always has a container.
+- Vertically, an inline image's em box centres on the font's ink band
+  rather than sitting on the baseline (marquee's `y_adjust`), so an icon
+  reads level with the text around it.
+
+**A location that gives nothing** draws marquee's placeholder: a framed
+box with a diagonal cross, one em square — a block image with nothing
+behind it stays that square instead of filling its column, since without
+an aspect ratio a column-wide box has no height to take, and a missing
+picture has no claim on the space a real one would have had. (This is
+where marquee's `img_asp` comes in, and why we have no equivalent: its
+image tag can name a grob or a ggplot, which carries no intrinsic size,
+so a fallback ratio is the only way to give one a height. Everything a
+hephaestus tag can resolve to is a raster, and a raster brings its own
+ratio.) Frame and cross come off the reserved `broken_image` selector —
+`border_color` / `border_width` for the frame, `color` /
+`text_stroke_width` for the cross — so a theme can restyle both without
+new vocabulary, and a build with no codec compiled in degrades to the
+placeholder rather than to nothing.
+
+**Mechanically**, `reduce` emits one zero-width space per tag so the
+object owns a byte position and an `InlineRun` (whose resolved style is
+what the em comes from), and `shape` turns each into a parley
+`InlineBox`. Span padding already uses inline boxes, numbered from zero
+up; images take ids from `OBJECT_ID_BASE`, and the draw pass tells the
+two apart by that. `compute_ink_band` unions the image rects, or a slot
+measured off the glyphs alone would clip a picture taller than its line.
+
 ## Known limitations
 
-- **Images are not rendered.** `![alt](path)` drops the image; the alt text renders as plain text. There is no host image-resolver hook yet.
 - **Math renders as its source text.** `$x^2$` renders the characters, not an equation.
 - Marquee's seven-value alignment vocabulary (`justified-left`, …), gradient backgrounds, and explicit control over underline / strikethrough metrics are not implemented.
 - Block borders stamp markers from the built-in shape registry only; a caller-supplied registry isn't threaded through.

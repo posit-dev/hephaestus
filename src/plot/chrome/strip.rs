@@ -123,7 +123,13 @@ impl StripMeasure {
     /// text-driven, so suppressing text suppresses the whole strip
     /// (background included). Strips with a label but a blanked
     /// background still reserve the slot and draw the text.
-    pub(crate) fn new(text: &str, side: AxisSide, theme: &Theme, dpi: f64) -> Option<Self> {
+    pub(crate) fn new(
+        text: &str,
+        side: AxisSide,
+        theme: &Theme,
+        dpi: f64,
+        images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
+    ) -> Option<Self> {
         let text_el = resolved_text(theme, side)?;
         let root_pt = crate::plot::chrome::root_text_pt(theme);
         let (pt_top, pt_right, pt_bottom, pt_left) = strip_padding_px(theme, dpi);
@@ -137,13 +143,14 @@ impl StripMeasure {
                 .clone()
                 .or_else(|| defaults.color.clone())
                 .expect("text_concrete_defaults sets color");
-            StripRun::Rich(crate::text::rich::RichTextRun::new(
+            StripRun::Rich(crate::text::rich::RichTextRun::new_with_images(
                 text,
                 &style,
                 color.resolve(&theme.palette),
                 &theme.rich_text,
                 &theme.palette,
                 dpi,
+                images,
             ))
         } else {
             StripRun::Plain(TextRun::new(text, &style, dpi))
@@ -299,6 +306,7 @@ impl Measure for StripMeasure {
 /// ship a default background that only appears when callers actually
 /// install a label via [`Plot::strip`](crate::plot::Plot::strip).
 /// `strip_background = Blank` still draws the label.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_strip(
     scene: &mut dyn SceneBuilder,
     text: &str,
@@ -306,6 +314,7 @@ pub fn draw_strip(
     side: AxisSide,
     theme: &Theme,
     dpi: f64,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
 ) {
     if rect.x1 <= rect.x0 || rect.y1 <= rect.y0 {
         return;
@@ -378,6 +387,7 @@ pub fn draw_strip(
         dpi,
         PickId::Skip,
         Some(&theme.rich_text),
+        images,
     );
     if clipping.is_some() {
         scene.pop_layer();
@@ -514,7 +524,8 @@ mod tests {
     const LONG: &str = "Sepal width in (2.5, 5.0] millimetres of observed range";
 
     fn measure(text: &str, side: AxisSide, theme: &Theme) -> StripMeasure {
-        StripMeasure::new(text, side, theme, DPI).expect("default theme draws strip text")
+        StripMeasure::new(text, side, theme, DPI, &crate::image_registry::no_images())
+            .expect("default theme draws strip text")
     }
 
     /// Default theme with the strip padding dropped, so a thickness
@@ -579,7 +590,15 @@ mod tests {
         let width = 220.0;
         let rect = Rect::new(0.0, 0.0, width, m.height_at(width, DPI));
         let mut scene = RecordingScene::default();
-        draw_strip(&mut scene, LONG, rect, AxisSide::Top, &theme, DPI);
+        draw_strip(
+            &mut scene,
+            LONG,
+            rect,
+            AxisSide::Top,
+            &theme,
+            DPI,
+            &crate::image_registry::no_images(),
+        );
         let lines = baselines(&scene);
         assert!(
             lines.len() > 1,
@@ -601,7 +620,15 @@ mod tests {
         let height = 400.0;
         let rect = Rect::new(0.0, 0.0, m.width_at(height, DPI), height);
         let mut scene = RecordingScene::default();
-        draw_strip(&mut scene, "Two words", rect, AxisSide::Right, &theme, DPI);
+        draw_strip(
+            &mut scene,
+            "Two words",
+            rect,
+            AxisSide::Right,
+            &theme,
+            DPI,
+            &crate::image_registry::no_images(),
+        );
         assert_eq!(
             baselines(&scene).len(),
             1,
@@ -619,7 +646,15 @@ mod tests {
             let m = measure(text, side, &theme);
             let rect = Rect::new(0.0, 0.0, m.width_at(height, DPI), height);
             let mut scene = RecordingScene::default();
-            draw_strip(&mut scene, text, rect, side, &theme, DPI);
+            draw_strip(
+                &mut scene,
+                text,
+                rect,
+                side,
+                &theme,
+                DPI,
+                &crate::image_registry::no_images(),
+            );
             let ys: Vec<f64> = glyph_points(&scene).iter().map(|p| p.y).collect();
             let lo = ys.iter().cloned().fold(f64::INFINITY, f64::min);
             let hi = ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -663,7 +698,15 @@ mod tests {
             let m = measure(text, AxisSide::Right, &theme);
             let rect = Rect::new(0.0, 0.0, m.width_at(height, DPI) + slack, height);
             let mut scene = RecordingScene::default();
-            draw_strip(&mut scene, text, rect, AxisSide::Right, &theme, DPI);
+            draw_strip(
+                &mut scene,
+                text,
+                rect,
+                AxisSide::Right,
+                &theme,
+                DPI,
+                &crate::image_registry::no_images(),
+            );
             let pts = glyph_points(&scene);
             let n = pts.len() as f64;
             (

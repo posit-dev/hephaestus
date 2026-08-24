@@ -493,15 +493,17 @@ impl Geom for TextGeom {
                     ctx.dpi,
                     width_spec,
                     align,
+                    ctx.images,
                 );
                 let rich = self.rich_cache.get_or_shape(key, || {
-                    let run = RichTextRun::new(
+                    let run = RichTextRun::new_with_images(
                         &text,
                         &style,
                         fill_color,
                         &row_sheet,
                         &ctx.theme.palette,
                         ctx.dpi,
+                        ctx.images,
                     );
                     if wraps {
                         run.set_max_width(wrap_width_px as f32, align);

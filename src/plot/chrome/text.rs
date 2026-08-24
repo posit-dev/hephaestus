@@ -27,10 +27,11 @@ pub(crate) fn text_cell_for_element(
     parent_pt: f64,
     dpi: f64,
     theme: &crate::plot::theme::Theme,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
 ) -> Cell {
     use crate::plot::theme::text_concrete_defaults;
     let style = text_style_from(el, parent_pt);
-    let run = measure_for_element(s, el, &style, dpi, theme);
+    let run = measure_for_element(s, el, &style, dpi, theme, images);
     let margin = el
         .margin
         .or(text_concrete_defaults().margin)
@@ -55,6 +56,7 @@ pub(crate) fn measure_for_element(
     style: &crate::text::TextStyle,
     dpi: f64,
     theme: &crate::plot::theme::Theme,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
 ) -> Box<dyn crate::layout::Measure> {
     use crate::plot::theme::text_concrete_defaults;
     if matches!(el.markdown, Some(true)) {
@@ -63,13 +65,14 @@ pub(crate) fn measure_for_element(
             .clone()
             .or_else(|| text_concrete_defaults().color.clone())
             .expect("color default");
-        return Box::new(crate::text::rich::RichTextRun::new(
+        return Box::new(crate::text::rich::RichTextRun::new_with_images(
             s,
             style,
             color.resolve(&theme.palette),
             &theme.rich_text,
             &theme.palette,
             dpi,
+            images,
         ));
     }
     Box::new(crate::text::TextRun::new(s, style, dpi))
@@ -296,6 +299,10 @@ pub(crate) struct RichChrome {
     pub(crate) palette: crate::plot::theme::Palette,
     /// Fill the base style paints with.
     pub(crate) fill: crate::color::Color,
+    /// Register the slot's image tags resolve against. Shared rather
+    /// than borrowed so a resolved context can be stored — an axis
+    /// keeps one for the whole of its draw.
+    pub(crate) images: std::sync::Arc<crate::image_registry::ImageRegistry>,
 }
 
 /// The markdown context for `el`, or `None` when the element leaves
@@ -310,6 +317,7 @@ pub(crate) fn rich_chrome_for(
     el: &crate::plot::theme::TextElement,
     theme: &crate::plot::theme::Theme,
     dpi: f64,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
 ) -> Option<RichChrome> {
     use crate::plot::theme::text_concrete_defaults;
     if !matches!(el.markdown, Some(true)) {
@@ -341,6 +349,7 @@ pub(crate) fn rich_chrome_for(
         sheet,
         palette: theme.palette,
         fill,
+        images: std::sync::Arc::clone(images),
     })
 }
 
@@ -384,10 +393,19 @@ impl ChromeRun {
             dpi,
             RichTextWidth::Natural,
             crate::plot::theme::HAlign::Start,
+            &rc.images,
         );
         let run = CHROME_RICH_CACHE.with(|cache| {
             cache.get_or_shape(key, || {
-                RichTextRun::new(text, style, rc.fill, &rc.sheet, &rc.palette, dpi)
+                RichTextRun::new_with_images(
+                    text,
+                    style,
+                    rc.fill,
+                    &rc.sheet,
+                    &rc.palette,
+                    dpi,
+                    &rc.images,
+                )
             })
         });
         ChromeRun::Rich(run)
@@ -515,6 +533,7 @@ pub(crate) fn axis_title_cell(
     side: AxisSide,
     theme: &crate::plot::theme::Theme,
     dpi: f64,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
 ) -> Cell {
     let (ch, side_idx) = crate::plot::chrome::axis::axis_side_to_channel_side(side);
     let resolved = theme.resolved_axis(ch, side_idx);
@@ -523,7 +542,7 @@ pub(crate) fn axis_title_cell(
         return Cell::empty();
     };
     let style = text_style_from(&el, root_pt);
-    let run = measure_for_element(title, &el, &style, dpi, theme);
+    let run = measure_for_element(title, &el, &style, dpi, theme, images);
     if side.is_vertical() {
         Cell::measured(RotatedAxisTitleMeasure {
             rotated_w: run.height_at(f64::INFINITY, dpi),
@@ -597,6 +616,9 @@ pub(crate) fn draw_text_element_in_rect(
     // callsites that don't want markdown, or feature gates that
     // prefer to opt out).
     sheet: Option<&std::sync::Arc<crate::text::rich::RichTextStyleSheet>>,
+    // Register the slot's image tags resolve against, ignored when the
+    // slot is not markdown.
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
 ) {
     use crate::brush::Brush;
     use crate::geometry::{Affine, Vec2};
@@ -668,7 +690,8 @@ pub(crate) fn draw_text_element_in_rect(
             _ => None,
         };
         let sheet = outlined_sheet.as_ref().unwrap_or(sheet);
-        let rich = RichTextRun::new(text, &style, base_brush_col, sheet, palette, dpi);
+        let rich =
+            RichTextRun::new_with_images(text, &style, base_brush_col, sheet, palette, dpi, images);
         rich.set_max_width(along_px as f32, align_h);
         let block_w = rich.content_width();
         // Inked band, not the stacked box — the same quantity
@@ -851,6 +874,7 @@ pub(crate) fn draw_axis_title_markdown(
     fill: crate::color::Color,
     palette: &crate::plot::theme::Palette,
     sheet: &std::sync::Arc<crate::text::rich::RichTextStyleSheet>,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
     dpi: f64,
     rect: Rect,
     side: AxisSide,
@@ -869,7 +893,7 @@ pub(crate) fn draw_axis_title_markdown(
     };
     let resolved_deg = angle.resolve(baseline_deg);
     let theta = (resolved_deg as f64).to_radians();
-    let run = RichTextRun::new(text, style, fill, sheet, palette, dpi);
+    let run = RichTextRun::new_with_images(text, style, fill, sheet, palette, dpi, images);
     if theta.abs() < 1e-9 {
         let w = (rect.x1 - rect.x0) as f32;
         run.set_max_width(w, HAlign::Center);
@@ -957,7 +981,8 @@ mod tests {
             markdown: Some(true),
             ..Default::default()
         };
-        rich_chrome_for(&el, theme, DPI).expect("markdown is on")
+        rich_chrome_for(&el, theme, DPI, &crate::image_registry::no_images())
+            .expect("markdown is on")
     }
 
     /// A slot that leaves `markdown` unset gets no context, so it
@@ -965,7 +990,13 @@ mod tests {
     #[test]
     fn an_element_without_markdown_gets_no_context() {
         let theme = Theme::default();
-        assert!(rich_chrome_for(&TextElement::default(), &theme, DPI).is_none());
+        assert!(rich_chrome_for(
+            &TextElement::default(),
+            &theme,
+            DPI,
+            &crate::image_registry::no_images()
+        )
+        .is_none());
     }
 
     /// Every label a slot shapes has to share the sheet's identity,

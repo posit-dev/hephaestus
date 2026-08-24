@@ -1503,3 +1503,51 @@ fn tracking_crosses_into_the_cascade_unchanged() {
         "heading tracking should follow its own em: {plain_added} → {head_added}"
     );
 }
+
+#[test]
+fn an_image_on_a_hanging_indent_survives_the_re_break() {
+    // A list item is the asymmetric case: `set_max_width` re-shapes it
+    // from source and splits the side tables between the first line and
+    // the continuation. An image in either half has to come through.
+    let mut images = crate::image_registry::ImageRegistry::new();
+    images.insert("dot", one_pixel());
+    let src = "- one ![](dot) two three four five ![](dot) six seven eight nine";
+    let sheet = RichTextStyleSheet::new();
+    let run = RichTextRun::new_with_images(
+        src,
+        &base_style(),
+        Color::from_rgba8(0, 0, 0, 255),
+        &sheet,
+        &palette(),
+        96.0,
+        &images,
+    );
+    let wide = image_count(&draw(&run));
+    run.set_max_width(120.0, HAlign::Start);
+    let narrow = image_count(&draw(&run));
+    assert_eq!(wide, 2, "both tags draw at natural width");
+    assert_eq!(
+        narrow, 2,
+        "and both still draw once the item wraps onto a continuation line"
+    );
+}
+
+/// A 1x1 opaque pixel, for tests that only count blits.
+fn one_pixel() -> crate::brush::Image {
+    crate::brush::Image {
+        data: crate::brush::Blob::new(std::sync::Arc::new(vec![0, 0, 0, 255])),
+        format: crate::brush::ImageFormat::Rgba8,
+        alpha_type: crate::brush::ImageAlphaType::Alpha,
+        width: 1,
+        height: 1,
+    }
+}
+
+/// How many image blits a scene holds.
+fn image_count(scene: &RecordingScene) -> usize {
+    scene
+        .ops
+        .iter()
+        .filter(|op| matches!(op, Op::DrawImage { .. }))
+        .count()
+}

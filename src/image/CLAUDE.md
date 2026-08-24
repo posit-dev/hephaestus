@@ -15,6 +15,13 @@ Turns the pixel buffer a `Renderer` fills into an encoded image, and an encoded 
 
 Per-format submodules are private; `mod.rs` re-exports their functions flat, so callers write `hephaestus::image::write_jpeg`. `src/png.rs` at the crate root aliases the PNG three so `hephaestus::png::write_png` also resolves.
 
+Two more read entry points name no format at all:
+
+- `decode_image(bytes)` — dispatch on the buffer's signature, so a `.png` holding a JPEG still decodes and a location with no extension is no obstacle. A format whose codec this build lacks reports `io::ErrorKind::Unsupported`, which is the distinction between "cannot read that here" and "those bytes are not an image".
+- `read_image(path)` — the same, reading the whole file first, since the signature is what picks the decoder.
+
+They exist because a caller naming a *location* rather than a format cannot say which decoder it wants: `ImageRegistry::resolve` reads a path or URL for an `ImageGeom` channel or a markdown `![](…)` tag, and the file decides.
+
 ## Reading
 
 A reader hands back a `crate::brush::Image` — the type `SceneBuilder::draw_image` and `plot::ImageGeom` consume — normalised to the same buffer contract the writers enforce. `from_rgba8` in `mod.rs` is the single construction point (and is public, for a caller holding pixels from somewhere else); `expand_to_rgba8` is the single widening point.

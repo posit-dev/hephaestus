@@ -47,6 +47,35 @@ pub struct BuiltRuns {
     /// content, place bullets, etc. Empty when the source is a single
     /// inline stream.
     pub blocks: Vec<Block>,
+    /// One entry per image tag, in document order.
+    pub objects: Vec<InlineObject>,
+}
+
+/// One image tag, reduced to the location it names and the style that
+/// sizes it.
+///
+/// The reducer emits a zero-width space at [`Self::index`] so the
+/// object owns a byte position in [`BuiltRuns::text`], which is what
+/// lets a shaper place a box there and what lets the block-slicing
+/// pass rebase it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InlineObject {
+    /// Byte offset into [`BuiltRuns::text`] where the object sits.
+    pub index: usize,
+    /// The location the tag named, verbatim — the name a register
+    /// resolves.
+    pub dest: String,
+    /// Resolved style at the tag. Its `size_pt` is the em an inline
+    /// image stands one of, and the em a placeholder is square at.
+    pub style: ResolvedStyle,
+    /// Whether the tag was the whole content of its paragraph, which
+    /// makes it a block image: it fills the block's width instead of
+    /// standing one em tall in a line of text.
+    pub block: bool,
+    /// The `broken_image` selector resolved at the tag, which paints
+    /// the placeholder when the location gives no pixels. Resolved
+    /// here because this is where the sheet is in scope.
+    pub placeholder_style: ResolvedStyle,
 }
 
 /// One styled inline run.
@@ -141,6 +170,52 @@ pub enum BlockKind {
 /// / pops one stack frame and, for text nodes, appends to the output
 /// string plus one `InlineRun` (coalesced when the resolved delta
 /// hasn't changed since the previous run).
+/// Zero-width space: what an image tag leaves in the text so its
+/// object has a byte position to hang on. Invisible in every font and
+/// a line-break opportunity, so a run of images can wrap between them.
+pub(crate) const OBJECT_PLACEHOLDER: &str = "\u{200b}";
+
+/// Which events belong to a paragraph whose whole content is one
+/// image — both the `ParagraphStart` and the `Image` itself, so the
+/// paragraph can take the `img` style and the object knows it is a
+/// block.
+///
+/// This is marquee's rule: an image tag is a span like any other
+/// until it is the only thing in its paragraph, at which point it
+/// becomes the paragraph's box.
+fn block_image_events(events: &[RichEvent]) -> Vec<bool> {
+    let mut out = vec![false; events.len()];
+    for (i, e) in events.iter().enumerate() {
+        if !matches!(e, RichEvent::ParagraphStart) {
+            continue;
+        }
+        let mut image: Option<usize> = None;
+        let mut lone = true;
+        let mut end = None;
+        for (j, inner) in events.iter().enumerate().skip(i + 1) {
+            match inner {
+                RichEvent::ParagraphEnd => {
+                    end = Some(j);
+                    break;
+                }
+                RichEvent::Image { .. } if image.is_none() => image = Some(j),
+                // Whitespace around the tag is what a source file
+                // looks like; anything else makes the image inline.
+                RichEvent::Text(t) if t.trim().is_empty() => {}
+                _ => {
+                    lone = false;
+                    break;
+                }
+            }
+        }
+        if let (true, Some(j), Some(_)) = (lone, image, end) {
+            out[i] = true;
+            out[j] = true;
+        }
+    }
+    out
+}
+
 pub fn reduce(events: &[RichEvent], sheet: &RichTextStyleSheet, base: &ResolvedStyle) -> BuiltRuns {
     // The document root is the caller's base style with the sheet's
     // `base` selector applied, so a sheet can set run-wide line height
@@ -154,6 +229,7 @@ pub fn reduce(events: &[RichEvent], sheet: &RichTextStyleSheet, base: &ResolvedS
         inline: Vec::new(),
         baseline_shifts: Vec::new(),
         blocks: Vec::new(),
+        objects: Vec::new(),
         base_size_pt: base.size_pt,
         style_stack: vec![StyleFrame {
             style: root,
@@ -164,8 +240,9 @@ pub fn reduce(events: &[RichEvent], sheet: &RichTextStyleSheet, base: &ResolvedS
         item_body_pending: false,
         synthetic_paragraph_open: false,
     };
-    for e in events {
-        r.consume(e, sheet);
+    let block_images = block_image_events(events);
+    for (i, e) in events.iter().enumerate() {
+        r.consume(e, sheet, block_images[i]);
     }
     r.finish()
 }
@@ -176,6 +253,7 @@ struct Reducer {
     inline: Vec<InlineRun>,
     baseline_shifts: Vec<BaselineRun>,
     blocks: Vec<Block>,
+    objects: Vec<InlineObject>,
     /// The run's base font size — what `Rem` lengths measure against.
     base_size_pt: f64,
     /// Cascade stack, root at index 0 and the deepest span on top.
@@ -242,7 +320,7 @@ struct ListFrame {
 }
 
 impl Reducer {
-    fn consume(&mut self, event: &RichEvent, sheet: &RichTextStyleSheet) {
+    fn consume(&mut self, event: &RichEvent, sheet: &RichTextStyleSheet, block_image: bool) {
         match event {
             // ── Block boundaries ──
             RichEvent::ParagraphStart => {
@@ -253,7 +331,14 @@ impl Reducer {
                 // the `paragraph` class so this paragraph picks up
                 // paragraph's default margin.bottom.
                 self.item_body_pending = false;
+                // A paragraph holding nothing but an image is that
+                // image's box: it takes the `img` style on top of its
+                // own, so `align` and padding on the sheet's `img`
+                // entry position the picture.
                 self.open_block(BlockKind::Paragraph, sheet, "paragraph");
+                if block_image {
+                    self.overlay_block_class("img", sheet);
+                }
             }
             RichEvent::ParagraphEnd => self.close_block(),
             RichEvent::HeadingStart { level } => {
@@ -336,6 +421,23 @@ impl Reducer {
                 self.ensure_item_body_open(sheet);
                 // v1 renders math as literal text — no shaper yet.
                 self.push_text(t);
+            }
+            RichEvent::Image { dest } => {
+                self.ensure_item_body_open(sheet);
+                // Styled by the `img` selector, the way inline code is
+                // styled by `code`. The zero-width space gives the
+                // object a byte position without inking anything.
+                self.push_inline("img", sheet);
+                let placeholder_style = self.resolve_class("broken_image", sheet);
+                self.objects.push(InlineObject {
+                    index: self.text.len(),
+                    dest: dest.clone(),
+                    style: self.top().clone(),
+                    block: block_image,
+                    placeholder_style,
+                });
+                self.push_text(OBJECT_PLACEHOLDER);
+                self.pop_inline();
             }
             RichEvent::SoftBreak => {
                 self.ensure_item_body_open(sheet);
@@ -495,6 +597,28 @@ impl Reducer {
             depth,
             style,
         });
+    }
+
+    /// Cascade `key`'s delta onto the block currently open, and onto
+    /// the cascade its content inherits. Used for a block image,
+    /// where marquee gives the paragraph the image element's style.
+    fn overlay_block_class(&mut self, key: &str, sheet: &RichTextStyleSheet) {
+        let Some(delta) = self.lookup_class(key, sheet) else {
+            return;
+        };
+        let n = self.style_stack.len();
+        let base_size = self.base_size_pt;
+        if let Some(frame) = self.block_stack.last_mut() {
+            let grandparent = &self.style_stack[n.saturating_sub(2)].style;
+            frame.style = frame.style.apply(&delta, grandparent, base_size);
+        }
+        let inherited = self
+            .block_stack
+            .last()
+            .map(|frame| frame.style.for_inline());
+        if let (Some(inherited), Some(frame)) = (inherited, self.style_stack.last_mut()) {
+            frame.style = inherited;
+        }
     }
 
     fn close_block(&mut self) {
@@ -675,6 +799,7 @@ impl Reducer {
             inline: self.inline,
             baseline_shifts: self.baseline_shifts,
             blocks: self.blocks,
+            objects: self.objects,
         }
     }
 }

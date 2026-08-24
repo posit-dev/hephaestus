@@ -62,6 +62,7 @@ pub(super) fn swatch_dim_for(
     // markdown swatch shapes through, so the reserved cell matches
     // what `render_text` paints.
     theme: &crate::plot::theme::Theme,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
 ) -> (f64, f64) {
     match kind {
         LegendKey::Point => {
@@ -108,7 +109,7 @@ pub(super) fn swatch_dim_for(
             (lw, lw)
         }
         LegendKey::Text => {
-            let rich = text_key_rich(peak, theme, geom, dpi);
+            let rich = text_key_rich(peak, theme, geom, dpi, images);
             let Some(run) = text_key_run(peak, dpi, geom, rich.as_ref()) else {
                 return (0.0, 0.0);
             };
@@ -324,12 +325,13 @@ pub(super) fn render_key(
     geom: &crate::plot::theme::GeomTheme,
     palette: &crate::plot::theme::Palette,
     theme: &crate::plot::theme::Theme,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
 ) {
     match kind {
         LegendKey::Point => render_point(resolved, cell, shapes, scene, dpi, geom, palette),
         LegendKey::Line => render_line(resolved, cell, shapes, scene, dpi, geom, palette),
         LegendKey::Rect => render_rect(resolved, cell, scene, dpi, geom, palette),
-        LegendKey::Text => render_text(resolved, cell, scene, dpi, geom, palette, theme),
+        LegendKey::Text => render_text(resolved, cell, scene, dpi, geom, palette, theme, images),
     }
 }
 
@@ -674,6 +676,7 @@ fn text_key_rich(
     theme: &crate::plot::theme::Theme,
     geom: &crate::plot::theme::GeomTheme,
     dpi: f64,
+    images: &Arc<crate::image_registry::ImageRegistry>,
 ) -> Option<RichChrome> {
     if !geom.text.markdown {
         return None;
@@ -703,6 +706,7 @@ fn text_key_rich(
         sheet,
         palette: *palette,
         fill,
+        images: Arc::clone(images),
     })
 }
 
@@ -759,8 +763,9 @@ fn render_text(
     geom: &crate::plot::theme::GeomTheme,
     palette: &crate::plot::theme::Palette,
     theme: &crate::plot::theme::Theme,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
 ) {
-    let rich = text_key_rich(resolved, theme, geom, dpi);
+    let rich = text_key_rich(resolved, theme, geom, dpi, images);
     let Some(run) = text_key_run(resolved, dpi, geom, rich.as_ref()) else {
         return;
     };
@@ -1025,7 +1030,15 @@ mod tests {
         };
         let lw = pt_to_px(20.0, DPI);
         for kind in [LegendKey::Line, LegendKey::Rect] {
-            let (_, h) = swatch_dim_for(kind, &key, DPI, &theme.geom, &shapes, &theme);
+            let (_, h) = swatch_dim_for(
+                kind,
+                &key,
+                DPI,
+                &theme.geom,
+                &shapes,
+                &theme,
+                &crate::image_registry::no_images(),
+            );
             assert!(
                 (h - lw).abs() < 1e-9,
                 "{kind:?} key should reserve its {lw}px stroke, reserved {h}"
@@ -1043,7 +1056,15 @@ mod tests {
             ..Default::default()
         };
         let lw = pt_to_px(20.0, DPI);
-        let (w, _) = swatch_dim_for(LegendKey::Line, &key, DPI, &theme.geom, &shapes, &theme);
+        let (w, _) = swatch_dim_for(
+            LegendKey::Line,
+            &key,
+            DPI,
+            &theme.geom,
+            &shapes,
+            &theme,
+            &crate::image_registry::no_images(),
+        );
         assert!(
             w > lw,
             "a round-capped key needs room for the caps plus a visible body, reserved {w} for a {lw}px stroke"
@@ -1058,14 +1079,28 @@ mod tests {
         let shapes = ShapeRegistry::with_builtins();
         let mut key = shape_only_key("star");
         key.size_pt = Some(12.0);
-        let (star_w, star_h) =
-            swatch_dim_for(LegendKey::Point, &key, DPI, &theme.geom, &shapes, &theme);
+        let (star_w, star_h) = swatch_dim_for(
+            LegendKey::Point,
+            &key,
+            DPI,
+            &theme.geom,
+            &shapes,
+            &theme,
+            &crate::image_registry::no_images(),
+        );
         let circle = ResolvedKey {
             size_pt: Some(12.0),
             ..Default::default()
         };
-        let (circle_w, circle_h) =
-            swatch_dim_for(LegendKey::Point, &circle, DPI, &theme.geom, &shapes, &theme);
+        let (circle_w, circle_h) = swatch_dim_for(
+            LegendKey::Point,
+            &circle,
+            DPI,
+            &theme.geom,
+            &shapes,
+            &theme,
+            &crate::image_registry::no_images(),
+        );
         assert!(
             star_w > circle_w && star_h > circle_h,
             "star ({star_w}×{star_h}) should reserve more than the circle ({circle_w}×{circle_h})"
@@ -1082,7 +1117,15 @@ mod tests {
             linewidth_pt: Some(12.0),
             ..Default::default()
         };
-        let (w, h) = swatch_dim_for(LegendKey::Point, &key, DPI, &theme.geom, &shapes, &theme);
+        let (w, h) = swatch_dim_for(
+            LegendKey::Point,
+            &key,
+            DPI,
+            &theme.geom,
+            &shapes,
+            &theme,
+            &crate::image_registry::no_images(),
+        );
         let marker = pt_to_px(8.0, DPI) * 2.0 * POINT_SHAPE_RADIUS;
         let outline = pt_to_px(12.0, DPI);
         assert!((w - (marker + outline)).abs() < 1e-9, "reserved width {w}");
@@ -1101,7 +1144,15 @@ mod tests {
             linewidth_pt: Some(12.0),
             ..Default::default()
         };
-        let (w, _) = swatch_dim_for(LegendKey::Point, &key, DPI, &theme.geom, &shapes, &theme);
+        let (w, _) = swatch_dim_for(
+            LegendKey::Point,
+            &key,
+            DPI,
+            &theme.geom,
+            &shapes,
+            &theme,
+            &crate::image_registry::no_images(),
+        );
         let marker = pt_to_px(8.0, DPI) * 2.0 * POINT_SHAPE_RADIUS;
         assert!((w - marker).abs() < 1e-9, "reserved width {w}");
     }
@@ -1205,11 +1256,25 @@ mod tests {
         // `hline` is wide and flat, so a quarter turn swaps its extents.
         let mut key = shape_only_key("hline");
         key.size_pt = Some(12.0);
-        let (flat_w, flat_h) =
-            swatch_dim_for(LegendKey::Point, &key, DPI, &theme.geom, &shapes, &theme);
+        let (flat_w, flat_h) = swatch_dim_for(
+            LegendKey::Point,
+            &key,
+            DPI,
+            &theme.geom,
+            &shapes,
+            &theme,
+            &crate::image_registry::no_images(),
+        );
         key.angle = Some(std::f64::consts::FRAC_PI_2);
-        let (turned_w, turned_h) =
-            swatch_dim_for(LegendKey::Point, &key, DPI, &theme.geom, &shapes, &theme);
+        let (turned_w, turned_h) = swatch_dim_for(
+            LegendKey::Point,
+            &key,
+            DPI,
+            &theme.geom,
+            &shapes,
+            &theme,
+            &crate::image_registry::no_images(),
+        );
         assert!(
             (turned_w - flat_h).abs() < 1e-9 && (turned_h - flat_w).abs() < 1e-9,
             "a quarter turn should swap the reserved extents: {flat_w}×{flat_h} → {turned_w}×{turned_h}"
@@ -1357,7 +1422,15 @@ mod tests {
         let theme = Theme::default();
         let shapes = ShapeRegistry::with_builtins();
         let key = arrow_key();
-        let (w, h) = swatch_dim_for(LegendKey::Line, &key, DPI, &theme.geom, &shapes, &theme);
+        let (w, h) = swatch_dim_for(
+            LegendKey::Line,
+            &key,
+            DPI,
+            &theme.geom,
+            &shapes,
+            &theme,
+            &crate::image_registry::no_images(),
+        );
         let lw = pt_to_px(1.5, DPI);
         // Default marker size is 3 × linewidth, and `arrow-closed`
         // reaches a full size unit either side of its axis.
@@ -1380,7 +1453,15 @@ mod tests {
             linewidth_pt: Some(1.5),
             ..Default::default()
         };
-        let (w, h) = swatch_dim_for(LegendKey::Line, &key, DPI, &theme.geom, &shapes, &theme);
+        let (w, h) = swatch_dim_for(
+            LegendKey::Line,
+            &key,
+            DPI,
+            &theme.geom,
+            &shapes,
+            &theme,
+            &crate::image_registry::no_images(),
+        );
         assert_eq!(w, 0.0, "butt-capped markerless key needs no width floor");
         assert!((h - pt_to_px(1.5, DPI)).abs() < 1e-9, "height {h}");
     }
@@ -1410,6 +1491,7 @@ mod tests {
             &theme.geom,
             &theme.palette,
             theme,
+            &crate::image_registry::no_images(),
         );
         scene
     }
@@ -1517,6 +1599,7 @@ mod tests {
             &theme.geom,
             &shapes,
             &theme,
+            &crate::image_registry::no_images(),
         );
         let (big_w, big_h) = swatch_dim_for(
             LegendKey::Text,
@@ -1525,6 +1608,7 @@ mod tests {
             &theme.geom,
             &shapes,
             &theme,
+            &crate::image_registry::no_images(),
         );
         assert!(
             big_w > small_w && big_h > small_h,
@@ -1543,6 +1627,7 @@ mod tests {
             &theme.geom,
             &shapes,
             &theme,
+            &crate::image_registry::no_images(),
         );
         let outlined = ResolvedKey {
             text_stroke: Some(crate::color::rgb(0.0, 0.0, 0.0)),
@@ -1556,6 +1641,7 @@ mod tests {
             &theme.geom,
             &shapes,
             &theme,
+            &crate::image_registry::no_images(),
         );
         let outline = pt_to_px(4.0, DPI);
         assert!((w - (plain.0 + outline)).abs() < 1e-9, "reserved width {w}");
@@ -1571,11 +1657,25 @@ mod tests {
         let shapes = ShapeRegistry::with_builtins();
         let mut key = text_key(12.0);
         key.text = Some(Arc::from("Legend"));
-        let (flat_w, flat_h) =
-            swatch_dim_for(LegendKey::Text, &key, DPI, &theme.geom, &shapes, &theme);
+        let (flat_w, flat_h) = swatch_dim_for(
+            LegendKey::Text,
+            &key,
+            DPI,
+            &theme.geom,
+            &shapes,
+            &theme,
+            &crate::image_registry::no_images(),
+        );
         key.angle = Some(std::f64::consts::FRAC_PI_2);
-        let (turned_w, turned_h) =
-            swatch_dim_for(LegendKey::Text, &key, DPI, &theme.geom, &shapes, &theme);
+        let (turned_w, turned_h) = swatch_dim_for(
+            LegendKey::Text,
+            &key,
+            DPI,
+            &theme.geom,
+            &shapes,
+            &theme,
+            &crate::image_registry::no_images(),
+        );
         assert!(
             (turned_w - flat_h).abs() < 1e-9 && (turned_h - flat_w).abs() < 1e-9,
             "a quarter turn should swap the reserved extents: {flat_w}×{flat_h} → {turned_w}×{turned_h}"
@@ -1594,7 +1694,15 @@ mod tests {
             },
         ] {
             assert_eq!(
-                swatch_dim_for(LegendKey::Text, &key, DPI, &theme.geom, &shapes, &theme),
+                swatch_dim_for(
+                    LegendKey::Text,
+                    &key,
+                    DPI,
+                    &theme.geom,
+                    &shapes,
+                    &theme,
+                    &crate::image_registry::no_images()
+                ),
                 (0.0, 0.0)
             );
             assert!(render_text_key(&key, &theme).ops.is_empty());

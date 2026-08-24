@@ -1128,3 +1128,60 @@ fn an_embedded_document_still_loads_for_a_reader_that_cannot_decode() {
         "the two documents should agree on every non-image draw call"
     );
 }
+
+/// An image a *markdown* slot names travels the same way an
+/// `ImageGeom`'s does, including one the writer read off disk rather
+/// than registering by hand — which is what lets a page rebuild a
+/// figure whose title holds a picture.
+#[test]
+fn a_markdown_title_image_round_trips_from_both_registers() {
+    let comp = || {
+        hephaestus::composition::Composition::empty(1, 1).place(
+            1,
+            1,
+            hephaestus::composition::Span::cell(),
+            Patch::new("panel"),
+        )
+    };
+    let mut theme = hephaestus::plot::theme::Theme::default();
+    theme.text.markdown = Some(true);
+
+    let mut plot = Plot::new(&comp(), "panel")
+        .bind("x", "x")
+        .bind("y", "y")
+        .image_registry(image_registry_of(8))
+        .title("plot ![](swatch)");
+    plot.add_geom(
+        hephaestus::plot::TextGeom::builder()
+            .set("x", vec![5.0_f64])
+            .set("y", vec![5.0_f64])
+            .set("text", vec!["x".to_string()])
+            .build(),
+    );
+    let mut comp_registry = ImageRegistry::new();
+    comp_registry.insert("banner", gradient_image(12));
+    let source = PlotComposition::new(&comp())
+        .add_scale("x", scale::continuous(0.0..=10.0))
+        .add_scale("y", scale::continuous(0.0..=10.0))
+        .theme(theme)
+        .image_registry(comp_registry)
+        .title("figure ![](banner)")
+        .with_plot(plot);
+
+    let bytes = write_composition(&source, &WriteOptions::new().embed_images(true))
+        .expect("a writable composition");
+    let reloaded = read_composition(&bytes, &ReadContext::new()).expect("a readable document");
+
+    assert!(
+        reloaded
+            .plot("panel")
+            .expect("panel plot")
+            .image_registry_ref()
+            .contains("swatch"),
+        "the plot's own register should come back"
+    );
+    assert!(
+        reloaded.image_registry_ref().contains("banner"),
+        "and so should the composition's, which its title names"
+    );
+}

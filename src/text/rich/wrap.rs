@@ -6,6 +6,7 @@
 
 use parley::AlignmentOptions;
 
+use super::image::slice_object_layouts;
 use super::run::{BlockLayout, RichTextRun};
 use super::shape::{hal_to_alignment, shape_block_layout, slice_block};
 use crate::style_vocab::HAlign;
@@ -158,14 +159,37 @@ impl RichTextRun {
             if bl.first_line_shift_px == bl.continuation_shift_px {
                 // Symmetric — single layout at (block - shift).
                 let target = (block_avail - bl.first_line_shift_px).max(1.0);
-                bl.layout.break_all_lines(Some(target));
-                bl.layout
-                    .align(effective_align, AlignmentOptions::default());
+                if bl.source_objects.iter().any(|o| o.block) {
+                    // A block image fills the column, and its box is
+                    // baked into the layout the shaper built — so a
+                    // new width means re-shaping, not re-breaking.
+                    for object in bl.source_objects.iter_mut() {
+                        object.resize_to_block(target);
+                    }
+                    let mut relaid = shape_block_layout(
+                        &bl.source_text,
+                        &bl.source_inlines,
+                        &bl.source_objects,
+                        &self.base_style,
+                        self.base_brush,
+                        &self.palette,
+                        self.dpi,
+                    );
+                    relaid.break_all_lines(Some(target));
+                    relaid.align(effective_align, AlignmentOptions::default());
+                    bl.layout = relaid;
+                } else {
+                    bl.layout.break_all_lines(Some(target));
+                    bl.layout
+                        .align(effective_align, AlignmentOptions::default());
+                }
                 bl.shape_width_px = target;
                 bl.height_px = bl.layout.height();
                 bl.continuation_layout = None;
                 bl.continuation_baseline_shifts.clear();
                 bl.continuation_inlines.clear();
+                bl.objects = bl.source_objects.clone();
+                bl.continuation_objects.clear();
                 bl.first_line_height_px = 0.0;
             } else {
                 // Asymmetric — two-layout dance so both first-line
@@ -175,9 +199,13 @@ impl RichTextRun {
                 // Re-shape from cached source at first-line's usable
                 // width. Parley may have wrapped natural single-line
                 // shape; re-shaping produces a fresh line-break.
+                for object in bl.source_objects.iter_mut() {
+                    object.resize_to_block(usable_first);
+                }
                 let mut first_layout = shape_block_layout(
                     &bl.source_text,
                     &bl.source_inlines,
+                    &bl.source_objects,
                     &self.base_style,
                     self.base_brush,
                     &self.palette,
@@ -205,6 +233,8 @@ impl RichTextRun {
                     bl.continuation_layout = None;
                     bl.continuation_baseline_shifts.clear();
                     bl.continuation_inlines.clear();
+                    bl.objects = bl.source_objects.clone();
+                    bl.continuation_objects.clear();
                     bl.first_line_height_px = 0.0;
                 } else {
                     // Slice remaining text + rebase inline/baseline
@@ -215,9 +245,14 @@ impl RichTextRun {
                         &bl.source_baselines,
                         &(first_line_end..bl.source_text.len()),
                     );
+                    let rest_objects = slice_object_layouts(
+                        &bl.source_objects,
+                        &(first_line_end..bl.source_text.len()),
+                    );
                     let mut cont_layout = shape_block_layout(
                         &rest_text,
                         &rest_inlines,
+                        &rest_objects,
                         &self.base_style,
                         self.base_brush,
                         &self.palette,
@@ -230,6 +265,8 @@ impl RichTextRun {
                     bl.continuation_layout = Some(cont_layout);
                     bl.continuation_baseline_shifts = rest_baselines;
                     bl.continuation_inlines = rest_inlines;
+                    bl.objects = slice_object_layouts(&bl.source_objects, &(0..first_line_end));
+                    bl.continuation_objects = rest_objects;
                     bl.first_line_height_px = first_line_height;
                     // Shape width for paint: use the wider of the
                     // two so the outer_rect matches the CONTINUATION

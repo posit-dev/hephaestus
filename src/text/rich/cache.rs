@@ -55,6 +55,11 @@ pub struct RichKey {
     /// Quantized wrap width in pixels; `None` = natural.
     width: Option<i32>,
     alignment: HAlign,
+    /// Address of the register the run resolved its image tags
+    /// against. Two plots on one thread hold different registers, and
+    /// the same markdown resolved through each can name different
+    /// pixels, so the register is part of what the run *is*.
+    images: usize,
 }
 
 impl RichKey {
@@ -69,6 +74,7 @@ impl RichKey {
         dpi: f64,
         width: RichTextWidth,
         alignment: HAlign,
+        images: &crate::image_registry::ImageRegistry,
     ) -> Self {
         Self {
             source: source.to_string(),
@@ -85,6 +91,7 @@ impl RichKey {
                 RichTextWidth::Fixed(px) => Some(px.round() as i32),
             },
             alignment,
+            images: std::ptr::from_ref(images) as usize,
         }
     }
 
@@ -104,6 +111,7 @@ impl RichKey {
         self.dpi.hash(&mut h);
         self.width.hash(&mut h);
         self.alignment.hash(&mut h);
+        self.images.hash(&mut h);
         h.finish()
     }
 }
@@ -257,6 +265,7 @@ mod tests {
             96.0,
             RichTextWidth::Natural,
             HAlign::Start,
+            crate::image_registry::ImageRegistry::shared_empty(),
         )
     }
 

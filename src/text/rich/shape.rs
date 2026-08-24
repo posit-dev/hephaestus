@@ -15,12 +15,14 @@ use parley::{
     StyleProperty,
 };
 
+use super::image::{fill_object_offsets, push_object_boxes, resolve_objects, ObjectLayout};
 use super::length::LineHeightSpec;
-use super::reduce::{BaselineRun, Block, BlockKind, BuiltRuns, InlineRun};
+use super::reduce::{BaselineRun, Block, BlockKind, BuiltRuns, InlineObject, InlineRun};
 use super::run::{BlockLayout, MarkerLayout, RichBrush, RichTextRun};
 use super::style::ResolvedStyle;
 use super::wrap::{stack_blocks, EdgeSpacing};
 use crate::color::Color;
+use crate::image_registry::ImageRegistry;
 use crate::style_vocab::{HAlign, Palette};
 use crate::text::shape_common::{generic_family_from_str, parley_features, push_style_defaults};
 use crate::text::TextStyle;
@@ -43,12 +45,14 @@ thread_local! {
         RefCell::new(LayoutContext::new());
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn shape_run(
     runs: BuiltRuns,
     base_style: &TextStyle,
     base_brush: Color,
     palette: &Palette,
     dpi: f64,
+    images: &ImageRegistry,
 ) -> RichTextRun {
     // Split blocks into leaves + containers. Leaves are the shape
     // units.
@@ -234,15 +238,29 @@ pub(crate) fn shape_run(
         // block's byte range; rebase ranges to block-local coords.
         let (block_text_owned, inlines, baselines) =
             slice_block(&runs.text, &runs.inline, &runs.baseline_shifts, &leaf.range);
+        let block_objects = slice_objects(&runs.objects, &leaf.range);
         let block_text = block_text_owned;
+        // Resolved against the register here, so nothing downstream —
+        // a re-break, a draw — needs to look a name up again. A block
+        // image has no container to fill at natural width, so it takes
+        // its own size; `set_max_width` re-sizes it once there is one.
+        let mut objects = resolve_objects(&block_objects, images, palette, dpi, None);
         // Shape at natural width first (no wrap constraint). The
         // asymmetric-shift split is applied only when
         // `set_max_width` is called with a finite constraint —
         // at natural width there's no wrap and thus no "gap on
         // right" issue.
-        let mut layout =
-            shape_block_layout(&block_text, &inlines, base_style, base_brush, palette, dpi);
+        let mut layout = shape_block_layout(
+            &block_text,
+            &inlines,
+            &objects,
+            base_style,
+            base_brush,
+            palette,
+            dpi,
+        );
         layout.break_all_lines(None);
+        fill_object_offsets(&layout, &mut objects);
         // Resolve `Auto` (or an unset field) against parley's own
         // UBA output on this block's text — that's the standard
         // paragraph-direction algorithm and the marquee-parity
@@ -309,6 +327,7 @@ pub(crate) fn shape_run(
             let mut m_layout = shape_block_layout(
                 text,
                 std::slice::from_ref(&run),
+                &[],
                 base_style,
                 base_brush,
                 palette,
@@ -350,6 +369,9 @@ pub(crate) fn shape_run(
             source_text: block_text,
             source_inlines: inlines,
             source_baselines: baselines,
+            objects: objects.clone(),
+            continuation_objects: Vec::new(),
+            source_objects: objects,
             marker,
         });
     }
@@ -407,9 +429,11 @@ pub(crate) fn shape_run(
 }
 // ─── Per-block shaping ──────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn shape_block_layout(
     text: &str,
     inlines: &[InlineRun],
+    objects: &[ObjectLayout],
     base_style: &TextStyle,
     base_brush: Color,
     palette: &Palette,
@@ -467,6 +491,11 @@ pub(crate) fn shape_block_layout(
                 });
             }
         }
+        // Images. Their boxes are in-flow like the padding spacers
+        // above but carry a height, so the line grows to hold the
+        // picture. Ids come from a disjoint range — see
+        // `OBJECT_ID_BASE`.
+        push_object_boxes(&mut builder, objects, text.len());
         builder.build(text)
     })
 }
@@ -721,4 +750,20 @@ pub(crate) fn slice_block(
         });
     }
     (block_text, out_inlines, out_baselines)
+}
+
+/// The image tags positioned inside `range`, rebased to it.
+///
+/// Separate from [`slice_block`] because the re-shape path slices
+/// objects that have already been resolved — see
+/// [`slice_object_layouts`](super::image::slice_object_layouts).
+pub(crate) fn slice_objects(objects: &[InlineObject], range: &Range<usize>) -> Vec<InlineObject> {
+    objects
+        .iter()
+        .filter(|o| range.contains(&o.index))
+        .map(|o| InlineObject {
+            index: o.index - range.start,
+            ..o.clone()
+        })
+        .collect()
 }

@@ -54,6 +54,17 @@ their costs differ by three orders of magnitude.
   262,144 raw. Photographic content compresses far less, and is the case where
   naming stays the better answer.
 
+  Two things beyond the registered entries end up in it. **Names read from a
+  location** — a markdown `![](logo.png)`, or an `"image"` channel holding a
+  path — are cached in the register they resolved through, and `carried_names`
+  unions them in, which is the whole reason a figure whose title holds a
+  picture survives being rebuilt on a page with no filesystem. And the
+  **composition's own register**, for chrome that belongs to the composition
+  rather than to a plot: it rides the existing `(patch, index)` address as
+  `(root_id, u32::MAX)`, an index no patch can hold, so it needed no wire
+  change and a reader that predates it looks for a plot that isn't there and
+  skips the entry.
+
 **Both need `png`, and neither half pulls it in.** `document-read` and
 `document-write` stay dependency-free, so a build without `png` reports every
 image through `UnsupportedItem::UnembeddableImage` on write and skips the

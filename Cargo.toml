@@ -91,6 +91,12 @@ webp = ["dep:image-webp"]
 # registers them with the running font context. Synchronous network call
 # on cache miss; cache hits are offline.
 google-fonts = ["dep:ureq", "dep:directories"]
+# Read images named by an `http(s)` URL rather than a filesystem path. The
+# fetch is synchronous on first use and memoized for the process, like the
+# `google-fonts` lookup it mirrors; unlike that one there is no on-disk cache,
+# so it adds no dependency beyond the HTTP client. Without it a URL is simply
+# a location this build cannot read.
+image-url = ["dep:ureq"]
 # Live window presentation: opens an OS window, presents rendered frames
 # through a wgpu surface, and drives an event loop with resize and pointer
 # events. Requires a rasterising backend — the window path presents what a
@@ -574,6 +580,12 @@ required-features = ["vello"]
 [[test]]
 name = "image_geom"
 required-features = ["vello", "png"]
+
+[[test]]
+name = "rich_image"
+# `png` for the fixtures the disk-reading cases write and read back; no
+# renderer, since every assertion is on recorded draw calls.
+required-features = ["png"]
 
 [[test]]
 name = "document_roundtrip"

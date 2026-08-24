@@ -139,7 +139,15 @@ impl AxisChromeStyle {
     /// Construct from a `ResolvedAxis` against the theme's palette at
     /// the given dpi. `root_pt` is the parent size relative text sizes
     /// resolve against — see [`crate::plot::chrome::root_text_pt`].
-    pub fn from_resolved(resolved: &ResolvedAxis, theme: &Theme, dpi: f64, root_pt: f64) -> Self {
+    /// `images` is what a markdown break label resolves image tags
+    /// against.
+    pub fn from_resolved(
+        resolved: &ResolvedAxis,
+        theme: &Theme,
+        dpi: f64,
+        root_pt: f64,
+        images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
+    ) -> Self {
         use crate::plot::theme::{line_concrete_defaults, text_concrete_defaults};
         let palette = &theme.palette;
         let fallback_stroke = || Stroke::new(pt_to_px(STROKE_WIDTH_PT, dpi));
@@ -188,7 +196,7 @@ impl AxisChromeStyle {
                     crate::plot::chrome::text::text_style_from(el, root_pt),
                     mk_brush(color),
                     crate::plot::chrome::text::text_outline_from(el, palette, dpi),
-                    crate::plot::chrome::text::rich_chrome_for(el, theme, dpi),
+                    crate::plot::chrome::text::rich_chrome_for(el, theme, dpi, images),
                     true,
                 )
             }
@@ -479,7 +487,13 @@ mod tests {
             markdown: Some(true),
             ..Default::default()
         };
-        crate::plot::chrome::text::rich_chrome_for(&el, &theme, DPI).expect("markdown is on")
+        crate::plot::chrome::text::rich_chrome_for(
+            &el,
+            &theme,
+            DPI,
+            &crate::image_registry::no_images(),
+        )
+        .expect("markdown is on")
     }
 
     fn draw_markdown(text: &str, direction: (f64, f64), anchor: Point) -> RecordingScene {

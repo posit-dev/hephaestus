@@ -47,12 +47,14 @@ use parley::Alignment;
 use super::anchor::LayoutBounds;
 use super::block::{compute_block_paints, BlockPaint};
 use super::draw::marker_x_range;
+use super::image::ObjectLayout;
 use super::parser::parse;
 use super::reduce::{reduce, BaselineRun, Block, BlockKind, InlineRun};
 use super::shape::shape_run;
 use super::style::{ResolvedStyle, RichTextStyleSheet};
 use super::wrap::EdgeSpacing;
 use crate::color::Color;
+use crate::image_registry::ImageRegistry;
 use crate::layout::{Measure, WidthHint};
 use crate::style_vocab::{HAlign, Palette};
 use crate::text::TextStyle;
@@ -201,6 +203,13 @@ pub(crate) struct BlockLayout {
     pub(crate) source_inlines: Vec<InlineRun>,
     /// Baseline shifts over `source_text`, in block-local byte ranges.
     pub(crate) source_baselines: Vec<BaselineRun>,
+    /// Image objects positioned in `layout`, block-local.
+    pub(crate) objects: Vec<ObjectLayout>,
+    /// Objects that fell into `continuation_layout`, rebased to it.
+    pub(crate) continuation_objects: Vec<ObjectLayout>,
+    /// Objects over `source_text`, for the re-shape `set_max_width`
+    /// does on an asymmetric split.
+    pub(crate) source_objects: Vec<ObjectLayout>,
     /// List-item marker, on the leaf that opens the item's body.
     pub(crate) marker: Option<MarkerLayout>,
 }
@@ -215,6 +224,39 @@ impl BlockLayout {
         let y1 = self.y_px + self.height_px + self.padding_bottom_px;
         crate::geometry::Rect::new(x0 as f64, y0 as f64, x1 as f64, y1 as f64)
     }
+}
+
+/// Run-local top and bottom of every image box in `bl`, or an empty
+/// band when it holds none.
+fn image_band(bl: &BlockLayout) -> (f32, f32) {
+    let mut top = f32::INFINITY;
+    let mut bottom = f32::NEG_INFINITY;
+    let mut visit = |layout: &parley::Layout<RichBrush>, objects: &[ObjectLayout], y: f32| {
+        if objects.is_empty() {
+            return;
+        }
+        for line in layout.lines() {
+            for item in line.items() {
+                let parley::PositionedLayoutItem::InlineBox(ib) = item else {
+                    continue;
+                };
+                let Some(object) = super::image::object_for_box(objects, ib.id) else {
+                    continue;
+                };
+                top = top.min(y + ib.y + object.dy_px);
+                bottom = bottom.max(y + ib.y + object.dy_px + ib.height);
+            }
+        }
+    };
+    visit(&bl.layout, &bl.objects, bl.y_px);
+    if let Some(cont) = &bl.continuation_layout {
+        visit(
+            cont,
+            &bl.continuation_objects,
+            bl.y_px + bl.first_line_height_px,
+        );
+    }
+    (top, bottom)
 }
 
 /// Values a run derives from its current break. Recomputing them per
@@ -295,6 +337,34 @@ impl RichTextRun {
         )
     }
 
+    /// Like [`Self::new`], resolving image tags against `images`.
+    ///
+    /// Every `![](name)` in `source` looks its name up there; a name
+    /// the register does not hold is read as a location. [`Self::new`]
+    /// passes the shared register, so a location still resolves but a
+    /// caller's own registered names do not.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_images(
+        source: &str,
+        base_style: &TextStyle,
+        base_brush: Color,
+        sheet: &RichTextStyleSheet,
+        palette: &Palette,
+        dpi: f64,
+        images: &ImageRegistry,
+    ) -> Self {
+        Self::build(
+            source,
+            base_style,
+            base_brush,
+            sheet,
+            palette,
+            dpi,
+            RichTextWidth::Natural,
+            images,
+        )
+    }
+
     /// Like [`Self::new`] but with an explicit wrap-width policy.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_width(
@@ -306,10 +376,52 @@ impl RichTextRun {
         dpi: f64,
         width: RichTextWidth,
     ) -> Self {
+        Self::build(
+            source,
+            base_style,
+            base_brush,
+            sheet,
+            palette,
+            dpi,
+            width,
+            ImageRegistry::shared_empty(),
+        )
+    }
+
+    /// Like [`Self::new_with_width`], resolving image tags against
+    /// `images`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_width_and_images(
+        source: &str,
+        base_style: &TextStyle,
+        base_brush: Color,
+        sheet: &RichTextStyleSheet,
+        palette: &Palette,
+        dpi: f64,
+        width: RichTextWidth,
+        images: &ImageRegistry,
+    ) -> Self {
+        Self::build(
+            source, base_style, base_brush, sheet, palette, dpi, width, images,
+        )
+    }
+
+    /// The whole pipeline: parse, reduce, shape, and break to `width`.
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        source: &str,
+        base_style: &TextStyle,
+        base_brush: Color,
+        sheet: &RichTextStyleSheet,
+        palette: &Palette,
+        dpi: f64,
+        width: RichTextWidth,
+        images: &ImageRegistry,
+    ) -> Self {
         let events = parse(source);
         let base = ResolvedStyle::from_base(base_style);
         let runs = reduce(&events, sheet, &base);
-        let r = shape_run(runs, base_style, base_brush, palette, dpi);
+        let r = shape_run(runs, base_style, base_brush, palette, dpi, images);
         if let RichTextWidth::Fixed(px) = width {
             r.set_max_width(px, HAlign::Start);
         }
@@ -447,6 +559,12 @@ impl RichTextRun {
             if let Some(y) = last {
                 bottom = bottom.max(y);
             }
+            // An image is taller than the glyphs around it more often
+            // than not, and a slot measured off the text alone would
+            // clip it.
+            let (top_box, bottom_box) = image_band(bl);
+            top = top.min(top_box);
+            bottom = bottom.max(bottom_box);
         }
         for p in paints {
             top = top.min(p.outer_rect.y0 as f32);

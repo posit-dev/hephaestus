@@ -582,15 +582,17 @@ impl Geom for TextPathGeom {
                     ctx.dpi,
                     RichTextWidth::Natural,
                     HAlign::Start,
+                    ctx.images,
                 );
                 let rich = self.rich_cache.get_or_shape(key, || {
-                    RichTextRun::new(
+                    RichTextRun::new_with_images(
                         &text,
                         &style,
                         fill_color,
                         rich_sheet,
                         &ctx.theme.palette,
                         ctx.dpi,
+                        ctx.images,
                     )
                 });
                 let flat = flatten_rich_run(&rich);

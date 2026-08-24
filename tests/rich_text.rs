@@ -232,14 +232,37 @@ fn escaped_braces_never_open_a_span() {
 }
 
 #[test]
-fn image_alt_text_survives_as_plain_text() {
-    // Documented limitation: images aren't rendered, but their alt
-    // text must not vanish.
+fn an_image_tag_becomes_an_object_keyed_on_its_location() {
     let r = build("before ![a diagram](diagram.png) after");
+    assert_eq!(r.objects.len(), 1, "one image tag, one object");
+    assert_eq!(r.objects[0].dest, "diagram.png");
+    assert!(!r.objects[0].block, "text either side keeps it inline");
+    // Alt text is the tag's payload, not content: marquee drops it,
+    // and the location is what the register is keyed on.
     assert!(
-        r.text.contains("a diagram"),
-        "alt text should render, got {:?}",
+        !r.text.contains("a diagram"),
+        "alt text should not render, got {:?}",
         r.text
+    );
+    assert!(r.text.starts_with("before "));
+    assert!(r.text.ends_with(" after"));
+}
+
+#[test]
+fn an_image_alone_in_a_paragraph_is_a_block() {
+    let r = build("![](logo.png)");
+    assert_eq!(r.objects.len(), 1);
+    assert!(r.objects[0].block, "nothing else in the paragraph");
+}
+
+#[test]
+fn markup_inside_an_image_tag_renders_nothing() {
+    let r = build("![*em* and `code`](x.png)");
+    assert_eq!(r.objects.len(), 1);
+    assert_eq!(
+        r.text.trim().replace('\u{200b}', ""),
+        "",
+        "the tag's whole content is its location"
     );
 }
 

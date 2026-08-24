@@ -31,12 +31,23 @@
 //! the wrap width comes from the layout solver, matching marquee's
 //! `width = NULL` "parent container width" semantics.
 //!
-//! **Known limitations.** Images are not rendered: `![alt](path)`
-//! drops the image and renders `alt` as plain text, since there is no
-//! host image-resolver hook yet. Math renders as its source
+//! **Images.** `![alt](location)` renders, resolved against an
+//! [`ImageRegistry`](crate::image_registry::ImageRegistry): a
+//! registered name wins, and a name that is not registered is read as
+//! a location, so a path or (with `image-url`) a URL needs no setup.
+//! Alt text is dropped, following marquee — the location is the tag's
+//! whole payload. An inline image stands one em tall and takes its
+//! width from the pixel aspect ratio; a tag alone in its paragraph is
+//! a block image and fills the column instead. A location that gives
+//! nothing draws a framed cross at text size, styled by the sheet's
+//! `broken_image` selector. Pass the register through
+//! [`RichTextRun::new_with_images`]; [`RichTextRun::new`] resolves
+//! locations but no registered names.
+//!
+//! **Known limitations.** Math renders as its source
 //! characters rather than as an equation. Marquee's seven-value
 //! alignment vocabulary, gradient backgrounds, and explicit control
-//! over underline / strikethrough metrics are also unimplemented.
+//! over underline / strikethrough metrics are unimplemented.
 //!
 //! See `src/text/rich/CLAUDE.md` for the full architectural note.
 
@@ -46,6 +57,7 @@ mod border;
 pub mod cache;
 pub mod draw;
 pub mod flat;
+mod image;
 pub mod length;
 pub mod parser;
 pub mod reduce;
@@ -66,6 +78,6 @@ pub use length::{
     em, pt, relative, rem, FieldSet, LengthSpec, LineHeightSpec, RichMargin, StyleField,
 };
 pub use parser::{parse, RichEvent, Selector};
-pub use reduce::{reduce, BaselineRun, Block, BlockKind, BuiltRuns, InlineRun};
+pub use reduce::{reduce, BaselineRun, Block, BlockKind, BuiltRuns, InlineObject, InlineRun};
 pub use run::{RichBrush, RichTextRun, RichTextWidth};
 pub use style::{css_color, Direction, ResolvedStyle, RichTextStyleSheet, StyleDelta};

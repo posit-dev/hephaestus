@@ -9,6 +9,7 @@ use parley::PositionedLayoutItem;
 
 use super::anchor::RichAnchor;
 use super::border::emit_block_paint;
+use super::image::{emit_object, object_for_box, ObjectLayout};
 use super::reduce::{BaselineRun, InlineRun};
 use super::run::{BlockLayout, MarkerLayout, RichBrush, RichTextRun};
 use super::shape::pt_to_px;
@@ -85,6 +86,7 @@ pub fn draw_rich_text(
                     bl.is_rtl,
                     &bl.baseline_shifts,
                     &bl.source_inlines,
+                    &bl.objects,
                     palette,
                     run.base_brush,
                     dpi,
@@ -104,6 +106,7 @@ pub fn draw_rich_text(
                     bl.is_rtl,
                     &bl.continuation_baseline_shifts,
                     &bl.continuation_inlines,
+                    &bl.continuation_objects,
                     palette,
                     run.base_brush,
                     dpi,
@@ -128,6 +131,7 @@ pub fn draw_rich_text(
                     bl.is_rtl,
                     &bl.baseline_shifts,
                     &bl.source_inlines,
+                    &bl.objects,
                     palette,
                     run.base_brush,
                     dpi,
@@ -160,6 +164,7 @@ fn emit_line_glyphs(
     is_rtl: bool,
     baseline_shifts: &[BaselineRun],
     inlines: &[InlineRun],
+    objects: &[ObjectLayout],
     palette: &Palette,
     base_brush: Color,
     dpi: f64,
@@ -170,11 +175,26 @@ fn emit_line_glyphs(
     // First pass — record positions of any InlineBoxes on this line
     // so we can bracket span paint rects with the reserved padding
     // space. Keyed by id (assigned at shape time: 2*i = left,
-    // 2*i + 1 = right).
+    // 2*i + 1 = right), and images from `OBJECT_ID_BASE` up, which is
+    // what tells the two kinds apart here.
     let mut inline_box_x: std::collections::HashMap<u64, (f32, f32)> =
         std::collections::HashMap::new();
+    let effective_shift = if is_rtl { 0.0 } else { shift_px };
+    let x_base = block_x + effective_shift - offsets.ref_x;
     for item in line.items() {
         if let PositionedLayoutItem::InlineBox(ib) = item {
+            if let Some(object) = object_for_box(objects, ib.id) {
+                // Images paint under the glyphs of their own line, so
+                // text that overlaps one stays legible.
+                let rect = crate::geometry::Rect::new(
+                    f64::from(ib.x + x_base),
+                    f64::from(block_y + ib.y + object.dy_px - offsets.ref_y),
+                    f64::from(ib.x + x_base + ib.width),
+                    f64::from(block_y + ib.y + object.dy_px + ib.height - offsets.ref_y),
+                );
+                emit_object(scene, object, rect, final_transform, pick_id);
+                continue;
+            }
             inline_box_x.insert(ib.id, (ib.x, ib.x + ib.width));
         }
     }
@@ -194,8 +214,7 @@ fn emit_line_glyphs(
         // Under Rtl the shape width was narrowed by `shift_px` and
         // parley right-aligns into it, so the indent gutter already
         // sits on the right of the block — no positional shift needed.
-        let effective_shift = if is_rtl { 0.0 } else { shift_px };
-        let run_x_base = block_x + effective_shift - offsets.ref_x;
+        let run_x_base = x_base;
         let glyph_x0 = run_x_base + gr.offset();
         let glyph_x1 = glyph_x0 + gr.advance();
         let y_base = block_y + baseline - offsets.ref_y - dy_px;
@@ -468,6 +487,7 @@ fn emit_marker(
             dy,
             0.0,
             false,
+            &[],
             &[],
             &[],
             palette,

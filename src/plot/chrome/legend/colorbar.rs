@@ -128,6 +128,7 @@ pub(super) fn render_binned_stack_body(
     measure: &LegendMeasure,
     registry: &ScaleRegistry,
     shapes: &ShapeRegistry,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
     slot_rect: Rect,
     scene: &mut dyn SceneBuilder,
     dpi: f64,
@@ -138,7 +139,7 @@ pub(super) fn render_binned_stack_body(
     root_pt: f64,
 ) {
     let palette = &theme.palette;
-    let styles = legend_text_styles(lt, theme, dpi, root_pt);
+    let styles = legend_text_styles(lt, theme, dpi, root_pt, images);
     let domain = match registry.get(&legend.domain_scale) {
         Some(s) => s,
         None => return,
@@ -279,7 +280,7 @@ pub(super) fn render_binned_stack_body(
         for key in keys {
             let resolved = resolve_key(key, registry, midpoint);
             render_key(
-                key.kind, &resolved, cell, shapes, scene, dpi, geom, palette, theme,
+                key.kind, &resolved, cell, shapes, scene, dpi, geom, palette, theme, images,
             );
         }
     }
@@ -305,6 +306,7 @@ pub(super) fn render_binned_stack_body(
         theme,
         dpi,
         root_pt,
+        images,
     );
     crate::plot::chrome::linear_axis::draw_linear_axis_at(
         scene,
@@ -329,6 +331,7 @@ pub(super) fn render_colorbar_body(
     spec: &ColorbarSpec,
     measure: &LegendMeasure,
     registry: &ScaleRegistry,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
     slot_rect: Rect,
     scene: &mut dyn SceneBuilder,
     dpi: f64,
@@ -339,7 +342,7 @@ pub(super) fn render_colorbar_body(
     root_pt: f64,
 ) {
     let palette = &theme.palette;
-    let styles = legend_text_styles(lt, theme, dpi, root_pt);
+    let styles = legend_text_styles(lt, theme, dpi, root_pt, images);
     let domain = match registry.get(&legend.domain_scale) {
         Some(s) => s,
         None => return,
@@ -469,6 +472,7 @@ pub(super) fn render_colorbar_body(
         theme,
         dpi,
         root_pt,
+        images,
     );
     crate::plot::chrome::linear_axis::draw_linear_axis_at(
         scene,

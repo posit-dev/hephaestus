@@ -60,6 +60,14 @@ jobs:
             cargo check --no-default-features --features "$feature"
           done
 
+      # `image-url` adds a read path behind a *second* gate: reading a URL
+      # needs both the HTTP client and a codec to decode what came back, and
+      # the feature is useless — and unbuilt — without one.
+      - name: cargo check, the URL reader with and without a codec
+        run: |
+          cargo check --no-default-features --features image-url
+          cargo check --no-default-features --features image-url,png --all-targets
+
       # Image embedding gates on `png` *and* on a document direction, so the
       # two axes have to be crossed. A codec-only helper reachable from the
       # read half, or a collector reachable from the write half, passes every

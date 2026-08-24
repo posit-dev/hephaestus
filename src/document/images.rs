@@ -119,18 +119,13 @@ impl_codec! {
 pub(crate) fn collect(comp: &PlotComposition) -> EmbeddedImages {
     let mut plots = Vec::new();
     for (patch, index, registry) in registries(comp) {
-        let mut names: Vec<&str> = registry.names().collect();
-        names.sort_unstable();
         let mut entries = Vec::new();
-        for name in names {
-            let Some(image) = registry.get(name) else {
+        for name in carried_names(registry) {
+            let Some(image) = registry.resolve(&name) else {
                 continue;
             };
-            if let Some(png) = encode(image) {
-                entries.push(ImageEntry {
-                    name: name.to_string(),
-                    png,
-                });
+            if let Some(png) = encode(&image) {
+                entries.push(ImageEntry { name, png });
             }
         }
         if !entries.is_empty() {
@@ -179,6 +174,33 @@ fn encode(image: &crate::brush::Image) -> Option<Vec<u8>> {
     crate::image::encode_png(image.width, image.height, image.data.as_ref()).ok()
 }
 
+/// Every name a register can hand pixels for, sorted so the same
+/// contents write the same bytes whatever order they arrived in.
+///
+/// Registered entries plus the locations [`ImageRegistry::resolve`]
+/// has already read: a markdown `![](logo.png)` registers nothing, so
+/// carrying only the registered names would leave a reader without a
+/// filesystem — a page rebuilding the document — with a broken image
+/// where the writer had a picture.
+#[cfg(feature = "document-write")]
+fn carried_names(registry: &crate::image_registry::ImageRegistry) -> Vec<String> {
+    let mut names: Vec<String> = registry.names().map(str::to_string).collect();
+    names.extend(registry.loaded_names());
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// The index a composition-level register is addressed by. No patch
+/// holds this many plots, so it cannot collide with one — and a reader
+/// that predates it looks for a plot that isn't there and skips the
+/// entry.
+#[cfg(any(
+    feature = "document-write",
+    all(feature = "document-read", feature = "png")
+))]
+pub(crate) const COMPOSITION_INDEX: u32 = u32::MAX;
+
 /// Every image registry in the composition, with the address the reader
 /// will use to find its plot again.
 #[cfg(feature = "document-write")]
@@ -192,13 +214,27 @@ fn registries(
     for patch in patches {
         for (index, plot) in comp.plots_in(patch).iter().enumerate() {
             let registry = plot.image_registry_ref();
-            if registry.is_empty() {
+            if is_empty(registry) {
                 continue;
             }
             out.push((patch.to_string(), index as u32, registry));
         }
     }
+    // The composition's own chrome — a title naming an image — reads a
+    // register of its own, addressed by the root id and an index no
+    // plot occupies.
+    let registry = comp.image_registry_ref();
+    if !is_empty(registry) {
+        out.push((comp.root_id.clone(), COMPOSITION_INDEX, registry));
+    }
     out
+}
+
+/// Whether a register can hand out no pixels at all — nothing
+/// registered and nothing read from a location.
+#[cfg(feature = "document-write")]
+fn is_empty(registry: &crate::image_registry::ImageRegistry) -> bool {
+    registry.is_empty() && registry.loaded_names().is_empty()
 }
 
 /// The images a composition names but this build cannot carry, for
@@ -210,16 +246,14 @@ fn registries(
 pub(crate) fn unembeddable(comp: &PlotComposition) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (patch, _, registry) in registries(comp) {
-        let mut names: Vec<&str> = registry.names().collect();
-        names.sort_unstable();
-        for name in names {
-            let Some(image) = registry.get(name) else {
+        for name in carried_names(registry) {
+            let Some(image) = registry.resolve(&name) else {
                 continue;
             };
-            if embeddable(image) {
+            if embeddable(&image) {
                 continue;
             }
-            out.push((patch.clone(), name.to_string()));
+            out.push((patch.clone(), name));
         }
     }
     out
@@ -244,6 +278,13 @@ pub(crate) fn apply(embedded: &EmbeddedImages, comp: &mut PlotComposition) {
             })
             .collect();
         if decoded.is_empty() {
+            continue;
+        }
+        if plot.index == COMPOSITION_INDEX {
+            let registry = comp.image_registry_mut();
+            for (name, image) in decoded {
+                registry.insert(name, image);
+            }
             continue;
         }
         comp.update_plot_at(&plot.patch, plot.index as usize, |p| {

@@ -174,6 +174,7 @@ pub fn legend_stack_natural_size(
     legends: &[&Legend],
     registry: &ScaleRegistry,
     shapes: &ShapeRegistry,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
     dpi: f64,
     theme: &crate::plot::theme::Theme,
 ) -> (f64, f64) {
@@ -185,6 +186,7 @@ pub fn legend_stack_natural_size(
                 l,
                 registry,
                 shapes,
+                images,
                 dpi,
                 theme.legend_for(l.theme_variant.as_deref()),
                 theme,
@@ -221,6 +223,7 @@ pub fn legend_measure(
     legend: &Legend,
     registry: &ScaleRegistry,
     shapes: &ShapeRegistry,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
     dpi: f64,
     theme: &crate::plot::theme::Theme,
 ) -> Box<dyn Measure> {
@@ -228,6 +231,7 @@ pub fn legend_measure(
         legend,
         registry,
         shapes,
+        images,
         dpi,
         theme.legend_for(legend.theme_variant.as_deref()),
         theme,
@@ -248,6 +252,7 @@ pub fn legend_stack_measure(
     side: LegendSide,
     registry: &ScaleRegistry,
     shapes: &ShapeRegistry,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
     dpi: f64,
     theme: &crate::plot::theme::Theme,
 ) -> Box<dyn Measure> {
@@ -260,6 +265,7 @@ pub fn legend_stack_measure(
                 l,
                 registry,
                 shapes,
+                images,
                 dpi,
                 theme.legend_for(l.theme_variant.as_deref()),
                 theme,
@@ -291,6 +297,7 @@ pub fn render_legend_stack(
     slot_rect: Rect,
     registry: &ScaleRegistry,
     shapes: &ShapeRegistry,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
     scene: &mut dyn SceneBuilder,
     dpi: f64,
     theme: &crate::plot::theme::Theme,
@@ -307,6 +314,7 @@ pub fn render_legend_stack(
                     l,
                     registry,
                     shapes,
+                    images,
                     dpi,
                     theme.legend_for(l.theme_variant.as_deref()),
                     theme,
@@ -343,6 +351,7 @@ pub fn render_legend_stack(
             measure,
             registry,
             shapes,
+            images,
             sub_rect,
             scene,
             dpi,
@@ -363,6 +372,7 @@ pub fn render_legend(
     legend: &Legend,
     registry: &ScaleRegistry,
     shapes: &ShapeRegistry,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
     slot_rect: Rect,
     scene: &mut dyn SceneBuilder,
     dpi: f64,
@@ -373,6 +383,7 @@ pub fn render_legend(
         legend,
         registry,
         shapes,
+        images,
         dpi,
         lt,
         theme,
@@ -382,7 +393,7 @@ pub fn render_legend(
         crate::plot::chrome::root_text_pt(theme),
     );
     render_legend_with_measure(
-        legend, &measure, registry, shapes, slot_rect, scene, dpi, theme,
+        legend, &measure, registry, shapes, images, slot_rect, scene, dpi, theme,
     );
 }
 
@@ -396,6 +407,7 @@ pub(crate) fn render_legend_with_measure(
     measure: &LegendMeasure,
     registry: &ScaleRegistry,
     shapes: &ShapeRegistry,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
     slot_rect: Rect,
     scene: &mut dyn SceneBuilder,
     dpi: f64,
@@ -422,6 +434,7 @@ pub(crate) fn render_legend_with_measure(
             measure,
             registry,
             shapes,
+            images,
             draw_rect,
             scene,
             dpi,
@@ -437,6 +450,7 @@ pub(crate) fn render_legend_with_measure(
             measure,
             registry,
             shapes,
+            images,
             draw_rect,
             scene,
             dpi,
@@ -451,6 +465,7 @@ pub(crate) fn render_legend_with_measure(
             spec,
             measure,
             registry,
+            images,
             draw_rect,
             scene,
             dpi,
@@ -534,6 +549,7 @@ pub(super) fn legend_text_styles(
     theme: &crate::plot::theme::Theme,
     dpi: f64,
     root_pt: f64,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
 ) -> LegendTextStyles {
     let palette = &theme.palette;
     let paint = |merged: crate::plot::theme::TextElement| {
@@ -548,7 +564,7 @@ pub(super) fn legend_text_styles(
             // Resolve off the cascaded element so the safety net's
             // unset outline and any themed value both come through.
             outline: crate::plot::chrome::text::text_outline_from(&merged, palette, dpi),
-            rich: crate::plot::chrome::text::rich_chrome_for(&merged, theme, dpi),
+            rich: crate::plot::chrome::text::rich_chrome_for(&merged, theme, dpi, images),
         }
     };
     let (title, label) = legend_text_elements(lt, &theme.text);
@@ -654,6 +670,7 @@ fn render_stack_body(
     measure: &LegendMeasure,
     registry: &ScaleRegistry,
     shapes: &ShapeRegistry,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
     slot_rect: Rect,
     scene: &mut dyn SceneBuilder,
     dpi: f64,
@@ -680,7 +697,7 @@ fn render_stack_body(
     } else {
         0.0
     };
-    let styles = legend_text_styles(lt, theme, dpi, root_pt);
+    let styles = legend_text_styles(lt, theme, dpi, root_pt, images);
 
     let entries = domain.breaks(DEFAULT_BREAK_COUNT);
     let entries: Vec<&Value> = entries
@@ -744,6 +761,7 @@ fn render_stack_body(
                 geom,
                 palette,
                 theme,
+                images,
             );
         }
         if let Some(frame_el) = key_frame {
@@ -820,6 +838,7 @@ mod tests {
             &legend,
             &build_registry(),
             &shape_reg(),
+            &crate::image_registry::no_images(),
             Rect::new(0.0, 0.0, 300.0, 300.0),
             &mut scene,
             dpi_96(),
@@ -861,6 +880,7 @@ mod tests {
                 &legend,
                 &reg,
                 &shape_reg(),
+                &crate::image_registry::no_images(),
                 Rect::new(0.0, 0.0, 300.0, 300.0),
                 &mut scene,
                 dpi_96(),
@@ -922,6 +942,7 @@ mod tests {
             &legend,
             &reg,
             &shapes,
+            &crate::image_registry::no_images(),
             Rect::new(0.0, 0.0, 200.0, 200.0),
             &mut scene,
             dpi_96(),
@@ -963,6 +984,7 @@ mod tests {
             &legend,
             &reg,
             &shapes,
+            &crate::image_registry::no_images(),
             Rect::new(0.0, 0.0, 300.0, 300.0),
             &mut scene,
             dpi_96(),
@@ -1007,6 +1029,7 @@ mod tests {
             &legend,
             &reg,
             &shapes,
+            &crate::image_registry::no_images(),
             Rect::new(0.0, 0.0, 200.0, 200.0),
             &mut scene,
             dpi_96(),
@@ -1066,8 +1089,14 @@ mod tests {
             })
             .key(LegendKeySpec::point().scaled("fill", "category_color"));
         let reg = build_registry();
-        let (w, h) =
-            legend_stack_natural_size(&[&legend], &reg, &shape_reg(), dpi_96(), &default_theme());
+        let (w, h) = legend_stack_natural_size(
+            &[&legend],
+            &reg,
+            &shape_reg(),
+            &crate::image_registry::no_images(),
+            dpi_96(),
+            &default_theme(),
+        );
         assert!(w > 0.0);
         assert!(h > 0.0);
     }
@@ -1079,8 +1108,14 @@ mod tests {
             inset_pt: 6.0,
         });
         let reg = build_registry();
-        let (w, h) =
-            legend_stack_natural_size(&[&legend], &reg, &shape_reg(), dpi_96(), &default_theme());
+        let (w, h) = legend_stack_natural_size(
+            &[&legend],
+            &reg,
+            &shape_reg(),
+            &crate::image_registry::no_images(),
+            dpi_96(),
+            &default_theme(),
+        );
         assert_eq!(w, 0.0);
         assert_eq!(h, 0.0);
     }

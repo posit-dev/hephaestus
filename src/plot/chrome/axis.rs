@@ -242,7 +242,13 @@ impl Measure for AxisMeasure {
 /// slot. The chrome style (label text style, tick / gap pixel sizes) is
 /// resolved from `theme` against the channel + side derived from
 /// `side`, so the slot reservation matches what [`draw`] emits.
-pub fn measure(scale: &Scale, side: AxisSide, dpi: f64, theme: &Theme) -> Box<dyn Measure> {
+pub fn measure(
+    scale: &Scale,
+    side: AxisSide,
+    dpi: f64,
+    theme: &Theme,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
+) -> Box<dyn Measure> {
     let (ch, side_idx) = axis_side_to_channel_side(side);
     let resolved = theme.resolved_axis(ch, side_idx);
     let chrome_style = AxisChromeStyle::from_resolved(
@@ -250,6 +256,7 @@ pub fn measure(scale: &Scale, side: AxisSide, dpi: f64, theme: &Theme) -> Box<dy
         theme,
         dpi,
         crate::plot::chrome::root_text_pt(theme),
+        images,
     );
     Box::new(AxisMeasure::new(
         scale,
@@ -282,6 +289,7 @@ pub fn draw(
     side: AxisSide,
     dpi: f64,
     theme: &Theme,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
 ) {
     let breaks = scale.breaks(DEFAULT_BREAK_COUNT);
     if breaks.is_empty() {
@@ -351,6 +359,7 @@ pub fn draw(
         theme,
         dpi,
         crate::plot::chrome::root_text_pt(theme),
+        images,
     );
     draw_linear_axis_at(
         scene,
@@ -448,6 +457,7 @@ mod tests {
             AxisSide::Bottom,
             dpi_96(),
             theme,
+            &crate::image_registry::no_images(),
         );
         scene
     }
@@ -470,8 +480,20 @@ mod tests {
     #[test]
     fn a_markdown_axis_reserves_the_width_it_draws() {
         let s = italic_labels();
-        let plain = measure(&s, AxisSide::Left, dpi_96(), &Theme::default());
-        let md = measure(&s, AxisSide::Left, dpi_96(), &markdown_theme());
+        let plain = measure(
+            &s,
+            AxisSide::Left,
+            dpi_96(),
+            &Theme::default(),
+            &crate::image_registry::no_images(),
+        );
+        let md = measure(
+            &s,
+            AxisSide::Left,
+            dpi_96(),
+            &markdown_theme(),
+            &crate::image_registry::no_images(),
+        );
         let width = |m: &dyn Measure| match m.width_hint(dpi_96()) {
             WidthHint::Min(w) => w,
             WidthHint::NeedsHeight { seed } => seed,
@@ -490,7 +512,13 @@ mod tests {
     fn bottom_axis_measure_reports_chrome_height() {
         let s = scale::continuous(0.0..=100.0);
         let theme = Theme::default();
-        let m = measure(&s, AxisSide::Bottom, dpi_96(), &theme);
+        let m = measure(
+            &s,
+            AxisSide::Bottom,
+            dpi_96(),
+            &theme,
+            &crate::image_registry::no_images(),
+        );
         // Bottom axis: width contribution = 0, height = tick + gap + label_h.
         assert_eq!(m.width_hint(dpi_96()), WidthHint::Min(0.0));
         let h = m.height_at(400.0, dpi_96());
@@ -503,7 +531,13 @@ mod tests {
     fn left_axis_measure_reports_chrome_width() {
         let s = scale::continuous(0.0..=100.0);
         let theme = Theme::default();
-        let m = measure(&s, AxisSide::Left, dpi_96(), &theme);
+        let m = measure(
+            &s,
+            AxisSide::Left,
+            dpi_96(),
+            &theme,
+            &crate::image_registry::no_images(),
+        );
         let w = match m.width_hint(dpi_96()) {
             WidthHint::Min(w) => w,
             WidthHint::NeedsHeight { seed } => seed,
@@ -520,8 +554,20 @@ mod tests {
         let s_short = scale::continuous(0.0..=10.0);
         let s_long = scale::continuous(0.0..=100_000_000.0);
         let theme = Theme::default();
-        let m_short = measure(&s_short, AxisSide::Left, dpi_96(), &theme);
-        let m_long = measure(&s_long, AxisSide::Left, dpi_96(), &theme);
+        let m_short = measure(
+            &s_short,
+            AxisSide::Left,
+            dpi_96(),
+            &theme,
+            &crate::image_registry::no_images(),
+        );
+        let m_long = measure(
+            &s_long,
+            AxisSide::Left,
+            dpi_96(),
+            &theme,
+            &crate::image_registry::no_images(),
+        );
         let w_short = match m_short.width_hint(dpi_96()) {
             WidthHint::Min(w) => w,
             WidthHint::NeedsHeight { seed } => seed,
@@ -557,7 +603,13 @@ mod tests {
         let panel = panel_400_300();
         // Place the slot directly below the panel — height = chrome.
         let theme = Theme::default();
-        let m = measure(&s, AxisSide::Bottom, dpi_96(), &theme);
+        let m = measure(
+            &s,
+            AxisSide::Bottom,
+            dpi_96(),
+            &theme,
+            &crate::image_registry::no_images(),
+        );
         let chrome_h = m.height_at(panel.x1 - panel.x0, dpi_96());
         let slot = Rect::new(panel.x0, panel.y1, panel.x1, panel.y1 + chrome_h);
 
@@ -570,6 +622,7 @@ mod tests {
             AxisSide::Bottom,
             dpi_96(),
             &Theme::default(),
+            &crate::image_registry::no_images(),
         );
 
         let (strokes, glyphs) = count_strokes_and_glyph_runs(&scene);
@@ -595,7 +648,13 @@ mod tests {
         let s = scale::continuous(0.0..=1.0);
         let panel = panel_400_300();
         let theme = Theme::default();
-        let m = measure(&s, AxisSide::Left, dpi_96(), &theme);
+        let m = measure(
+            &s,
+            AxisSide::Left,
+            dpi_96(),
+            &theme,
+            &crate::image_registry::no_images(),
+        );
         let chrome_w = match m.width_hint(dpi_96()) {
             WidthHint::Min(w) => w,
             WidthHint::NeedsHeight { seed } => seed,
@@ -611,6 +670,7 @@ mod tests {
             AxisSide::Left,
             dpi_96(),
             &Theme::default(),
+            &crate::image_registry::no_images(),
         );
 
         let (strokes, glyphs) = count_strokes_and_glyph_runs(&scene);
@@ -631,7 +691,13 @@ mod tests {
         let s = scale::binned(2500.0..=6500.0, edges.clone());
         let panel = panel_400_300();
         let theme = Theme::default();
-        let m = measure(&s, AxisSide::Bottom, dpi_96(), &theme);
+        let m = measure(
+            &s,
+            AxisSide::Bottom,
+            dpi_96(),
+            &theme,
+            &crate::image_registry::no_images(),
+        );
         let chrome_h = m.height_at(panel.x1 - panel.x0, dpi_96());
         let slot = Rect::new(panel.x0, panel.y1, panel.x1, panel.y1 + chrome_h);
 
@@ -644,6 +710,7 @@ mod tests {
             AxisSide::Bottom,
             dpi_96(),
             &theme,
+            &crate::image_registry::no_images(),
         );
 
         let tick_xs: Vec<f64> = scene
@@ -684,6 +751,7 @@ mod tests {
             AxisSide::Bottom,
             dpi_96(),
             &Theme::default(),
+            &crate::image_registry::no_images(),
         );
         assert!(
             scene.ops.is_empty(),
@@ -707,6 +775,7 @@ mod tests {
             AxisSide::Bottom,
             dpi_96(),
             &Theme::default(),
+            &crate::image_registry::no_images(),
         );
         assert!(scene.ops.is_empty());
     }

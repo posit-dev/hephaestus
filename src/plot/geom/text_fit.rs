@@ -622,15 +622,17 @@ impl Geom for TextFitGeom {
                         ctx.dpi,
                         RichTextWidth::Fixed(rect_w as f32),
                         justify_x,
+                        ctx.images,
                     );
                     let run = self.rich_cache.get_or_shape(key, || {
-                        RichTextRun::new(
+                        RichTextRun::new_with_images(
                             &text,
                             &style,
                             fill_color,
                             &row_sheet,
                             &ctx.theme.palette,
                             ctx.dpi,
+                            ctx.images,
                         )
                     });
                     run.set_max_width(rect_w as f32, justify_x);

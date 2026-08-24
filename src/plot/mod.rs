@@ -26,7 +26,6 @@ pub mod chrome;
 pub mod composition;
 pub mod diff;
 pub mod geom;
-pub mod image_registry;
 #[allow(clippy::module_inception)]
 pub mod plot;
 pub mod projection;
@@ -34,6 +33,8 @@ pub mod scale;
 pub mod theme;
 pub mod value;
 
+pub use crate::image_registry;
+pub use crate::image_registry::ImageRegistry;
 pub use chrome::axis::{Axis, AxisId, AxisPlacement, PolarRing};
 pub use chrome::legend::{Legend, LegendId, LegendKeySpec};
 pub use composition::{PlotComposition, ValidationIssue};
@@ -44,7 +45,6 @@ pub use geom::{
     RectGeom, RibbonBSplineGeom, RibbonGeom, ScaleResolver, SegmentGeom, WedgeGeom,
 };
 pub use geom::{TextFitGeom, TextGeom, TextPathGeom};
-pub use image_registry::ImageRegistry;
 pub use plot::{AspectMode, GeomId, Plot};
 pub use projection::{ChromeStrategy, CustomProjection, Projection};
 pub use scale::{

@@ -502,6 +502,8 @@ impl ResolvedStyle {
 /// - Block markdown: `paragraph`, `h1`..`h6`, `block_quote`, `list`,
 ///   `list_ordered`, `list_item`, `list_item_body`, `code_block`,
 ///   `hr`.
+/// - Images: `img` (both inline and block image tags) and
+///   `broken_image` (the placeholder for one that cannot be read).
 ///
 /// Custom class names (from `{.warning …}` spans, `:::note …:::`
 /// divs, etc.) are user-supplied via `set`. On a class-selector
@@ -733,6 +735,32 @@ impl RichTextStyleSheet {
                 padding: Some(RichMargin::all(em(1.0))),
                 border_radius: Some(rem(3.0 / 16.0)),
                 margin: Some(RichMargin::new(rem(1.0), pt(0.0), rem(1.0), pt(0.0))),
+                ..StyleDelta::empty()
+            },
+        );
+        // Images. marquee's `img = style(align = "center", border =
+        // NA)`: a block image centres in its container, and the entry
+        // carries no border, since a block image's paragraph takes
+        // this style and would otherwise draw one around itself.
+        self.set(
+            "img",
+            StyleDelta {
+                align: Some(HAlign::Center),
+                ..StyleDelta::empty()
+            },
+        );
+        // The placeholder an unreadable image draws: marquee's black
+        // square with a red cross. `border_*` paints the frame,
+        // `color` and `text_stroke_width` the cross, so a caller can
+        // restyle both without new vocabulary. R's `lwd` is 1/96 in,
+        // making its 4 and 2 three points and one and a half.
+        self.set(
+            "broken_image",
+            StyleDelta {
+                border_color: Some(ThemeColor::Fixed(crate::color::rgb(0.0, 0.0, 0.0))),
+                border_width: Some(RichMargin::all(pt(3.0))),
+                color: Some(ThemeColor::Fixed(crate::color::rgb(1.0, 0.0, 0.0))),
+                text_stroke_width: Some(pt(1.5)),
                 ..StyleDelta::empty()
             },
         );

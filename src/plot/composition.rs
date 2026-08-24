@@ -171,6 +171,9 @@ struct RebuildCtx<'a> {
     /// Registry the composition's own legend keys size their markers
     /// against — the same one their draw step resolves shapes through.
     shapes: &'a ShapeRegistry,
+    /// Register the composition's own markdown chrome resolves image
+    /// names against.
+    images: &'a std::sync::Arc<crate::image_registry::ImageRegistry>,
 }
 
 impl CompositionTemplate {
@@ -189,6 +192,7 @@ impl CompositionTemplate {
         let registry = ScaleRegistry::new();
         let theme = Theme::default();
         let shapes = ShapeRegistry::new();
+        let images = std::sync::Arc::new(crate::image_registry::ImageRegistry::new());
         self.rebuild(&RebuildCtx {
             plots: &plots,
             registry: &registry,
@@ -197,6 +201,7 @@ impl CompositionTemplate {
             theme: &theme,
             chrome: &chrome,
             shapes: &shapes,
+            images: &images,
         })
     }
 }
@@ -485,7 +490,7 @@ impl CompositionChrome {
                     r,
                     col,
                     Span::rc(rs, cs),
-                    text_cell_for_element(t, &el, root_pt, ctx.dpi, theme),
+                    text_cell_for_element(t, &el, root_pt, ctx.dpi, theme, ctx.images),
                 );
             }
         }
@@ -497,7 +502,7 @@ impl CompositionChrome {
             if let Some(title) = self.axis_title_at(side) {
                 c = c.slot(
                     cartesian_axis_title_slot(side),
-                    axis_title_cell(title, side, theme, ctx.dpi),
+                    axis_title_cell(title, side, theme, ctx.dpi, ctx.images),
                 );
             }
         }
@@ -520,6 +525,7 @@ impl CompositionChrome {
                     side,
                     ctx.registry,
                     ctx.shapes,
+                    ctx.images,
                     ctx.dpi,
                     theme,
                 )),
@@ -542,6 +548,7 @@ impl CompositionChrome {
         layout: &CompositionLayout,
         registry: &ScaleRegistry,
         shapes: &ShapeRegistry,
+        images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
         dpi: f64,
         theme: &Theme,
     ) {
@@ -578,6 +585,7 @@ impl CompositionChrome {
                 dpi,
                 crate::pick::PickId::Skip,
                 Some(&theme.rich_text),
+                images,
             );
         }
 
@@ -611,6 +619,7 @@ impl CompositionChrome {
                     color.resolve(&theme.palette),
                     &theme.palette,
                     &theme.rich_text,
+                    images,
                     dpi,
                     rect,
                     side,
@@ -641,7 +650,7 @@ impl CompositionChrome {
             }
             if let Some(rect) = layout.get(comp_id, slot) {
                 crate::plot::chrome::legend::render_legend_stack(
-                    &group, side, rect, registry, shapes, scene, dpi, theme,
+                    &group, side, rect, registry, shapes, images, scene, dpi, theme,
                 );
             }
         }
@@ -707,6 +716,10 @@ pub struct PlotComposition {
     /// Registry backing the glyphs drawn in composition-level legend
     /// keys. Per-plot legends use their own plot's registry.
     pub(crate) shapes: ShapeRegistry,
+    /// Register the composition's own chrome resolves image names
+    /// against — a title or caption that names one in markdown. Each
+    /// plot's chrome reads its own plot's register.
+    pub(crate) images: std::sync::Arc<crate::image_registry::ImageRegistry>,
     /// Per-plot dirty bits, plumbed for partial-repaint heuristics. Not
     /// currently consumed — every render re-draws the full table.
     plot_dirty: HashMap<String, bool>,
@@ -743,6 +756,7 @@ impl PlotComposition {
             chrome_order: Vec::new(),
             root_id,
             shapes: ShapeRegistry::with_builtins(),
+            images: std::sync::Arc::new(crate::image_registry::ImageRegistry::new()),
             plot_dirty: HashMap::new(),
             scale_dirty: HashMap::new(),
             layout_dirty: true,
@@ -786,6 +800,7 @@ impl PlotComposition {
             chrome_order,
             root_id,
             shapes: ShapeRegistry::with_builtins(),
+            images: std::sync::Arc::new(crate::image_registry::ImageRegistry::new()),
             plot_dirty,
             scale_dirty,
             layout_dirty: true,
@@ -1036,6 +1051,37 @@ impl PlotComposition {
         &self.shapes
     }
 
+    // ── Image register ────────────────────────────────────────────────
+
+    /// Replace the register the composition's own chrome resolves
+    /// image names against. Each plot's chrome and geoms read their
+    /// own plot's register instead.
+    pub fn image_registry(mut self, r: crate::image_registry::ImageRegistry) -> Self {
+        self.images = std::sync::Arc::new(r);
+        self
+    }
+
+    /// Replace the composition-level image register in place. Flags
+    /// the layout dirty, since an image in a title changes its
+    /// measure.
+    pub fn set_image_registry(&mut self, r: crate::image_registry::ImageRegistry) {
+        self.images = std::sync::Arc::new(r);
+        self.layout_dirty = true;
+    }
+
+    /// Mutably borrow the composition-level image register, to add
+    /// entries without replacing the whole table. Flags the layout
+    /// dirty.
+    pub fn image_registry_mut(&mut self) -> &mut crate::image_registry::ImageRegistry {
+        self.layout_dirty = true;
+        std::sync::Arc::make_mut(&mut self.images)
+    }
+
+    /// Borrow the composition-level image register.
+    pub fn image_registry_ref(&self) -> &crate::image_registry::ImageRegistry {
+        &self.images
+    }
+
     // ── Scale registry ────────────────────────────────────────────────
 
     /// Insert a scale under `name`, replacing any previous entry.
@@ -1216,6 +1262,7 @@ impl PlotComposition {
                 theme: &self.theme,
                 chrome: &self.chrome,
                 shapes: &self.shapes,
+                images: &self.images,
             });
             self.last_layout = Some(comp.solve(size, dpi));
             self.last_size = Some(size);
@@ -1302,6 +1349,7 @@ impl PlotComposition {
                 layout,
                 &self.scales,
                 &self.shapes,
+                &self.images,
                 dpi,
                 &self.theme,
             );

@@ -107,6 +107,7 @@ impl LegendMeasure {
         legend: &Legend,
         registry: &ScaleRegistry,
         shapes: &ShapeRegistry,
+        images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
         dpi: f64,
         lt: &crate::plot::theme::LegendTheme,
         theme: &crate::plot::theme::Theme,
@@ -124,10 +125,10 @@ impl LegendMeasure {
         let (title_el, label_el) = legend_text_elements(lt, &theme.text);
         let label_rich = label_el
             .as_ref()
-            .and_then(|el| crate::plot::chrome::text::rich_chrome_for(el, theme, dpi));
+            .and_then(|el| crate::plot::chrome::text::rich_chrome_for(el, theme, dpi, images));
         let title_rich = title_el
             .as_ref()
-            .and_then(|el| crate::plot::chrome::text::rich_chrome_for(el, theme, dpi));
+            .and_then(|el| crate::plot::chrome::text::rich_chrome_for(el, theme, dpi, images));
         let label_style = label_el
             .as_ref()
             .map(|el| crate::plot::chrome::text::text_style_from(el, root_pt));
@@ -185,8 +186,9 @@ impl LegendMeasure {
                         let (mut row_w, mut row_h) = (0.0_f64, 0.0_f64);
                         for key in &stack.keys {
                             let resolved = resolve_key(key, registry, v);
-                            let (w, h) =
-                                swatch_dim_for(key.kind, &resolved, dpi, geom, shapes, theme);
+                            let (w, h) = swatch_dim_for(
+                                key.kind, &resolved, dpi, geom, shapes, theme, images,
+                            );
                             row_w = row_w.max(w);
                             row_h = row_h.max(h);
                         }
@@ -216,7 +218,8 @@ impl LegendMeasure {
                     let (mut row_w, mut row_h) = (0.0_f64, 0.0_f64);
                     for key in &stack.keys {
                         let resolved = resolve_key(key, registry, v);
-                        let (w, h) = swatch_dim_for(key.kind, &resolved, dpi, geom, shapes, theme);
+                        let (w, h) =
+                            swatch_dim_for(key.kind, &resolved, dpi, geom, shapes, theme, images);
                         row_w = row_w.max(w);
                         row_h = row_h.max(h);
                     }
@@ -615,7 +618,14 @@ mod tests {
     fn empty_legend_reports_zero_size() {
         let legend = Legend::new("category_color");
         let reg = build_registry();
-        let m = legend_measure(&legend, &reg, &shape_reg(), dpi_96(), &default_theme());
+        let m = legend_measure(
+            &legend,
+            &reg,
+            &shape_reg(),
+            &crate::image_registry::no_images(),
+            dpi_96(),
+            &default_theme(),
+        );
         assert_eq!(m.width_hint(dpi_96()), WidthHint::Min(0.0));
         assert_eq!(m.height_at(100.0, dpi_96()), 0.0);
     }
@@ -626,7 +636,14 @@ mod tests {
             .title("Category")
             .key(LegendKeySpec::point().scaled("fill", "category_color"));
         let reg = build_registry();
-        let m = legend_measure(&legend, &reg, &shape_reg(), dpi_96(), &default_theme());
+        let m = legend_measure(
+            &legend,
+            &reg,
+            &shape_reg(),
+            &crate::image_registry::no_images(),
+            dpi_96(),
+            &default_theme(),
+        );
         let w = match m.width_hint(dpi_96()) {
             WidthHint::Min(w) => w,
             WidthHint::NeedsHeight { seed } => seed,
@@ -646,14 +663,28 @@ mod tests {
                 .scaled("size", "category_size"),
         );
         let reg = build_registry();
-        let s_w = match legend_measure(&small, &reg, &shape_reg(), dpi_96(), &default_theme())
-            .width_hint(dpi_96())
+        let s_w = match legend_measure(
+            &small,
+            &reg,
+            &shape_reg(),
+            &crate::image_registry::no_images(),
+            dpi_96(),
+            &default_theme(),
+        )
+        .width_hint(dpi_96())
         {
             WidthHint::Min(w) => w,
             _ => 0.0,
         };
-        let l_w = match legend_measure(&large, &reg, &shape_reg(), dpi_96(), &default_theme())
-            .width_hint(dpi_96())
+        let l_w = match legend_measure(
+            &large,
+            &reg,
+            &shape_reg(),
+            &crate::image_registry::no_images(),
+            dpi_96(),
+            &default_theme(),
+        )
+        .width_hint(dpi_96())
         {
             WidthHint::Min(w) => w,
             _ => 0.0,
@@ -692,6 +723,7 @@ mod tests {
             legend,
             reg,
             &shape_reg(),
+            &crate::image_registry::no_images(),
             dpi_96(),
             theme.legend_for(legend.theme_variant.as_deref()),
             theme,
@@ -745,6 +777,7 @@ mod tests {
             &legend,
             &reg,
             &shape_reg(),
+            &crate::image_registry::no_images(),
             dpi_96(),
             theme.legend_for(None),
             &theme,
@@ -782,7 +815,14 @@ mod tests {
         let theme = default_theme();
         let reg = build_registry();
         assert!(binned_rows(&legend, &reg, &theme).is_empty());
-        let measure = legend_measure(&legend, &reg, &shape_reg(), dpi_96(), &theme);
+        let measure = legend_measure(
+            &legend,
+            &reg,
+            &shape_reg(),
+            &crate::image_registry::no_images(),
+            dpi_96(),
+            &theme,
+        );
         assert_eq!(measure.width_hint(dpi_96()), WidthHint::Min(0.0));
         assert_eq!(measure.height_at(0.0, dpi_96()), 0.0);
     }

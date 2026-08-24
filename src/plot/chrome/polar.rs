@@ -45,6 +45,7 @@ pub fn draw_radius_axis(
     dpi: f64,
     title: Option<&str>,
     theme: &Theme,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
 ) {
     let g = polar.geometry(panel);
     if g.r_outer <= 0.0 {
@@ -81,6 +82,7 @@ pub fn draw_radius_axis(
         theme,
         dpi,
         crate::plot::chrome::root_text_pt(theme),
+        images,
     );
     draw_linear_axis_at(
         scene,
@@ -149,6 +151,7 @@ pub fn draw_angular_axis(
     dpi: f64,
     title: Option<&str>,
     theme: &Theme,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
 ) {
     let g = polar.geometry(panel);
     if g.r_outer <= 0.0 {
@@ -179,6 +182,7 @@ pub fn draw_angular_axis(
         theme,
         dpi,
         crate::plot::chrome::root_text_pt(theme),
+        images,
     );
     let tick_px = chrome_style.tick_length_px;
     let minor_tick_px = chrome_style.minor_tick_length_px;
@@ -403,15 +407,20 @@ impl Measure for PolarBleedMeasure {
 /// midpoint, curving along an arc; their radial extent past `r_outer`
 /// is `tick + gap + label_max + title_gap + title_h` and is
 /// distributed to cardinal sides by the midpoint direction.
-pub(crate) fn compute_polar_bleed(axes: &[BleedAxis], dpi: f64, theme: &Theme) -> PolarBleed {
+pub(crate) fn compute_polar_bleed(
+    axes: &[BleedAxis],
+    dpi: f64,
+    theme: &Theme,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
+) -> PolarBleed {
     // Resolve each polar axis-type's chrome style once; pick per-label
     // by `BleedLabelKind`. Angular labels (outer ring) live on
     // channel 0 / side 0; radius labels live on channel 1 / side 0.
     let root_pt = crate::plot::chrome::root_text_pt(theme);
     let angular_style =
-        AxisChromeStyle::from_resolved(&theme.resolved_axis(0, 0), theme, dpi, root_pt);
+        AxisChromeStyle::from_resolved(&theme.resolved_axis(0, 0), theme, dpi, root_pt, images);
     let radial_style =
-        AxisChromeStyle::from_resolved(&theme.resolved_axis(1, 0), theme, dpi, root_pt);
+        AxisChromeStyle::from_resolved(&theme.resolved_axis(1, 0), theme, dpi, root_pt, images);
     let title_style_for = |kind: &BleedLabelKind| match kind {
         BleedLabelKind::Radius => &radial_style,
         _ => &angular_style,
@@ -1001,8 +1010,18 @@ mod tests {
     #[test]
     fn bleed_covers_a_multi_word_label_in_full() {
         let theme = Theme::default();
-        let whole = compute_polar_bleed(&[east_label("Species: setosa")], DPI, &theme);
-        let first_word = compute_polar_bleed(&[east_label("Species:")], DPI, &theme);
+        let whole = compute_polar_bleed(
+            &[east_label("Species: setosa")],
+            DPI,
+            &theme,
+            &crate::image_registry::no_images(),
+        );
+        let first_word = compute_polar_bleed(
+            &[east_label("Species:")],
+            DPI,
+            &theme,
+            &crate::image_registry::no_images(),
+        );
         assert!(
             whole.right_px > first_word.right_px + 1.0,
             "the reservation has to grow past the label's widest word: \

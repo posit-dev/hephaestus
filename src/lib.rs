@@ -20,6 +20,7 @@ pub mod document;
 pub mod geometry;
 #[cfg(any(feature = "png", feature = "jpeg", feature = "tiff", feature = "webp"))]
 pub mod image;
+pub mod image_registry;
 pub mod layout;
 pub mod linetype;
 pub mod mesh;
@@ -55,6 +56,7 @@ pub use blend::{BlendMode, Compose, Mix};
 pub use brush::{Brush, Sampling};
 pub use color::{lerp_color, rgb, rgb8, rgba, Color, ColorSpace};
 pub use geometry::{Affine, Point, Rect, Size, Vec2};
+pub use image_registry::ImageRegistry;
 pub use layout::{
     Axis, Cell, CellId, Extent, Grid, Inset, Layout, Measure, Placement, Respect, Track, WidthHint,
 };
