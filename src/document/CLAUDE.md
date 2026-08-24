@@ -90,6 +90,21 @@ several plots, so the position within the patch is part of the address —
 rebuilt, so `shape_registry_mut` / `image_registry_mut` rather than the
 replacing setters.
 
+## Reading
+
+`read_document` is the entry point: it hands back the composition **and** the
+hints from one pass. `read_composition` and `read_hints` are each that with one
+half discarded, and they still exist because a consumer often wants only one —
+`read_hints` decodes the head alone, which is what lets a caller choose a size
+before rebuilding anything. Calling both, though, decodes the head twice, so a
+renderer seeding a surface from the hints before it draws should call
+`read_document`.
+
+`ReadContext::builtin()` is the shared context; `ReadContext::new` builds a
+fifteen-entry geom factory table per call, so it is for adding a formatter or a
+geom of your own rather than for the default case. A host reading document after
+document wants the shared one.
+
 ## Conventions
 
 - **Adding a field to `Theme`, `Scale`, `Plot` or the composition template means adding a line to the matching `impls_*.rs`.** Nothing catches the omission at compile time — a macro invocation lists field *names*, so a new field is silently skipped rather than rejected. `tests/document_roundtrip.rs` catches it only if the field changes pixels.

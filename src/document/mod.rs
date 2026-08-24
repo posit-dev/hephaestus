@@ -332,11 +332,35 @@ fn decode_head(body: &[u8], ctx: &ReadContext) -> Result<(String, DocumentHints)
 /// call `render` on it at whatever size the output happens to be, and it
 /// solves its layout and shapes its text for that size, exactly as the
 /// composition that was captured would have.
+///
+/// [`read_document`] is this plus the hints, for a caller that wants both.
 #[cfg(feature = "document-read")]
 pub fn read_composition(
     bytes: &[u8],
     ctx: &ReadContext,
 ) -> Result<crate::plot::PlotComposition, DocumentError> {
+    read_document(bytes, ctx).map(|doc| doc.composition)
+}
+
+/// A document read in one pass.
+#[cfg(feature = "document-read")]
+pub struct ReadDocument {
+    /// The live composition, ready to render at any size.
+    pub composition: crate::plot::PlotComposition,
+    /// What the writer had in mind, for a consumer that has to choose a size
+    /// or a clear color before it has laid anything out.
+    pub hints: DocumentHints,
+}
+
+/// Rebuild a document's composition and return its hints alongside.
+///
+/// [`read_composition`] and [`read_hints`] are each this with one half
+/// discarded. A consumer that wants both — a renderer seeding a surface from
+/// the hints before it draws — should call this rather than both, since
+/// `read_hints` is only cheap in isolation and calling it beside
+/// `read_composition` decodes the head twice.
+#[cfg(feature = "document-read")]
+pub fn read_document(bytes: &[u8], ctx: &ReadContext) -> Result<ReadDocument, DocumentError> {
     use codec::{Decode, Reader};
 
     let chunks = wire::parse(bytes)?;
@@ -395,8 +419,7 @@ pub fn read_composition(
         tables.set_sheets(sheets);
     }
 
-    // Hints are advisory here; `read_hints` is how a caller asks for them.
-    let (root_id, _hints) = decode_head(required(&chunks, wire::CHUNK_HEAD)?, ctx)?;
+    let (root_id, hints) = decode_head(required(&chunks, wire::CHUNK_HEAD)?, ctx)?;
 
     let theme = {
         let body = required(&chunks, wire::CHUNK_THEME)?;
@@ -474,5 +497,5 @@ pub fn read_composition(
         images::apply_if_supported(&embedded, &mut composition);
     }
 
-    Ok(composition)
+    Ok(ReadDocument { composition, hints })
 }

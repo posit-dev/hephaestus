@@ -22,7 +22,7 @@
 
 use wasm_bindgen::prelude::*;
 
-use hephaestus::document::{read_composition, read_hints, ReadContext};
+use hephaestus::document::{read_document, ReadContext};
 use hephaestus::plot::theme::Theme;
 use hephaestus::plot::PlotComposition;
 use hephaestus::text::GenericFamilyKind;
@@ -102,7 +102,7 @@ pub fn document_format_version() -> u16 {
 /// list, since registering nothing silently would render a textless plot
 /// with no indication why.
 #[wasm_bindgen(js_name = registerFont)]
-pub fn register_font(bytes: &[u8]) -> Result<Vec<String>, JsError> {
+pub fn register_font(bytes: Vec<u8>) -> Result<Vec<String>, JsError> {
     let owned = decode_webfont(bytes)?;
     let families = hephaestus::text::register_font_families(owned);
     if families.is_empty() {
@@ -129,28 +129,33 @@ pub fn has_fonts() -> bool {
 /// The shaper ingests sfnt only (TTF / OTF / TTC / OTC), and a font CDN serves
 /// a browser WOFF2 — so without this the single most likely input is the one
 /// that fails.
+///
+/// Takes the buffer by value so an sfnt — the common case, and every face the
+/// client bundles — moves straight through to the shaper. wasm-bindgen has
+/// already copied the `Uint8Array` into linear memory to hand us this, and
+/// `register_font_families` wants it owned, so a borrow here would mean
+/// copying half a megabyte of boot-path font twice over.
 #[cfg(feature = "webfonts")]
-fn decode_webfont(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
-    let wrapped = match bytes.get(..4) {
-        Some(b"wOF2") => wuff::decompress_woff2(bytes)
-            .map_err(|e| JsError::new(&format!("could not decode the WOFF2 font: {e:?}")))?,
-        Some(b"wOFF") => wuff::decompress_woff1(bytes)
-            .map_err(|e| JsError::new(&format!("could not decode the WOFF font: {e:?}")))?,
-        _ => bytes.to_vec(),
-    };
-    Ok(wrapped)
+fn decode_webfont(bytes: Vec<u8>) -> Result<Vec<u8>, JsError> {
+    match bytes.get(..4) {
+        Some(b"wOF2") => wuff::decompress_woff2(&bytes)
+            .map_err(|e| JsError::new(&format!("could not decode the WOFF2 font: {e:?}"))),
+        Some(b"wOFF") => wuff::decompress_woff1(&bytes)
+            .map_err(|e| JsError::new(&format!("could not decode the WOFF font: {e:?}"))),
+        _ => Ok(bytes),
+    }
 }
 
 /// Without the `webfonts` feature the containers are refused by name, rather
 /// than reaching the shaper and registering nothing.
 #[cfg(not(feature = "webfonts"))]
-fn decode_webfont(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
+fn decode_webfont(bytes: Vec<u8>) -> Result<Vec<u8>, JsError> {
     match bytes.get(..4) {
         Some(b"wOF2") | Some(b"wOFF") => Err(JsError::new(
             "this build cannot decode WOFF or WOFF2; use TTF, OTF, TTC or OTC, \
              or rebuild with the `webfonts` feature",
         )),
-        _ => Ok(bytes.to_vec()),
+        _ => Ok(bytes),
     }
 }
 
@@ -251,8 +256,11 @@ impl PlotHandle {
         #[cfg(feature = "debug-panics")]
         console_error_panic_hook::set_once();
 
-        let hints = read_hints(&doc).map_err(to_js)?;
-        let view = read_composition(&doc, &ReadContext::new()).map_err(to_js)?;
+        // One pass, and the shared context: `read_hints` beside
+        // `read_composition` decodes the head twice, and `ReadContext::new`
+        // builds a geom factory table per view.
+        let doc = read_document(&doc, ReadContext::builtin()).map_err(to_js)?;
+        let (view, hints) = (doc.composition, doc.hints);
         let base = view.theme_ref().clone();
 
         let mut app = DocumentApp {

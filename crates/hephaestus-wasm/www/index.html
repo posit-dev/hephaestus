@@ -27,13 +27,24 @@
   #status { opacity: 0.75; }
   code { font-family: ui-monospace, monospace; }
 
-  /* The placeholder is an overlay element, never something drawn into the
+  /* A placeholder is an overlay element, never something drawn into the
      canvas: a canvas's context type is sticky, so calling getContext('2d')
      on it would make the renderer's later getContext('webgl2') — or
-     'webgpu', on a wgpu build — return null with no way back. #frame is the
-     positioning context; the overlay is removed once the first frame is on
-     screen. */
+     'webgpu', on a wgpu build — return null with no way back. That is why
+     the client's `placeholder` option takes an <img> and never touches the
+     canvas, and why it reuses the same element `saveOnRightClick` overlays
+     rather than stacking a second one. #frame is the positioning context. */
   #frame { position: relative; }
+  /* Sized and positioned exactly like the canvas, so it cannot shift the
+     layout. object-fit keeps a resize mid-boot a letterbox rather than a
+     distortion — the picture was made for one box and the plot re-solves for
+     whatever box it actually gets. */
+  #ph {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: contain;
+  }
+  /* The text fallback for a checkout that has not generated the picture yet.
+     Behind the <img>, so it is only ever seen when there isn't one. */
   #loading {
     position: absolute; inset: 0; display: grid; place-items: center;
     background: var(--bg); color: var(--fg); opacity: 0.6;
@@ -52,6 +63,14 @@
 <div id="frame">
   <canvas id="plot"></canvas>
   <div id="loading">preparing renderer…</div>
+  <!-- Generated, not committed:
+         cargo run --example document_placeholder \
+           --features vello-hybrid,document-read,png
+         cp examples/document.png crates/hephaestus-wasm/www/
+       In the served HTML rather than fetched by script, which is the point:
+       the viewer sees the plot before any module has loaded. A page whose
+       producer cannot rasterise simply omits this element. -->
+  <img id="ph" alt="Observations and trend, by hour" src="./document.png" />
 </div>
 
 <p id="note"></p>
@@ -60,8 +79,12 @@
   const status = document.getElementById('status');
   const note = document.getElementById('note');
   const canvas = document.getElementById('plot');
+  const frame = document.getElementById('frame');
 
   const fail = (msg, hint) => {
+    // The ?nowasm= path throws on purpose to stop the boot, and that surfaces
+    // here as an unhandled rejection. Leave its message alone.
+    if ('static' in frame.dataset) return;
     status.textContent = 'failed';
     note.innerHTML = `<strong>${msg}</strong>` + (hint ? `<br />${hint}` : '');
     const overlay = document.getElementById('loading');
@@ -79,6 +102,19 @@
     'Run <code>wasm-pack build --target web --release</code> in ' +
     '<code>crates/hephaestus-wasm</code>, then serve that directory ' +
     '(<code>python3 -m http.server</code>) and open <code>/www/</code>.';
+
+  // `?nowasm=1` skips the import, so the degradation path is something to
+  // look at rather than a paragraph: the picture stays, with an ordinary
+  // image's context menu, and nothing else happens.
+  if (new URLSearchParams(location.search).has('nowasm')) {
+    frame.dataset.static = '';
+    status.textContent = 'renderer skipped';
+    note.textContent =
+      'Loaded with ?nowasm=1, so no module was imported. What you see is the ' +
+      'static picture the producer emitted — which is also what a browser ' +
+      'with no WebGL2 would be left with. Right-click it: it is a real image.';
+    throw new Error('renderer skipped by ?nowasm');
+  }
 
   let mod;
   try {
@@ -114,7 +150,7 @@
   // enough to shape. Not committed — drop any TTF/OTF at www/font.ttf.
   //
   // The Google Fonts route is the same call with a key:
-  //   await registerGoogleFont('Inter', { apiKey: '…', genericFor: 'sans-serif' });
+  //   await registerGoogleFont('Inter', { genericFor: 'sans-serif' });
   // No font is registered here on purpose. `PlotView.create` fetches the
   // bundled default (Roboto: regular, bold, italic, bold-italic, covering
   // latin, latin-ext, Greek, Cyrillic and Vietnamese) when nothing else is,
@@ -137,10 +173,10 @@
   }
 
   // `PlotView.create` resolves only once the first frame is on the canvas, so
-  // hiding the overlay straight after it needs no extra signal. The default
-  // WebGL2 build has no adapter or device to request, so startup is dominated
-  // by shader setup rather than the wasm module; a wgpu build additionally
-  // waits on device acquisition and pipeline compilation.
+  // the client retires the placeholder itself and this page needs no extra
+  // signal. The default WebGL2 build has no adapter or device to request, so
+  // startup is dominated by shader setup rather than the wasm module; a wgpu
+  // build additionally waits on device acquisition and pipeline compilation.
   // `saveOnRightClick` gives the plot an ordinary image's context menu —
   // Save image as…, Copy image, drag-to-save — which a bare <canvas> never
   // offers. It re-renders synchronously before each capture, which is what
@@ -148,8 +184,12 @@
   const view = await PlotView.create(canvas, new Uint8Array(await docResponse.arrayBuffer()), {
     colorScheme: 'light',
     saveOnRightClick: 'plot.png',
+    // The <img> already on screen. It is retired in the same task as the
+    // first draw, so one paint reveals the canvas and hides the picture —
+    // and then goes on being the save overlay.
+    placeholder: document.getElementById('ph'),
   });
-  document.getElementById('frame').dataset.ready = '';
+  frame.dataset.ready = '';
 
   for (const input of document.querySelectorAll('input[name=scheme]')) {
     input.addEventListener('change', (e) => view.setColorScheme(e.target.value));
@@ -159,9 +199,12 @@
   status.textContent = `${hasFonts() ? 'fonts ready' : 'NO FONTS'}; document hint ${width}\u00d7${height}pt`;
   {
     note.textContent =
-      'Drag the bottom-right corner of the frame — axis ticks and label ' +
-      'placement recompute for each size, because the document carries the ' +
-      'plot rather than a picture of it. Right-click the plot to save it as ' +
-      'a PNG, as you would any image.';
+      'The plot was on screen before the renderer existed: what you saw first ' +
+      'was a picture the producer rasterised, swapped for the live frame in a ' +
+      'single paint. Drag the bottom-right corner of the frame — axis ticks ' +
+      'and label placement recompute for each size, which the picture could ' +
+      'not do. Right-click to save it as a PNG: the same element, in its ' +
+      'second phase. Reload with ?nowasm=1 to see what a browser that cannot ' +
+      'run the renderer is left with.';
   }
 </script>

@@ -89,7 +89,6 @@ export interface PlotViewOptions {
   autoResize?: boolean;
   /** Allocate a pick target and read it back per frame. Default `false`. */
   picking?: boolean;
-  /** Overlay an image so right-click offers the usual save entries. */
   /**
    * Give the canvas the context menu an ordinary image has. A string names
    * the saved file (`true` means `plot.png`); the name is a hint a browser
@@ -98,6 +97,23 @@ export interface PlotViewOptions {
   saveOnRightClick?: boolean | string;
   /** Set `false` to skip fetching the bundled font when none is registered. */
   defaultFont?: boolean;
+  /**
+   * A static image to show until the first live frame is on the canvas.
+   *
+   * An `HTMLImageElement` already in the page is adopted, which is the form
+   * that reaches the first paint: a producer that can rasterise the plot
+   * itself puts the picture in the served HTML and the viewer sees it before
+   * any script runs. A string is a URL for an element created here, which
+   * cannot beat the renderer to the screen but is the convenient form for a
+   * lazy embed.
+   *
+   * It becomes the `saveOnRightClick` overlay once the live frame replaces
+   * it, so the two share one node. Nothing touches it until there is a frame
+   * to reveal, so a renderer that never starts leaves the picture on screen —
+   * which is the whole fallback story for a browser `isSupported` refuses.
+   * Adopting an element transfers ownership: `free()` removes it.
+   */
+  placeholder?: HTMLImageElement | string;
 }
 
 /** The size and dpi a document's writer recorded, if any. Advisory. */
@@ -137,6 +153,9 @@ export class PlotView {
 
   hints(): DocumentHints;
 
-  /** Detach observers and release the wasm-side handle. */
+  /**
+   * Detach observers and release the wasm-side handle. Removes the overlay
+   * image, including a `placeholder` element the page supplied.
+   */
   free(): void;
 }

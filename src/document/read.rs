@@ -53,6 +53,17 @@ impl std::fmt::Debug for ReadContext {
 }
 
 impl ReadContext {
+    /// The shared context that knows this crate's geoms and no named
+    /// formatters.
+    ///
+    /// [`Self::new`] builds the same thing, but it builds a factory table per
+    /// call; a consumer reading document after document — a page swapping
+    /// plots, a renderer in a loop — wants this one. Reach for `new` only to
+    /// add a formatter or a geom of your own.
+    pub fn builtin() -> &'static ReadContext {
+        default_context()
+    }
+
     /// A context that knows this crate's geoms and no named formatters.
     pub fn new() -> Self {
         let mut out = Self::default();

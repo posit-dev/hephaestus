@@ -8,15 +8,34 @@ use super::{check_pixels, expand_to_rgba8, from_rgba8};
 use crate::brush::Image;
 
 /// Encode `pixels` (RGBA8 with straight alpha, length `width * height * 4`)
-/// as a PNG into `writer`.
-pub fn write_png_to<W: Write>(writer: W, width: u32, height: u32, pixels: &[u8]) -> io::Result<()> {
+/// as a PNG into `writer`, recording `dpi` as the resolution the image was
+/// rendered at.
+///
+/// A PNG that declares no resolution is read as 72 dpi by whatever opens it,
+/// so an image rendered at a device pixel ratio above one comes out claiming
+/// the wrong physical size. `None` writes no `pHYs` chunk at all, which is
+/// what [`write_png_to`] does.
+pub fn write_png_dpi_to<W: Write>(
+    writer: W,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    dpi: Option<f64>,
+) -> io::Result<()> {
     check_pixels(width, height, pixels)?;
     let mut encoder = png::Encoder::new(writer, width, height);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_pixel_dims(dpi.map(pixel_dims));
     let mut writer = encoder.write_header().map_err(io_err)?;
     writer.write_image_data(pixels).map_err(io_err)?;
     Ok(())
+}
+
+/// Encode `pixels` (RGBA8 with straight alpha, length `width * height * 4`)
+/// as a PNG into `writer`.
+pub fn write_png_to<W: Write>(writer: W, width: u32, height: u32, pixels: &[u8]) -> io::Result<()> {
+    write_png_dpi_to(writer, width, height, pixels, None)
 }
 
 /// Encode `pixels` (RGBA8 with straight alpha, length `width * height * 4`)
@@ -25,16 +44,57 @@ pub fn write_png_to<W: Write>(writer: W, width: u32, height: u32, pixels: &[u8])
 /// For hosts that need the encoded image in memory — an HTTP response body, a
 /// base64 data URL, a clipboard payload — rather than on disk.
 pub fn encode_png(width: u32, height: u32, pixels: &[u8]) -> io::Result<Vec<u8>> {
+    encode_png_dpi(width, height, pixels, None)
+}
+
+/// Encode `pixels` as a PNG in memory, recording `dpi` as the resolution the
+/// image was rendered at.
+pub fn encode_png_dpi(
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    dpi: Option<f64>,
+) -> io::Result<Vec<u8>> {
     let mut out = Vec::new();
-    write_png_to(&mut out, width, height, pixels)?;
+    write_png_dpi_to(&mut out, width, height, pixels, dpi)?;
     Ok(out)
 }
 
 /// Write `pixels` (RGBA8 with straight alpha, length `width * height * 4`) to
 /// `path` as a PNG.
 pub fn write_png(path: impl AsRef<Path>, width: u32, height: u32, pixels: &[u8]) -> io::Result<()> {
+    write_png_dpi(path, width, height, pixels, None)
+}
+
+/// Write `pixels` to `path` as a PNG, recording `dpi` as the resolution the
+/// image was rendered at.
+pub fn write_png_dpi(
+    path: impl AsRef<Path>,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    dpi: Option<f64>,
+) -> io::Result<()> {
     let file = File::create(path)?;
-    write_png_to(BufWriter::new(file), width, height, pixels)
+    write_png_dpi_to(BufWriter::new(file), width, height, pixels, dpi)
+}
+
+/// Dots per inch as the pixels-per-metre pair `pHYs` carries.
+fn pixel_dims(dpi: f64) -> png::PixelDimensions {
+    // One inch is exactly 0.0254 m. A non-finite or non-positive figure has
+    // no resolution to record, so it lands on the 1 ppm floor rather than
+    // saturating or wrapping.
+    let per_metre = (dpi / 0.0254).round();
+    let per_metre = if per_metre.is_finite() {
+        per_metre.clamp(1.0, u32::MAX as f64) as u32
+    } else {
+        1
+    };
+    png::PixelDimensions {
+        xppu: per_metre,
+        yppu: per_metre,
+        unit: png::Unit::Meter,
+    }
 }
 
 /// Read a PNG from `reader`.
@@ -93,6 +153,21 @@ mod tests {
 
     /// The 8-byte signature every PNG stream opens with.
     const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+
+    /// The data bytes of the first chunk with `tag`, walking the stream the
+    /// way a reader does: length, tag, data, CRC.
+    fn find_chunk<'a>(png: &'a [u8], tag: &[u8; 4]) -> Option<&'a [u8]> {
+        let mut at = SIGNATURE.len();
+        while at + 8 <= png.len() {
+            let len = u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as usize;
+            let body = at + 8;
+            if &png[at + 4..body] == tag {
+                return png.get(body..body + len);
+            }
+            at = body + len + 4;
+        }
+        None
+    }
 
     fn checkerboard(width: u32, height: u32) -> Vec<u8> {
         let mut px = Vec::with_capacity((width as usize) * (height as usize) * 4);
@@ -161,6 +236,50 @@ mod tests {
             image.data.as_ref(),
             &[0, 0, 0, 255, 64, 64, 64, 255, 128, 128, 128, 255, 255, 255, 255, 255]
         );
+    }
+
+    /// A dpi lands in `pHYs` as pixels per metre, which is what an editor
+    /// reads to know an image rendered at 2x is not twice its physical size.
+    #[test]
+    fn a_dpi_is_recorded_as_pixels_per_metre() {
+        let bytes = encode_png_dpi(4, 3, &checkerboard(4, 3), Some(192.0)).expect("encode");
+        let chunk = find_chunk(&bytes, b"pHYs").expect("pHYs chunk");
+        assert_eq!(chunk.len(), 9);
+
+        // 192 / 0.0254, rounded — the same arithmetic the wasm client's
+        // `withPngDpi` performs on a captured frame.
+        let expected = (192.0f64 / 0.0254).round() as u32;
+        assert_eq!(
+            u32::from_be_bytes(chunk[0..4].try_into().unwrap()),
+            expected
+        );
+        assert_eq!(
+            u32::from_be_bytes(chunk[4..8].try_into().unwrap()),
+            expected
+        );
+        assert_eq!(chunk[8], 1, "unit must be metres");
+    }
+
+    /// `None` is the shape a caller with no resolution to declare asks for,
+    /// and it must write nothing rather than a zero or a default.
+    #[test]
+    fn no_dpi_writes_no_phys_chunk() {
+        let pixels = checkerboard(4, 3);
+        let without = encode_png_dpi(4, 3, &pixels, None).expect("encode");
+        assert!(find_chunk(&without, b"pHYs").is_none());
+        assert_eq!(without, encode_png(4, 3, &pixels).expect("encode"));
+    }
+
+    /// A dpi that is not a usable number still has to produce a valid file.
+    #[test]
+    fn an_unusable_dpi_falls_back_to_the_floor() {
+        for dpi in [0.0, -96.0, f64::NAN, f64::INFINITY] {
+            let bytes = encode_png_dpi(2, 2, &checkerboard(2, 2), Some(dpi)).expect("encode");
+            let chunk = find_chunk(&bytes, b"pHYs").expect("pHYs chunk");
+            let ppu = u32::from_be_bytes(chunk[0..4].try_into().unwrap());
+            assert!(ppu >= 1, "dpi {dpi} produced {ppu} pixels per metre");
+            decode_png(&bytes).expect("decode");
+        }
     }
 
     #[test]

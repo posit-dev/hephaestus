@@ -6,9 +6,10 @@
 /pkg/
 /target/
 /Cargo.lock
-# Both supplied locally by whoever runs the demo; see www/index.html.
-# The document is generated — `cargo run --example document_save
-# --features document-write` writes examples/document.hplot, which is
-# itself gitignored.
+# All supplied locally by whoever runs the demo; see www/index.html. The
+# document and the picture are generated — `document_save` writes
+# examples/document.hplot and `document_placeholder` writes
+# examples/document.png, and both of those are gitignored too.
 /www/font.ttf
 /www/document.hplot
+/www/document.png

@@ -4,7 +4,7 @@ Repo-level orientation for working in `hephaestus`. Architecture, module map, an
 
 ## Project
 
-`hephaestus` is a 2D scene renderer for data visualization. The crate exposes a backend-agnostic scene API and two Vello backends over wgpu — Vello Classic (GPU compute) and Vello Hybrid (sparse strips: path processing on the CPU, a render pipeline on the GPU); future planned backends are Blend2D (CPU raster), SVG, and PDF. Performance for interactive / real-time updates on dense plots is the design driver. WASM must work but is not the primary target.
+`hephaestus` is a 2D scene renderer for data visualization. The crate exposes a backend-agnostic scene API and two Vello backends over wgpu — Vello Classic (GPU compute) and Vello Hybrid (sparse strips: path processing on the CPU, a render pipeline on the GPU); future planned backends are Blend2D (CPU raster), SVG, and PDF. Performance for interactive / real-time updates on dense plots is the design driver. WASM must work.
 
 The crate ships two API levels in the same source tree: a low-level scene API (`SceneBuilder` + primitives + layout) and a high-level plot API (`plot::*` — geoms, scales, and the `PlotComposition` orchestrator) built on top of it. See `src/CLAUDE.md` for the split and the rules that govern it.
 
@@ -35,6 +35,7 @@ cargo fmt                                                # rustfmt; always run b
 cargo run --example hello                                # renders examples/hello.png — visual sanity check
 cargo run --example image_formats --features jpeg,tiff,webp  # all four raster writers
 cargo run --example image_geom                           # raster images placed in a panel, and in markdown
+cargo run --example document_placeholder --features vello-hybrid,document-read,png  # the static picture a page shows while the client boots
 cargo run --example window --features window             # live window: resize + hover picking
 cargo run --release --example window --features window -- 100000  # same scene at N points
 cargo run --release --example window --features window,vello-hybrid -- 200000 hybrid  # sparse strips: no draw cap
@@ -49,7 +50,14 @@ cargo clippy --target wasm32-unknown-unknown --no-default-features \
 cargo clippy --target wasm32-unknown-unknown --no-default-features \
   --features vello,canvas,document-read -- -D warnings   # its `wgpu-backend` alternative
 cd crates/hephaestus-wasm && ./build.sh && node verify-dist.mjs   # assemble + check dist/
+cd crates/hephaestus-wasm && node bench/pixel-diff.mjs           # does a native pre-render match the client's frame?
+cd crates/hephaestus-wasm && node bench/swap.mjs                 # is first paint immediate, and the swap invisible?
 ```
+
+`crates/hephaestus-wasm/bench/README.md` covers the startup measurements, what
+they mean and how to reproduce them. The headline: with a natively-rendered
+picture in the served HTML the plot is on screen at ~57 ms instead of ~185 ms,
+and the two frames are bit-identical.
 
 **Always run `cargo fmt` after completing a coding task.** It's the last step before reporting work done, even when the diff looks cosmetically fine — rustfmt catches subtle layout drift (over-long lines, brace style, import ordering) that otherwise piles up across changes.
 

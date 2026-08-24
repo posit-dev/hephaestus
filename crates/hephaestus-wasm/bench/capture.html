@@ -1,0 +1,64 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>hephaestus — frame capture</title>
+<!--
+  The page the pixel-diff harness drives. Deliberately minimal: no theme
+  switch, no status line, nothing that could change what is drawn. The size is
+  pinned by query string rather than by CSS so a run is reproducible, and
+  `autoResize` is off so nothing re-solves the layout after the first frame.
+
+  The point of comparison is `examples/document_placeholder.rs`, which
+  rasterises the same document natively through the same sparse-strip
+  rasteriser. Anything that differs between the two frames beyond antialiasing
+  is a mismatch in size, dpi, theme or fonts.
+-->
+<style>
+  html, body { margin: 0; background: #fff; }
+  #frame { position: relative; overflow: hidden; }
+  #plot { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+</style>
+<div id="frame"><canvas id="plot"></canvas></div>
+<script type="module">
+  const q = new URLSearchParams(location.search);
+  const cssW = Number(q.get('w') ?? 900);
+  const cssH = Number(q.get('h') ?? 420);
+  const ratio = Number(q.get('ratio') ?? window.devicePixelRatio ?? 1);
+  const scheme = q.get('scheme') ?? 'light';
+
+  const frame = document.getElementById('frame');
+  frame.style.width = `${cssW}px`;
+  frame.style.height = `${cssH}px`;
+
+  // Set the backing store before the renderer sees the canvas. A bare canvas
+  // reports 300x150, and the WebGL renderer would be built at that size and
+  // immediately resized; with the attributes right it is built once.
+  const canvas = document.getElementById('plot');
+  canvas.width = Math.round(cssW * ratio);
+  canvas.height = Math.round(cssH * ratio);
+
+  const fail = (e) => {
+    window.__capture = { error: String(e?.message ?? e) };
+  };
+
+  try {
+    const { default: init, PlotView } = await import('../dist/hephaestus.js');
+    await init();
+    const doc = await fetch('../www/document.hplot');
+    if (!doc.ok) throw new Error(`document.hplot: ${doc.status}`);
+    const view = await PlotView.create(canvas, new Uint8Array(await doc.arrayBuffer()), {
+      colorScheme: scheme,
+      autoResize: false,
+    });
+    // One extra synchronous draw, so the capture cannot race a drawing buffer
+    // the compositor has already consumed.
+    view.redraw();
+    window.__capture = {
+      png: canvas.toDataURL('image/png'),
+      width: canvas.width,
+      height: canvas.height,
+      hints: view.hints(),
+    };
+  } catch (e) {
+    fail(e);
+  }
+</script>

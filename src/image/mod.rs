@@ -47,7 +47,10 @@ pub use jpeg::{decode_jpeg, encode_jpeg, read_jpeg, read_jpeg_from, write_jpeg, 
 
 #[cfg(feature = "png")]
 #[cfg_attr(docsrs, doc(cfg(feature = "png")))]
-pub use png::{decode_png, encode_png, read_png, read_png_from, write_png, write_png_to};
+pub use png::{
+    decode_png, encode_png, encode_png_dpi, read_png, read_png_from, write_png, write_png_dpi,
+    write_png_dpi_to, write_png_to,
+};
 
 #[cfg(feature = "tiff")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tiff")))]

@@ -512,6 +512,13 @@ required-features = ["vello"]
 name = "document_save"
 required-features = ["document-write"]
 
+# The static picture a page shows while the client boots. Reads a document
+# and rasterises with the same backend the client's WebGL2 build uses, which
+# is what makes the swap to the live frame invisible.
+[[example]]
+name = "document_placeholder"
+required-features = ["vello-hybrid", "document-read", "png"]
+
 # Deliberately not `document-write`: a consumer compiles only the half it
 # uses, and this example is the shape a wasm build would take.
 [[example]]

@@ -206,7 +206,8 @@ export class PlotView {
    * @param {HTMLCanvasElement} canvas
    * @param {Uint8Array|ArrayBuffer} doc bytes of a `.hplot` document.
    * @param {{ colorScheme?: 'light'|'dark'|'auto', autoResize?: boolean,
-   *           picking?: boolean, saveOnRightClick?: boolean|string }} [opts]
+   *           picking?: boolean, saveOnRightClick?: boolean|string,
+   *           defaultFont?: boolean, placeholder?: HTMLImageElement|string }} [opts]
    *   `picking` allocates a second render target and reads it back after
    *   every frame, so leave it off unless `pickAt` is going to be called.
    *   `saveOnRightClick` gives the canvas an ordinary image's context menu.
@@ -214,10 +215,20 @@ export class PlotView {
    *   The name is a hint: a `data:` URL has no path for a browser to take a
    *   filename from, so it travels as a media-type parameter and an engine
    *   that ignores it falls back to whatever it would have chosen (Safari
-   *   says "Unknown"). See {@link PlotView#_installImageOverlay}.
+   *   says "Unknown"). See {@link PlotView#_enableSaveAffordance}.
    *   `defaultFont: false` suppresses fetching the bundled font when nothing
    *   else is registered, for a page that would rather render no text than
    *   pull ~260 kB.
+   *   `placeholder` is a static image to show until the first live frame
+   *   lands. An `HTMLImageElement` already in the page is adopted, which is
+   *   the form that reaches the *first* paint: a producer that can rasterise
+   *   the plot itself puts the picture in the served HTML and the viewer sees
+   *   it before any script runs. A string is a URL for an element created
+   *   here, which cannot beat the renderer to the screen but is the
+   *   convenient form for a lazy embed. Either way it becomes the
+   *   `saveOnRightClick` overlay once the live frame replaces it, so the two
+   *   share one node. Nothing here touches it until there is a frame to
+   *   reveal, so a renderer that never starts leaves the picture on screen.
    */
   static async create(canvas, doc, opts = {}) {
     if (!isSupported()) {
@@ -240,7 +251,13 @@ export class PlotView {
     }
 
     const handle = await PlotHandle.create(canvas, bytes, opts.picking === true);
-    return new PlotView(canvas, handle, opts);
+    const view = new PlotView(canvas, handle, opts);
+    // The constructor drew frame 1 synchronously and the browser has not
+    // painted since, so retiring here puts the reveal and the hide in one
+    // paint. Deferring to an animation frame would show the placeholder once
+    // more with the live frame already underneath.
+    view._retirePlaceholder();
+    return view;
   }
 
   /** @private — use {@link PlotView.create}. */
@@ -253,10 +270,22 @@ export class PlotView {
     this._onMedia = null;
     this._overlay = null;
     this._refreshOverlay = null;
+    // Whether the overlay is still showing the host's picture. Until it is
+    // retired the element is opaque and the canvas beneath it is unseen, and
+    // the `error` handler and the save affordance both behave differently.
+    this._showingPlaceholder = false;
+    this._saveAs = null;
     // Kept in step with `_applySize` so an exported PNG can declare the
     // resolution it was actually rendered at.
     this._dpi = 96 * (window.devicePixelRatio || 1);
     this._freed = false;
+
+    if (opts.saveOnRightClick) {
+      this._saveAs = typeof opts.saveOnRightClick === 'string' ? opts.saveOnRightClick : 'plot.png';
+    }
+    // Before the first draw, so the picture is in place if anything below
+    // throws — and so an adopted element is never removed and re-added.
+    this._resolveOverlay(opts.placeholder);
 
     this.setColorScheme(opts.colorScheme ?? 'light');
 
@@ -277,61 +306,86 @@ export class PlotView {
     }
     this._syncSize();
 
-    if (opts.saveOnRightClick) {
-      this._installImageOverlay(
-        typeof opts.saveOnRightClick === 'string' ? opts.saveOnRightClick : 'plot.png',
-      );
-    }
+    if (this._saveAs !== null) this._enableSaveAffordance(this._saveAs);
   }
 
   /**
-   * Give the canvas the context menu an ordinary image has.
+   * Put the overlay image in place, adopting one the page already has.
    *
-   * A `<canvas>` never offers "Save image as…" / "Copy image" / drag-to-save:
-   * those come from the hit-test node being an image, and a canvas is not
-   * one. Nor can a `contextmenu` handler retarget the menu. So the only way
-   * to get the *native* affordance — rather than a bespoke menu that looks
-   * nothing like the browser's — is for the right-click to genuinely land on
-   * an `<img>`.
+   * One element serves two purposes in sequence. While it is opaque it is the
+   * placeholder — a picture of this plot, on screen before the renderer
+   * exists. Once {@link PlotView#_retirePlaceholder} drops it to transparent
+   * it is the save affordance, because a `<canvas>` never offers "Save image
+   * as…" / "Copy image" / drag-to-save: those come from the hit-test node
+   * being an image, and a `contextmenu` handler cannot retarget the menu. So
+   * the only way to get the *native* affordance — rather than a bespoke menu
+   * that looks nothing like the browser's — is for the right-click to
+   * genuinely land on an `<img>`.
    *
-   * This overlays a transparent image exactly on the canvas and keeps its
-   * `src` refreshed from the live frame, so the canvas below stays the thing
-   * that renders while the image above is the thing the menu acts on.
-   *
-   * Encoding is lazy: a PNG per frame would be pointless work, so the src is
-   * refreshed only when a menu is plausibly about to open — pointer entry,
-   * a right/ctrl mousedown, and `contextmenu` itself. `mousedown` matters
-   * because a browser gathers the menu's image URL from the hit test, which
-   * can precede the `contextmenu` dispatch.
+   * `placeholder` is an element to adopt, a URL to create one from, or
+   * nothing. With nothing and no `saveOnRightClick` there is no overlay at
+   * all — it would sit over the canvas swallowing the pointer events a page
+   * doing its own hit testing needs. With nothing and a filename the element
+   * is created transparent, as the save affordance alone.
    */
-  _installImageOverlay(filename) {
+  _resolveOverlay(placeholder) {
+    const wanted = placeholder != null && placeholder !== '';
+    if (!wanted && this._saveAs === null) return;
     const parent = this.canvas.parentElement;
     if (!parent) return;
     // The overlay is positioned against the canvas's containing block, so
     // that block has to be positioned. Only touched when it isn't already.
     if (getComputedStyle(parent).position === 'static') parent.style.position = 'relative';
 
-    const img = document.createElement('img');
-    img.alt = '';
-    // Invisible but hit-testable: the canvas underneath is what the viewer
-    // sees, and `opacity` (rather than `visibility` or `display`) is what
-    // keeps the element in the hit-test tree.
-    img.style.cssText =
-      'position:absolute;inset:0;width:100%;height:100%;opacity:0;' +
-      'pointer-events:auto;touch-action:none';
-    // If the named URL is ever rejected — an engine that dislikes the extra
-    // media-type parameter — fall back to the same bytes unnamed. An overlay
-    // that fails to load is not an image, and a right-click would silently get
-    // the ordinary element menu instead, which is the failure this guards.
-    img.addEventListener('error', () => {
-      const plain = img.src.replace(/;name=[^;,]*/, '');
-      if (plain !== img.src) {
-        this._nameRejected = true;
-        img.src = plain;
-      }
-    });
+    let img = null;
+    let adopted = false;
+    if (placeholder instanceof HTMLImageElement) {
+      img = placeholder;
+      adopted = true;
+    } else if (typeof placeholder === 'string' && placeholder !== '') {
+      img = document.createElement('img');
+      img.alt = '';
+      img.src = placeholder;
+    } else {
+      img = document.createElement('img');
+      img.alt = '';
+    }
+
+    // Invisible but hit-testable once retired: the canvas underneath is what
+    // the viewer sees, and `opacity` (rather than `visibility` or `display`)
+    // is what keeps the element in the hit-test tree. Opaque until then.
+    this._showingPlaceholder = wanted;
+    img.style.position = 'absolute';
+    img.style.inset = '0';
+    img.style.width = '100%';
+    img.style.height = '100%';
+    img.style.pointerEvents = 'auto';
+    img.style.touchAction = 'none';
+    img.style.opacity = this._showingPlaceholder ? '1' : '0';
+
+    img.addEventListener('error', () => this._onOverlayError(img));
+    // Last child, so it stacks above the canvas without needing a z-index.
+    // Re-appending an adopted element moves it, which is what we want.
     parent.appendChild(img);
     this._overlay = img;
+    // An adopted element carries a description the viewer can actually use
+    // while the picture is showing; one created here describes nothing.
+    if (!adopted) img.alt = '';
+  }
+
+  /**
+   * Refresh the overlay's `src` from the live frame when a menu is plausibly
+   * about to open.
+   *
+   * Encoding is lazy: a PNG per frame would be pointless work, so the src is
+   * refreshed only on pointer entry, a right/ctrl mousedown, and
+   * `contextmenu` itself. `mousedown` matters because a browser gathers the
+   * menu's image URL from the hit test, which can precede the `contextmenu`
+   * dispatch.
+   */
+  _enableSaveAffordance(filename) {
+    const img = this._overlay;
+    if (!img) return;
 
     const refresh = () => {
       if (this._freed) return;
@@ -369,7 +423,11 @@ export class PlotView {
       }
     };
     this._refreshOverlay = refresh;
-    refresh();
+    // Not while the placeholder is up: the host's picture is already a
+    // correct image of this plot, so it serves as the initial src and the
+    // first pointer entry upgrades it. That keeps a render plus a full PNG
+    // encode off the path to the first frame.
+    if (!this._showingPlaceholder) refresh();
 
     img.addEventListener('pointerenter', refresh);
     img.addEventListener('mousedown', (e) => {
@@ -377,6 +435,65 @@ export class PlotView {
       if (e.button === 2 || e.ctrlKey) refresh();
     });
     img.addEventListener('contextmenu', refresh);
+  }
+
+  /**
+   * Reveal the canvas, and leave the overlay as whatever it is still for.
+   *
+   * Called in the same task as the first draw, so one paint both shows the
+   * live frame and hides the picture over it. There is deliberately no
+   * transition: the two images agree pixel for pixel, and blending them
+   * would show a ghost where a hard cut shows nothing.
+   */
+  _retirePlaceholder() {
+    if (!this._showingPlaceholder) return;
+    this._showingPlaceholder = false;
+    const img = this._overlay;
+    if (!img) return;
+    if (this._saveAs === null) {
+      // Nothing else wanted the element.
+      img.remove();
+      this._overlay = null;
+      return;
+    }
+    img.style.opacity = '0';
+    // The host's picture is now the save overlay's src, so give it the
+    // filename hint the affordance would have. A prefix rewrite on a data URL
+    // and a no-op on anything else, and the element is already invisible so
+    // a re-decode cannot flicker.
+    if (!this._nameRejected && img.src.startsWith('data:')) {
+      img.src = named(img.src, this._saveAs);
+    }
+  }
+
+  /**
+   * A failed overlay load, handled according to which phase it is in.
+   *
+   * While the picture is showing, a failure would put broken-image chrome
+   * over a canvas nobody has seen yet, so get out of the way at once and let
+   * the plot arrive as it would with no placeholder. Afterwards, the only
+   * expected cause is an engine rejecting the `name` media-type parameter, so
+   * fall back to the same bytes unnamed — an overlay that fails to load is
+   * not an image, and a right-click would silently get the ordinary element
+   * menu instead, which is the failure this guards.
+   */
+  _onOverlayError(img) {
+    if (this._showingPlaceholder) {
+      this._showingPlaceholder = false;
+      img.style.opacity = '0';
+      if (this._saveAs === null) {
+        img.remove();
+        if (this._overlay === img) this._overlay = null;
+      } else if (this._refreshOverlay) {
+        this._refreshOverlay();
+      }
+      return;
+    }
+    const plain = img.src.replace(/;name=[^;,]*/, '');
+    if (plain !== img.src) {
+      this._nameRejected = true;
+      img.src = plain;
+    }
   }
 
   /** Draw immediately, cancelling any frame already scheduled. */
@@ -473,7 +590,12 @@ export class PlotView {
     };
   }
 
-  /** Detach observers and release the wasm-side handle. */
+  /**
+   * Detach observers and release the wasm-side handle.
+   *
+   * Removes the overlay image, including a `placeholder` element the page
+   * supplied: adopting one transfers ownership of it.
+   */
   free() {
     if (this._freed) return;
     this._freed = true;

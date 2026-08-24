@@ -106,26 +106,30 @@ impl WriteTables {
 
 /// Read-side tables: index to the single `Arc` every reference shares.
 ///
-/// `Clone` is shallow — cloning shares the same `Arc`s, so a nested
-/// reader resolves an index to the very allocation its parent would.
+/// `Clone` is O(1) and shallow — cloning shares the same tables, and so the
+/// same `Arc`s, so a nested reader resolves an index to the very allocation
+/// its parent would. The tables themselves are shared and not just their
+/// entries because a document is read chunk by chunk against one set of them,
+/// and copying a string table of one entry per data row per chunk is work for
+/// nothing.
 #[cfg(feature = "document-read")]
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ReadTables {
-    geometries: Vec<Arc<Geometry>>,
-    sheets: Vec<Arc<RichTextStyleSheet>>,
-    strings: Vec<Arc<str>>,
+    geometries: Arc<Vec<Arc<Geometry>>>,
+    sheets: Arc<Vec<Arc<RichTextStyleSheet>>>,
+    strings: Arc<Vec<Arc<str>>>,
 }
 
 #[cfg(feature = "document-read")]
 impl ReadTables {
     /// Install the geometry table read from its chunk.
     pub(crate) fn set_geometries(&mut self, gs: Vec<Arc<Geometry>>) {
-        self.geometries = gs;
+        self.geometries = Arc::new(gs);
     }
 
     /// Install the style-sheet table read from its chunk.
     pub(crate) fn set_sheets(&mut self, ss: Vec<Arc<RichTextStyleSheet>>) {
-        self.sheets = ss;
+        self.sheets = Arc::new(ss);
     }
 
     /// The geometry at `index`, or `None` when the document referenced
@@ -142,7 +146,7 @@ impl ReadTables {
 
     /// Install the string table read from its chunk.
     pub(crate) fn set_strings(&mut self, ss: Vec<Arc<str>>) {
-        self.strings = ss;
+        self.strings = Arc::new(ss);
     }
 
     /// The string at `index`, or `None` when the document referenced

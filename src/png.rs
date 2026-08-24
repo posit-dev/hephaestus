@@ -3,7 +3,10 @@
 //! Aliases for the PNG entry points in [`crate::image`], the module that
 //! carries every raster codec.
 
-pub use crate::image::{decode_png, encode_png, read_png, read_png_from, write_png, write_png_to};
+pub use crate::image::{
+    decode_png, encode_png, encode_png_dpi, read_png, read_png_from, write_png, write_png_dpi,
+    write_png_dpi_to, write_png_to,
+};
 
 #[cfg(test)]
 mod tests {
