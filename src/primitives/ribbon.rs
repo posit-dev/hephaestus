@@ -1,33 +1,33 @@
 //! Polyline- and polygon-as-ribbon tessellation.
 //!
 //! A "ribbon" is a stroked open polyline or closed polygon expressed
-//! as a triangle [`Mesh`] with per-vertex colour and per-vertex
+//! as a triangle [`Mesh`] with per-vertex color and per-vertex
 //! half-width. Drawing happens via
 //! [`SceneBuilder::draw_mesh`](crate::scene::SceneBuilder); the Vello
 //! backend decomposes the mesh into per-triangle linear-gradient
-//! fills, which gives perfect Gouraud-equivalent colour blending
+//! fills, which gives perfect Gouraud-equivalent color blending
 //! along ribbon strips (because the two shoulders at each polyline
-//! vertex carry the same colour, so the gradient axis runs cleanly
+//! vertex carry the same color, so the gradient axis runs cleanly
 //! between adjacent segments).
 //!
 //! # Entry points
 //!
 //! Open polylines (with end caps):
-//! - [`polyline_ribbon`] — constant colour, constant half-width.
-//! - [`polyline_gradient`] — per-vertex colour, constant half-width.
-//! - [`polyline_ribbon_full`] — per-vertex colour and per-vertex
+//! - [`polyline_ribbon`] — constant color, constant half-width.
+//! - [`polyline_gradient`] — per-vertex color, constant half-width.
+//! - [`polyline_ribbon_full`] — per-vertex color and per-vertex
 //!   half-width.
 //!
 //! Closed polygons (no caps; the loop closes from `points[n - 1]`
 //! back to `points[0]` — do not repeat the first vertex):
-//! - [`polygon_ribbon`] — constant colour, constant half-width.
-//! - [`polygon_gradient`] — per-vertex colour, constant half-width.
-//! - [`polygon_ribbon_full`] — per-vertex colour and per-vertex
+//! - [`polygon_ribbon`] — constant color, constant half-width.
+//! - [`polygon_gradient`] — per-vertex color, constant half-width.
+//! - [`polygon_ribbon_full`] — per-vertex color and per-vertex
 //!   half-width.
 //!
 //! Quad-strip band between two arbitrary co-indexed polylines:
 //! - [`ribbon_band_mesh`] — fills the band between curve A and curve
-//!   B with per-vertex colour on each side. Used by `RibbonGeom`
+//!   B with per-vertex color on each side. Used by `RibbonGeom`
 //!   under free-form orientation and under non-linear projections
 //!   when fill varies.
 //!
@@ -49,8 +49,8 @@ use crate::geometry::{Point, Vec2};
 use crate::mesh::Mesh;
 use crate::stroke::{Cap, Join};
 
-/// Colour used by the entry points that accept an optional per-vertex
-/// colour slice when none is supplied.
+/// Color used by the entry points that accept an optional per-vertex
+/// color slice when none is supplied.
 const DEFAULT_COLOR: Color = Color::new([0.0, 0.0, 0.0, 1.0]);
 
 /// Segment-count bounds for a round **cap** fan. The floor keeps a
@@ -107,7 +107,7 @@ impl Default for RibbonOptions {
 
 // ── Public entry points ─────────────────────────────────────────────────────
 
-/// Constant-colour, constant-width ribbon. Equivalent to a uniformly
+/// Constant-color, constant-width ribbon. Equivalent to a uniformly
 /// stroked polyline expressed as a mesh.
 pub fn polyline_ribbon(points: &[Point], color: Color, opts: &RibbonOptions) -> Mesh {
     ribbon(
@@ -120,7 +120,7 @@ pub fn polyline_ribbon(points: &[Point], color: Color, opts: &RibbonOptions) -> 
     )
 }
 
-/// Per-vertex coloured, constant-width ribbon. `colors.len()` must
+/// Per-vertex colored, constant-width ribbon. `colors.len()` must
 /// equal `points.len()`.
 pub fn polyline_gradient(points: &[Point], colors: &[Color], opts: &RibbonOptions) -> Mesh {
     ribbon(
@@ -133,7 +133,7 @@ pub fn polyline_gradient(points: &[Point], colors: &[Color], opts: &RibbonOption
     )
 }
 
-/// Full ribbon: optionally per-vertex coloured, optionally per-vertex
+/// Full ribbon: optionally per-vertex colored, optionally per-vertex
 /// half-width. `colors` defaults to opaque black and `half_widths` to
 /// [`RibbonOptions::half_width`]; a supplied slice must match
 /// `points.len()`.
@@ -153,7 +153,7 @@ pub fn polyline_ribbon_full(
     )
 }
 
-/// Constant-colour, constant-width closed-polygon ribbon. The loop
+/// Constant-color, constant-width closed-polygon ribbon. The loop
 /// closes from `points[n - 1]` back to `points[0]` — do **not**
 /// repeat the first vertex. [`RibbonOptions::cap`] is ignored (a
 /// closed loop has no endpoints to cap). Returns an empty mesh when
@@ -169,7 +169,7 @@ pub fn polygon_ribbon(points: &[Point], color: Color, opts: &RibbonOptions) -> M
     )
 }
 
-/// Per-vertex coloured, constant-width closed-polygon ribbon.
+/// Per-vertex colored, constant-width closed-polygon ribbon.
 /// `colors.len()` must equal `points.len()`. The wrap segment
 /// interpolates `colors[n - 1] → colors[0]` like any other segment,
 /// so the gradient closes seamlessly. See [`polygon_ribbon`] for the
@@ -185,7 +185,7 @@ pub fn polygon_gradient(points: &[Point], colors: &[Color], opts: &RibbonOptions
     )
 }
 
-/// Full closed-polygon ribbon: optionally per-vertex coloured,
+/// Full closed-polygon ribbon: optionally per-vertex colored,
 /// optionally per-vertex half-width. `colors` defaults to opaque black
 /// and `half_widths` to [`RibbonOptions::half_width`]; a supplied slice
 /// must match `points.len()`. See [`polygon_ribbon`] for the closure
@@ -244,7 +244,7 @@ fn ribbon(
 /// `(curve_a[i], curve_b[i], curve_b[i + 1], curve_a[i + 1])`,
 /// tessellated as two triangles in the canonical `[A, B, C, A, C, D]`
 /// pattern that the Vello backend's quad-pair detector folds into a
-/// single bilinear-gradient quad fill. Per-vertex colours come from
+/// single bilinear-gradient quad fill. Per-vertex colors come from
 /// `colors_a` (curve A side) and `colors_b` (curve B side).
 ///
 /// Returns an empty mesh when either curve has fewer than two points.
@@ -257,14 +257,14 @@ fn ribbon(
 /// quad of the band gets its own linear-gradient brush (the
 /// Vello backend's quad-pair detector folds the strip into one gradient
 /// fill per quad); two adjacent quads paint the overlap region twice
-/// with the **same** boundary colour, so SrcOver compositing stacks
+/// with the **same** boundary color, so SrcOver compositing stacks
 /// the alpha when the fill is translucent and reveals the seam as a
 /// darker band. A small bleed is enough to bridge the AA edge without
 /// producing a perceptible double-coat.
 ///
-/// For a uniformly-coloured band a plain `fill` on the path that
+/// For a uniformly-colored band a plain `fill` on the path that
 /// traces curve A forward then curve B in reverse is cheaper — the
-/// per-vertex colour is the point of the mesh path.
+/// per-vertex color is the point of the mesh path.
 pub fn ribbon_band_mesh(
     curve_a: &[Point],
     curve_b: &[Point],
@@ -351,7 +351,7 @@ enum ColorSource<'a> {
 }
 
 impl<'a> ColorSource<'a> {
-    /// Per-vertex when a colour slice is supplied, opaque black
+    /// Per-vertex when a color slice is supplied, opaque black
     /// otherwise.
     fn from_optional(colors: Option<&'a [Color]>) -> Self {
         match colors {
@@ -540,7 +540,7 @@ fn ribbon_inner(
     let mut vcolors: Vec<Color> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
-    // Helper: push a single vertex with colour, return its index.
+    // Helper: push a single vertex with color, return its index.
     let push_vertex =
         |vertices: &mut Vec<Point>, vcolors: &mut Vec<Color>, p: Point, c: Color| -> u32 {
             let idx = vertices.len() as u32;
@@ -553,8 +553,7 @@ fn ribbon_inner(
     // later geometry draws on top of earlier geometry under SrcOver —
     // so emitting "start cap → segments → joins → end cap" in path
     // order ensures the path's tail correctly occludes its head when
-    // they cross. The previous ordering (caps last) caused the start
-    // cap to draw OVER segments that happened to pass through it.
+    // they cross.
     //
     // **Seam-bleed**: each interior segment quad is extended by
     // `SEAM_BLEED_PX` along its local tangent at both ends, so
@@ -562,7 +561,7 @@ fn ribbon_inner(
     // region. SrcOver compositing on the overlap renders fully
     // opaque, eliminating the AA seam between adjacent fills. The
     // gradient stops are computed against the original (unbled)
-    // axis, so the bleed introduces a tiny ε/L colour shift at the
+    // axis, so the bleed introduces a tiny ε/L color shift at the
     // original endpoints — invisible for typical segment lengths.
     // Endpoint edges (segment 0's near / last segment's far) are NOT
     // bled, so cap geometry attaches at the natural shoulder
@@ -943,7 +942,7 @@ mod tests {
         // tangent to eliminate the AA seam between adjacent fills, so
         // shoulders near the interior vertex are emitted at slightly
         // staggered x-coordinates. All such shoulders should still
-        // carry the green colour.
+        // carry the green color.
         let pts = [pt(0.0, 0.0), pt(10.0, 0.0), pt(20.0, 0.0)];
         let cols = [red(), green(), blue()];
         let mesh = polyline_gradient(&pts, &cols, &RibbonOptions::default());
@@ -1221,7 +1220,7 @@ mod tests {
 
     #[test]
     fn polygon_gradient_wrap_segment_closes_color_loop() {
-        // Triangle with vertex colours [red, green, blue]. The wrap
+        // Triangle with vertex colors [red, green, blue]. The wrap
         // segment (vertex 2 → vertex 0) must emit red shoulders at
         // its far end, otherwise the loop wouldn't actually close.
         let pts = [pt(0.0, 0.0), pt(10.0, 0.0), pt(5.0, 8.66)];
@@ -1242,7 +1241,7 @@ mod tests {
                 counts[2] += 1;
             }
         }
-        // Each colour should appear at multiple shoulder emissions
+        // Each color should appear at multiple shoulder emissions
         // (incoming AND outgoing segment at its vertex).
         assert!(counts[0] >= 2, "expected red shoulders, got {counts:?}");
         assert!(counts[1] >= 2, "expected green shoulders, got {counts:?}");

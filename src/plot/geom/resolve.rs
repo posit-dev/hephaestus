@@ -2,7 +2,7 @@
 //!
 //! Every geom maps the same kind of raw `(Channel, Option<&Scale>, row_idx)`
 //! triple to a typed visual output (color, pt size, dash pattern, etc.).
-//! These helpers centralise that machinery so each geom's draw loop reads
+//! These helpers centralize that machinery so each geom's draw loop reads
 //! as the geom-specific logic only.
 //!
 //! The helpers all share one principle: scale mapping is applied to the
@@ -96,7 +96,7 @@ pub(crate) fn resolve_position(raw: Value, scale: Option<&Scale>, band_offset: f
 /// `Channel::Raw*` variants bypass the scale: the wrapped value flows
 /// through as-is, regardless of whether a scale is bound to the
 /// channel name. This lets callers draw with pre-computed output-unit
-/// values (panel fractions, colours, pt sizes) on a plot whose
+/// values (panel fractions, colors, pt sizes) on a plot whose
 /// channels otherwise use scales.
 fn resolve_value(channel: Option<&Channel>, scale: Option<&Scale>, i: usize) -> Option<Value> {
     let (raw, bypass_scale) = match channel? {
@@ -111,8 +111,8 @@ fn resolve_value(channel: Option<&Channel>, scale: Option<&Scale>, i: usize) -> 
     })
 }
 
-/// Resolve a colour channel. Returns `None` when unset or when the
-/// resolved value isn't a colour. Used for `"fill"` / `"stroke"`.
+/// Resolve a color channel. Returns `None` when unset or when the
+/// resolved value isn't a color. Used for `"fill"` / `"stroke"`.
 pub(crate) fn resolve_color_channel(
     channel: Option<&Channel>,
     scale: Option<&Scale>,
@@ -121,10 +121,10 @@ pub(crate) fn resolve_color_channel(
     resolve_value(channel, scale, i)?.as_color()
 }
 
-/// The space a colour channel's gradient interpolates through: the bound
-/// scale's, or the crate default when the channel carries raw colours or
+/// The space a color channel's gradient interpolates through: the bound
+/// scale's, or the crate default when the channel carries raw colors or
 /// no scale is bound. Geoms that blend between two rows' resolved
-/// colours — densified vertices under a non-linear projection, spline
+/// colors — densified vertices under a non-linear projection, spline
 /// samples between control points — read it once per mark so the blend
 /// follows the same ramp the scale itself walks.
 pub(crate) fn channel_color_space(scale: Option<&Scale>) -> ColorSpace {
@@ -163,7 +163,7 @@ pub(crate) fn resolve_number_channel(
 /// tessellated mesh only when there is actual within-mark variation.
 /// Returns `false` for `Channel::Constant`, unset channels, and data
 /// channels whose rows all map to the same value (compared via
-/// [`Value::key_eq`] — variant-aware, NaN-canonicalised, same
+/// [`Value::key_eq`] — variant-aware, NaN-canonicalized, same
 /// equality the diff machinery uses).
 pub(crate) fn channel_varies_across(
     channel: Option<&Channel>,
@@ -201,7 +201,7 @@ pub(crate) fn resolve_number_channel_or(
 /// `Value::Bool`; any other resolved value (including numeric)
 /// falls back to `default` rather than coercing — keeps the channel
 /// strictly boolean so a misbound numeric scale doesn't silently
-/// flip behaviour.
+/// flip behavior.
 pub(crate) fn resolve_bool_channel_or(
     channel: Option<&Channel>,
     scale: Option<&Scale>,
@@ -279,7 +279,7 @@ pub(crate) fn join_from_str(s: &str) -> Option<Join> {
     }
 }
 
-/// Resolve a cap channel from a string-named value. Recognises `"butt"`
+/// Resolve a cap channel from a string-named value. Recognizes `"butt"`
 /// / `"round"` / `"square"`; falls back to `default` otherwise.
 pub(crate) fn resolve_cap_channel(
     channel: Option<&Channel>,
@@ -292,7 +292,7 @@ pub(crate) fn resolve_cap_channel(
         .unwrap_or(default)
 }
 
-/// Resolve a join channel from a string-named value. Recognises
+/// Resolve a join channel from a string-named value. Recognizes
 /// `"miter"` / `"round"` / `"bevel"`; falls back to `default` otherwise.
 pub(crate) fn resolve_join_channel(
     channel: Option<&Channel>,
@@ -473,7 +473,7 @@ pub(crate) fn resolve_pick_id(
 /// marker walk scales gaps to fit the perimeter exactly — `true` for
 /// closed paths (no visible seam at the join), `false` for open lines.
 ///
-/// The geom layer is responsible for resolving the per-row colours,
+/// The geom layer is responsible for resolving the per-row colors,
 /// pattern, linewidth, cap, join, and pick id. This helper just plumbs
 /// them through the dispatch.
 #[allow(clippy::too_many_arguments)]
@@ -585,8 +585,8 @@ pub(crate) fn auto_endpoint_clip_pt(
 /// false`), falls back to the terminal polyline edge direction —
 /// identical to the chord in that limit.
 ///
-/// Returns a normalised [`Vec2`]; degenerate inputs (single-vertex
-/// polyline, coincident neighbour, etc.) return [`Vec2::ZERO`] and the
+/// Returns a normalized [`Vec2`]; degenerate inputs (single-vertex
+/// polyline, coincident neighbor, etc.) return [`Vec2::ZERO`] and the
 /// downstream [`emit_endpoint_marker`] no-ops on zero-length vectors.
 pub(crate) fn endpoint_outward(
     clipped: &[Point],
@@ -865,7 +865,7 @@ mod tests {
         let red = crate::color::rgb(1.0, 0.0, 0.0);
         let blue = crate::color::rgb(0.0, 0.0, 1.0);
         let palette = scale::discrete([cat("a"), cat("b")]).range_colors([red, blue]);
-        // A raw column of colours ignores the palette bound to the name.
+        // A raw column of colors ignores the palette bound to the name.
         let raw = Channel::RawData(DataColumn::Color(vec![blue, red]));
         assert_eq!(
             resolve_color_channel(Some(&raw), Some(&palette), 0),

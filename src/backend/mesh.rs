@@ -38,19 +38,19 @@ pub(crate) fn triangle_path(pts: &[Point; 3]) -> Path {
     p
 }
 
-/// Pick a brush for a triangle's three vertex colours.
+/// Pick a brush for a triangle's three vertex colors.
 ///
 /// - All three equal → solid brush.
 /// - Exactly two equal (the ribbon-triangle case: two shoulders sharing
-///   a colour + one tip with a different colour) → linear gradient
+///   a color + one tip with a different color) → linear gradient
 ///   running from the midpoint of the matching pair to the unique tip
-///   vertex, with stops `[shared, tip]`. This places both equal-colour
+///   vertex, with stops `[shared, tip]`. This places both equal-color
 ///   vertices at gradient fraction 0 (because they project equidistant
 ///   from the axis's start) and the tip at fraction 1 — so adjacent
 ///   ribbon segments meet seamlessly.
-/// - Three distinct colours (general mesh) → linear gradient between
-///   the max-colour-distance pair. The third vertex gets an
-///   interpolated colour at its perpendicular-projection position,
+/// - Three distinct colors (general mesh) → linear gradient between
+///   the max-color-distance pair. The third vertex gets an
+///   interpolated color at its perpendicular-projection position,
 ///   which produces a small visible discontinuity along the edge
 ///   between the picked pair and the third vertex — a documented
 ///   limitation.
@@ -61,7 +61,7 @@ pub(crate) fn triangle_gradient_brush(pts: &[Point; 3], colors: &[Color; 3]) -> 
     if eq01 && eq12 {
         return Brush::Solid(colors[0]);
     }
-    // Identify the "tip" vertex when exactly two colours match. For
+    // Identify the "tip" vertex when exactly two colors match. For
     // `eq01 && !eq12 && !eq20` the matching pair is (0, 1) and the tip
     // is index 2; similar for the other two cases.
     let tip_idx = if eq01 {
@@ -83,7 +83,7 @@ pub(crate) fn triangle_gradient_brush(pts: &[Point; 3], colors: &[Color; 3]) -> 
         // The gradient axis runs perpendicular to the back-edge AB,
         // through the back-edge midpoint, to the foot of the
         // perpendicular dropped from the tip onto that axis. This
-        // places A and B at gradient fraction 0 (pure shared colour)
+        // places A and B at gradient fraction 0 (pure shared color)
         // and the tip at fraction 1 — Gouraud-exact across the
         // triangle, with no projection error along the AB side.
         let start_x = 0.5 * (pts[a].x + pts[b].x);

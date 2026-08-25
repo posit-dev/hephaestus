@@ -99,9 +99,8 @@ fn compute_cuts(
         if classes[i] != Class::Corner {
             continue;
         }
-        let (avail_back, back_stop) =
-            walk_available(verts, classes, i, closed, /*back=*/ true);
-        let (avail_fwd, fwd_stop) = walk_available(verts, classes, i, closed, /*back=*/ false);
+        let (avail_back, back_stop) = walk_available(verts, classes, i, closed, true);
+        let (avail_fwd, fwd_stop) = walk_available(verts, classes, i, closed, false);
         let back_share = if back_stop == StopKind::Corner {
             0.5
         } else {
@@ -114,8 +113,8 @@ fn compute_cuts(
         };
         let back_dist = (avail_back * back_share).min(max_cut).max(0.0);
         let fwd_dist = (avail_fwd * fwd_share).min(max_cut).max(0.0);
-        let (p_back, t_back) = walk_distance(verts, i, back_dist, closed, /*back=*/ true);
-        let (p_fwd, t_fwd) = walk_distance(verts, i, fwd_dist, closed, /*back=*/ false);
+        let (p_back, t_back) = walk_distance(verts, i, back_dist, closed, true);
+        let (p_fwd, t_fwd) = walk_distance(verts, i, fwd_dist, closed, false);
         // Control points sit (2/3) · cut_dist from each endpoint along the
         // local polyline-forward tangent. The 2/3 factor is the cubic
         // degree-elevation ratio for the quadratic Chaikin limit — in the

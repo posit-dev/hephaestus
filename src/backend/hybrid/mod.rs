@@ -2,7 +2,7 @@
 //! render pipeline on the GPU.
 //!
 //! Two properties drive the design. First, coverage is computed CPU-side, so
-//! the rasteriser can paint with *binary* coverage on request — a pixel is
+//! the rasterizer can paint with *binary* coverage on request — a pixel is
 //! either fully painted or not painted at all. That is what an id buffer
 //! needs, and it is why picking here reports exactly one id per pixel rather
 //! than a blend of two. Second, the GPU buffers are sized to the scene's
@@ -16,7 +16,7 @@
 //! carries no size, so [`HybridScene`] records draws into a
 //! [`RecordingScene`] and the renderer replays them once the size is known.
 //! Replaying is also how the pick pass is produced: one recording feeds both
-//! scenes, so enabling picking costs a second rasterisation but not a second
+//! scenes, so enabling picking costs a second rasterization but not a second
 //! set of recorded draws.
 
 use std::collections::HashMap;
@@ -60,7 +60,7 @@ const PICK_ALIASING_THRESHOLD: u8 = 128;
 /// [`PICK_ALIASING_THRESHOLD`] and would vanish from the hitmap entirely.
 const MIN_PICK_STROKE_WIDTH: f64 = 2.0;
 
-/// Largest scene dimension the rasteriser accepts, in pixels.
+/// Largest scene dimension the rasterizer accepts, in pixels.
 ///
 /// `vello_hybrid::Scene` sizes itself in `u16`.
 pub const MAX_DIMENSION: u32 = u16::MAX as u32;
@@ -69,7 +69,7 @@ pub const MAX_DIMENSION: u32 = u16::MAX as u32;
 
 /// A [`SceneBuilder`] that records draws for the Hybrid renderer to replay.
 ///
-/// Recording rather than rasterising immediately is what lets one set of draws
+/// Recording rather than rasterizing immediately is what lets one set of draws
 /// serve a frame whose size is only known at render time, and serve the
 /// parallel pick pass as well. See the module docs.
 #[derive(Debug, Default, Clone)]
@@ -161,7 +161,7 @@ impl SceneBuilder for HybridScene {
 enum Pass {
     /// The visible frame: the caller's brushes, blend modes and antialiasing.
     Display,
-    /// The id buffer: solid encoded ids, normalised blending, binary coverage.
+    /// The id buffer: solid encoded ids, normalized blending, binary coverage.
     Pick,
 }
 
@@ -176,7 +176,7 @@ fn image_key(image: &Image) -> u64 {
 /// Replays recorded draws into a `vello_hybrid::Scene`.
 ///
 /// One writer per pass. The pick pass differs in three ways: solid ids
-/// replace brushes, blending and layer alpha are normalised so ids cannot
+/// replace brushes, blending and layer alpha are normalized so ids cannot
 /// fade toward the no-hit sentinel, and hairline strokes are widened.
 struct Writer<'a> {
     scene: &'a mut Scene,
@@ -411,7 +411,7 @@ fn dimension(v: u32) -> Result<u16, BackendError> {
 
 /// Every distinct image the recording paints with, in first-drawn order.
 ///
-/// Images arrive as CPU pixels but the rasteriser only samples handles into
+/// Images arrive as CPU pixels but the rasterizer only samples handles into
 /// its atlas, so each one has to be uploaded before a replay can reference it.
 fn recorded_images(ops: &RecordingScene) -> Vec<&Image> {
     use crate::scene::recording::Op;
@@ -448,7 +448,7 @@ fn recorded_images(ops: &RecordingScene) -> Vec<&Image> {
 /// Only the wgpu path needs it: that is the one with a `render_to_buffer` to
 /// hand bytes out of.
 ///
-/// The rasteriser composites premultiplied, so without this a PNG writer
+/// The rasterizer composites premultiplied, so without this a PNG writer
 /// would darken every partially transparent pixel.
 #[cfg(feature = "vello-hybrid")]
 fn unpremultiply(buf: &mut [u8]) {

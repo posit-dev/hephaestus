@@ -29,7 +29,7 @@ Geometry transforms (`round_corners`, `clip_polyline`, `offset_polygon`, `round_
 
 ## Path sampling
 
-- **`ArcLengthWalker`** — yields position + tangent samples at fixed arc-length intervals along a path. Treats each subpath independently; zero-length segments fall back to the last valid tangent. Used by `LineGeom` for linetype marker placement and (planned) text-on-path geoms.
+- **`ArcLengthWalker`** — yields position + tangent samples at fixed arc-length intervals along a path. Treats each subpath independently; zero-length segments fall back to the last valid tangent. Used by `LineGeom` for linetype marker placement and text-on-path geoms.
 - **`PolylineSampler`** — same protocol over a polyline vertex list.
 - **`ArcSample`**, **`TrailingPolicy`** — sample type and the policy for handling the trailing partial interval.
 

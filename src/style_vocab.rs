@@ -202,13 +202,13 @@ impl Default for Margin {
 
 // ─── Palette ────────────────────────────────────────────────────────────────
 
-/// Three semantic colour anchors that every theme element references.
+/// Three semantic color anchors that every theme element references.
 ///
 /// - `paper` — background anchor (panel + plot backgrounds, light grids
 ///   in light themes / dark grids in dark themes).
 /// - `ink` — foreground anchor (text, axis lines, panel borders,
-///   default stroke colour for geoms).
-/// - `accent` — highlight anchor (default fill colour for geoms when
+///   default stroke color for geoms).
+/// - `accent` — highlight anchor (default fill color for geoms when
 ///   no fill channel is bound; legend / strip accents).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Palette {

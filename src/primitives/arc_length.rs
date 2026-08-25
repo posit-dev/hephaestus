@@ -4,7 +4,7 @@
 //! Generic utility used by:
 //! - LineGeom's linetype marker rendering, to stamp shapes along a
 //!   polyline at fixed pt spacing (`crate::plot::geom::line`).
-//! - Phase D's planned `TextPathGeom` (text following a curve).
+//! - `TextPathGeom` (text following a curve).
 //!
 //! The walker treats each subpath of a path independently — every
 //! `MoveTo` starts a new subpath whose cumulative arc length resets to
@@ -202,7 +202,7 @@ impl ArcLengthWalker {
 ///
 /// Used when the caller needs irregular sampling — e.g. LineGeom
 /// walking a linetype pattern where Dash / Gap / Marker steps consume
-/// different amounts of arc length per step, or Phase D's TextPathGeom
+/// different amounts of arc length per step, or TextPathGeom
 /// placing each glyph at the next-glyph-width along the path. For
 /// regular fixed-step sampling use [`ArcLengthWalker`] instead.
 #[derive(Clone, Debug)]
