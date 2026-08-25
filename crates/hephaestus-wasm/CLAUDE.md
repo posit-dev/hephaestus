@@ -383,6 +383,137 @@ simply re-render. The first live frame is already correct either way, since
   size**, so neither has an intrinsic size that could feed back into layout.
   Cumulative layout shift is then exactly 0, which `bench/swap.mjs` asserts.
 
+## Embedding: the producer's side
+
+What a host has to do to get the startup above. Written from the case that
+motivated it — `ggsql` emitting plots into Positron's plot pane, where **every
+render is a fresh page load**, so the cold boot is paid per plot rather than per
+session. Nothing here is implemented in this repo; it is the recipe the client's
+`placeholder` option is shaped for.
+
+### Per render, on the native side
+
+`ggsql` already depends on `hephaestus` with `vello` + `png`, so it can
+rasterise. Given the pane's CSS box, the device pixel ratio `r`, and the host's
+light/dark state:
+
+1. Solve the plot and `write_composition` it, with the size, dpi and background
+   hints set.
+2. **Read the document back and rasterise *that***, through `vello-hybrid`, at
+   `(cssW·r, cssH·r)` and dpi `96r`. Encode PNG with its dpi.
+   `examples/document_placeholder.rs` is the working reference.
+3. Emit `text/html` carrying the picture, the document and the theme.
+
+Step 2's read-back is the step that will get skipped, and the one that makes the
+swap invisible — see "Startup cost, and how to hide it" for why, and for the
+ranking of what has to match. The same call is where `unsupported_items` should
+be surfaced as a warning, since it names exactly what the round trip dropped.
+
+### The page
+
+```html
+<style>
+  html, body { margin: 0; background: #ffffff; /* = theme.palette.paper */ }
+  #frame { position: relative; width: 100vw; height: 100vh; overflow: hidden; }
+  #plot  { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #ph    { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+</style>
+
+<div id="frame">
+  <canvas id="plot" width="1800" height="840"></canvas>
+  <img id="ph" alt="…" decoding="sync" fetchpriority="high"
+       src="data:image/png;base64,…" />
+</div>
+```
+
+- **The `<img>` must be in the served markup.** Appending it from script is the
+  one mistake that silently removes the whole benefit: the element misses the
+  first paint, and the page reports **no `largest-contentful-paint` entry at
+  all**, because a canvas draw is not a contentful paint and by then the
+  picture is the only candidate left. That absent LCP entry is the cheapest
+  way to detect the mistake, and `bench/swap.mjs` asserts against it. The
+  57 ms figure is a picture in the markup.
+- **`data:` rather than a URL**, so there is no fetch between parsing and
+  painting. The cost is a document ~1.33x the PNG, which for a locally generated
+  page is nothing.
+- **Explicit `width`/`height` on the canvas**, and the container sized in CSS —
+  both explained under "Two free wins in the page shape".
+- **`<html>` background set to the theme's paper**, so overscroll and any
+  `object-fit` letterbox match the plot instead of flashing white.
+- **Load the client behind a dynamic `import()`.** A static import of a missing
+  module never runs the page's own body, which would leave the picture up with
+  the reason only in the console — recoverable, but silent. `www/index.html`
+  models the handling.
+- **Listen for pointer events on the container, not the canvas.** After the swap
+  the overlay is the hit-test target; events bubble with `offsetX`/`offsetY`
+  intact.
+- Pass `colorScheme` explicitly and `defaultFont: false`, and register the same
+  faces the native render used.
+
+### Getting the wasm to the page
+
+The client's assets resolve relative to the module, so the only question is
+where the module comes from. Three answers, and the middle one is the default
+choice:
+
+| | cost |
+| --- | --- |
+| a CDN | a network round trip per render, which is what makes the current Vega-Lite path in `ggsql-jupyter/src/display.rs` feel the way it does. Not an option here. |
+| an extension-local resource URI | needs the extension to inject a base URI into the emitted HTML, and needs those resources to be reachable from a runtime's display output. Keeps streaming compilation and the HTTP cache. |
+| base64 in the HTML | works unconditionally, costs +33% bytes, and forfeits `instantiateStreaming` — the module compiles synchronously on the main thread. |
+
+### What Positron actually does, and the two things still unknown
+
+Read off `~/GitHub/positron`, so it is a starting point rather than a
+measurement:
+
+- A `text/html` display bundle reaches the plot pane through
+  `NotebookOutputPlotClient` →
+  `positronOutputWebview/browser/notebookOutputWebviewServiceImpl.ts` with
+  `viewType: 'jupyter-notebook'` — the **notebook-renderer** path, not
+  `createRawHtmlOutputWebview`. Both paths set `allowScripts: true` and
+  `retainContextWhenHidden: true`; what differs is that the notebook path
+  supplies a renderer extension and computes `localResourceRoots` per output,
+  where the raw path takes a single `baseUri` and injects no CSP meta of its
+  own. Which of those governs an emitted plot decides both the CSP and what
+  the page can load.
+- **Each plot is its own client with its own `createWebview` /
+  `disposeWebview`**, so the fresh-page-per-render assumption is real, and a
+  `setDocument` on this side could not help without Positron-side changes.
+- **Webviews sharing an origin share a service worker** — the comment on
+  `origin: DOM.getActiveWindow().origin` says so outright. That is the reason
+  to expect cached assets across plots rather than to assume the worst, and
+  the reason the code-cache question below is worth measuring rather than
+  guessing.
+- The pane's width arrives already: `RenderHints::output_width_px` in
+  `ggsql-jupyter/src/display.rs`, read from the request's `positron` block.
+  There is no matching height or device-pixel-ratio hint, so the aspect comes
+  from the document and `r` has to be assumed — which is the soft one of the
+  four matching rules, so assuming `2` is safe.
+
+Two questions decide how much of the rest matters, and **neither can be
+answered by reading**:
+
+1. **Does the plot pane's CSP permit `wasm-unsafe-eval`?**
+   `WebAssembly.instantiateStreaming` needs it in `script-src`. Nothing in the
+   Positron tree grants it — `grep -rn wasm-unsafe-eval` is empty — which is a
+   warning sign rather than a verdict, since an inner document with no CSP meta
+   is unconstrained. If it is refused, nothing else here works.
+2. **Does V8's wasm code cache survive across page loads there?** Webview
+   resources go through a service worker, and Chromium's wasm code cache hangs
+   off HTTP-cache metadata. If it does survive, only the first plot of a session
+   pays the ~185 ms and the problem is much smaller than it looks; if it does
+   not, every plot pays it and bundle size becomes the whole game. Infer it from
+   the `init` span on load 1 against loads 2..N with everything else held
+   constant.
+
+Both are answerable with a small probe extension loading `bench/swap.html`
+through `webview.asWebviewUri` and reporting back — which is also how to find
+out whether the wasm arrives as `application/wasm` at all, whether the transport
+compresses it, and whether a `<link rel=preload crossorigin>` is usable there.
+The placeholder makes the first plot feel instant regardless of the answers,
+which is why it did not wait on them.
+
 ## Saving a PNG needs no configuration, but does need an `<img>`
 
 `canvas.toDataURL()` / `toBlob()` work on the WebGPU canvas as-is (verified:
@@ -720,4 +851,6 @@ in "Startup cost, and how to hide it".
   and the traps (`strip = true` anonymises wasm frames; discard the first run
   against a fresh headless Chrome).
 - `examples/document_placeholder.rs` — the reference for a producer emitting
-  the picture the `placeholder` option consumes.
+  the picture the `placeholder` option consumes. "Embedding: the producer's
+  side" above is the rest of that recipe, including what is still unknown
+  about Positron's plot pane.

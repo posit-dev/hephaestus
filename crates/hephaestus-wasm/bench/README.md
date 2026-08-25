@@ -121,6 +121,15 @@ node bench/server.mjs --port 8080 [--brotli] [--no-cache] [--wrong-wasm-mime]
 Serves the crate directory, so `/www/`, `/bench/` and `/dist/` all resolve the
 way they do in the published layout.
 
+## What is not measured here yet
+
+Everything above runs against a local HTTP server. The case that motivated the
+work is a webview, where resources go through a service worker — so whether the
+wasm arrives as `application/wasm`, whether the transport compresses it, and
+whether V8's wasm code cache survives across page loads are all open. The last
+one decides whether renders 2..N are cheap or pay the full ~185 ms. See
+"Embedding: the producer's side" in `../CLAUDE.md` for what to probe and why.
+
 ## Traps worth knowing before measuring anything here
 
 - **`strip = true` in `[profile.release]` removes the wasm name section**, so
