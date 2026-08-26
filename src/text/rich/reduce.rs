@@ -42,6 +42,8 @@ pub struct BuiltRuns {
     /// Non-empty and non-overlapping; the em shift is applied to the
     /// glyph y-position when drawing.
     pub baseline_shifts: Vec<BaselineRun>,
+    /// Link destinations over byte ranges of `text`.
+    pub links: Vec<LinkRun>,
     /// Block boundaries recorded during reduction, in emission order.
     /// A layout pass consumes this to draw block backgrounds, indent
     /// content, place bullets, etc. Empty when the source is a single
@@ -86,6 +88,22 @@ pub struct InlineRun {
     /// Resolved style — every active span's delta already cascaded in,
     /// lengths in points.
     pub style: ResolvedStyle,
+}
+
+/// A link destination over a byte range of [`BuiltRuns::text`].
+///
+/// Kept as a side table rather than folded into [`InlineRun`] because a
+/// link's *styling* already flows through the `link` selector; what is
+/// carried here is the destination, which styling has no place for. A
+/// backend that can express a link — SVG's `<a>`, a PDF annotation —
+/// reads it; a rasteriser ignores it, which is why a link has never
+/// been interactive when drawn to pixels.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkRun {
+    /// Byte range of the linked text.
+    pub range: Range<usize>,
+    /// Destination as the markdown gave it.
+    pub dest: String,
 }
 
 /// One baseline-shifted range. Nested shifts overlap; the innermost
@@ -228,12 +246,14 @@ pub fn reduce(events: &[RichEvent], sheet: &RichTextStyleSheet, base: &ResolvedS
         text: String::new(),
         inline: Vec::new(),
         baseline_shifts: Vec::new(),
+        links: Vec::new(),
         blocks: Vec::new(),
         objects: Vec::new(),
         base_size_pt: base.size_pt,
         style_stack: vec![StyleFrame {
             style: root,
             baseline_start: None,
+            link: None,
         }],
         block_stack: Vec::new(),
         list_stack: Vec::new(),
@@ -252,6 +272,7 @@ struct Reducer {
     text: String,
     inline: Vec<InlineRun>,
     baseline_shifts: Vec<BaselineRun>,
+    links: Vec<LinkRun>,
     blocks: Vec<Block>,
     objects: Vec<InlineObject>,
     /// The run's base font size — what `Rem` lengths measure against.
@@ -305,6 +326,8 @@ struct StyleFrame {
     /// Byte offset where this frame's baseline shift began, when the
     /// frame changed the shift relative to its parent.
     baseline_start: Option<usize>,
+    /// Destination and start offset when this frame is a link.
+    link: Option<(usize, String)>,
 }
 
 /// One list container's running state.
@@ -400,7 +423,13 @@ impl Reducer {
             RichEvent::SuperscriptEnd => self.pop_inline(),
             RichEvent::SubscriptStart => self.push_inline("sub", sheet),
             RichEvent::SubscriptEnd => self.pop_inline(),
-            RichEvent::LinkStart { .. } => self.push_inline("link", sheet),
+            RichEvent::LinkStart { dest } => {
+                self.push_inline("link", sheet);
+                let start = self.text.len();
+                if let Some(frame) = self.style_stack.last_mut() {
+                    frame.link = Some((start, dest.clone()));
+                }
+            }
             RichEvent::LinkEnd => self.pop_inline(),
             RichEvent::SpanStart { selector } => self.push_selector(selector, sheet),
             RichEvent::SpanEnd => self.pop_inline(),
@@ -697,6 +726,7 @@ impl Reducer {
         self.style_stack.push(StyleFrame {
             style,
             baseline_start,
+            link: None,
         });
     }
 
@@ -713,6 +743,15 @@ impl Reducer {
                 self.baseline_shifts.push(BaselineRun {
                     range: start..end,
                     shift_pt: frame.style.baseline_pt,
+                });
+            }
+        }
+        if let Some((start, dest)) = frame.link {
+            let end = self.text.len();
+            if end > start {
+                self.links.push(LinkRun {
+                    range: start..end,
+                    dest,
                 });
             }
         }
@@ -798,6 +837,7 @@ impl Reducer {
             text: self.text,
             inline: self.inline,
             baseline_shifts: self.baseline_shifts,
+            links: self.links,
             blocks: self.blocks,
             objects: self.objects,
         }

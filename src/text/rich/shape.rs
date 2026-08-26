@@ -17,7 +17,7 @@ use parley::{
 
 use super::image::{fill_object_offsets, push_object_boxes, resolve_objects, ObjectLayout};
 use super::length::LineHeightSpec;
-use super::reduce::{BaselineRun, Block, BlockKind, BuiltRuns, InlineObject, InlineRun};
+use super::reduce::{BaselineRun, Block, BlockKind, BuiltRuns, InlineObject, InlineRun, LinkRun};
 use super::run::{BlockLayout, MarkerLayout, RichBrush, RichTextRun};
 use super::style::ResolvedStyle;
 use super::wrap::{stack_blocks, EdgeSpacing};
@@ -279,7 +279,9 @@ pub(crate) fn shape_run(
         let height_px = layout.height();
         let continuation_layout: Option<parley::Layout<RichBrush>> = None;
         let continuation_baseline_shifts: Vec<BaselineRun> = Vec::new();
+        let continuation_links: Vec<LinkRun> = Vec::new();
         let continuation_inlines: Vec<InlineRun> = Vec::new();
+        let continuation_text = String::new();
         let first_line_height_px: f32 = 0.0;
         // Under Rtl, the class-supplied `.left` / `.right` on
         // padding, margin, and (in block.rs) border_width are
@@ -339,6 +341,7 @@ pub(crate) fn shape_run(
                 width_px: m_layout.calculate_content_widths().max,
                 gap_px: pt_to_px(anc.style.size_pt * MARKER_GAP_EM, dpi),
                 layout: m_layout,
+                text: text.clone(),
             })
         });
         layouts.push(BlockLayout {
@@ -364,11 +367,14 @@ pub(crate) fn shape_run(
             is_rtl,
             continuation_layout,
             continuation_baseline_shifts,
+            continuation_links,
             first_line_height_px,
             continuation_inlines,
+            continuation_text,
             source_text: block_text,
             source_inlines: inlines,
             source_baselines: baselines,
+            source_links: slice_links(&runs.links, &leaf.range),
             objects: objects.clone(),
             continuation_objects: Vec::new(),
             source_objects: objects,
@@ -425,6 +431,7 @@ pub(crate) fn shape_run(
         natural_height_px: total_height,
         current_height_px: RefCell::new(total_height),
         min_width_px: min_width,
+        group: crate::scene::TextGroup::next(),
     }
 }
 // ─── Per-block shaping ──────────────────────────────────────────────────────
@@ -750,6 +757,26 @@ pub(crate) fn slice_block(
         });
     }
     (block_text, out_inlines, out_baselines)
+}
+
+/// The link runs overlapping `range`, clipped and rebased to it.
+///
+/// Separate from [`slice_block`] rather than a fourth element of its
+/// tuple: that function has two callers whose signatures would both
+/// churn, and links slice exactly the way `slice_objects` does.
+pub(crate) fn slice_links(links: &[LinkRun], range: &Range<usize>) -> Vec<LinkRun> {
+    let (s, e) = (range.start, range.end);
+    links
+        .iter()
+        .filter_map(|l| {
+            let start = l.range.start.max(s);
+            let end = l.range.end.min(e);
+            (start < end).then(|| LinkRun {
+                range: (start - s)..(end - s),
+                dest: l.dest.clone(),
+            })
+        })
+        .collect()
 }
 
 /// The image tags positioned inside `range`, rebased to it.

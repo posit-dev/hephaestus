@@ -23,7 +23,7 @@
 //! `text::rich` resolves palette colours and relative sizes while
 //! shaping, and the low-level text layer must not depend on the
 //! high-level plot layer. `plot::theme` re-exports every item here, so
-//! plot-side code addresses them through the theme as before.
+//! plot-side code can address them through the theme.
 
 use std::sync::Arc;
 
@@ -339,6 +339,96 @@ pub enum VAlign {
     Baseline,
     /// Align with the bottom edge of the slot.
     Bottom,
+}
+
+// ─── Font description ───────────────────────────────────────────────────────
+
+/// Generic font-family categories mirroring the CSS surface. The host
+/// shaper resolves each to a concrete face — independent of any specific
+/// named family.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GenericFamilyKind {
+    /// Serifed faces — Times-like.
+    Serif,
+    /// Sans-serif faces — Helvetica-like.
+    SansSerif,
+    /// Monospaced faces.
+    Mono,
+    /// Cursive / script faces.
+    Cursive,
+    /// Decorative / fantasy faces.
+    Fantasy,
+    /// Operating-system UI font.
+    SystemUi,
+}
+
+/// One entry in a font-family fallback chain. Named entries reference a
+/// specific face by string; generic entries pick a CSS-style category.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FontFamilyEntry {
+    /// A specific named family (e.g. `"Helvetica"`).
+    Named(String),
+    /// A generic family category.
+    Generic(GenericFamilyKind),
+}
+
+/// Style axis — upright, italic, or oblique with a slant angle in degrees.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum FontStyleKind {
+    /// Upright glyphs.
+    #[default]
+    Normal,
+    /// Italic — a distinct set of slanted glyphs.
+    Italic,
+    /// Oblique — upright glyphs slanted by the given angle in degrees.
+    Oblique(f32),
+}
+
+/// OpenType feature setting (4-byte tag + `u16` value).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FontFeatureSetting {
+    /// OpenType feature tag — e.g. `*b"liga"`.
+    pub tag: [u8; 4],
+    /// Feature value (0 = off, 1 = on, stylistic-set indices for `ssXX`).
+    pub value: u16,
+}
+
+/// Variable-font axis assignment (4-byte tag + `f32` value).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FontVariationSetting {
+    /// Variable-font axis tag — e.g. `*b"wght"`.
+    pub tag: [u8; 4],
+    /// Axis position (units are axis-specific).
+    pub value: f32,
+}
+
+/// How a face was *asked* for, as a CSS-shaped description.
+///
+/// A backend that emits text as text — SVG, and a future PDF — needs to
+/// name the font it is referencing, and the name exists only in the
+/// request: the resolved face carries its family in its own `name`
+/// table, which the shaper does not surface. So this travels beside the
+/// resolved face rather than being derived from it, and it means the
+/// same thing CSS `font-family` means.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FontSpec {
+    /// Fallback chain, most preferred first. Mirrors CSS `font-family`.
+    pub families: Vec<FontFamilyEntry>,
+    /// CSS numeric weight (400 normal, 700 bold).
+    pub weight: u16,
+    /// Upright, italic, or oblique.
+    pub style: FontStyleKind,
+    /// CSS `font-width` ratio — 1.0 is normal.
+    pub width: f32,
+    /// Letter spacing in 1/1000 em. Already folded into the shaped
+    /// advances; carried so a backend can restate it.
+    pub tracking: f32,
+    /// Size in points, before the DPI conversion the shaped run carries.
+    pub size_pt: f32,
+    /// OpenType feature toggles applied to the run.
+    pub features: Vec<FontFeatureSetting>,
+    /// Variable-font axis values applied to the run.
+    pub variations: Vec<FontVariationSetting>,
 }
 
 #[cfg(test)]

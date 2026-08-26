@@ -10,15 +10,16 @@ use parley::PositionedLayoutItem;
 use super::anchor::RichAnchor;
 use super::border::emit_block_paint;
 use super::image::{emit_object, object_for_box, ObjectLayout};
-use super::reduce::{BaselineRun, InlineRun};
+use super::reduce::{BaselineRun, InlineRun, LinkRun};
 use super::run::{BlockLayout, MarkerLayout, RichBrush, RichTextRun};
 use super::shape::pt_to_px;
+use super::style::ResolvedStyle;
 use crate::brush::Brush;
 use crate::color::Color;
 use crate::geometry::Affine;
 use crate::pick::PickId;
-use crate::scene::{Font, GlyphRun, SceneBuilder};
-use crate::style_vocab::Palette;
+use crate::scene::{Decorations, Font, GlyphRun, Rule, SceneBuilder, TextGroup, TextSource};
+use crate::style_vocab::{FontFamilyEntry, FontSpec, FontStyleKind, Palette};
 use crate::text::shape_common::{emit_decoration_rect, glyphs_of_run, DecorationRect};
 
 // ─── Draw ───────────────────────────────────────────────────────────────────
@@ -60,6 +61,8 @@ pub fn draw_rich_text(
         emit_block_paint(scene, paint, offsets, final_transform, dpi, pick_id);
     }
     let palette = &run.palette;
+    let base_spec = crate::text::shape_common::font_spec_of(&run.base_style);
+    let group = run.group.for_placement(x, y, transform);
     // Glyphs.
     let blocks = run.blocks.borrow();
     for bl in blocks.iter() {
@@ -74,6 +77,8 @@ pub fn draw_rich_text(
             final_transform,
             dpi,
             pick_id,
+            &base_spec,
+            group,
         );
         if let Some(cont_layout) = &bl.continuation_layout {
             if let Some(first_line) = bl.layout.lines().next() {
@@ -93,6 +98,12 @@ pub fn draw_rich_text(
                     offsets,
                     final_transform,
                     pick_id,
+                    SourceCtx {
+                        text: &bl.source_text,
+                        base: &base_spec,
+                        group,
+                        links: &bl.source_links,
+                    },
                 );
             }
             let cont_y = block_y + bl.first_line_height_px;
@@ -113,6 +124,12 @@ pub fn draw_rich_text(
                     offsets,
                     final_transform,
                     pick_id,
+                    SourceCtx {
+                        text: &bl.continuation_text,
+                        base: &base_spec,
+                        group,
+                        links: &bl.continuation_links,
+                    },
                 );
             }
         } else {
@@ -138,6 +155,12 @@ pub fn draw_rich_text(
                     offsets,
                     final_transform,
                     pick_id,
+                    SourceCtx {
+                        text: &bl.source_text,
+                        base: &base_spec,
+                        group,
+                        links: &bl.source_links,
+                    },
                 );
             }
         }
@@ -152,6 +175,49 @@ pub fn draw_rich_text(
 /// `is_rtl` controls how `shift_px` is applied: under Ltr it pushes
 /// the glyph run rightward from the block's left edge (indent gutter
 /// on the left); under Rtl the shift is not added — the block's
+/// Describe how a resolved span asked for its face.
+///
+/// `ResolvedStyle` names at most one family; where it names none the
+/// block's base chain applies, which is the same fallback the shaper
+/// used when it picked the face.
+fn font_spec_of_resolved(style: &ResolvedStyle, base: &FontSpec) -> FontSpec {
+    FontSpec {
+        families: match &style.family {
+            Some(name) => vec![FontFamilyEntry::Named(name.clone())],
+            None => base.families.clone(),
+        },
+        weight: style.weight,
+        style: if style.italic {
+            FontStyleKind::Italic
+        } else {
+            FontStyleKind::Normal
+        },
+        width: style.width,
+        tracking: style.tracking,
+        size_pt: style.size_pt as f32,
+        features: style.features.clone(),
+        variations: base.variations.clone(),
+    }
+}
+
+/// What a line's glyph runs need in order to say where they came from.
+///
+/// Bundled because `emit_line_glyphs` already carries a long parameter
+/// list and these three always travel together.
+#[derive(Clone, Copy)]
+pub(crate) struct SourceCtx<'a> {
+    /// The text this line's layout was shaped from. Byte ranges a glyph
+    /// run reports index into it.
+    pub text: &'a str,
+    /// The block's base font description, used where a run falls
+    /// outside every styled span.
+    pub base: &'a FontSpec,
+    /// The block this line belongs to.
+    pub group: TextGroup,
+    /// Link destinations over `text`.
+    pub links: &'a [LinkRun],
+}
+
 /// narrower shape width plus parley's right-alignment already leaves
 /// the indent gutter on the right side of the block.
 #[allow(clippy::too_many_arguments)]
@@ -171,6 +237,7 @@ fn emit_line_glyphs(
     offsets: super::anchor::AnchorOffsets,
     final_transform: Affine,
     pick_id: PickId,
+    src: SourceCtx<'_>,
 ) {
     // First pass — record positions of any InlineBoxes on this line
     // so we can bracket span paint rects with the reserved padding
@@ -198,8 +265,10 @@ fn emit_line_glyphs(
             inline_box_x.insert(ib.id, (ib.x, ib.x + ib.width));
         }
     }
+    let mut cursor = crate::text::shape_common::GlyphRunCursor::default();
     for item in line.items() {
         let PositionedLayoutItem::GlyphRun(gr) = item else {
+            cursor.skip_item();
             continue;
         };
         let prun = gr.run();
@@ -360,6 +429,51 @@ fn emit_line_glyphs(
             continue;
         }
 
+        // Where this run's characters live. Attribution to an
+        // `InlineRun` above matches on resolved colour, which cannot
+        // separate two spans that resolve alike; the byte range can, so
+        // the font description a run reports is taken from whichever
+        // span actually contains it.
+        let glyph_start = cursor.advance(&gr, glyphs.len());
+        let span = crate::text::shape_common::text_range_of_run(&gr, glyph_start, glyphs.len());
+        let owning_style = span.as_ref().and_then(|r| {
+            inlines
+                .iter()
+                .find(|inl| inl.range.start <= r.start && inl.range.end >= r.end)
+                .or_else(|| {
+                    inlines
+                        .iter()
+                        .find(|inl| inl.range.start < r.end && inl.range.end > r.start)
+                })
+                .map(|inl| &inl.style)
+        });
+        let run_spec = owning_style.map(|st| font_spec_of_resolved(st, src.base));
+        let source = span.as_ref().map(|r| TextSource {
+            text: src.text.get(r.clone()).unwrap_or(""),
+            font: run_spec.as_ref().unwrap_or(src.base),
+            advance: gr.advance(),
+            rtl: prun.is_rtl(),
+            decorations: Decorations {
+                underline: gr.style().underline.as_ref().map(|d| Rule {
+                    thickness: d.size.unwrap_or(metrics.underline_size).max(0.0),
+                    offset: d.offset.unwrap_or(metrics.underline_offset),
+                }),
+                strikethrough: gr.style().strikethrough.as_ref().map(|d| Rule {
+                    thickness: d.size.unwrap_or(metrics.strikethrough_size).max(0.0),
+                    offset: d.offset.unwrap_or(metrics.strikethrough_offset),
+                }),
+            },
+            link: span
+                .as_ref()
+                .and_then(|r| {
+                    src.links
+                        .iter()
+                        .find(|l| l.range.start < r.end && l.range.end > r.start)
+                })
+                .map(|l| l.dest.as_str()),
+            group: src.group,
+        });
+
         // ── Outline pass (behind fill). Sourced from
         //    `text_stroke` on any matching InlineRun —
         //    typically set on a specific span class (e.g. a
@@ -388,6 +502,12 @@ fn emit_line_glyphs(
                 hint: false,
                 glyphs: &glyphs,
                 style: Some(os),
+                // Decorations belong to the fill pass below, which
+                // draws them; repeating them here would double the rule.
+                source: source.map(|s| TextSource {
+                    decorations: Decorations::default(),
+                    ..s
+                }),
             };
             // The fill pass owns picking; the halo behind it must not
             // widen the hit area.
@@ -405,6 +525,7 @@ fn emit_line_glyphs(
             hint: false,
             glyphs: &glyphs,
             style: None,
+            source,
         };
         scene.draw_glyphs(&glyph_run, pick_id);
 
@@ -467,6 +588,8 @@ fn emit_marker(
     final_transform: Affine,
     dpi: f64,
     pick_id: PickId,
+    base_spec: &FontSpec,
+    group: TextGroup,
 ) {
     let Some(marker) = &bl.marker else { return };
     let Some(body_line) = bl.layout.lines().next() else {
@@ -496,6 +619,12 @@ fn emit_marker(
             offsets,
             final_transform,
             pick_id,
+            SourceCtx {
+                text: &marker.text,
+                base: base_spec,
+                group,
+                links: &[],
+            },
         );
     }
 }

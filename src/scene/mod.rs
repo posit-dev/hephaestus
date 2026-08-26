@@ -10,6 +10,7 @@ use crate::geometry::Affine;
 use crate::mesh::Mesh;
 use crate::path::{FillRule, Path};
 use crate::pick::PickId;
+use crate::style_vocab::FontSpec;
 
 pub mod recording;
 
@@ -137,6 +138,126 @@ impl Font {
     }
 }
 
+/// Identifies the text block a glyph run belongs to.
+///
+/// Runs sharing a value were laid out together, so a backend that emits
+/// text as text can gather them into one element rather than one per
+/// run. Opaque and only ever compared for equality; a rasteriser ignores
+/// it entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TextGroup(u64);
+
+impl TextGroup {
+    /// Mint a group id no other shaped run shares. Called once per
+    /// shaped run, so a run drawn twice is two blocks.
+    pub fn next() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// The group for one placement of a shaped run.
+    ///
+    /// Derived rather than minted so that two passes over the same run
+    /// at the same place agree without having to be told — which is what
+    /// lets an outline pass and the fill pass that follows it be
+    /// recognised as one piece of text rather than two stacked copies.
+    pub fn for_placement(&self, x: f64, y: f64, transform: crate::geometry::Affine) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.0.hash(&mut h);
+        x.to_bits().hash(&mut h);
+        y.to_bits().hash(&mut h);
+        for c in transform.as_coeffs() {
+            c.to_bits().hash(&mut h);
+        }
+        Self(h.finish())
+    }
+}
+
+/// One decoration rule's resolved metrics, in the run's own units.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rule {
+    /// Rule thickness.
+    pub thickness: f32,
+    /// Offset from the baseline, in font-typography convention (Y-up),
+    /// which is how the face reports it.
+    pub offset: f32,
+}
+
+/// The decorations a run's style asks for.
+///
+/// A rasterising backend ignores these — the rules arrive separately as
+/// ordinary fills, which is what it wants. A backend that expresses
+/// decorations semantically reads them here and suppresses the fills it
+/// can account for.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Decorations {
+    /// Underline rule, when the style asks for one.
+    pub underline: Option<Rule>,
+    /// Strikethrough rule, when the style asks for one.
+    pub strikethrough: Option<Rule>,
+}
+
+impl Decorations {
+    /// True when the style asks for no decoration at all.
+    pub fn is_empty(&self) -> bool {
+        self.underline.is_none() && self.strikethrough.is_none()
+    }
+}
+
+/// What a run of glyphs was shaped from.
+///
+/// [`GlyphRun`] carries glyph ids, which is all a rasteriser needs and
+/// strictly less than a backend emitting `<text>` or a PDF text object
+/// needs — those need the characters back, and the font named. Shaping
+/// knows both and used to drop them; this is that knowledge travelling
+/// alongside the glyphs.
+///
+/// Optional because a caller may position glyphs itself with no source
+/// string to point at — a glyph-backed marker shape, say. A backend that
+/// needs text and finds `None` falls back to outlines.
+#[derive(Debug, Clone, Copy)]
+pub struct TextSource<'a> {
+    /// The source substring this run covers, exactly.
+    pub text: &'a str,
+    /// How the face was asked for. [`GlyphRun::font`] is what it
+    /// resolved to.
+    pub font: &'a FontSpec,
+    /// Total advance along the flow axis. What an SVG `textLength`
+    /// states, and the only width claim we can make that does not
+    /// assume the reader resolves the same face we did.
+    pub advance: f32,
+    /// True when the run reads right-to-left.
+    pub rtl: bool,
+    /// Decorations the run's style asks for.
+    pub decorations: Decorations,
+    /// Link destination covering this run, if any.
+    pub link: Option<&'a str>,
+    /// The text block this run belongs to.
+    pub group: TextGroup,
+}
+
+/// Equality ignores [`TextSource::group`].
+///
+/// A group id is a label whose only meaning is *equality within one
+/// scene* — it says which runs were laid out together, not which block
+/// they are. Ids are minted from a running counter, so the same drawing
+/// recorded twice carries different ones, and comparing across scenes
+/// would report a difference where none exists. Two scenes are equal as
+/// *drawing* when they draw the same glyphs from the same text; that is
+/// the question `RecordingScene`'s equality exists to answer.
+impl PartialEq for TextSource<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text
+            && self.font == other.font
+            && self.advance == other.advance
+            && self.rtl == other.rtl
+            && self.decorations == other.decorations
+            && self.link == other.link
+    }
+}
+
 /// A single positioned glyph.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Glyph {
@@ -163,6 +284,9 @@ pub struct GlyphRun<'a> {
     /// strokes them along the outline with the given pen. Used for outlined
     /// text — typically paired with a separate filled pass on top.
     pub style: Option<&'a crate::stroke::Stroke>,
+    /// What this run was shaped from, when the caller knows. Backends
+    /// that emit text as text need it; rasterisers ignore it.
+    pub source: Option<TextSource<'a>>,
 }
 
 #[cfg(test)]

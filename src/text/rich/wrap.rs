@@ -188,6 +188,8 @@ impl RichTextRun {
                 bl.continuation_layout = None;
                 bl.continuation_baseline_shifts.clear();
                 bl.continuation_inlines.clear();
+                bl.continuation_text.clear();
+                bl.continuation_links.clear();
                 bl.objects = bl.source_objects.clone();
                 bl.continuation_objects.clear();
                 bl.first_line_height_px = 0.0;
@@ -233,6 +235,8 @@ impl RichTextRun {
                     bl.continuation_layout = None;
                     bl.continuation_baseline_shifts.clear();
                     bl.continuation_inlines.clear();
+                    bl.continuation_text.clear();
+                    bl.continuation_links.clear();
                     bl.objects = bl.source_objects.clone();
                     bl.continuation_objects.clear();
                     bl.first_line_height_px = 0.0;
@@ -265,6 +269,11 @@ impl RichTextRun {
                     bl.continuation_layout = Some(cont_layout);
                     bl.continuation_baseline_shifts = rest_baselines;
                     bl.continuation_inlines = rest_inlines;
+                    bl.continuation_text = rest_text.clone();
+                    bl.continuation_links = super::shape::slice_links(
+                        &bl.source_links,
+                        &(first_line_end..bl.source_text.len()),
+                    );
                     bl.objects = slice_object_layouts(&bl.source_objects, &(0..first_line_end));
                     bl.continuation_objects = rest_objects;
                     bl.first_line_height_px = first_line_height;

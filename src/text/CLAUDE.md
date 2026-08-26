@@ -7,7 +7,7 @@ Text shaping / layout backed by `parley`. The committed text stack for chrome re
 Provides the text infrastructure that chrome (axis labels, legends, plot titles) and the `TextGeom` / `TextFitGeom` / `TextPathGeom` plot geoms render through. Three primary types:
 
 - **`TextStyle`** — style descriptor covering size (pt, DPI-independent), family chain, CSS-style weight / width, italic / oblique, OpenType features, variable-font variations. Build with `TextStyle::new(size_pt).family("Helvetica").weight(700).italic(true)`.
-- **`TextRun`** — shaped string + cached parley `Layout`. Implements `crate::layout::Measure`, so it drops directly into a `Cell::measured(run)` and participates in Auto-track sizing in `layout/`. Constructed via `TextRun::new(text, &style, dpi)` — the DPI converts the style's `size_pt` to pixels before shaping. `set_max_width(px)` re-breaks lines cheaply (parley keeps the shaping result; only line breaking re-runs).
+- **`TextRun`** — shaped string + cached parley `Layout`. Retains the source string and a `FontSpec` describing how the face was asked for: parley's `Layout` stores byte *ranges* into a text it does not own, so without them a backend that emits text as text has nothing to index. Reachable as `text()` and `font_spec()`. Implements `crate::layout::Measure`, so it drops directly into a `Cell::measured(run)` and participates in Auto-track sizing in `layout/`. Constructed via `TextRun::new(text, &style, dpi)` — the DPI converts the style's `size_pt` to pixels before shaping. `set_max_width(px)` re-breaks lines cheaply (parley keeps the shaping result; only line breaking re-runs).
 - **`draw_text`** — bridge from a positioned `TextRun` to `SceneBuilder::draw_glyphs`.
 
 `run_layout_glyphs` and `run_layout_rules` are the alternative to `draw_text` for a caller that places each glyph itself — text on a curve. One yields every glyph with its advance, the other the decoration rules the style asks for, both positioned relative to the run's first baseline. A caller that takes them owns the drawing, so it also owns whatever `draw_text` would have done for it.
@@ -22,6 +22,14 @@ Line justification is expressed with `crate::style_vocab::HAlign` — the same f
 ## Host-supplied shaper (optional extension)
 
 A host crate that wants to plug in its own shaper can do so by preserving `TextRun`'s `Measure` impl and `draw_text`'s glyph-emission contract — those are the stable surface. Anything inside (parley layout, `FontContext` caching) is implementation detail. This is an opt-in extension, not the planned trajectory.
+
+## Glyph runs carry what they were shaped from
+
+Every `GlyphRun` this module emits carries a `crate::scene::TextSource` — the substring it covers, the font description, its advance and its decorations — which is what lets `backend/svg/` emit `<text>` rather than outlines. Three details are load-bearing and easy to break:
+
+- **The byte range is reconstructed, not read off.** Parley splits a `Run` into glyph runs on style change and keeps the split point private, so `shape_common::text_range_of_run` replays parley's own cluster walk and `GlyphRunCursor` mirrors the private offset it keeps. `Run::index()` being the *line-item* index is what makes the boundary observable; the cursor resets per line, because parley builds a fresh glyph-run iterator for each one. `every_glyph_run_reports_the_text_it_was_shaped_from` is the pin on this, and it is as much a test of parley's internals as of ours.
+- **Glyphs are emitted before decorations.** `draw_text` holds underline and strikethrough rects back until every glyph run is out, so one block's runs are contiguous and a backend can gather them into a single element. A rule never overlaps a later run's glyphs, so the deferral does not change the picture.
+- **An outline pass and the fill pass that follows share a `TextGroup`**, derived from the run's identity and its placement rather than minted, so the two agree without being told. A backend that emits text as text collapses them into one element; two stacked copies would mean editing the visible one leaves the outline spelling the old string.
 
 ## Conventions
 

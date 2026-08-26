@@ -37,11 +37,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use parley::{AlignmentOptions, FontContext, LayoutContext, PositionedLayoutItem};
 
+use shape_common::font_spec_of;
+
 use crate::brush::Brush;
 use crate::geometry::{Affine, Point, Rect};
 use crate::layout::{Measure, WidthHint};
 use crate::pick::PickId;
-use crate::scene::{Font, Glyph, GlyphRun, SceneBuilder};
+use crate::scene::{Decorations, Font, Glyph, GlyphRun, Rule, SceneBuilder, TextGroup, TextSource};
 use crate::shape::Shape;
 use crate::style_vocab::HAlign;
 
@@ -252,65 +254,14 @@ pub fn register_font_dir(dir: impl AsRef<Path>) -> std::io::Result<usize> {
 
 // ─── TextStyle ───────────────────────────────────────────────────────────────
 
-/// Generic font-family categories mirroring the CSS surface. The host
-/// shaper resolves each to a concrete face — independent of any specific
-/// named family.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum GenericFamilyKind {
-    /// Serifed faces — Times-like.
-    Serif,
-    /// Sans-serif faces — Helvetica-like.
-    SansSerif,
-    /// Monospaced faces.
-    Mono,
-    /// Cursive / script faces.
-    Cursive,
-    /// Decorative / fantasy faces.
-    Fantasy,
-    /// Operating-system UI font.
-    SystemUi,
-}
-
-/// One entry in a [`TextStyle::families`] fallback chain. Named entries
-/// reference a specific face by string; generic entries pick a CSS-style
-/// category.
-#[derive(Clone, Debug, PartialEq)]
-pub enum FontFamilyEntry {
-    /// A specific named family (e.g. `"Helvetica"`).
-    Named(String),
-    /// A generic family category.
-    Generic(GenericFamilyKind),
-}
-
-/// Style axis — upright, italic, or oblique with a slant angle in degrees.
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
-pub enum FontStyleKind {
-    /// Upright glyphs.
-    #[default]
-    Normal,
-    /// Italic — a distinct set of slanted glyphs.
-    Italic,
-    /// Oblique — upright glyphs slanted by the given angle in degrees.
-    Oblique(f32),
-}
-
-/// OpenType feature setting (4-byte tag + `u16` value).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct FontFeatureSetting {
-    /// OpenType feature tag — e.g. `*b"liga"`.
-    pub tag: [u8; 4],
-    /// Feature value (0 = off, 1 = on, stylistic-set indices for `ssXX`).
-    pub value: u16,
-}
-
-/// Variable-font axis assignment (4-byte tag + `f32` value).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FontVariationSetting {
-    /// Variable-font axis tag — e.g. `*b"wght"`.
-    pub tag: [u8; 4],
-    /// Axis position (units are axis-specific).
-    pub value: f32,
-}
+/// The font-description vocabulary lives in [`crate::style_vocab`],
+/// beside the other styling types the theme, the text layer and
+/// `scales` all share. Re-exported here because this is where a caller
+/// building a [`TextStyle`] reaches for them.
+pub use crate::style_vocab::{
+    FontFamilyEntry, FontFeatureSetting, FontSpec, FontStyleKind, FontVariationSetting,
+    GenericFamilyKind,
+};
 
 /// Line-height specification. Mirrors parley's `LineHeight` minus the
 /// metrics-relative variant — chrome callers either want a font-size
@@ -518,6 +469,15 @@ pub struct TextRun {
     /// "haven't broken yet". `height_at` mutates this; `draw_text` reads it
     /// to know whether the layout is ready to render.
     last_break_width: RefCell<Option<f32>>,
+    /// The string this run was shaped from. Parley's layout stores byte
+    /// ranges into a text it does not own, so a backend that emits text
+    /// as text has nothing to index without this.
+    source: String,
+    /// How the face was asked for, kept so a glyph run can name its font.
+    font_spec: FontSpec,
+    /// Stable identity for this shaped run, so every pass over it at one
+    /// position agrees on which block the glyphs belong to.
+    group: TextGroup,
 }
 
 thread_local! {
@@ -568,7 +528,21 @@ impl TextRun {
             natural_width: widths.max,
             natural_height,
             last_break_width: RefCell::new(None),
+            source: text.to_string(),
+            font_spec: font_spec_of(style),
+            group: TextGroup::next(),
         }
+    }
+
+    /// The string this run was shaped from.
+    pub fn text(&self) -> &str {
+        &self.source
+    }
+
+    /// How the face was asked for — the CSS-shaped description a
+    /// backend emitting text as text needs in order to name the font.
+    pub fn font_spec(&self) -> &FontSpec {
+        &self.font_spec
     }
 
     /// Re-break lines at `max_width` pixels, applying `alignment` to the
@@ -999,9 +973,15 @@ pub fn draw_text<S: SceneBuilder + ?Sized>(
     pick_id: PickId,
 ) {
     let layout = run.layout.borrow();
+    let group = run.group.for_placement(x, y, transform);
+    let mut cursor = shape_common::GlyphRunCursor::default();
+    // Glyphs first, decorations after — see the note on `pending` below.
+    let mut pending: Vec<DecorationRect> = Vec::new();
     for line in layout.lines() {
+        cursor.start_line();
         for item in line.items() {
             let PositionedLayoutItem::GlyphRun(gr) = item else {
+                cursor.skip_item();
                 continue; // inline boxes — unsupported
             };
             let prun = gr.run();
@@ -1017,22 +997,7 @@ pub fn draw_text<S: SceneBuilder + ?Sized>(
             if glyphs.is_empty() {
                 continue;
             }
-            let glyph_run = GlyphRun {
-                font: &font,
-                font_size: prun.font_size(),
-                transform,
-                glyph_transform: None,
-                brush,
-                brush_alpha: 1.0,
-                hint: false,
-                glyphs: &glyphs,
-                style: None,
-            };
-            scene.draw_glyphs(&glyph_run, pick_id);
-            // Underline / strikethrough decorations are emitted as
-            // axis-aligned filled rectangles in the same pre-transform
-            // coordinate frame as the glyphs, so any rotation supplied
-            // via `transform` rotates them with the text.
+            let glyph_start = cursor.advance(&gr, glyphs.len());
             let style = gr.style();
             let metrics = prun.metrics();
             let baseline = gr.baseline();
@@ -1044,36 +1009,61 @@ pub fn draw_text<S: SceneBuilder + ?Sized>(
             // typography), strikeout offset typically positive
             // (above baseline in typography). In our screen Y-DOWN
             // frame we SUBTRACT to flip.
-            if let Some(deco) = &style.underline {
-                emit_decoration_rect(
-                    scene,
-                    DecorationRect {
-                        x0: run_x0,
-                        x1: run_x1,
-                        top: y as f32 + baseline - deco.offset.unwrap_or(metrics.underline_offset),
-                        thickness: deco.size.unwrap_or(metrics.underline_size).max(0.0),
-                    },
-                    brush,
-                    transform,
-                    pick_id,
-                );
-            }
-            if let Some(deco) = &style.strikethrough {
-                emit_decoration_rect(
-                    scene,
-                    DecorationRect {
-                        x0: run_x0,
-                        x1: run_x1,
-                        top: y as f32 + baseline
-                            - deco.offset.unwrap_or(metrics.strikethrough_offset),
-                        thickness: deco.size.unwrap_or(metrics.strikethrough_size).max(0.0),
-                    },
-                    brush,
-                    transform,
-                    pick_id,
-                );
+            let underline = style.underline.as_ref().map(|deco| Rule {
+                thickness: deco.size.unwrap_or(metrics.underline_size).max(0.0),
+                offset: deco.offset.unwrap_or(metrics.underline_offset),
+            });
+            let strikethrough = style.strikethrough.as_ref().map(|deco| Rule {
+                thickness: deco.size.unwrap_or(metrics.strikethrough_size).max(0.0),
+                offset: deco.offset.unwrap_or(metrics.strikethrough_offset),
+            });
+            let text_range = shape_common::text_range_of_run(&gr, glyph_start, glyphs.len());
+            let source = text_range.map(|r| TextSource {
+                text: &run.source[r],
+                font: &run.font_spec,
+                advance: gr.advance(),
+                rtl: prun.is_rtl(),
+                decorations: Decorations {
+                    underline,
+                    strikethrough,
+                },
+                link: None,
+                group,
+            });
+            let glyph_run = GlyphRun {
+                font: &font,
+                font_size: prun.font_size(),
+                transform,
+                glyph_transform: None,
+                brush,
+                brush_alpha: 1.0,
+                hint: false,
+                glyphs: &glyphs,
+                style: None,
+                source,
+            };
+            scene.draw_glyphs(&glyph_run, pick_id);
+            // Underline / strikethrough decorations are emitted as
+            // axis-aligned filled rectangles in the same pre-transform
+            // coordinate frame as the glyphs, so any rotation supplied
+            // via `transform` rotates them with the text.
+            //
+            // Held back until every glyph run is out so one block's runs
+            // are contiguous, which is what lets a backend gather them
+            // into a single text element. A rule never overlaps a later
+            // run's glyphs, so the deferral does not change the picture.
+            for rule in [underline, strikethrough].into_iter().flatten() {
+                pending.push(DecorationRect {
+                    x0: run_x0,
+                    x1: run_x1,
+                    top: y as f32 + baseline - rule.offset,
+                    thickness: rule.thickness,
+                });
             }
         }
+    }
+    for rect in pending {
+        emit_decoration_rect(scene, rect, brush, transform, pick_id);
     }
 }
 
@@ -1102,9 +1092,16 @@ pub fn draw_text_outline<S: SceneBuilder + ?Sized>(
     pick_id: PickId,
 ) {
     let layout = run.layout.borrow();
+    // The same group the fill pass will derive, so a backend emitting
+    // text as text can recognise the two passes as one piece of text
+    // and give it a stroke and a fill rather than stacking two copies.
+    let group = run.group.for_placement(x, y, transform);
+    let mut cursor = shape_common::GlyphRunCursor::default();
     for line in layout.lines() {
+        cursor.start_line();
         for item in line.items() {
             let PositionedLayoutItem::GlyphRun(gr) = item else {
+                cursor.skip_item();
                 continue;
             };
             let prun = gr.run();
@@ -1120,6 +1117,20 @@ pub fn draw_text_outline<S: SceneBuilder + ?Sized>(
             if glyphs.is_empty() {
                 continue;
             }
+            let glyph_start = cursor.advance(&gr, glyphs.len());
+            let source = shape_common::text_range_of_run(&gr, glyph_start, glyphs.len()).map(|r| {
+                TextSource {
+                    text: &run.source[r],
+                    font: &run.font_spec,
+                    advance: gr.advance(),
+                    rtl: prun.is_rtl(),
+                    // Decorations belong to the fill pass, which draws
+                    // them; declaring them here would double the rule.
+                    decorations: Decorations::default(),
+                    link: None,
+                    group,
+                }
+            });
             let glyph_run = GlyphRun {
                 font: &font,
                 font_size: prun.font_size(),
@@ -1130,6 +1141,7 @@ pub fn draw_text_outline<S: SceneBuilder + ?Sized>(
                 hint: false,
                 glyphs: &glyphs,
                 style: Some(stroke),
+                source,
             };
             scene.draw_glyphs(&glyph_run, pick_id);
         }
@@ -1493,5 +1505,140 @@ mod tests {
         // panic so the caller can't accidentally register a multi-glyph
         // marker.
         let _ = glyph_marker("AB", &style);
+    }
+
+    /// The property the whole editable-text path rests on: every glyph
+    /// run must be able to name the source substring it covers, and the
+    /// substrings must reassemble into the string that was shaped.
+    ///
+    /// Parley keeps the glyph-run split point private, so
+    /// `text_range_of_run` reconstructs it by replaying parley's own
+    /// cluster walk. That makes this test a pin on parley's internals as
+    /// much as on our arithmetic — if an upgrade changes the iteration,
+    /// this is what says so.
+    #[test]
+    fn every_glyph_run_reports_the_text_it_was_shaped_from() {
+        use crate::brush::Brush;
+        use crate::color::Color;
+        use crate::geometry::Affine;
+        use crate::pick::PickId;
+        use crate::scene::recording::{Op, RecordingScene};
+
+        fn collected(text: &str, max_width: Option<f32>) -> String {
+            let style = TextStyle::new(12.0);
+            let run = TextRun::new(text, &style, 96.0);
+            if let Some(w) = max_width {
+                run.set_max_width(w, HAlign::Start);
+            }
+            let mut scene = RecordingScene::new();
+            let brush = Brush::Solid(Color::BLACK);
+            draw_text(
+                &mut scene,
+                &run,
+                0.0,
+                0.0,
+                &brush,
+                Affine::IDENTITY,
+                PickId::Skip,
+            );
+            scene
+                .ops
+                .iter()
+                .filter_map(|op| match op {
+                    Op::DrawGlyphs(r) => Some(r),
+                    _ => None,
+                })
+                .map(|r| {
+                    r.source
+                        .as_ref()
+                        .map(|s| s.text.as_str())
+                        .expect("every run shaped from a TextRun knows its source")
+                })
+                .collect()
+        }
+
+        // Ligature candidates, kerning pairs, combining marks, and three
+        // scripts where shaping substitutes or reorders — the cases a
+        // reverse-cmap approach would get wrong.
+        for text in [
+            "Hello, world",
+            "office finfluent",
+            "AV To Wa",
+            "naïve café Ünicode",
+            "日本語のラベル",
+            "العربية",
+            "हिन्दी",
+            "mixed العربية and latin",
+            "0.25  1.50  2.75",
+        ] {
+            assert_eq!(collected(text, None), text, "single line: {text:?}");
+        }
+
+        // Wrapped text re-scopes runs per line, which is a separate path
+        // through the cursor.
+        let long = "The quick brown fox jumps over the lazy dog near the riverbank";
+        let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        assert_eq!(
+            squash(&collected(long, Some(80.0))),
+            squash(long),
+            "wrapped over several lines"
+        );
+    }
+
+    /// An outline pass and the fill pass that follows it are one piece
+    /// of text, not two stacked copies. A backend that emits text as
+    /// text has to be able to tell, or editing the visible copy leaves
+    /// the outline behind still spelling the old string.
+    #[test]
+    fn the_outline_pass_and_the_fill_pass_share_a_group() {
+        use crate::brush::Brush;
+        use crate::color::Color;
+        use crate::geometry::Affine;
+        use crate::pick::PickId;
+        use crate::scene::recording::{Op, RecordingScene};
+        use crate::stroke::Stroke;
+
+        let style = TextStyle::new(12.0);
+        let run = TextRun::new("outlined", &style, 96.0);
+        let brush = Brush::Solid(Color::BLACK);
+        let stroke = Stroke::new(2.0);
+        let mut scene = RecordingScene::new();
+        let at = Affine::translate((3.0, 4.0));
+        draw_text_outline(
+            &mut scene,
+            &run,
+            7.0,
+            11.0,
+            &brush,
+            &stroke,
+            at,
+            PickId::Skip,
+        );
+        draw_text(&mut scene, &run, 7.0, 11.0, &brush, at, PickId::Skip);
+
+        let runs: Vec<_> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::DrawGlyphs(r) => Some(r),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(runs.len(), 2, "one stroked run and one filled run");
+        let (stroked, filled) = (runs[0], runs[1]);
+        assert!(stroked.style.is_some() && filled.style.is_none());
+        let a = stroked.source.as_ref().expect("stroke pass carries source");
+        let b = filled.source.as_ref().expect("fill pass carries source");
+        assert_eq!(a.group, b.group, "the two passes must agree on the block");
+        assert_eq!(a.text, b.text);
+
+        // A different placement of the same run is a different block.
+        let mut elsewhere = RecordingScene::new();
+        draw_text(&mut elsewhere, &run, 9.0, 11.0, &brush, at, PickId::Skip);
+        let c = match &elsewhere.ops[0] {
+            Op::DrawGlyphs(r) => r.source.as_ref().expect("source"),
+            _ => panic!("expected glyphs"),
+        };
+        assert_ne!(b.group, c.group, "a second placement is a second block");
     }
 }

@@ -1551,3 +1551,68 @@ fn image_count(scene: &RecordingScene) -> usize {
         .filter(|op| matches!(op, Op::DrawImage { .. }))
         .count()
 }
+
+/// Rich text must report its source the same way plain text does, or a
+/// backend emitting text as text sees markdown as anonymous glyphs.
+///
+/// Attribution is by byte range, which is what lets two spans that
+/// resolve to the same color still be told apart — the case the older
+/// color-matching recovery could not separate.
+#[test]
+fn rich_glyph_runs_report_their_source_text_and_font() {
+    use crate::color::Color;
+    use crate::geometry::Affine;
+    use crate::pick::PickId;
+    use crate::scene::recording::{Op, RecordingScene};
+    use crate::style_vocab::{FontStyleKind, Palette};
+    use crate::text::rich::{draw_rich_text, RichAnchor, RichTextRun, RichTextStyleSheet};
+    use crate::text::TextStyle;
+
+    fn runs(source: &str) -> Vec<(String, u16, FontStyleKind)> {
+        let base = TextStyle::new(12.0);
+        let sheet = RichTextStyleSheet::default();
+        let palette = Palette::default();
+        let run = RichTextRun::new(source, &base, Color::BLACK, &sheet, &palette, 96.0);
+        let mut scene = RecordingScene::new();
+        draw_rich_text(
+            &mut scene,
+            &run,
+            0.0,
+            0.0,
+            RichAnchor::default(),
+            Affine::IDENTITY,
+            PickId::Skip,
+        );
+        scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::DrawGlyphs(r) => r.source.as_ref(),
+                _ => None,
+            })
+            .map(|s| (s.text.clone(), s.font.weight, s.font.style))
+            .collect()
+    }
+
+    let got = runs("plain **bold** and *italic* text");
+    let joined: String = got.iter().map(|(t, _, _)| t.as_str()).collect();
+    assert_eq!(
+        joined, "plain bold and italic text",
+        "every run names the text it drew"
+    );
+    assert!(
+        got.iter().any(|(t, w, _)| t == "bold" && *w >= 700),
+        "the bold span reports a bold weight: {got:?}"
+    );
+    assert!(
+        got.iter()
+            .any(|(t, _, st)| t == "italic" && *st == FontStyleKind::Italic),
+        "the italic span reports italic: {got:?}"
+    );
+
+    // Two spans that resolve to the same color are still distinguished,
+    // because attribution is by byte range rather than by brush.
+    let got = runs("a **b** c **d** e");
+    let joined: String = got.iter().map(|(t, _, _)| t.as_str()).collect();
+    assert_eq!(joined, "a b c d e");
+}

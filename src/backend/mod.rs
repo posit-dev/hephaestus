@@ -5,7 +5,15 @@ use crate::scene::SceneBuilder;
 
 #[cfg(any(feature = "vello", feature = "vello-hybrid", feature = "webgl"))]
 mod convert;
-#[cfg(any(feature = "vello", feature = "vello-hybrid", feature = "webgl"))]
+// Mesh decomposition works in this crate's own types and emits plain
+// `SceneBuilder::fill` calls, so every backend can share it — including
+// the ones with no GPU.
+#[cfg(any(
+    feature = "vello",
+    feature = "vello-hybrid",
+    feature = "webgl",
+    feature = "svg"
+))]
 mod mesh;
 
 #[cfg(feature = "vello")]
@@ -13,6 +21,9 @@ pub mod vello;
 
 #[cfg(any(feature = "vello-hybrid", feature = "webgl"))]
 pub mod hybrid;
+
+#[cfg(feature = "svg")]
+pub mod svg;
 
 /// Owns backend resources (GPU device, pipelines, etc.) and rasterizes a scene
 /// to an RGBA8 buffer.

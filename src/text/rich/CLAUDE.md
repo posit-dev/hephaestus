@@ -118,9 +118,17 @@ This is marquee's guarantee, and it matters here because markdown is a formattin
 
 Related parser conventions: `_x_` is **underline** and `*x*` is italic (marquee's reading); `\{` and `{{` both yield a literal brace; raw HTML passes through as literal text; `{#name}` looks up the id namespace with the `#` included in the key, so ids and classes share one map without colliding.
 
-## Brush-matching caveat
+## Span attribution is by byte range
 
-Parley splits `GlyphRun`s on brush changes, so `draw.rs` identifies which `InlineRun` owns a given glyph run by matching resolved colour. Two inline runs that resolve to the *same* colour are indistinguishable at that point — a background-only or outline-only span with no `color` of its own can't have its decorations attributed. Sheet entries that want span chrome therefore set `color` alongside `background` / `text_stroke`; the built-in `code` and `outline` selectors both do.
+Parley splits `GlyphRun`s on brush change, so `draw.rs` has to work out which `InlineRun` owns a given glyph run. It does that by **byte range** — the range `shape_common::text_range_of_run` reports, against each `InlineRun`'s own range — which is exact.
+
+This replaced a heuristic that matched on resolved colour, and with it the limitation that heuristic carried: two inline runs resolving to the same colour were indistinguishable, so a background-only or outline-only span with no `color` of its own could not have its decorations attributed. Sheet entries no longer need to set `color` alongside `background` / `text_stroke` for that reason (the built-in `code` and `outline` selectors still do, harmlessly).
+
+## Links carry their destination
+
+`reduce.rs` records a `LinkRun { range, dest }` side table beside `baseline_shifts`, and it reaches a glyph run as `TextSource::link`. The `link` style selector is still what colours and underlines a link; this is the destination, which styling has no place for. A rasteriser ignores it — a link has never been interactive when drawn to pixels — and `backend/svg/` turns it into an `<a href>`.
+
+`MarkerLayout` retains its `text` for the same reason, so a list bullet or ordinal travels as text rather than as anonymous glyphs, and `BlockLayout` carries `continuation_text`: a wrapped block's continuation lines are shaped from a *different* string than `source_text`, and their byte ranges index into that one.
 
 ## Caching and invalidation
 

@@ -689,6 +689,7 @@ fn draw_point(
                     hint: false,
                     glyphs: &glyphs,
                     style: None,
+                    source: None,
                 };
                 scene.draw_glyphs(&run, dc.pick);
             }

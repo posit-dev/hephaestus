@@ -820,6 +820,7 @@ impl Geom for TextPathGeom {
                         hint: false,
                         glyphs: std::slice::from_ref(&glyph),
                         style: Some(stroke),
+                        source: None,
                     };
                     scene.draw_glyphs(&stroke_run, crate::pick::PickId::Skip);
                 }
@@ -833,6 +834,7 @@ impl Geom for TextPathGeom {
                     hint: false,
                     glyphs: std::slice::from_ref(&glyph),
                     style: None,
+                    source: None,
                 };
                 scene.draw_glyphs(&glyph_run, pick);
             }

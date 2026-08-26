@@ -14,6 +14,8 @@ Every method is **self-contained** — no persistent "current transform" or "cur
 - **`Font`** — opaque handle wrapping `peniko::FontData` (Arc-backed font blob + index). Construct via `Font::new(blob, index)`.
 - **`Glyph`** — `{ id: u32, x: f32, y: f32 }`. A single positioned glyph in run-local coordinates.
 - **`GlyphRun<'a>`** — a run of glyphs sharing one font, size, transform, brush, and brush alpha. Borrows the font and glyph slice; the brush is owned by the caller and borrowed by reference.
+- **`TextSource<'a>`** — optional, on `GlyphRun`: what the run was *shaped from*. Glyph ids are everything a rasteriser needs and strictly less than a backend emitting `<text>` or a PDF text object needs — those need the characters back and the font named, and shaping knew both. Carries the source substring, a `FontSpec` (the CSS-shaped *request*, since the resolved face's family lives only in its own `name` table), the run's advance, its decorations, a link destination, and a `TextGroup`. `None` when the caller positioned glyphs itself with no string to point at — a glyph-backed marker — in which case a vector backend falls back to outlines.
+- **`TextGroup`** — says which runs were laid out together, so a backend can gather a block into one element instead of one per run. **Equality on `TextSource` ignores it**: ids come from a running counter, so the same drawing recorded twice carries different ones, and `RecordingScene`'s op-for-op equality exists to answer "is this the same *drawing*". The cost is that op-list equality cannot verify grouping — `tests/svg.rs` is what covers it.
 
 The trait deliberately consumes already-positioned glyphs — shaping and line-breaking are out of scope. The optional `text` module provides the parley-backed shaper used by chrome and the text geoms; the scene API itself does not require it.
 
@@ -27,6 +29,7 @@ The trait deliberately consumes already-positioned glyphs — shaping and line-b
 ## Cross-references
 
 - `backend/vello/` — the only `SceneBuilder` implementation that rasterises today. Pick scene is a parallel `vello::Scene` recorded alongside the display scene.
+- `backend/svg/` — the vector implementation. Consumes `TextSource` to emit real `<text>`; the reason that field exists.
 - `pick.rs` — `PickId` variants and the RGB-channel encoding.
 - `text/` — produces `GlyphRun` values from shaped strings.
 - `mesh.rs` — `Mesh` type consumed by `draw_mesh`.

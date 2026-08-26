@@ -18,6 +18,7 @@ use crate::geometry::Affine;
 use crate::path::FillRule;
 use crate::pick::PickId;
 use crate::scene::{Glyph, SceneBuilder};
+use crate::style_vocab::FontSpec;
 
 /// Push every property `style` dictates onto `builder` as a default.
 ///
@@ -136,6 +137,26 @@ pub(crate) fn generic_family_from_str(s: &str) -> Option<GenericFamily> {
     }
 }
 
+/// Describe how `style` asked for its face, for a backend that names
+/// fonts rather than rasterising them.
+///
+/// The resolved face cannot answer this: its family lives in its own
+/// `name` table, which the shaper does not surface, and a fallback chain
+/// means the face may not be the one named first anyway. CSS
+/// `font-family` means the request, so that is what travels.
+pub(crate) fn font_spec_of(style: &TextStyle) -> FontSpec {
+    FontSpec {
+        families: style.families.clone(),
+        weight: style.weight,
+        style: style.style,
+        width: style.width,
+        tracking: style.tracking,
+        size_pt: style.size_pt,
+        features: style.features.clone(),
+        variations: style.variations.clone(),
+    }
+}
+
 /// Collect one parley glyph run's glyphs into scene-space positions,
 /// offset by `(dx, dy)`.
 ///
@@ -153,6 +174,97 @@ pub(crate) fn glyphs_of_run<B: parley::style::Brush>(
             y: dy + g.y,
         })
         .collect()
+}
+
+/// The source byte range one parley glyph run covers.
+///
+/// `glyph_start` is the run's first glyph index within its parley
+/// `Run`; [`GlyphRunCursor`] tracks it.
+///
+/// Parley splits a `Run` into glyph runs on style change and keeps the
+/// split point private, so the range is recovered by replaying the same
+/// cluster walk `GlyphRun::glyphs` performs — `visual_clusters`, not
+/// `clusters`, so the ordering matches under RTL.
+///
+/// A cluster covers exactly one `char`. A ligature is one cluster
+/// carrying every glyph followed by clusters carrying none, and those
+/// trailing zero-glyph clusters belong to the same glyph run as the one
+/// before them — sweeping them in is what keeps the trailing character
+/// of a ligature in the substring.
+pub(crate) fn text_range_of_run<B: parley::style::Brush>(
+    glyph_run: &GlyphRun<'_, B>,
+    glyph_start: usize,
+    glyph_count: usize,
+) -> Option<std::ops::Range<usize>> {
+    if glyph_count == 0 {
+        return None;
+    }
+    let end = glyph_start + glyph_count;
+    let run = glyph_run.run();
+    let mut seen = 0usize;
+    let mut inside = false;
+    let mut range: Option<std::ops::Range<usize>> = None;
+    for cluster in run.visual_clusters() {
+        let n = cluster.glyphs().count();
+        if n > 0 {
+            inside = seen >= glyph_start && seen < end;
+        }
+        if inside {
+            let r = cluster.text_range();
+            range = Some(match range {
+                None => r,
+                Some(prev) => prev.start.min(r.start)..prev.end.max(r.end),
+            });
+        }
+        seen += n;
+    }
+    range
+}
+
+/// Tracks a glyph run's offset within its parley `Run` while walking a
+/// line's items.
+///
+/// Mirrors the private cursor `parley::GlyphRunIter` keeps: it resets on
+/// every item boundary and accumulates across consecutive glyph runs of
+/// one `Run`. `Run::index()` is the line-item index, which is what makes
+/// the boundary observable from outside.
+#[derive(Default)]
+pub(crate) struct GlyphRunCursor {
+    item: Option<usize>,
+    start: usize,
+}
+
+impl GlyphRunCursor {
+    /// Offset of `glyph_run`'s first glyph within its `Run`. Call once
+    /// per glyph run, in line-item order.
+    pub(crate) fn advance<B: parley::style::Brush>(
+        &mut self,
+        glyph_run: &GlyphRun<'_, B>,
+        glyph_count: usize,
+    ) -> usize {
+        let index = glyph_run.run().index();
+        if self.item != Some(index) {
+            self.item = Some(index);
+            self.start = 0;
+        }
+        let start = self.start;
+        self.start += glyph_count;
+        start
+    }
+
+    /// Note a non-glyph item, which resets the offset.
+    pub(crate) fn skip_item(&mut self) {
+        self.item = None;
+        self.start = 0;
+    }
+
+    /// Reset at a line boundary. Parley builds a fresh glyph-run
+    /// iterator per line, so item indices restart and a run continuing
+    /// onto the next line is re-scoped to that line's clusters.
+    pub(crate) fn start_line(&mut self) {
+        self.item = None;
+        self.start = 0;
+    }
 }
 
 /// One underline or strikethrough rule over a span of the flow axis,

@@ -49,7 +49,7 @@ use super::block::{compute_block_paints, BlockPaint};
 use super::draw::marker_x_range;
 use super::image::ObjectLayout;
 use super::parser::parse;
-use super::reduce::{reduce, BaselineRun, Block, BlockKind, InlineRun};
+use super::reduce::{reduce, BaselineRun, Block, BlockKind, InlineRun, LinkRun};
 use super::shape::shape_run;
 use super::style::{ResolvedStyle, RichTextStyleSheet};
 use super::wrap::EdgeSpacing;
@@ -100,6 +100,9 @@ pub(crate) struct MarkerLayout {
     pub(crate) width_px: f32,
     /// Space (px) between the marker and the content edge.
     pub(crate) gap_px: f32,
+    /// The marker's own source text — the bullet or the ordinal — so it
+    /// travels as text rather than as anonymous glyphs.
+    pub(crate) text: String,
 }
 
 // ─── BlockLayout ────────────────────────────────────────────────────────────
@@ -191,6 +194,11 @@ pub(crate) struct BlockLayout {
     /// backgrounds / borders / outlines apply on continuation
     /// lines too.
     pub(crate) continuation_inlines: Vec<InlineRun>,
+    /// The text `continuation_layout` was shaped from. Byte ranges a
+    /// glyph run reports index into this, not into `source_text`.
+    pub(crate) continuation_text: String,
+    /// Link runs over `continuation_text`.
+    pub(crate) continuation_links: Vec<LinkRun>,
     /// Height (px) of the first line only. Used to y-position the
     /// continuation layout when `continuation_layout` is Some.
     pub(crate) first_line_height_px: f32,
@@ -201,6 +209,9 @@ pub(crate) struct BlockLayout {
     pub(crate) source_text: String,
     /// Inline runs over `source_text`, in block-local byte ranges.
     pub(crate) source_inlines: Vec<InlineRun>,
+    /// Link destinations over `source_text`, in block-local byte
+    /// ranges.
+    pub(crate) source_links: Vec<LinkRun>,
     /// Baseline shifts over `source_text`, in block-local byte ranges.
     pub(crate) source_baselines: Vec<BaselineRun>,
     /// Image objects positioned in `layout`, block-local.
@@ -313,6 +324,9 @@ pub struct RichTextRun {
     pub(crate) current_height_px: RefCell<f32>,
     /// Cached min-content width (px).
     pub(crate) min_width_px: f32,
+    /// Stable identity for this shaped run, so every pass over it at
+    /// one position agrees on which block the glyphs belong to.
+    pub(crate) group: crate::scene::TextGroup,
 }
 
 impl RichTextRun {

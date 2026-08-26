@@ -406,6 +406,7 @@ impl Geom for PointGeom {
                         hint: false,
                         glyphs: &glyphs,
                         style: None,
+                        source: None,
                     };
                     scene.draw_glyphs(&run, pick);
                 }

@@ -4,7 +4,7 @@ Vello backend: implements `SceneBuilder` against a `vello::Scene` and `Renderer`
 
 ## What this module does
 
-`VelloScene` (in `mod.rs`) wraps a `vello::Scene` and translates our restricted enums to peniko's wider set via `convert.rs`. `VelloRenderer` owns the wgpu device, queue, and the cached `HeadlessTarget` (storage texture + readback buffer) needed to render headlessly. When picking is enabled (`VelloRenderer::with_picking()`), every draw call is also recorded into a parallel pick `vello::Scene`, rasterised into a second target, and read back to power `pick_at(x, y) -> Option<u32>`.
+`VelloScene` (in `mod.rs`) wraps a `vello::Scene` and translates our restricted enums to peniko's wider set via `../convert.rs`. `VelloRenderer` owns the wgpu device, queue, and the cached `HeadlessTarget` (storage texture + readback buffer) needed to render headlessly. When picking is enabled (`VelloRenderer::with_picking()`), every draw call is also recorded into a parallel pick `vello::Scene`, rasterised into a second target, and read back to power `pick_at(x, y) -> Option<u32>`.
 
 Two output paths share one scene:
 
@@ -41,4 +41,4 @@ Linebender / wgpu move fast and broke surface between recent versions. Notes for
 ## Files
 
 - `mod.rs` — `VelloScene`, `VelloRenderer`, `HeadlessTarget`, the pick scene rasterisation path.
-- `convert.rs` — the enum-mapping layer: `FillRule`, `BlendMode`, `Compose`, `Mix`, `Sampling` → peniko's native types.
+- `../convert.rs` — the enum-mapping layer: `FillRule`, `BlendMode`, `Compose`, `Mix`, `Sampling` → peniko's native types.

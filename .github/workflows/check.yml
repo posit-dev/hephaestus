@@ -78,6 +78,15 @@ jobs:
             cargo check --no-default-features --features "$feature" --all-targets
           done
 
+      # The SVG backend embeds a raster image by re-encoding it, so that one
+      # path gates on `png` while the rest of the backend gates on nothing.
+      # Both halves have to stand alone, for the same reason the document
+      # jobs cross their two axes.
+      - name: cargo check, the SVG backend with and without an image codec
+        run: |
+          cargo check --no-default-features --features svg --all-targets
+          cargo check --no-default-features --features svg,png --all-targets
+
       # The sparse-strips backend must stand on its own: `--all-features`
       # builds it beside the compute-shader one, which would hide anything it
       # reaches for through the other backend's gates.
@@ -170,6 +179,15 @@ jobs:
               --all-targets --ignore-rust-version
           done
 
+      # The point of a renderer-free vector backend: a document in and an SVG
+      # out, on the oldest rustc this crate supports. `vello` rules that out,
+      # so this is the only configuration that can carry the claim — and the
+      # only thing keeping it true.
+      - name: cargo check, document in / SVG out on the oldest rustc
+        run: |
+          cargo check --no-default-features --features document-read,svg \
+            --all-targets --ignore-rust-version
+
   # wasm32 is a supported target, so it gets its own job: it shares no compiled
   # artifacts with the host build and needs none of the system libraries above
   # (fontconfig and Vulkan are both gated to native targets). Catches
@@ -205,6 +223,13 @@ jobs:
       # `ureq`, which has no wasm target.
       - name: cargo check --target wasm32-unknown-unknown --features jpeg,tiff,webp
         run: cargo check --target wasm32-unknown-unknown --features jpeg,tiff,webp
+
+      # Downloading an SVG of the plot is an obvious thing for a page to
+      # offer, so the backend has to pull nothing that is not wasm-clean.
+      - name: cargo check --target wasm32-unknown-unknown, SVG out
+        run: |
+          cargo check --target wasm32-unknown-unknown --no-default-features \
+            --features svg,document-read
 
       # The render client's exact configuration: the canvas host plus a
       # read-only document reader, and nothing else. Checked on its own

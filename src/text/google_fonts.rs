@@ -60,6 +60,7 @@ pub fn fetch_google_font(family: &str) -> Result<usize, GoogleFontError> {
     if family_dir.is_dir() {
         let n = register_font_dir(&family_dir)?;
         if n > 0 {
+            note_fetched(family);
             return Ok(n);
         }
     }
@@ -76,7 +77,37 @@ pub fn fetch_google_font(family: &str) -> Result<usize, GoogleFontError> {
         std::fs::write(&file, &bytes)?;
         total += register_font_bytes(bytes);
     }
+    note_fetched(family);
     Ok(total)
+}
+
+/// Families this process resolved through [`fetch_google_font`].
+///
+/// A vector backend emitting a `@import` needs to know which families
+/// a viewer could actually fetch from Google, and guessing from the
+/// name is not an option: it would send the font names of every plot
+/// anyone exports to Google, and would mostly 400. This answers from
+/// what actually happened, costs no network call, and is empty in a
+/// build without this feature — which is the right degradation.
+pub fn google_fetched_families() -> Vec<String> {
+    fetched()
+        .lock()
+        .map(|set| set.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// The process-global record behind [`google_fetched_families`].
+fn fetched() -> &'static std::sync::Mutex<std::collections::BTreeSet<String>> {
+    static FETCHED: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    FETCHED.get_or_init(Default::default)
+}
+
+/// Note that `family` resolved through Google Fonts.
+fn note_fetched(family: &str) {
+    if let Ok(mut set) = fetched().lock() {
+        set.insert(family.to_string());
+    }
 }
 
 /// Resolved on-disk cache directory for Google-Fonts-sourced font

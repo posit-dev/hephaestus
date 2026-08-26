@@ -18,6 +18,7 @@ Hephaestus is written to make it easy and convenient to create high-level visual
 * Native wasm support for embedding on websites
 * Scales and projections
 * Render to png, jpeg, tiff, webp, canvas, or a window buffer — and read those four formats back in, to place raster images inside a plot
+* Render to SVG, with text that stays text: real `<text>` elements naming their font, so a plot opens in a vector editor ready to edit rather than as a wall of outlines
 * Theming system
 
 ## Install

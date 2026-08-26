@@ -521,6 +521,7 @@ pub(crate) fn emit_marker_shape(
                 hint: false,
                 glyphs: &glyphs,
                 style: None,
+                source: None,
             };
             scene.draw_glyphs(&run, pick);
         }

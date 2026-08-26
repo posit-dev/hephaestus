@@ -781,6 +781,7 @@ fn draw_radius_title(
                 hint: false,
                 glyphs: std::slice::from_ref(&stamp),
                 style: Some(&o.stroke),
+                source: None,
             };
             scene.draw_glyphs(&stroke_run, PickId::Skip);
         }
@@ -794,6 +795,7 @@ fn draw_radius_title(
             hint: false,
             glyphs: std::slice::from_ref(&stamp),
             style: None,
+            source: None,
         };
         scene.draw_glyphs(&glyph_run, PickId::Skip);
     }
@@ -968,6 +970,7 @@ fn draw_angular_title(
                 hint: false,
                 glyphs: std::slice::from_ref(&stamp),
                 style: Some(&o.stroke),
+                source: None,
             };
             scene.draw_glyphs(&stroke_run, PickId::Skip);
         }
@@ -981,6 +984,7 @@ fn draw_angular_title(
             hint: false,
             glyphs: std::slice::from_ref(&stamp),
             style: None,
+            source: None,
         };
         scene.draw_glyphs(&glyph_run, PickId::Skip);
     }

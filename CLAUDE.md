@@ -4,7 +4,7 @@ Repo-level orientation for working in `hephaestus`. Architecture, module map, an
 
 ## Project
 
-`hephaestus` is a 2D scene renderer for data visualization. The crate exposes a backend-agnostic scene API and two Vello backends over wgpu — Vello Classic (GPU compute) and Vello Hybrid (sparse strips: path processing on the CPU, a render pipeline on the GPU); future planned backends are Blend2D (CPU raster), SVG, and PDF. Performance for interactive / real-time updates on dense plots is the design driver. WASM must work.
+`hephaestus` is a 2D scene renderer for data visualization. The crate exposes a backend-agnostic scene API, two Vello backends over wgpu — Vello Classic (GPU compute) and Vello Hybrid (sparse strips: path processing on the CPU, a render pipeline on the GPU) — and an SVG backend that emits markup rather than pixels; future planned backends are Blend2D (CPU raster) and PDF. Performance for interactive / real-time updates on dense plots is the design driver. WASM must work.
 
 The crate ships two API levels in the same source tree: a low-level scene API (`SceneBuilder` + primitives + layout) and a high-level plot API (`plot::*` — geoms, scales, and the `PlotComposition` orchestrator) built on top of it. See `src/CLAUDE.md` for the split and the rules that govern it.
 
@@ -28,11 +28,15 @@ cargo test --no-default-features --features vello-hybrid --test hybrid  # the sp
 cargo test --test window_blit                            # the window presentation blit, headless
 cargo check --no-default-features --features window,vello-hybrid,png  # presentation with no compute-shader backend
 cargo test --features document --test document_roundtrip # plot documents: reflow at unseen sizes
+cargo test --features svg --test svg                     # the vector backend, with and without a codec
+cargo test --features svg,png --test svg
 
 cargo clippy --all-features --all-targets -- -D warnings # treat warnings as errors
 cargo fmt                                                # rustfmt; always run before declaring a task done
 
 cargo run --example hello                                # renders examples/hello.png — visual sanity check
+cargo run --example svg_export --features svg            # one plot as both SVG and PNG, for side-by-side review
+cargo check --no-default-features --features document-read,svg  # renderer-free: document in, SVG out
 cargo run --example image_formats --features jpeg,tiff,webp  # all four raster writers
 cargo run --example image_geom                           # raster images placed in a panel, and in markdown
 cargo run --example document_placeholder --features vello-hybrid,document-read,png  # the static picture a page shows while the client boots
@@ -85,18 +89,19 @@ Style rules (apply everywhere, including comments in `tests/` and `examples/`):
 
 ## Cargo features
 
-- **`vello`** (default) — the compute-shader GPU rasterising backend (wgpu + vello + pollster + futures-intrusive + bytemuck).
-- **`vello-hybrid`** (off by default) — the sparse-strips GPU backend (wgpu + vello_hybrid + vello_common + glifo + the same support crates). Independent of `vello`: either, both, or neither. Two things it can do that the compute-shader backend cannot — rasterise with binary coverage, which is what an id buffer needs, and size GPU buffers to actual scene content instead of fixed caps, so there is no draw-count ceiling. Measured less than half the wasm bundle size of `vello`. See `src/backend/hybrid/CLAUDE.md`.
+- **`vello`** (default) — the compute-shader GPU rasterizing backend (wgpu + vello + pollster + futures-intrusive + bytemuck).
+- **`vello-hybrid`** (off by default) — the sparse-strips GPU backend (wgpu + vello_hybrid + vello_common + glifo + the same support crates). Independent of `vello`: either, both, or neither. Two things it can do that the compute-shader backend cannot — rasterize with binary coverage, which is what an id buffer needs, and size GPU buffers to actual scene content instead of fixed caps, so there is no draw-count ceiling. Measured less than half the wasm bundle size of `vello`. See `src/backend/hybrid/CLAUDE.md`.
 - **`png`** (default) — PNG reader and writer (`png` crate).
-- **`jpeg`**, **`tiff`**, **`webp`** (off by default) — the other raster codecs (`jpeg-encoder` + `jpeg-decoder`, `tiff`, `image-webp`). All four live in `src/image/`. Writing consumes the same RGBA8 buffer a `Renderer` produces, so a format costs only its codec — unlike `svg` / `pdf`, which need an alternative render path. Reading normalises whatever the file holds to that same buffer and hands back a `brush::Image`, which is what `SceneBuilder::draw_image` and `plot::ImageGeom` consume. JPEG is the one format needing two crates, since `jpeg-encoder` cannot decode. All pure Rust and wasm-clean.
+- **`jpeg`**, **`tiff`**, **`webp`** (off by default) — the other raster codecs (`jpeg-encoder` + `jpeg-decoder`, `tiff`, `image-webp`). All four live in `src/image/`. Writing consumes the same RGBA8 buffer a `Renderer` produces, so a format costs only its codec — unlike `svg` / `pdf`, which need an alternative render path. Reading normalizes whatever the file holds to that same buffer and hands back a `brush::Image`, which is what `SceneBuilder::draw_image` and `plot::ImageGeom` consume. JPEG is the one format needing two crates, since `jpeg-encoder` cannot decode. All pure Rust and wasm-clean.
 - **`google-fonts`** (off by default) — auto-fetch named Google Fonts families on demand. Synchronous network call on cache miss; cache hits are offline.
 - **`image-url`** (off by default) — resolve an image named by an `http(s)` URL rather than a filesystem path, wherever a name is looked up: an `ImageGeom` channel, or a markdown `![](…)` tag. Fetches once per process and memoizes, like `google-fonts`; unlike it there is no on-disk cache, so it adds nothing beyond the HTTP client (`ureq`, already optional). Without it a URL is a location this build cannot read, which renders the broken-image placeholder in markdown and nothing at all for a geom row.
-- **`window`** (off by default) — live window presentation: an OS window, a wgpu surface, and an event loop with resize and pointer events (`winit`). Requires a rasterising backend — either one — and `WindowConfig::backend` chooses which. See `src/window/CLAUDE.md`.
-- **`webgl`** (off by default) — the same sparse-strip rasteriser against a canvas's WebGL2 context instead of wgpu, using `vello_hybrid`'s precompiled GLSL renderer. Pulls **no wgpu at all**, and needs no WebGPU: it runs on browsers that have none, which is the point. Independent of `vello-hybrid`, which is the wgpu flavour of the same rasteriser. Only `wasm32` compiles it — a `WebGl2RenderingContext` exists nowhere else. Brings its own presentation host, `window::WebGlHost`, since there is no surface or swap chain to manage: the canvas is the render target. See `src/backend/hybrid/CLAUDE.md`.
-- **`canvas`** (off by default) — presentation onto a `<canvas>` already on a page, for a wasm build embedded in a website. Shares the `WindowApp` / `Frame` / `Event` surface and the blit path with `window`, but the page owns the event loop and feeds resize and pointer events in. Requires a rasterising backend; pulls no winit. Only `wasm32` compiles the host, since `wgpu::SurfaceTarget::Canvas` exists nowhere else. The client built on it is `crates/hephaestus-wasm`.
+- **`window`** (off by default) — live window presentation: an OS window, a wgpu surface, and an event loop with resize and pointer events (`winit`). Requires a rasterizing backend — either one — and `WindowConfig::backend` chooses which. See `src/window/CLAUDE.md`.
+- **`webgl`** (off by default) — the same sparse-strip rasterizer against a canvas's WebGL2 context instead of wgpu, using `vello_hybrid`'s precompiled GLSL renderer. Pulls **no wgpu at all**, and needs no WebGPU: it runs on browsers that have none, which is the point. Independent of `vello-hybrid`, which is the wgpu flavour of the same rasterizer. Only `wasm32` compiles it — a `WebGl2RenderingContext` exists nowhere else. Brings its own presentation host, `window::WebGlHost`, since there is no surface or swap chain to manage: the canvas is the render target. See `src/backend/hybrid/CLAUDE.md`.
+- **`canvas`** (off by default) — presentation onto a `<canvas>` already on a page, for a wasm build embedded in a website. Shares the `WindowApp` / `Frame` / `Event` surface and the blit path with `window`, but the page owns the event loop and feeds resize and pointer events in. Requires a rasterizing backend; pulls no winit. Only `wasm32` compiles the host, since `wgpu::SurfaceTarget::Canvas` exists nowhere else. The client built on it is `crates/hephaestus-wasm`.
 - **`geom-wkt`**, **`geom-wkb`**, **`geom-geojson`** (off by default) — opt-in parsers for `crate::scales::Geometry`. Each gate enables one of `Geometry::from_wkt` / `from_wkb` / `from_geojson`. Hand-rolled and dependency-free, so toggling them only affects what constructors compile, not the dependency tree.
 - **`document-read`**, **`document-write`**, **`document`** (off by default) — plot documents: capture a `PlotComposition` to a self-contained binary file and rebuild it elsewhere, so a wasm build on a website re-solves the layout at whatever size it has rather than scaling a frozen image. Hand-rolled and dependency-free, like the `geom-*` parsers. Split by direction because a consumer only ever reads; `document` enables both. See `src/document/CLAUDE.md`. Adding no dependency of their own, they are also the one useful configuration with no renderer at all: `--no-default-features --features document-write` builds a writer that compiles on rustc 1.86, which `vello` rules out.
-- **`blend2d`**, **`svg`**, **`pdf`** — feature placeholders only; no backend code behind them yet. Wired so dependent crates can write `features = ["blend2d"]` once they exist.
+- **`svg`** (off by default) — vector output: a `SceneBuilder` that emits SVG text instead of pixels, so it implements `SceneBuilder` and not `Renderer`. The point is *editable* output rather than merely vector output — text arrives as real `<text>` elements naming their font, markdown links as `<a href>`, decorations as `text-decoration`, and a filled-and-stroked mark as one `<path>` rather than two stacked ones. Needs no GPU and adds only `skrifa` (already in the tree via parley, for the glyph-outline fallback), which makes `--no-default-features --features document-read,svg` a renderer-free "document in, SVG out" build on rustc 1.86. Embedding a raster image additionally needs `png`; without it an image is reported and skipped. See `src/backend/svg/CLAUDE.md`.
+- **`blend2d`**, **`pdf`** — feature placeholders only; no backend code behind them yet. Wired so dependent crates can write `features = ["blend2d"]` once they exist.
 
 The core types and traits compile with `--no-default-features` (no wgpu pulled in), so downstream crates can build on top of `SceneBuilder` without GPU dependencies.
 
@@ -169,6 +174,7 @@ See `crates/hephaestus-wasm/CLAUDE.md` for the npm side in detail.
 
 ## Where to look next
 
+- **`src/backend/svg/CLAUDE.md`** — the vector backend: why text is `textLength` rather than per-glyph positions, and what degrades.
 - **`src/CLAUDE.md`** — code architecture: API levels, two-trait split, intersection-of-backends rule, picking model, module map.
 - **Per-module `CLAUDE.md` files** under `src/scene/`, `src/backend/`, `src/backend/vello/`, `src/backend/hybrid/`, `src/layout/`, `src/composition/`, `src/document/`, `src/primitives/`, `src/plot/`, `src/plot/geom/`, `src/plot/theme/`, `src/scales/`, `src/image/`, `src/text/`, `src/text/rich/`, `src/window/`.
 - **`crates/hephaestus-wasm/CLAUDE.md`** — the wasm render client: the Rust/JS split, why WebGPU is required, and why fonts are the thing that surprises people.

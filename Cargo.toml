@@ -137,7 +137,17 @@ document-write = []
 document = ["document-read", "document-write"]
 # Placeholders for future backends — wired through cargo but not implemented yet.
 blend2d = []
-svg = []
+# Vector output: implements `SceneBuilder` and emits SVG text rather
+# than pixels. Needs no GPU and no renderer, so
+# `--no-default-features --features document-read,svg` is a "document
+# in, SVG out" build on the oldest supported rustc. Hand-rolled apart
+# from `skrifa`, which reads glyph outlines for the runs that have no
+# source text to emit as `<text>` — it is already in the tree via
+# parley, so the gate adds no new dependency. Embedding a raster image
+# additionally needs `png`; without it an image draws nothing and is
+# reported through `SvgWarning::MissingPngFeature`, the same
+# degradation a document without `png` produces.
+svg = ["dep:skrifa"]
 pdf = []
 
 [dependencies]
@@ -198,6 +208,13 @@ web-sys = { version = "0.3", optional = true, features = [
     "WebGl2RenderingContext",
 ] }
 parley = "0.9"
+# Glyph outlines, for the `svg` backend's fallback when a run carries no
+# source text — a marker shape, or a caller that positioned glyphs
+# itself. Already in the tree transitively via parley, so naming it
+# directly costs nothing.
+skrifa = { version = "0.44", optional = true, default-features = false, features = [
+    "std",
+] }
 # CommonMark parser for rich text. `default-features = false` drops the
 # optional HTML-rendering helpers we don't use.
 pulldown-cmark = { version = "0.13", default-features = false }
@@ -235,6 +252,13 @@ wgpu = { version = "29", optional = true, default-features = false, features = [
 [[example]]
 name = "hello"
 required-features = ["vello", "png"]
+
+# Renders one composition twice — once through the vector backend, once
+# through the rasteriser — so `vello` and `png` are needed alongside
+# `svg` for the PNG half.
+[[example]]
+name = "svg_export"
+required-features = ["svg", "vello", "png"]
 
 [[example]]
 name = "hello_hybrid"

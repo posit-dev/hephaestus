@@ -4,7 +4,7 @@
 //! "render to RGBA8 buffer" shape. The op enum is intentionally exhaustive —
 //! adding a new variant means SVG/PDF emitters need to handle it.
 
-use super::{Glyph, GlyphRun, SceneBuilder};
+use super::{Decorations, Glyph, GlyphRun, SceneBuilder, TextGroup, TextSource};
 use crate::blend::BlendMode;
 use crate::brush::{Brush, Image, Sampling};
 use crate::geometry::Affine;
@@ -12,6 +12,7 @@ use crate::mesh::Mesh;
 use crate::path::{FillRule, Path};
 use crate::pick::PickId;
 use crate::stroke::Stroke;
+use crate::style_vocab::FontSpec;
 
 /// One captured draw operation.
 #[derive(Debug, Clone, PartialEq)]
@@ -68,7 +69,37 @@ pub struct OwnedGlyphRun {
     /// `None` means fill the glyph outlines; `Some(stroke)` means
     /// stroke them.
     pub style: Option<crate::stroke::Stroke>,
+    /// Owned counterpart of `TextSource`. Boxed to keep `Op` small:
+    /// a `FontSpec` carries three `Vec`s and a `String`, which would
+    /// otherwise make `DrawGlyphs` dominate the enum's size.
+    pub source: Option<Box<OwnedTextSource>>,
     pub pick_id: PickId,
+}
+
+/// Owned counterpart of `TextSource<'_>` for storage in `Op::DrawGlyphs`.
+#[derive(Debug, Clone)]
+pub struct OwnedTextSource {
+    pub text: String,
+    pub font: FontSpec,
+    pub advance: f32,
+    pub rtl: bool,
+    pub decorations: Decorations,
+    pub link: Option<String>,
+    pub group: TextGroup,
+}
+
+/// Equality ignores [`OwnedTextSource::group`], for the reason given on
+/// [`TextSource`]'s own impl: the id is scene-local, so comparing it
+/// across two recordings reports a difference that is not one.
+impl PartialEq for OwnedTextSource {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text
+            && self.font == other.font
+            && self.advance == other.advance
+            && self.rtl == other.rtl
+            && self.decorations == other.decorations
+            && self.link == other.link
+    }
 }
 
 /// Recording scene: appends every call to an op list.
@@ -119,20 +150,34 @@ impl RecordingScene {
                     alpha,
                     pick_id,
                 } => scene.draw_image(image, *transform, *sampling, *alpha, *pick_id),
-                Op::DrawGlyphs(run) => scene.draw_glyphs(
-                    &GlyphRun {
-                        font: &run.font,
-                        font_size: run.font_size,
-                        transform: run.transform,
-                        glyph_transform: run.glyph_transform,
-                        brush: &run.brush,
-                        brush_alpha: run.brush_alpha,
-                        hint: run.hint,
-                        glyphs: &run.glyphs,
-                        style: run.style.as_ref(),
-                    },
-                    run.pick_id,
-                ),
+                Op::DrawGlyphs(run) => {
+                    // Borrowed from the owned form, and bound first so it
+                    // outlives the `GlyphRun` that points into it.
+                    let source = run.source.as_ref().map(|src| TextSource {
+                        text: &src.text,
+                        font: &src.font,
+                        advance: src.advance,
+                        rtl: src.rtl,
+                        decorations: src.decorations,
+                        link: src.link.as_deref(),
+                        group: src.group,
+                    });
+                    scene.draw_glyphs(
+                        &GlyphRun {
+                            font: &run.font,
+                            font_size: run.font_size,
+                            transform: run.transform,
+                            glyph_transform: run.glyph_transform,
+                            brush: &run.brush,
+                            brush_alpha: run.brush_alpha,
+                            hint: run.hint,
+                            glyphs: &run.glyphs,
+                            style: run.style.as_ref(),
+                            source,
+                        },
+                        run.pick_id,
+                    )
+                }
                 Op::DrawMesh {
                     mesh,
                     transform,
@@ -221,6 +266,17 @@ impl SceneBuilder for RecordingScene {
             hint: run.hint,
             glyphs: run.glyphs.to_vec(),
             style: run.style.cloned(),
+            source: run.source.map(|src| {
+                Box::new(OwnedTextSource {
+                    text: src.text.to_string(),
+                    font: src.font.clone(),
+                    advance: src.advance,
+                    rtl: src.rtl,
+                    decorations: src.decorations,
+                    link: src.link.map(str::to_string),
+                    group: src.group,
+                })
+            }),
             pick_id,
         }));
     }
@@ -407,6 +463,7 @@ mod tests {
             hint: true,
             glyphs: &glyphs,
             style: Some(&stroke),
+            source: None,
         };
         let mut scene = RecordingScene::new();
         scene.draw_glyphs(&run, PickId::Id(21));
@@ -443,6 +500,7 @@ mod tests {
             hint: false,
             glyphs: &[],
             style: None,
+            source: None,
         };
         let mut scene = RecordingScene::new();
         scene.draw_glyphs(&run, PickId::Skip);
@@ -555,6 +613,7 @@ mod tests {
                 hint: false,
                 glyphs: &glyphs,
                 style: None,
+                source: None,
             };
             let mut scene = RecordingScene::new();
             scene.draw_glyphs(&run, PickId::Skip);
@@ -587,6 +646,7 @@ mod tests {
                 hint: false,
                 glyphs: &glyphs,
                 style: None,
+                source: None,
             };
             let mut scene = RecordingScene::new();
             scene.draw_glyphs(&run, PickId::Skip);

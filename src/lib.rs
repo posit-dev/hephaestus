@@ -36,6 +36,8 @@ pub mod style_vocab;
 
 #[cfg(feature = "png")]
 pub mod png;
+#[cfg(feature = "svg")]
+pub mod svg;
 
 // `canvas` only has a host to compile on wasm (`wgpu::SurfaceTarget::Canvas`
 // is web-only), so on any other target that feature leaves the module out
