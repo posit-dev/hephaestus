@@ -8,7 +8,7 @@ use super::build::{
     build_composition_grid, build_single_patch, element_contains_patch_id, inset_is_zero,
     BuildState,
 };
-use super::{CompositionLayout, Patch, PatchPlacement, Slot, Span, PANEL_COL, PANEL_ROW};
+use super::{CompositionLayout, Patch, PatchPlacement, Slot, Span};
 
 /// A grid of [`Element`]s of size `rows × cols`. Per-panel-column widths and
 /// per-panel-row heights default to `Fr(1.0)`; override with
@@ -137,12 +137,11 @@ impl Composition {
     /// Useful for giving a faceted plot a shared title / subtitle /
     /// caption / axis title that spans all facets.
     ///
-    /// Panics on [`Slot::Panel`] — the composition's facets fill the
-    /// panel.
+    /// [`Slot::Panel`] is accepted: it resolves to the rect the facets
+    /// occupy, addressable as `(composition_id, "panel")`. Content
+    /// placed there sits behind or over the facets — a shared panel
+    /// background, a watermark, an annotation layer.
     pub fn slot(mut self, s: Slot, cell: Cell) -> Self {
-        if matches!(s, Slot::Panel) {
-            return self.fail(CompositionError::PanelSlot);
-        }
         let (r, c, rs, cs) = s.placement();
         self.chrome.push(PatchPlacement {
             placement: Placement::at(r, c).span(rs, cs),
@@ -157,9 +156,10 @@ impl Composition {
     /// addressable as `(composition_id, region)`. Mirrors
     /// [`Patch::place_at`].
     ///
-    /// Panics if `(row, col, span)` includes the canonical panel cell
-    /// (row 9 col 7) — that cell is reserved for the composition's
-    /// facets.
+    /// The panel cell (row 9, col 7) may be covered; the facets sit in
+    /// the same tracks, so content there shares their rect. A span
+    /// reaching into the surrounding Auto chrome tracks sizes them, as
+    /// any spanning placement does.
     pub fn place_at(
         mut self,
         region: impl Into<String>,
@@ -168,14 +168,6 @@ impl Composition {
         span: Span,
         cell: Cell,
     ) -> Self {
-        let end_row = row + span.rows - 1;
-        let end_col = col + span.cols - 1;
-        if row <= PANEL_ROW && end_row >= PANEL_ROW && col <= PANEL_COL && end_col >= PANEL_COL {
-            return self.fail(CompositionError::PanelCovered {
-                row: PANEL_ROW,
-                col: PANEL_COL,
-            });
-        }
         self.chrome.push(PatchPlacement {
             placement: Placement::at(row, col).span(span.rows, span.cols),
             region: region.into(),
@@ -414,8 +406,8 @@ impl Composition {
     /// Like [`Self::solve`] but returns an error instead of panicking.
     ///
     /// Reports construction errors the builders recorded (a placement
-    /// off the grid, a mismatched track list, `Slot::Panel` on a
-    /// composition) as well as solve-time ones (duplicate patch ids),
+    /// off the grid, a mismatched track list) as well as solve-time
+    /// ones (duplicate patch ids),
     /// so this is the single entry point for validating a composition
     /// built from untrusted input.
     pub fn try_solve(self, size: Size, dpi: f64) -> Result<CompositionLayout, CompositionError> {
@@ -487,11 +479,13 @@ pub enum CompositionError {
     DuplicateId(String),
     /// [`Composition::empty`] was given a zero row or column count.
     Degenerate { rows: usize, cols: usize },
-    /// [`Composition::slot`] was given [`Slot::Panel`]. A composition's
-    /// facets fill the panel; there is no panel of its own to populate.
+    /// Inert variant, kept so existing exhaustive matches compile. No
+    /// builder produces it: a composition-level [`Slot::Panel`] is a
+    /// valid placement.
     PanelSlot,
-    /// [`Composition::place_at`] covered the panel cell, which the
-    /// facets occupy.
+    /// Inert variant, kept so existing exhaustive matches compile. No
+    /// builder produces it: covering the panel cell is a valid
+    /// placement.
     PanelCovered { row: u16, col: u16 },
     /// A placement used a 0 row or column. Placements are 1-indexed.
     NotOneIndexed { row: u16, col: u16 },
@@ -528,15 +522,12 @@ impl std::fmt::Display for CompositionError {
             CompositionError::Degenerate { rows, cols } => {
                 write!(f, "composition must be at least 1×1, got {rows}×{cols}")
             }
-            CompositionError::PanelSlot => write!(
-                f,
-                "Composition::slot does not accept Slot::Panel; the composition's facets fill it"
-            ),
-            CompositionError::PanelCovered { row, col } => write!(
-                f,
-                "Composition::place_at cannot cover the panel cell (row {row}, col {col}); \
-                 the facets fill it"
-            ),
+            CompositionError::PanelSlot => {
+                write!(f, "composition-level panel slot")
+            }
+            CompositionError::PanelCovered { row, col } => {
+                write!(f, "placement covering the panel cell ({row}, {col})")
+            }
             CompositionError::NotOneIndexed { row, col } => {
                 write!(f, "composition placement is 1-indexed, got ({row}, {col})")
             }

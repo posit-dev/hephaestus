@@ -905,10 +905,6 @@ fn try_solve_reports_construction_errors() {
     let cases: Vec<(&str, Composition)> = vec![
         ("zero extent", Composition::empty(0, 2)),
         (
-            "panel slot",
-            Composition::empty(1, 1).slot(Slot::Panel, Cell::empty()),
-        ),
-        (
             "off-grid placement",
             Composition::empty(1, 1).place(1, 5, Span::cell(), Patch::new("p")),
         ),
@@ -943,12 +939,12 @@ fn try_solve_reports_construction_errors() {
         1,
         1,
         Span::cell(),
-        Composition::empty(1, 1).slot(Slot::Panel, Cell::empty()),
+        Composition::empty(1, 1).place(1, 5, Span::cell(), Patch::new("p")),
     );
     assert!(
         matches!(
             nested.try_solve(size, 96.0),
-            Err(CompositionError::PanelSlot)
+            Err(CompositionError::PlacementOverflow { .. })
         ),
         "a nested construction error must reach the root's try_solve"
     );
@@ -1178,5 +1174,64 @@ fn composition_chrome_nested_inside_another_composition() {
         c1_panel.y0,
         0.5,
         "plain and inner panel share y0",
+    );
+}
+
+#[test]
+fn composition_panel_slot_resolves_to_the_facet_band() {
+    let size = Size::new(400.0, 300.0);
+    let build = |panel: Option<Cell>| {
+        let mut c = Composition::empty(1, 2)
+            .id("c")
+            .place(1, 1, Span::cell(), wrap("a", sized(30.0, 30.0)))
+            .place(1, 2, Span::cell(), wrap("b", sized(30.0, 30.0)))
+            .slot(Slot::Title, sized(10.0, 20.0));
+        if let Some(cell) = panel {
+            c = c.slot(Slot::Panel, cell);
+        }
+        c.try_solve(size, 96.0).expect("solves")
+    };
+
+    // The composition's panel rect covers the facets and nothing else.
+    let layout = build(Some(Cell::empty()));
+    let panel = layout
+        .get("c", Slot::Panel)
+        .expect("composition panel rect");
+    let a = layout.get("a", Slot::Panel).expect("first facet panel");
+    let b = layout.get("b", Slot::Panel).expect("second facet panel");
+    approx_eq(panel.x0, a.x0, 0.01, "panel band starts at the first facet");
+    approx_eq(panel.x1, b.x1, 0.01, "panel band ends at the last facet");
+    approx_eq(panel.y0, a.y0, 0.01, "panel band top matches the facets");
+    approx_eq(panel.y1, a.y1, 0.01, "panel band bottom matches the facets");
+
+    // The panel track is Fr, so a measure there cannot move a track:
+    // every other rect is identical with and without it.
+    let base = build(None);
+    let huge = build(Some(sized(9000.0, 9000.0)));
+    for (id, region) in [("a", "panel"), ("b", "panel"), ("c", "title")] {
+        assert_eq!(
+            format!("{:?}", base.get(id, region)),
+            format!("{:?}", huge.get(id, region)),
+            "{id}/{region} moved when the panel cell was populated"
+        );
+    }
+}
+
+#[test]
+fn composition_place_at_may_cover_the_panel() {
+    let size = Size::new(400.0, 300.0);
+    let layout = Composition::empty(1, 2)
+        .id("c")
+        .place(1, 1, Span::cell(), wrap("a", sized(30.0, 30.0)))
+        .place(1, 2, Span::cell(), wrap("b", sized(30.0, 30.0)))
+        // Rows 8–10 × cols 6–8: the panel plus the axis track on each side.
+        .place_at("overlay", 8, 6, Span::rc(3, 3), sized(40.0, 40.0))
+        .try_solve(size, 96.0)
+        .expect("a placement over the panel is valid");
+    let overlay = layout.get("c", "overlay").expect("overlay rect");
+    let a = layout.get("a", Slot::Panel).expect("first facet panel");
+    assert!(
+        overlay.x0 <= a.x0 + 0.01 && overlay.y0 <= a.y0 + 0.01,
+        "the overlay reaches at least the facet band"
     );
 }
