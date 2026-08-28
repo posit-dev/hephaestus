@@ -16,10 +16,10 @@ Axes and legends — *rendering* of a scale's ticks / breaks against a `SceneBui
 
 A `Scale` combines a `ScaleType` (Continuous / Discrete / Ordinal / Binned / Identity / Temporal), an optional `Transform`, an `InputRange` (domain), an optional `OutputRange` (visual range), and — for `Binned` — a bin-edge list. Mapping flow:
 
-1. Apply the transform (continuous scales only).
-2. Normalise to `[0, 1]` against the input range.
-3. Mirror the fraction (or the domain index) if the `Direction` is `Reversed`.
-4. Interpolate through the output range, or return the fraction directly if output is unset (position scales).
+1.  Apply the transform (continuous scales only).
+2.  Normalise to `[0, 1]` against the input range.
+3.  Mirror the fraction (or the domain index) if the `Direction` is `Reversed`.
+4.  Interpolate through the output range, or return the fraction directly if output is unset (position scales).
 
 Scales are *stateless mappers*: all config lives on `Scale` itself. The same scale instance is shared between plots and across renders.
 
@@ -38,7 +38,10 @@ Scales are *stateless mappers*: all config lives on `Scale` itself. The same sca
 - **Per-kind free functions** (`scale_type.rs`): `continuous_map`, `discrete_map`, `ordinal_map`, `binned_map`, `identity_map`; `continuous_breaks`, `continuous_minor_breaks`, `discrete_breaks`, `binned_breaks`, `temporal_breaks`, `temporal_breaks_with_interval`, `temporal_minor_breaks`, `temporal_minor_breaks_with_interval`; `binned_map_break`; `wrap_temporal_value` (raw f64 position → its calendar `Value`); `discrete_band_width`, `binned_band_width`, `binned_band_width_at`.
 - **Transform dispatch** (`transform.rs`): `transform_forward`, `transform_inverse`, `transform_allowed_domain` — all take `kind: TransformKind`. Break generation dispatches on the same tag through the private `transform_breaks` / `transform_minor_breaks` in `scale_type.rs`, reached via `continuous_breaks` / `continuous_minor_breaks` — a continuous scale's ticks follow its transform without the caller choosing an algorithm.
 - **Tick selection** (`breaks.rs`): `extended_breaks` (Wilkinson) and `linear_breaks` (evenly-spaced) for linear domains; `log_pretty_breaks` / `log_minor_breaks` for the log family; `sqrt_breaks`; `symlog_breaks` / `symlog_minor_breaks` for Asinh and the PseudoLog family; `linear_minor_breaks_between` for subdividing majors.
-- **Calendar arithmetic** (`breaks.rs`): `pick_temporal_interval` sizes a `TemporalInterval` to a target tick count; `derive_minor_interval` picks the sub-interval. Per-type `align_*`, `advance_*`, `retreat_*`, `temporal_breaks_*` and `temporal_minor_breaks_*` families cover `Date` (days), `DateTime` (µs) and `Time` (ns), with `temporal_breaks_from_f64` / `temporal_minor_breaks_from_f64` as the projected-f64 entry points. `temporal_minor_breaks_from_f64_with_interval` takes the major interval instead of deriving it from a tick target, so minors under a pinned major interval subdivide that interval.
+- **Calendar arithmetic** (`breaks.rs`): `pick_temporal_interval` sizes a `TemporalInterval` to a target tick count; `derive_minor_interval` picks the sub-interval, taking the `TemporalUnit` so it can stop at `smallest_calendar_unit` — the finest unit the data type resolves (`Day` for `Date`, `Second` for the rest). The floor is *one* of that unit: majors several apart still divide, and only a single one comes back empty. The picker respects the same floor, so a `Date` span too short for a day-spaced target still gets days rather than the hours `Date` cannot address. Per-type `align_*`, `advance_*`, `retreat_*`, `temporal_breaks_*` and `temporal_minor_breaks_*` families cover `Date` (days), `DateTime` (µs) and `Time` (ns), with `temporal_breaks_from_f64` / `temporal_minor_breaks_from_f64` as the projected-f64 entry points. `temporal_minor_breaks_from_f64_with_interval` takes the major interval instead of deriving it from a tick target, so minors under a pinned major interval subdivide that interval.
+- **Breaks sit on the calendar, not on the range.** `align_*_to_grid` is the count-aware floor every `temporal_breaks_*` and `temporal_minor_breaks_*` walks from: 3 months land on a quarter start, a week on a Monday, 6 hours on 00/06/12/18, 15 minutes on :00/:15/:30/:45. A break's position therefore depends only on the interval, not on where the range happens to open — a 30-second axis starting at :07 puts majors on :00 and :30, and panning it slides the data under a fixed grid rather than dragging the ticks along. `align_*_to_interval` is the unit-only floor beside it, kept as a primitive; nothing in the break path uses it.
+- **Minors nest inside majors by construction.** `temporal_minor_breaks_*` walks the sub-interval's grid across the whole range and drops the points a major already holds. Since the sub-interval either divides the major's count or is a whole unit below it, and both sit on the same epoch-anchored grid, every major is a minor position that was suppressed. The visible consequence of grid placement over major-relative stepping: weekly minors under monthly majors are Mondays in *every* month, so the count between two majors varies with the month's length. Stepping off each major would keep that count even but put February's minors on a Thursday.
+- **A multi-unit major divides within its unit.** `subdivide_count` splits the count into the number of sub-intervals closest to four, breaking ties towards the coarser minor: 12 hours → 3 hours, 30 seconds → 10 seconds, 25 years → 5 years. Only a count of one falls through to the unit ladder, which is what that table was always describing. Without this a 12-hour major took the `Hour` row and got 47 fifteen-minute minors.
 
 Rendering of axis and legend chrome lives in `crate::plot::chrome::{axis, legend}`, not here — that's hephaestus's own surface against `SceneBuilder`. Future `scales`-crate consumers (e.g. ggsql) supply their own rendering.
 
@@ -65,10 +68,10 @@ Rendering of axis and legend chrome lives in `crate::plot::chrome::{axis, legend
 
 ## Adding a new scale type
 
-1. Extend the `ScaleTypeKind` enum with the new variant.
-2. Add a per-kind free function pair (`my_kind_map(...)`, `my_kind_breaks(...)`, optionally `my_kind_band_width(...)` / `my_kind_band_width_at(...)`). The map function takes a `Direction` and applies it to whatever it normalises — a fraction via `apply_fraction`, an index via `apply_index` — unless the kind normalises nothing (`identity_map`).
-3. Add the new arm to each central `match` in `crate::plot::scale::Scale::{map, breaks, band_width, band_width_at}`. Rust's exhaustive-match check makes the missing arms compile errors — easy to find them all.
-4. Geoms don't directly interact with scale types — they call `scale.map(&value)`. No geom changes needed unless the new type implies a new `ExpectedOutput` variant.
+1.  Extend the `ScaleTypeKind` enum with the new variant.
+2.  Add a per-kind free function pair (`my_kind_map(...)`, `my_kind_breaks(...)`, optionally `my_kind_band_width(...)` / `my_kind_band_width_at(...)`). The map function takes a `Direction` and applies it to whatever it normalises — a fraction via `apply_fraction`, an index via `apply_index` — unless the kind normalises nothing (`identity_map`).
+3.  Add the new arm to each central `match` in `crate::plot::scale::Scale::{map, breaks, band_width, band_width_at}`. Rust's exhaustive-match check makes the missing arms compile errors — easy to find them all.
+4.  Geoms don't directly interact with scale types — they call `scale.map(&value)`. No geom changes needed unless the new type implies a new `ExpectedOutput` variant.
 
 ## Cross-references
 

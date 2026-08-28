@@ -555,6 +555,10 @@ const HOUR_US: i64 = 3_600_000_000;
 const MIN_US: i64 = 60_000_000;
 const SEC_US: i64 = 1_000_000;
 
+// The Monday on or before the epoch (1969-12-29), which anchors the
+// week grid the way midnight anchors the day grid.
+const EPOCH_MONDAY: i32 = -3;
+
 // Time-of-day (Value::Time) is stored as nanoseconds; needs its own
 // constant ladder for the ns-typed primitives.
 const DAY_NS: i64 = 86_400_000_000_000;
@@ -562,8 +566,37 @@ const HOUR_NS: i64 = 3_600_000_000_000;
 const MIN_NS: i64 = 60_000_000_000;
 const SEC_NS: i64 = 1_000_000_000;
 
-/// Auto-derive a minor interval for the given major. Ported from
-/// ggsql's `derive_minor_interval` (the `MinorBreakSpec::Auto` path).
+/// The finest calendar unit a temporal data type can resolve. A
+/// [`Value::Date`] carries no time of day, so a day is as far as it
+/// divides; the timestamp-backed types reach a second.
+pub fn smallest_calendar_unit(unit: TemporalUnit) -> CalendarUnit {
+    match unit {
+        TemporalUnit::Date => CalendarUnit::Day,
+        TemporalUnit::DateTime | TemporalUnit::Duration | TemporalUnit::Time => {
+            CalendarUnit::Second
+        }
+    }
+}
+
+// Position on the coarseness ladder, for comparing a unit against a data
+// type's floor.
+fn unit_rank(unit: CalendarUnit) -> u8 {
+    use CalendarUnit::*;
+    match unit {
+        Second => 0,
+        Minute => 1,
+        Hour => 2,
+        Day => 3,
+        Week => 4,
+        Month => 5,
+        Year => 6,
+    }
+}
+
+/// Auto-derive a minor interval for the given major on a `unit`-typed
+/// scale. Ported from ggsql's `derive_minor_interval` (the
+/// `MinorBreakSpec::Auto` path), with a floor at the data type's
+/// smallest unit.
 ///
 /// | major          | minor       |
 /// |----------------|-------------|
@@ -574,21 +607,52 @@ const SEC_NS: i64 = 1_000_000_000;
 /// | day            | 6 hours     |
 /// | hour           | 15 minutes  |
 /// | minute         | 15 seconds  |
-/// | second         | (no minor)  |
-pub fn derive_minor_interval(major: TemporalInterval) -> Option<TemporalInterval> {
+///
+/// A major spanning several of its unit divides inside that unit first
+/// — twelve hours by three, thirty seconds by ten — since the next unit
+/// down would cut it far finer than the table intends. The table itself
+/// covers the single-unit majors, where there is nowhere to go but down.
+///
+/// The floor is one of the finest unit `unit` resolves (see
+/// [`smallest_calendar_unit`]). A single one of that unit has nothing
+/// left inside it and returns `None`, as does anything finer than the
+/// type can address.
+pub fn derive_minor_interval(
+    major: TemporalInterval,
+    unit: TemporalUnit,
+) -> Option<TemporalInterval> {
     use CalendarUnit::*;
-    Some(match major {
-        TemporalInterval { unit: Year, .. } => TemporalInterval::new(3, Month),
-        TemporalInterval {
-            unit: Month, count, ..
-        } if count >= 3 => TemporalInterval::new(1, Month),
-        TemporalInterval { unit: Month, .. } => TemporalInterval::new(1, Week),
-        TemporalInterval { unit: Week, .. } => TemporalInterval::new(1, Day),
-        TemporalInterval { unit: Day, .. } => TemporalInterval::new(6, Hour),
-        TemporalInterval { unit: Hour, .. } => TemporalInterval::new(15, Minute),
-        TemporalInterval { unit: Minute, .. } => TemporalInterval::new(15, Second),
-        TemporalInterval { unit: Second, .. } => return None,
+    let floor = smallest_calendar_unit(unit);
+    if unit_rank(major.unit) < unit_rank(floor) {
+        return None;
+    }
+    if let Some(step) = subdivide_count(major.count) {
+        return Some(TemporalInterval::new(step, major.unit));
+    }
+    if major.unit == floor {
+        return None;
+    }
+    Some(match major.unit {
+        Year => TemporalInterval::new(3, Month),
+        Month => TemporalInterval::new(1, Week),
+        Week => TemporalInterval::new(1, Day),
+        Day => TemporalInterval::new(6, Hour),
+        Hour => TemporalInterval::new(15, Minute),
+        Minute => TemporalInterval::new(15, Second),
+        Second => return None,
     })
+}
+
+// The step dividing `count` into the number of sub-intervals closest to
+// four — the density every entry of the unit ladder lands on — breaking
+// a tie towards the coarser minor. `None` for a count of one, which has
+// no divisor to split it.
+fn subdivide_count(count: u32) -> Option<u32> {
+    const TARGET: u32 = 4;
+    (2..=count)
+        .filter(|k| count % k == 0)
+        .min_by_key(|k| (k.abs_diff(TARGET), *k))
+        .map(|k| count / k)
 }
 
 // ─── Date primitives (days since epoch) ─────────────────────────────────────
@@ -603,6 +667,35 @@ pub fn align_date_to_interval(days: i32, interval: TemporalInterval) -> i32 {
         Week => d.start_of_week().to_days(),
         Month => d.start_of_month().to_days(),
         Year => d.start_of_year().to_days(),
+        // Sub-day units don't change a Date.
+        Hour | Minute | Second => days,
+    }
+}
+
+/// Align a date down to a calendar grid of `interval`-sized cells
+/// anchored at the epoch — a count-aware floor, unlike
+/// [`align_date_to_interval`], which floors to the unit and ignores the
+/// count. Three months land on a quarter start (January, April, July,
+/// October) rather than on whichever month the date falls in.
+pub fn align_date_to_grid(days: i32, interval: TemporalInterval) -> i32 {
+    use CalendarUnit::*;
+    let count = interval.count.max(1) as i32;
+    let d = Date::from_days(days);
+    match interval.unit {
+        Day => days.div_euclid(count) * count,
+        Week => {
+            let weeks = (d.start_of_week().to_days() - EPOCH_MONDAY).div_euclid(7);
+            EPOCH_MONDAY + weeks.div_euclid(count) * count * 7
+        }
+        Month => {
+            let (y, m, _) = d.to_ymd();
+            let months = (y * 12 + (m as i32 - 1)).div_euclid(count) * count;
+            Date::from_ymd(months.div_euclid(12), (months.rem_euclid(12) + 1) as u8, 1).to_days()
+        }
+        Year => {
+            let (y, _, _) = d.to_ymd();
+            Date::from_ymd(y.div_euclid(count) * count, 1, 1).to_days()
+        }
         // Sub-day units don't change a Date.
         Hour | Minute | Second => days,
     }
@@ -657,7 +750,7 @@ pub fn retreat_date_by_interval(days: i32, interval: TemporalInterval) -> i32 {
 /// that out when integrating (see [`temporal_breaks_from_f64`]).
 pub fn temporal_breaks_date(min_days: i32, max_days: i32, interval: TemporalInterval) -> Vec<i32> {
     let mut out = Vec::new();
-    let mut current = align_date_to_interval(min_days, interval);
+    let mut current = align_date_to_grid(min_days, interval);
     while current <= max_days {
         out.push(current);
         current = advance_date_by_interval(current, interval);
@@ -668,51 +761,51 @@ pub fn temporal_breaks_date(min_days: i32, max_days: i32, interval: TemporalInte
     out
 }
 
-/// Minor calendar breaks for a Date scale. Ported from ggsql's
-/// `temporal_minor_breaks_date` with `MinorBreakSpec::Auto`.
+// The span the minors cover: the caller's range when there is one, else
+// the span the majors themselves reach across.
+fn minor_span<T: Copy + PartialOrd>(majors: &[T], range: Option<(T, T)>) -> Option<(T, T)> {
+    let (lo, hi) = match range {
+        Some(span) => span,
+        None => (*majors.first()?, *majors.last()?),
+    };
+    (lo < hi).then_some((lo, hi))
+}
+
+/// Minor calendar breaks for a Date scale: every point of the derived
+/// sub-interval's own calendar grid that lands in range, minus the ones
+/// a major already occupies. Weekly minors are Mondays and quarterly
+/// minors are quarter starts wherever the majors fall, so the number
+/// between two majors follows the calendar rather than the major
+/// spacing. `majors` must be ascending; `range` covers the span the
+/// minors span when it reaches past them.
 pub fn temporal_minor_breaks_date(
     majors: &[i32],
     major_interval: TemporalInterval,
     range: Option<(i32, i32)>,
 ) -> Vec<i32> {
-    if majors.len() < 2 {
-        return Vec::new();
-    }
-    let minor = match derive_minor_interval(major_interval) {
+    let minor = match derive_minor_interval(major_interval, TemporalUnit::Date) {
         Some(i) => i,
         None => return Vec::new(),
     };
+    let (lo, hi) = match minor_span(majors, range) {
+        Some(span) => span,
+        None => return Vec::new(),
+    };
     let mut out = Vec::new();
-
-    if let Some((min_day, _)) = range {
-        let first = majors[0];
-        let mut current = retreat_date_by_interval(first, minor);
-        while current >= min_day && current < first {
-            out.push(current);
-            current = retreat_date_by_interval(current, minor);
-        }
+    let mut current = align_date_to_grid(lo, minor);
+    if current < lo {
+        current = advance_date_by_interval(current, minor);
     }
-
-    for w in majors.windows(2) {
-        let start = w[0];
-        let end = w[1];
-        let mut current = advance_date_by_interval(start, minor);
-        while current < end {
+    while current <= hi {
+        if majors.binary_search(&current).is_err() {
             out.push(current);
-            current = advance_date_by_interval(current, minor);
         }
-    }
-
-    if let Some((_, max_day)) = range {
-        let last = *majors.last().unwrap();
-        let mut current = advance_date_by_interval(last, minor);
-        while current <= max_day {
-            out.push(current);
-            current = advance_date_by_interval(current, minor);
+        let next = advance_date_by_interval(current, minor);
+        if next <= current {
+            break;
         }
+        current = next;
     }
-
-    out.sort();
     out
 }
 
@@ -738,6 +831,26 @@ pub fn align_datetime_to_interval(micros: i64, interval: TemporalInterval) -> i6
         Year => {
             let day = micros.div_euclid(DAY_US) as i32;
             (Date::from_days(day).start_of_year().to_days() as i64) * DAY_US
+        }
+    }
+}
+
+/// Align a timestamp down to a calendar grid of `interval`-sized cells
+/// anchored at the epoch — the count-aware counterpart to
+/// [`align_datetime_to_interval`]. Six hours land on 00:00, 06:00, 12:00
+/// or 18:00 rather than on the top of whichever hour the timestamp falls
+/// in.
+pub fn align_datetime_to_grid(micros: i64, interval: TemporalInterval) -> i64 {
+    use CalendarUnit::*;
+    let count = interval.count.max(1) as i64;
+    match interval.unit {
+        Second => micros.div_euclid(SEC_US * count) * (SEC_US * count),
+        Minute => micros.div_euclid(MIN_US * count) * (MIN_US * count),
+        Hour => micros.div_euclid(HOUR_US * count) * (HOUR_US * count),
+        Day => micros.div_euclid(DAY_US * count) * (DAY_US * count),
+        Week | Month | Year => {
+            let day = micros.div_euclid(DAY_US) as i32;
+            (align_date_to_grid(day, interval) as i64) * DAY_US
         }
     }
 }
@@ -814,7 +927,7 @@ fn split_datetime(micros: i64) -> (Date, i64) {
 /// `temporal_breaks_datetime`. Includes the terminal break past `max_us`.
 pub fn temporal_breaks_datetime(min_us: i64, max_us: i64, interval: TemporalInterval) -> Vec<i64> {
     let mut out = Vec::new();
-    let mut current = align_datetime_to_interval(min_us, interval);
+    let mut current = align_datetime_to_grid(min_us, interval);
     while current <= max_us {
         out.push(current);
         current = advance_datetime_by_interval(current, interval);
@@ -825,51 +938,37 @@ pub fn temporal_breaks_datetime(min_us: i64, max_us: i64, interval: TemporalInte
     out
 }
 
-/// Minor calendar breaks for a DateTime scale. Ported from ggsql's
-/// `temporal_minor_breaks_datetime` (Auto spec).
+/// Minor calendar breaks for a DateTime scale — the timestamp
+/// counterpart to [`temporal_minor_breaks_date`], and the one a
+/// `Duration` scale uses too, since both resolve down to a second.
 pub fn temporal_minor_breaks_datetime(
     majors: &[i64],
     major_interval: TemporalInterval,
     range: Option<(i64, i64)>,
 ) -> Vec<i64> {
-    if majors.len() < 2 {
-        return Vec::new();
-    }
-    let minor = match derive_minor_interval(major_interval) {
+    let minor = match derive_minor_interval(major_interval, TemporalUnit::DateTime) {
         Some(i) => i,
         None => return Vec::new(),
     };
+    let (lo, hi) = match minor_span(majors, range) {
+        Some(span) => span,
+        None => return Vec::new(),
+    };
     let mut out = Vec::new();
-
-    if let Some((min_us, _)) = range {
-        let first = majors[0];
-        let mut current = retreat_datetime_by_interval(first, minor);
-        while current >= min_us && current < first {
-            out.push(current);
-            current = retreat_datetime_by_interval(current, minor);
-        }
+    let mut current = align_datetime_to_grid(lo, minor);
+    if current < lo {
+        current = advance_datetime_by_interval(current, minor);
     }
-
-    for w in majors.windows(2) {
-        let start = w[0];
-        let end = w[1];
-        let mut current = advance_datetime_by_interval(start, minor);
-        while current < end {
+    while current <= hi {
+        if majors.binary_search(&current).is_err() {
             out.push(current);
-            current = advance_datetime_by_interval(current, minor);
         }
-    }
-
-    if let Some((_, max_us)) = range {
-        let last = *majors.last().unwrap();
-        let mut current = advance_datetime_by_interval(last, minor);
-        while current <= max_us {
-            out.push(current);
-            current = advance_datetime_by_interval(current, minor);
+        let next = advance_datetime_by_interval(current, minor);
+        if next <= current {
+            break;
         }
+        current = next;
     }
-
-    out.sort();
     out
 }
 
@@ -886,6 +985,22 @@ pub fn align_time_to_interval(nanos: i64, interval: TemporalInterval) -> i64 {
         Second => (nanos.div_euclid(SEC_NS)) * SEC_NS,
         Minute => (nanos.div_euclid(MIN_NS)) * MIN_NS,
         Hour => (nanos.div_euclid(HOUR_NS)) * HOUR_NS,
+        // Day/Week/Month/Year don't apply to Time-of-day.
+        _ => nanos,
+    }
+}
+
+/// Align a time-of-day down to a grid of `interval`-sized cells anchored
+/// at midnight — the count-aware counterpart to
+/// [`align_time_to_interval`]. Fifteen minutes land on :00, :15, :30 or
+/// :45.
+pub fn align_time_to_grid(nanos: i64, interval: TemporalInterval) -> i64 {
+    use CalendarUnit::*;
+    let count = interval.count.max(1) as i64;
+    match interval.unit {
+        Second => nanos.div_euclid(SEC_NS * count) * (SEC_NS * count),
+        Minute => nanos.div_euclid(MIN_NS * count) * (MIN_NS * count),
+        Hour => nanos.div_euclid(HOUR_NS * count) * (HOUR_NS * count),
         // Day/Week/Month/Year don't apply to Time-of-day.
         _ => nanos,
     }
@@ -931,7 +1046,7 @@ pub fn retreat_time_by_interval(nanos: i64, interval: TemporalInterval) -> Optio
 /// from ggsql's `temporal_breaks_time`.
 pub fn temporal_breaks_time(min_ns: i64, max_ns: i64, interval: TemporalInterval) -> Vec<i64> {
     let mut out = Vec::new();
-    let mut current = align_time_to_interval(min_ns, interval);
+    let mut current = align_time_to_grid(min_ns, interval);
     while current <= max_ns {
         out.push(current);
         current = match advance_time_by_interval(current, interval) {
@@ -951,63 +1066,39 @@ pub fn temporal_breaks_time(min_ns: i64, max_ns: i64, interval: TemporalInterval
     out
 }
 
-/// Minor calendar breaks for a Time scale. Ported from ggsql's
-/// `temporal_minor_breaks_time` (Auto spec).
+/// Minor calendar breaks for a Time scale — the time-of-day
+/// counterpart to [`temporal_minor_breaks_date`]. The grid is anchored
+/// at midnight and stops at the end of the day rather than wrapping.
 pub fn temporal_minor_breaks_time(
     majors: &[i64],
     major_interval: TemporalInterval,
     range: Option<(i64, i64)>,
 ) -> Vec<i64> {
-    if majors.len() < 2 {
-        return Vec::new();
-    }
-    let minor = match derive_minor_interval(major_interval) {
+    let minor = match derive_minor_interval(major_interval, TemporalUnit::Time) {
         Some(i) => i,
         None => return Vec::new(),
     };
+    let (lo, hi) = match minor_span(majors, range) {
+        Some(span) => span,
+        None => return Vec::new(),
+    };
     let mut out = Vec::new();
-
-    if let Some((min_ns, _)) = range {
-        let first = majors[0];
-        if let Some(mut current) = retreat_time_by_interval(first, minor) {
-            while current >= min_ns && current < first {
-                out.push(current);
-                match retreat_time_by_interval(current, minor) {
-                    Some(prev) if prev < current => current = prev,
-                    _ => break,
-                }
-            }
+    let mut current = align_time_to_grid(lo, minor);
+    if current < lo {
+        current = match advance_time_by_interval(current, minor) {
+            Some(next) if next > current => next,
+            _ => return out,
+        };
+    }
+    while current <= hi {
+        if majors.binary_search(&current).is_err() {
+            out.push(current);
+        }
+        match advance_time_by_interval(current, minor) {
+            Some(next) if next > current => current = next,
+            _ => break,
         }
     }
-
-    for w in majors.windows(2) {
-        let start = w[0];
-        let end = w[1];
-        if let Some(mut current) = advance_time_by_interval(start, minor) {
-            while current < end {
-                out.push(current);
-                match advance_time_by_interval(current, minor) {
-                    Some(next) if next > current => current = next,
-                    _ => break,
-                }
-            }
-        }
-    }
-
-    if let Some((_, max_ns)) = range {
-        let last = *majors.last().unwrap();
-        if let Some(mut current) = advance_time_by_interval(last, minor) {
-            while current <= max_ns && current > last {
-                out.push(current);
-                match advance_time_by_interval(current, minor) {
-                    Some(next) if next > current => current = next,
-                    _ => break,
-                }
-            }
-        }
-    }
-
-    out.sort();
     out
 }
 
@@ -1053,6 +1144,12 @@ pub fn pick_temporal_interval(span: f64, target: f64, unit: TemporalUnit) -> Tem
             return TemporalInterval::new(1, Week);
         }
         if day_count >= threshold {
+            return TemporalInterval::new(1, Day);
+        }
+        // A type resolving no finer than a day takes a day even when the
+        // span is shorter than the tick target asks for: there is no
+        // sub-day position it could name.
+        if unit_rank(smallest_calendar_unit(unit)) >= unit_rank(Day) {
             return TemporalInterval::new(1, Day);
         }
     }
@@ -1581,50 +1678,253 @@ mod tests {
 
     #[test]
     fn derive_minor_year_is_three_months() {
-        let m = derive_minor_interval(TemporalInterval::new(1, CalendarUnit::Year)).unwrap();
+        let m = derive_minor_interval(
+            TemporalInterval::new(1, CalendarUnit::Year),
+            TemporalUnit::Date,
+        )
+        .unwrap();
         assert_eq!(m, TemporalInterval::new(3, CalendarUnit::Month));
     }
 
     #[test]
     fn derive_minor_quarter_is_month() {
         // ggsql: quarter == Month(count=3) → minor = month.
-        let m = derive_minor_interval(TemporalInterval::new(3, CalendarUnit::Month)).unwrap();
+        let m = derive_minor_interval(
+            TemporalInterval::new(3, CalendarUnit::Month),
+            TemporalUnit::Date,
+        )
+        .unwrap();
         assert_eq!(m, TemporalInterval::new(1, CalendarUnit::Month));
     }
 
     #[test]
     fn derive_minor_month_is_week() {
-        let m = derive_minor_interval(TemporalInterval::new(1, CalendarUnit::Month)).unwrap();
+        let m = derive_minor_interval(
+            TemporalInterval::new(1, CalendarUnit::Month),
+            TemporalUnit::Date,
+        )
+        .unwrap();
         assert_eq!(m, TemporalInterval::new(1, CalendarUnit::Week));
     }
 
     #[test]
     fn derive_minor_week_is_day() {
-        let m = derive_minor_interval(TemporalInterval::new(1, CalendarUnit::Week)).unwrap();
+        let m = derive_minor_interval(
+            TemporalInterval::new(1, CalendarUnit::Week),
+            TemporalUnit::Date,
+        )
+        .unwrap();
         assert_eq!(m, TemporalInterval::new(1, CalendarUnit::Day));
     }
 
     #[test]
     fn derive_minor_day_is_six_hours() {
-        let m = derive_minor_interval(TemporalInterval::new(1, CalendarUnit::Day)).unwrap();
+        let m = derive_minor_interval(
+            TemporalInterval::new(1, CalendarUnit::Day),
+            TemporalUnit::DateTime,
+        )
+        .unwrap();
         assert_eq!(m, TemporalInterval::new(6, CalendarUnit::Hour));
     }
 
     #[test]
     fn derive_minor_hour_is_fifteen_minutes() {
-        let m = derive_minor_interval(TemporalInterval::new(1, CalendarUnit::Hour)).unwrap();
+        let m = derive_minor_interval(
+            TemporalInterval::new(1, CalendarUnit::Hour),
+            TemporalUnit::Time,
+        )
+        .unwrap();
         assert_eq!(m, TemporalInterval::new(15, CalendarUnit::Minute));
     }
 
     #[test]
     fn derive_minor_minute_is_fifteen_seconds() {
-        let m = derive_minor_interval(TemporalInterval::new(1, CalendarUnit::Minute)).unwrap();
+        let m = derive_minor_interval(
+            TemporalInterval::new(1, CalendarUnit::Minute),
+            TemporalUnit::Time,
+        )
+        .unwrap();
         assert_eq!(m, TemporalInterval::new(15, CalendarUnit::Second));
     }
 
     #[test]
     fn derive_minor_second_is_none() {
-        assert!(derive_minor_interval(TemporalInterval::new(1, CalendarUnit::Second)).is_none());
+        for unit in [
+            TemporalUnit::Date,
+            TemporalUnit::DateTime,
+            TemporalUnit::Duration,
+            TemporalUnit::Time,
+        ] {
+            assert!(
+                derive_minor_interval(TemporalInterval::new(1, CalendarUnit::Second), unit)
+                    .is_none(),
+                "{unit:?} should not subdivide a second"
+            );
+        }
+    }
+
+    #[test]
+    fn derive_minor_stops_at_the_type_floor() {
+        // A day is as fine as a Date gets, so a day-spaced axis has
+        // nothing between two majors — while the same major on a
+        // DateTime still subdivides.
+        let day = TemporalInterval::new(1, CalendarUnit::Day);
+        assert!(derive_minor_interval(day, TemporalUnit::Date).is_none());
+        assert_eq!(
+            derive_minor_interval(day, TemporalUnit::DateTime),
+            Some(TemporalInterval::new(6, CalendarUnit::Hour))
+        );
+
+        // Anything finer than the floor stops too, whatever its count.
+        assert!(derive_minor_interval(
+            TemporalInterval::new(12, CalendarUnit::Hour),
+            TemporalUnit::Date
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn derive_minor_divides_within_the_unit() {
+        // A multi-unit major splits inside its own unit rather than
+        // dropping to the next one down, which would cut it far finer.
+        let cases = [
+            (12, CalendarUnit::Hour, 3, CalendarUnit::Hour),
+            (6, CalendarUnit::Hour, 2, CalendarUnit::Hour),
+            (30, CalendarUnit::Second, 10, CalendarUnit::Second),
+            (15, CalendarUnit::Minute, 5, CalendarUnit::Minute),
+            (10, CalendarUnit::Minute, 2, CalendarUnit::Minute),
+            (25, CalendarUnit::Year, 5, CalendarUnit::Year),
+            (2, CalendarUnit::Month, 1, CalendarUnit::Month),
+            (3, CalendarUnit::Month, 1, CalendarUnit::Month),
+        ];
+        for (count, unit, want_count, want_unit) in cases {
+            assert_eq!(
+                derive_minor_interval(TemporalInterval::new(count, unit), TemporalUnit::DateTime),
+                Some(TemporalInterval::new(want_count, want_unit)),
+                "{count} {unit:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn subdivide_count_targets_four_sub_intervals() {
+        // Every stride the pickers can produce, and what it splits into.
+        for (count, step) in [
+            (1, None),
+            (2, Some(1)),
+            (3, Some(1)),
+            (4, Some(1)),
+            (5, Some(1)),
+            (6, Some(2)),
+            (10, Some(2)),
+            (12, Some(3)),
+            (15, Some(5)),
+            (25, Some(5)),
+            (30, Some(10)),
+            (50, Some(10)),
+            (100, Some(25)),
+        ] {
+            assert_eq!(subdivide_count(count), step, "count {count}");
+        }
+    }
+
+    #[test]
+    fn temporal_breaks_datetime_multi_unit_majors_land_on_the_grid() {
+        // Majors used to take their phase from the range start: a
+        // 30-second axis opening at :07 put ticks on :07 and :37.
+        let min = 7.0 * SEC_US as f64;
+        let max = min + 100.0 * SEC_US as f64;
+        let majors = temporal_breaks_from_f64(min, max, TemporalUnit::DateTime, 4);
+        let secs: Vec<i64> = majors.iter().map(|us| *us as i64 / SEC_US).collect();
+        assert_eq!(secs, vec![30, 60, 90]);
+        // And the minors nest inside them, on the 10-second grid.
+        let minors = temporal_minor_breaks_from_f64(min, max, TemporalUnit::DateTime, 4);
+        assert!(!minors.is_empty());
+        for us in &minors {
+            assert_eq!(
+                (*us as i64) % (10 * SEC_US),
+                0,
+                "minor {us} is off the 10-second grid"
+            );
+            assert!(!majors.contains(us), "minor {us} doubles a major");
+        }
+    }
+
+    #[test]
+    fn derive_minor_divides_a_multi_unit_floor_major() {
+        // The floor is *one* of the smallest unit: majors several apart
+        // still take a minor between them, one unit wide.
+        assert_eq!(
+            derive_minor_interval(
+                TemporalInterval::new(2, CalendarUnit::Day),
+                TemporalUnit::Date
+            ),
+            Some(TemporalInterval::new(1, CalendarUnit::Day))
+        );
+        assert_eq!(
+            derive_minor_interval(
+                TemporalInterval::new(5, CalendarUnit::Second),
+                TemporalUnit::DateTime
+            ),
+            Some(TemporalInterval::new(1, CalendarUnit::Second))
+        );
+        assert_eq!(
+            derive_minor_interval(
+                TemporalInterval::new(2, CalendarUnit::Second),
+                TemporalUnit::Time
+            ),
+            Some(TemporalInterval::new(1, CalendarUnit::Second))
+        );
+    }
+
+    #[test]
+    fn temporal_minor_breaks_date_fills_a_two_day_major() {
+        let two_days = TemporalInterval::new(2, CalendarUnit::Day);
+        let lo = Date::from_ymd(2024, 3, 1).to_days();
+        let hi = Date::from_ymd(2024, 3, 9).to_days();
+        let majors = temporal_breaks_date(lo, hi, two_days);
+        let minors = temporal_minor_breaks_date(&majors, two_days, Some((lo, hi)));
+        // One minor per gap, on the day the majors skip.
+        assert_eq!(minors.len(), 5);
+        for d in &minors {
+            assert!(!majors.contains(d), "minor {d} doubles a major");
+            assert!(
+                majors.contains(&(d - 1)) && majors.contains(&(d + 1)),
+                "minor {d} does not sit between two majors"
+            );
+        }
+    }
+
+    #[test]
+    fn pick_temporal_interval_date_never_goes_sub_day() {
+        // Spans too short for the tick target still land on days: a Date
+        // has no position finer to name.
+        for span_days in [0.5, 1.0, 2.0, 3.0] {
+            let interval = pick_temporal_interval(span_days, 5.0, TemporalUnit::Date);
+            assert_eq!(
+                interval,
+                TemporalInterval::new(1, CalendarUnit::Day),
+                "{span_days}-day span picked {interval:?}"
+            );
+        }
+        // A DateTime over the same span keeps its sub-day units.
+        let interval = pick_temporal_interval(2.0 * DAY_US as f64, 5.0, TemporalUnit::DateTime);
+        assert_eq!(interval.unit, CalendarUnit::Hour);
+    }
+
+    #[test]
+    fn smallest_calendar_unit_per_type() {
+        assert_eq!(
+            smallest_calendar_unit(TemporalUnit::Date),
+            CalendarUnit::Day
+        );
+        for unit in [
+            TemporalUnit::DateTime,
+            TemporalUnit::Duration,
+            TemporalUnit::Time,
+        ] {
+            assert_eq!(smallest_calendar_unit(unit), CalendarUnit::Second);
+        }
     }
 
     #[test]
@@ -1713,27 +2013,166 @@ mod tests {
     }
 
     #[test]
-    fn temporal_minor_breaks_date_subdivides_between_majors() {
-        // 4 monthly majors → weekly minors between them.
-        let majors = vec![
-            Date::from_ymd(2024, 1, 1).to_days(),
-            Date::from_ymd(2024, 2, 1).to_days(),
-            Date::from_ymd(2024, 3, 1).to_days(),
-        ];
+    fn temporal_minor_breaks_date_weekly_minors_are_mondays() {
+        // Monthly majors → weekly minors, on the week grid rather than
+        // stepped off each major: February's minors are Mondays too.
+        let majors: Vec<i32> = [(1, 1), (2, 1), (3, 1), (4, 1)]
+            .iter()
+            .map(|(m, d)| Date::from_ymd(2024, *m, *d).to_days())
+            .collect();
         let minors = temporal_minor_breaks_date(
             &majors,
             TemporalInterval::new(1, CalendarUnit::Month),
-            None,
+            Some((
+                Date::from_ymd(2024, 1, 1).to_days(),
+                Date::from_ymd(2024, 3, 31).to_days(),
+            )),
         );
-        // Each minor should be a Monday (week-aligned via advance_date).
         assert!(!minors.is_empty(), "expected weekly minors");
         for d in &minors {
-            // Minors must lie strictly between majors.
-            assert!(
-                *d > majors[0] && *d < *majors.last().unwrap(),
-                "minor {d} not between majors {:?}",
-                majors
+            let dow = Date::from_days(*d).day_of_week();
+            assert_eq!(
+                dow,
+                0,
+                "minor {:?} is not a Monday",
+                Date::from_days(*d).to_ymd()
             );
+        }
+        // A month start that is itself a Monday belongs to the major, not
+        // the minors.
+        assert!(!minors.contains(&majors[0]), "Jan 1 2024 is a major");
+        // The first Monday of February, not "seven days after Feb 1".
+        assert!(
+            minors.contains(&Date::from_ymd(2024, 2, 5).to_days()),
+            "{:?}",
+            minors
+                .iter()
+                .map(|d| Date::from_days(*d).to_ymd())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn temporal_minor_breaks_date_quarters_under_yearly_majors() {
+        let majors = temporal_breaks_date(
+            Date::from_ymd(2023, 1, 1).to_days(),
+            Date::from_ymd(2024, 12, 31).to_days(),
+            TemporalInterval::new(1, CalendarUnit::Year),
+        );
+        let minors = temporal_minor_breaks_date(
+            &majors,
+            TemporalInterval::new(1, CalendarUnit::Year),
+            Some((
+                Date::from_ymd(2023, 1, 1).to_days(),
+                Date::from_ymd(2024, 12, 31).to_days(),
+            )),
+        );
+        let ymds: Vec<(i32, u8, u8)> = minors
+            .iter()
+            .map(|d| Date::from_days(*d).to_ymd())
+            .collect();
+        assert_eq!(
+            ymds,
+            vec![
+                (2023, 4, 1),
+                (2023, 7, 1),
+                (2023, 10, 1),
+                (2024, 4, 1),
+                (2024, 7, 1),
+                (2024, 10, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn temporal_minor_breaks_date_none_at_the_day_floor() {
+        let majors =
+            temporal_breaks_date(19723, 19733, TemporalInterval::new(1, CalendarUnit::Day));
+        let minors = temporal_minor_breaks_date(
+            &majors,
+            TemporalInterval::new(1, CalendarUnit::Day),
+            Some((19723, 19733)),
+        );
+        assert!(minors.is_empty(), "a day-spaced Date axis has no minors");
+    }
+
+    #[test]
+    fn temporal_minor_breaks_from_f64_keeps_the_week_grid_off_a_major() {
+        // A range starting mid-week: the first weekly minor is the first
+        // Monday inside it, not an offset from the first major.
+        let min = Date::from_ymd(2024, 1, 10).to_days() as f64;
+        let max = Date::from_ymd(2024, 4, 15).to_days() as f64;
+        let minors = temporal_minor_breaks_from_f64_with_interval(
+            min,
+            max,
+            TemporalUnit::Date,
+            TemporalInterval::new(1, CalendarUnit::Month),
+        );
+        assert_eq!(
+            Date::from_days(minors[0] as i32).to_ymd(),
+            (2024, 1, 15),
+            "first minor should be the first Monday on or after Jan 10"
+        );
+        for raw in &minors {
+            assert_eq!(Date::from_days(*raw as i32).day_of_week(), 0);
+            assert!(*raw >= min && *raw <= max);
+        }
+    }
+
+    #[test]
+    fn temporal_minor_breaks_datetime_six_hour_grid() {
+        let start = Date::from_ymd(2024, 3, 1).to_days() as i64 * DAY_US;
+        let end = start + 2 * DAY_US;
+        let day = TemporalInterval::new(1, CalendarUnit::Day);
+        let majors = temporal_breaks_datetime(start, end, day);
+        let minors = temporal_minor_breaks_datetime(&majors, day, Some((start, end)));
+        assert!(!minors.is_empty());
+        for us in &minors {
+            let into_day = (us - start).rem_euclid(DAY_US);
+            assert_eq!(into_day % HOUR_US, 0, "minor {us} is not on the hour");
+            let hour = into_day / HOUR_US;
+            assert!(
+                [6, 12, 18].contains(&hour),
+                "minor at hour {hour} is not on the 6-hour grid"
+            );
+        }
+    }
+
+    #[test]
+    fn temporal_minor_breaks_time_quarter_hour_grid() {
+        let hour = TemporalInterval::new(1, CalendarUnit::Hour);
+        let majors = temporal_breaks_time(0, 3 * HOUR_NS, hour);
+        let minors = temporal_minor_breaks_time(&majors, hour, Some((0, 3 * HOUR_NS)));
+        assert_eq!(minors.len(), 9, "three hours hold nine quarter-hour minors");
+        for ns in &minors {
+            assert_eq!(ns % (15 * MIN_NS), 0, "minor {ns} is off the quarter-hour");
+            assert_ne!(ns % HOUR_NS, 0, "minor {ns} sits under a major");
+        }
+    }
+
+    #[test]
+    fn align_date_to_grid_is_count_aware() {
+        // Unit-only alignment lands on the month; grid alignment lands on
+        // the quarter that contains it.
+        let mid = Date::from_ymd(2024, 5, 17).to_days();
+        let quarter = TemporalInterval::new(3, CalendarUnit::Month);
+        assert_eq!(
+            Date::from_days(align_date_to_interval(mid, quarter)).to_ymd(),
+            (2024, 5, 1)
+        );
+        assert_eq!(
+            Date::from_days(align_date_to_grid(mid, quarter)).to_ymd(),
+            (2024, 4, 1)
+        );
+    }
+
+    #[test]
+    fn align_date_to_grid_week_lands_on_monday() {
+        for offset in 0..14 {
+            let d = Date::from_ymd(2024, 5, 17).to_days() + offset;
+            let aligned = align_date_to_grid(d, TemporalInterval::new(1, CalendarUnit::Week));
+            assert_eq!(Date::from_days(aligned).day_of_week(), 0);
+            assert!(aligned <= d && d - aligned < 7);
         }
     }
 

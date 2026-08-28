@@ -40,9 +40,11 @@
 //!     [`symlog_breaks`], [`symlog_minor_breaks`],
 //!     [`linear_minor_breaks_between`].
 //!   - Calendar arithmetic behind the temporal families:
-//!     [`pick_temporal_interval`], [`derive_minor_interval`], and the
-//!     `align_*` / `advance_*` / `retreat_*` / `temporal_breaks_*`
-//!     families over [`Date`] / [`DateTime`] / [`Time`].
+//!     [`pick_temporal_interval`], [`derive_minor_interval`],
+//!     [`smallest_calendar_unit`], and the `align_*_to_interval` /
+//!     `align_*_to_grid` / `advance_*` / `retreat_*` /
+//!     `temporal_breaks_*` families over [`Date`] / [`DateTime`] /
+//!     [`Time`].
 //!
 //! ## What's not here
 //!
@@ -80,10 +82,11 @@ pub mod interop_time;
 
 pub use breaks::{
     advance_date_by_interval, advance_datetime_by_interval, advance_time_by_interval,
-    align_date_to_interval, align_datetime_to_interval, align_time_to_interval,
-    derive_minor_interval, extended_breaks, linear_breaks, linear_minor_breaks_between,
-    log_minor_breaks, log_pretty_breaks, pick_temporal_interval, retreat_date_by_interval,
-    retreat_datetime_by_interval, retreat_time_by_interval, sqrt_breaks, symlog_breaks,
+    align_date_to_grid, align_date_to_interval, align_datetime_to_grid, align_datetime_to_interval,
+    align_time_to_grid, align_time_to_interval, derive_minor_interval, extended_breaks,
+    linear_breaks, linear_minor_breaks_between, log_minor_breaks, log_pretty_breaks,
+    pick_temporal_interval, retreat_date_by_interval, retreat_datetime_by_interval,
+    retreat_time_by_interval, smallest_calendar_unit, sqrt_breaks, symlog_breaks,
     symlog_minor_breaks, temporal_breaks_date, temporal_breaks_datetime, temporal_breaks_time,
     temporal_minor_breaks_date, temporal_minor_breaks_datetime,
     temporal_minor_breaks_from_f64_with_interval, temporal_minor_breaks_time, CalendarUnit,

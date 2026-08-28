@@ -296,10 +296,17 @@ pub fn temporal_breaks_with_interval(
         .collect()
 }
 
-/// Calendar-aligned minor breaks for a temporal scale. Subdivides each
-/// major-unit interval by a sensible sub-unit: year → quarter, quarter
-/// → month, month → week, week → day, day → 6-hour, hour → 15-minute,
-/// minute → 15-second.
+/// Calendar-aligned minor breaks for a temporal scale. Majors spanning
+/// several of their unit divide inside it — twelve hours by three,
+/// thirty seconds by ten — and single-unit majors take the sub-unit
+/// below: year → quarter, month → week, week → day, day → 6-hour,
+/// hour → 15-minute, minute → 15-second. Either way the minors sit on
+/// that sub-interval's own calendar grid, skipping the points a major
+/// already holds, so weekly minors are Mondays rather than a fixed
+/// offset into each month and how many fall between two majors follows
+/// the calendar. Empty once the majors are one of the finest unit the
+/// data type resolves: a day-spaced `Date` axis has no minors, while a
+/// two-day one takes a minor between each pair.
 pub fn temporal_minor_breaks(
     input_range: Option<&InputRange>,
     unit: TemporalUnit,
@@ -316,10 +323,10 @@ pub fn temporal_minor_breaks(
         .collect()
 }
 
-/// Calendar-aligned minor breaks under a caller-chosen major interval.
-/// Subdivides `interval` — the counterpart to
-/// [`temporal_breaks_with_interval`], so majors pinned to an interval and
-/// their minors agree on what they're subdividing.
+/// Calendar-aligned minor breaks under a caller-chosen major interval —
+/// the counterpart to [`temporal_breaks_with_interval`], so majors
+/// pinned to an interval and their minors agree on what is being
+/// divided. Placement follows [`temporal_minor_breaks`].
 pub fn temporal_minor_breaks_with_interval(
     input_range: Option<&InputRange>,
     unit: TemporalUnit,

@@ -100,9 +100,9 @@ pub struct GridNode {
 
 /// Per-grid respect policy. Mirrors R `grid`'s `respect` argument:
 /// `None` lets each axis size independently; `All` couples every fr
-/// track across both axes (today's `Grid::respect()` behaviour); `Matrix`
-/// selectively couples only the (row, col) cells marked `true` so the
-/// unrespected fr tracks absorb whatever slack remains.
+/// track across both axes; `Matrix` selectively couples only the (row, col)
+/// cells marked `true` so the unrespected fr tracks absorb whatever slack
+/// remains.
 #[derive(Clone, Debug, Default)]
 pub enum Respect {
     /// Each axis sizes independently. Default.
