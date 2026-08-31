@@ -737,7 +737,7 @@ pub trait Geom: 'static {
     /// Number of pickable **marks** this geom will draw — one ticket per
     /// mark in the pick table. For "one mark per row" geoms (PointGeom)
     /// this is the same as [`Self::len`] and the default impl suffices.
-    /// Multi-row-per-mark geoms (LineGeom, future AreaGeom, ...)
+    /// Multi-row-per-mark geoms (LineGeom, AreaGeom, ...)
     /// override this to return their mark count.
     fn mark_count(&self) -> usize {
         self.len()

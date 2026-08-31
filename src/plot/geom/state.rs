@@ -4,7 +4,7 @@
 //!
 //! Every geom struct in `crate::plot::geom` is just `GeomState` plus
 //! whatever caches the geom needs for its own draw loop (LineGeom adds
-//! `Vec<MarkSlot>`; future area / ribbon / bar geoms add their own).
+//! `Vec<MarkSlot>`).
 //! The `Geom` trait's `state()` / `state_mut()` accessors give the
 //! shared default impls (`len`, `is_empty`, `mark_count`,
 //! `rebuild_diff_against_previous`, `declared_channels`) something to

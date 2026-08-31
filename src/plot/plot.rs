@@ -15,7 +15,6 @@
 //! `wire → solve → draw_chrome → draw_panel` flow with dirty tracking.
 //! Stand-alone Plot use is supported for tests and one-off renders.
 //!
-//! See `we-are-approaching-the-binary-kitten.md` for the full design.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -175,9 +174,7 @@ pub struct Plot {
     /// Next [`LegendId`] to hand out from `add_legend*`.
     next_legend_id: u32,
 
-    /// Coordinate projection. v1 ships `Cartesian` only — geom output
-    /// is unchanged from the pre-projection era. E.3b introduces
-    /// `Polar` for partial-arc / gauge layouts.
+    /// Coordinate projection.
     projection: crate::plot::projection::Projection,
 
     /// Whether geoms are clipped to the projection's outline when
@@ -508,8 +505,6 @@ impl Plot {
     }
 
     /// Set the coordinate projection (consumes self; builder-style).
-    /// v1 ships only `Cartesian` (default) — output is unchanged from
-    /// the pre-projection era. E.3b introduces `Polar`.
     pub fn projection(mut self, p: crate::plot::projection::Projection) -> Self {
         self.projection = p;
         self

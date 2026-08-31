@@ -1025,9 +1025,10 @@ impl PlotComposition {
 
     /// Replace the registry backing composition-level legend key
     /// glyphs. Per-plot legends resolve through their own plot's
-    /// registry.
+    /// registry. Chainable builder form of
+    /// [`Self::set_shape_registry`].
     pub fn shape_registry(mut self, r: ShapeRegistry) -> Self {
-        self.shapes = r;
+        self.set_shape_registry(r);
         self
     }
 
@@ -1055,9 +1056,10 @@ impl PlotComposition {
 
     /// Replace the register the composition's own chrome resolves
     /// image names against. Each plot's chrome and geoms read their
-    /// own plot's register instead.
+    /// own plot's register instead. Chainable builder form of
+    /// [`Self::set_image_registry`].
     pub fn image_registry(mut self, r: crate::image_registry::ImageRegistry) -> Self {
-        self.images = std::sync::Arc::new(r);
+        self.set_image_registry(r);
         self
     }
 
@@ -1512,6 +1514,23 @@ mod tests {
         // Both plots reference "time" → both flagged.
         assert!(view.plot_dirty.get("a").copied().unwrap_or(false));
         assert!(view.plot_dirty.get("b").copied().unwrap_or(false));
+    }
+
+    #[test]
+    fn registry_builders_flip_layout_dirty() {
+        // The consuming builder forms delegate to their `set_*`
+        // counterparts, so a registry swapped in after a render still
+        // re-solves — a legend key's glyph or an image in a title can
+        // change its measure.
+        let mut view = PlotComposition::new(&comp_two());
+        view.layout_dirty = false;
+        let view = view.shape_registry(ShapeRegistry::with_builtins());
+        assert!(view.layout_dirty);
+
+        let mut view = view;
+        view.layout_dirty = false;
+        let view = view.image_registry(crate::image_registry::ImageRegistry::new());
+        assert!(view.layout_dirty);
     }
 
     #[test]
