@@ -1340,7 +1340,7 @@ fn features_and_axes_share_one_style_attribute() {
 #[test]
 fn a_tag_that_would_break_the_css_string_is_dropped() {
     let svg = styled(TextStyle::new(12.0).features([FontFeatureSetting {
-        tag: [b't', b'n', b'\'', b'm'],
+        tag: *b"tn'm",
         value: 1,
     }]));
     assert!(!svg.contains("font-feature-settings"), "{svg}");
