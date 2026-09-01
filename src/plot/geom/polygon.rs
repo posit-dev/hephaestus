@@ -696,6 +696,7 @@ fn draw_one_polygon_mark(
             cap,
             join,
             miter_limit: MITER_LIMIT,
+            ..Default::default()
         };
         for (r, ring) in offset_rings.iter().enumerate() {
             if ring.len() < 3 {

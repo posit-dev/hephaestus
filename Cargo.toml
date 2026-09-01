@@ -148,7 +148,23 @@ blend2d = []
 # reported through `SvgWarning::MissingPngFeature`, the same
 # degradation a document without `png` produces.
 svg = ["dep:skrifa"]
-pdf = []
+# Fixed vector output: implements `SceneBuilder` and emits a PDF file
+# rather than pixels. Where `svg` aims at output someone can edit, this
+# aims at output that looks the same everywhere — so the glyphs a plot
+# draws are embedded, always, as a synthesized subset font a few kB in
+# size rather than the megabyte face they came from. `skrifa` reads
+# those outlines and drives the COLR paint traversal that puts color
+# emoji on the page; both it and `flate2` are already in the tree, via
+# parley and `png` respectively.
+#
+# A raster image needs no codec — PDF takes raw samples — so unlike
+# `svg` this gate does not imply `png` for images. It does reach for it
+# in one place: a *bitmap* color glyph (Apple Color Emoji and most
+# Android emoji ship PNG strikes), which has to be decoded before it can
+# be re-encoded as an image XObject. Without `png` those glyphs are
+# reported through `PdfWarning::MissingPngFeature` and everything else
+# still renders.
+pdf = ["dep:skrifa", "dep:flate2"]
 
 [dependencies]
 kurbo = "0.13"
@@ -178,6 +194,10 @@ wgpu = { version = "29", optional = true, default-features = false, features = [
 pollster = { version = "0.4", optional = true }
 futures-intrusive = { version = "0.5", optional = true }
 png = { version = "0.18", optional = true }
+# `FlateDecode` for PDF streams. `default-features = false` plus
+# `rust_backend` pins the pure-Rust miniz_oxide path, which is what
+# builds for wasm; the same crate arrives transitively with `png`.
+flate2 = { version = "1", optional = true, default-features = false, features = ["rust_backend"] }
 jpeg-encoder = { version = "0.7", optional = true }
 # The decode half of the `jpeg` feature — `jpeg-encoder` is write-only, so
 # this is the one format whose two directions come from two crates.
@@ -259,6 +279,12 @@ required-features = ["vello", "png"]
 [[example]]
 name = "svg_export"
 required-features = ["svg", "vello", "png"]
+
+# The same shape as `svg_export`, and for the same reason: the PDF and
+# the PNG come from one composition so the pair can be compared.
+[[example]]
+name = "pdf_export"
+required-features = ["pdf", "vello", "png"]
 
 [[example]]
 name = "hello_hybrid"

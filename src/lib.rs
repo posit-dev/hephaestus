@@ -39,6 +39,9 @@ pub mod png;
 #[cfg(feature = "svg")]
 pub mod svg;
 
+#[cfg(feature = "pdf")]
+pub mod pdf;
+
 // `canvas` only has a host to compile on wasm (`wgpu::SurfaceTarget::Canvas`
 // is web-only), so on any other target that feature leaves the module out
 // entirely rather than pulling in an unreachable one.

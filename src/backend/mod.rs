@@ -25,6 +25,15 @@ pub mod hybrid;
 #[cfg(feature = "svg")]
 pub mod svg;
 
+#[cfg(feature = "pdf")]
+pub mod pdf;
+
+// The link-safety allow-list, shared by the two backends that emit a
+// clickable destination. Two copies of a security check is how they
+// drift.
+#[cfg(any(feature = "svg", feature = "pdf"))]
+mod href;
+
 /// Owns backend resources (GPU device, pipelines, etc.) and rasterizes a scene
 /// to an RGBA8 buffer.
 ///

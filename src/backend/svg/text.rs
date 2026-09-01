@@ -31,6 +31,7 @@ use super::defs::Defs;
 use super::paint;
 use super::writer::{escape_attr, escape_text, num, transform_attr};
 use super::{SvgWarning, Warnings};
+use crate::backend::href::safe_href;
 use crate::geometry::Affine;
 use crate::pick::PickId;
 use crate::scene::{GlyphRun, TextGroup};
@@ -646,27 +647,6 @@ fn generic_keyword(kind: GenericFamilyKind) -> &'static str {
     }
 }
 
-/// True when a link destination is safe to put in an `href`.
-///
-/// Markdown here is layered over arbitrary user strings, and an inlined
-/// SVG carrying a `javascript:` href is a script-injection vector.
-/// Anything not on the allowed list falls back to plain styled text.
-fn safe_href(url: &str) -> bool {
-    let trimmed = url.trim_start();
-    if trimmed.starts_with('#') || trimmed.starts_with('/') {
-        return true;
-    }
-    match trimmed.split_once(':') {
-        None => true, // relative
-        Some((scheme, _)) => {
-            matches!(
-                scheme.trim().to_ascii_lowercase().as_str(),
-                "http" | "https" | "mailto"
-            )
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -697,17 +677,5 @@ mod tests {
     fn family_names_needing_quotes_get_them() {
         let s = spec(vec![FontFamilyEntry::Named("Open Sans".into())], 400);
         assert_eq!(family_list(&s), "'Open Sans', sans-serif");
-    }
-
-    #[test]
-    fn dangerous_link_schemes_are_refused() {
-        assert!(safe_href("https://example.com"));
-        assert!(safe_href("http://example.com"));
-        assert!(safe_href("mailto:a@b.c"));
-        assert!(safe_href("#anchor"));
-        assert!(safe_href("relative/path"));
-        assert!(!safe_href("javascript:alert(1)"));
-        assert!(!safe_href("  JavaScript:alert(1)"));
-        assert!(!safe_href("data:text/html,<script>"));
     }
 }

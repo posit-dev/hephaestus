@@ -95,10 +95,8 @@ use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomConte
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
 // Style defaults — size, shape, stroke width — come from
-// `theme.geom.point` at draw time. The geom no longer injects
-// `Channel::Constant(...)` for missing channels in `build_from`; the
-// draw loop calls the `resolve_*_or` helpers with the theme value as
-// the fallback.
+// `theme.geom.point` at draw time: the draw loop calls the
+// `resolve_*_or` helpers with the theme value as the fallback.
 
 /// Reference local-bbox height for built-in vector shapes (circle:
 /// r=0.8 → bbox 1.6×1.6). The glyph branch scales font-size by

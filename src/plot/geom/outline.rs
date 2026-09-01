@@ -738,6 +738,7 @@ pub(crate) fn draw_ribbon_mode_curve(
         cap: spec.cap,
         join: spec.join,
         miter_limit: RIBBON_MITER_LIMIT,
+        ..Default::default()
     };
     let mesh = polyline_ribbon_full(
         &clipped,

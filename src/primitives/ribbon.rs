@@ -92,6 +92,16 @@ pub struct RibbonOptions {
     /// join. Joins exceeding this fall back to bevel for that join
     /// only. Matches the SVG default of `4.0`.
     pub miter_limit: f64,
+    /// How far each interior quad is extended past its natural
+    /// endpoint, in panel pixels, so adjacent quads overlap.
+    ///
+    /// Exists to hide the antialiased seam a consumer leaves when it
+    /// paints each quad as an independent fill, which is what every
+    /// rasterizing backend does. Set it to `0.0` when the consumer
+    /// paints the mesh as one object — a PDF `ShadingType 4` shading,
+    /// say — where there is no seam to hide and the overlap is pure
+    /// distortion.
+    pub seam_bleed: f64,
 }
 
 impl Default for RibbonOptions {
@@ -101,6 +111,7 @@ impl Default for RibbonOptions {
             cap: Cap::Butt,
             join: Join::Miter,
             miter_limit: 4.0,
+            seam_bleed: SEAM_BLEED_PX,
         }
     }
 }
@@ -271,6 +282,24 @@ pub fn ribbon_band_mesh(
     colors_a: &[Color],
     colors_b: &[Color],
 ) -> Mesh {
+    ribbon_band_mesh_with_bleed(curve_a, curve_b, colors_a, colors_b, SEAM_BLEED_PX / 3.0)
+}
+
+/// As [`ribbon_band_mesh`], with the interior seam-bleed under the
+/// caller's control.
+///
+/// `0.0` leaves every quad at its geometric position, which is what a
+/// consumer painting the mesh as one object wants — a PDF
+/// `ShadingType 4` shading interpolates across the whole strip and has
+/// no seam to hide, so the overlap is pure distortion there.
+/// [`ribbon_band_mesh`] passes the default.
+pub fn ribbon_band_mesh_with_bleed(
+    curve_a: &[Point],
+    curve_b: &[Point],
+    colors_a: &[Color],
+    colors_b: &[Color],
+    seam_bleed: f64,
+) -> Mesh {
     assert_eq!(
         curve_a.len(),
         curve_b.len(),
@@ -318,12 +347,9 @@ pub fn ribbon_band_mesh(
         // Bleed interior seams; outer-most quad edges (segment 0's near
         // end and the last segment's far end) carry the band's actual
         // endpoints — leave them alone so any caller-drawn endcap lines
-        // up flush. Use a third of the polyline-ribbon's bleed: enough
-        // to cover the AA edge without stacking enough alpha to be
-        // perceptible on translucent fills.
-        let interior_bleed = SEAM_BLEED_PX / 3.0;
-        let near_bleed = if i > 0 { interior_bleed } else { 0.0 };
-        let far_bleed = if i + 1 < segs { interior_bleed } else { 0.0 };
+        // up flush.
+        let near_bleed = if i > 0 { seam_bleed } else { 0.0 };
+        let far_bleed = if i + 1 < segs { seam_bleed } else { 0.0 };
         let near_off = tangent * near_bleed;
         let far_off = tangent * far_bleed;
 
@@ -597,7 +623,7 @@ fn ribbon_inner(
     // unused.
     let cap_bleed_amount = match opts.cap {
         Cap::Butt => 0.0,
-        Cap::Square | Cap::Round => SEAM_BLEED_PX,
+        Cap::Square | Cap::Round => opts.seam_bleed,
     };
     for i in 0..n_segs {
         let i_next = (i + 1) % n;
@@ -608,12 +634,12 @@ fn ribbon_inner(
         // polylines the segment's near boundary is the start cap when
         // i == 0, and the far boundary is the end cap when i == n-2.
         let near_bleed_amount = if closed || i > 0 {
-            SEAM_BLEED_PX
+            opts.seam_bleed
         } else {
             cap_bleed_amount
         };
         let far_bleed_amount = if closed || i + 1 < n - 1 {
-            SEAM_BLEED_PX
+            opts.seam_bleed
         } else {
             cap_bleed_amount
         };
@@ -891,6 +917,7 @@ mod tests {
             cap: Cap::Butt,
             join: Join::Miter,
             miter_limit: 4.0,
+            ..Default::default()
         };
         let mesh = polyline_ribbon(&pts, red(), &opts);
         assert_eq!(mesh.vertex_count(), 4);
@@ -999,6 +1026,56 @@ mod tests {
             for (s, e) in sorted.iter().zip(expected.iter()) {
                 assert!(approx(*s, *e), "at x={x}, got {s}, expected {e}");
             }
+        }
+    }
+
+    /// With the bleed off, every interior shoulder sits where the
+    /// geometry puts it — which is what a consumer painting the mesh as
+    /// one object wants, since it has no antialiased seam to hide.
+    #[test]
+    fn a_zero_seam_bleed_leaves_interior_shoulders_at_the_geometric_position() {
+        let pts = [pt(0.0, 0.0), pt(5.0, 0.0), pt(10.0, 0.0)];
+        let widths = [1.0_f64, 2.0, 1.0];
+        let opts = RibbonOptions {
+            seam_bleed: 0.0,
+            ..Default::default()
+        };
+        let mesh = polyline_ribbon_full(&pts, None, Some(&widths), &opts);
+        let interior: Vec<f64> = mesh
+            .vertices
+            .iter()
+            .map(|p| p.x)
+            .filter(|x| (*x - 5.0).abs() < 1.0)
+            .collect();
+        assert!(!interior.is_empty(), "the interior vertex is present");
+        for x in interior {
+            assert!(
+                approx(x, 5.0),
+                "the bleed is off, so nothing is staggered off 5.0: got {x}"
+            );
+        }
+        // The default still staggers, which is what every rasterizing
+        // backend needs.
+        let bled = polyline_ribbon_full(&pts, None, Some(&widths), &RibbonOptions::default());
+        assert!(
+            bled.vertices
+                .iter()
+                .any(|p| (p.x - 4.25).abs() < 1e-6 || (p.x - 5.75).abs() < 1e-6),
+            "the default bleed is unchanged"
+        );
+    }
+
+    #[test]
+    fn a_zero_bleed_band_mesh_keeps_its_quads_apart() {
+        let a = [pt(0.0, 0.0), pt(5.0, 0.0), pt(10.0, 0.0)];
+        let b = [pt(0.0, 4.0), pt(5.0, 4.0), pt(10.0, 4.0)];
+        let colors = [crate::color::Color::BLACK; 3];
+        let mesh = ribbon_band_mesh_with_bleed(&a, &b, &colors, &colors, 0.0);
+        for p in &mesh.vertices {
+            assert!(
+                approx(p.x, 0.0) || approx(p.x, 5.0) || approx(p.x, 10.0),
+                "no vertex is displaced: {p:?}"
+            );
         }
     }
 

@@ -40,10 +40,20 @@ Geometry transforms (`round_corners`, `clip_polyline`, `offset_polygon`, `round_
 - **`polyline_ribbon`**, **`polyline_ribbon_full`** — open ribbons.
 - **`polygon_ribbon`**, **`polygon_ribbon_full`** — closed ribbons.
 - **`polyline_gradient`**, **`polygon_gradient`** — colour-along helpers.
-- **`ribbon_band_mesh`** — quad-strip mesh between two co-indexed polylines (curve A and curve B). Used by `RibbonGeom`'s mesh path for free-form bands and for axis-aligned bands under non-linear projections, where a screen-aligned linear-gradient brush would misrepresent the sweep.
+- **`ribbon_band_mesh`**, **`ribbon_band_mesh_with_bleed`** — quad-strip mesh between two co-indexed polylines (curve A and curve B). Used by `RibbonGeom`'s mesh path for free-form bands and for axis-aligned bands under non-linear projections, where a screen-aligned linear-gradient brush would misrepresent the sweep.
 - **`RibbonOptions`** — configuration. Reuses [`crate::stroke::Cap`] / [`crate::stroke::Join`] (same three variants each — no need for ribbon-specific enums).
 
 If every vertex would share the same colour, a plain `stroke` / `fill` with a solid brush is cheaper than a ribbon mesh — the per-vertex colour is the whole point.
+
+### The seam bleed
+
+Every interior quad is extended a little past its natural endpoint along the local segment tangent, so adjacent quads overlap. That is a compensation for how meshes are *consumed*: no rasterizing backend has an indexed-mesh primitive, so `backend/mesh.rs` decomposes a mesh into one fill per quad, and two independent antialiased fills meeting on a shared edge leave a visible seam. Overlapping them makes SrcOver render the join fully opaque.
+
+`RibbonOptions::seam_bleed` (default `0.75` px) and `ribbon_band_mesh_with_bleed` (default a third of that — a band's quads each carry their own gradient brush, so a bigger overlap would double-coat a translucent fill perceptibly) exist so a caller feeding a consumer that paints the mesh as *one object* can turn it off. `backend/pdf/` is that consumer: a `ShadingType 4` shading interpolates across the whole strip with no edge between triangles, so there is no seam to hide and the overlap is pure distortion.
+
+The displacement is baked into `Mesh.vertices`, which means it happens before any backend sees the mesh — so nothing in `plot/` sets the knob today. A geom builds its mesh before it knows what sink it is drawing into, and `SceneBuilder` has no "do you paint meshes natively" query to add without breaking the intersection-of-backends rule. Wiring it per-backend needs a render hint on `PlotComposition`; that is a `PLAN.md` item.
+
+Gradient stops are computed against the original, unbled axis, so the bleed introduces a small color shift at the original endpoints rather than moving the ramp.
 
 ## Shared internals
 
