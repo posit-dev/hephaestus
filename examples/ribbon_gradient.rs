@@ -66,6 +66,7 @@ fn main() {
             cap: Cap::Round,
             join: Join::Round,
             miter_limit: 4.0,
+            ..Default::default()
         };
         let mesh = polyline_gradient(&points, &colors, &opts);
         render_mesh(
@@ -106,6 +107,7 @@ fn main() {
             cap: Cap::Round,
             join: Join::Round,
             miter_limit: 4.0,
+            ..Default::default()
         };
         // `polyline_ribbon_full` with no colours uses black; pass a
         // same-colour slice for the desired stroke colour.
@@ -173,6 +175,7 @@ fn main() {
             cap: Cap::Round,
             join: Join::Round,
             miter_limit: 4.0,
+            ..Default::default()
         };
         let mesh = polyline_ribbon_full(&points, Some(&colors), Some(&half_widths), &opts);
         render_mesh(
@@ -220,6 +223,7 @@ fn main() {
                     cap: *cap,
                     join: *join,
                     miter_limit: 4.0,
+                    ..Default::default()
                 };
                 let stroke = rgb8(40, 90, 180);
                 all_meshes.push(polyline_ribbon(&pts, stroke, &opts));
@@ -262,6 +266,7 @@ fn main() {
             cap: Cap::Butt,
             join: Join::Round,
             miter_limit: 4.0,
+            ..Default::default()
         };
         let mesh = polygon_gradient(&points, &colors, &opts);
         render_mesh(
@@ -312,6 +317,7 @@ fn main() {
             cap: Cap::Butt, // ignored by polygon_*
             join: Join::Round,
             miter_limit: 4.0,
+            ..Default::default()
         };
         let mesh = polygon_ribbon_full(&points, Some(&colors), Some(&half_widths), &opts);
         render_mesh(

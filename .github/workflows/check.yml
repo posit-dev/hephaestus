@@ -87,6 +87,15 @@ jobs:
           cargo check --no-default-features --features svg --all-targets
           cargo check --no-default-features --features svg,png --all-targets
 
+      # The PDF backend needs no codec for a raster image — PDF takes raw
+      # samples — but it does reach for `png` to decode a bitmap color
+      # glyph, which is how most emoji ship. Same two-halves reasoning as
+      # the SVG job above.
+      - name: cargo check, the PDF backend with and without an image codec
+        run: |
+          cargo check --no-default-features --features pdf --all-targets
+          cargo check --no-default-features --features pdf,png --all-targets
+
       # The sparse-strips backend must stand on its own: `--all-features`
       # builds it beside the compute-shader one, which would hide anything it
       # reaches for through the other backend's gates.
@@ -188,6 +197,13 @@ jobs:
           cargo check --no-default-features --features document-read,svg \
             --all-targets --ignore-rust-version
 
+      # And the same claim for the fixed vector backend, which adds only
+      # `flate2` over what `svg` needs.
+      - name: cargo check, document in / PDF out on the oldest rustc
+        run: |
+          cargo check --no-default-features --features document-read,pdf \
+            --all-targets --ignore-rust-version
+
   # wasm32 is a supported target, so it gets its own job: it shares no compiled
   # artifacts with the host build and needs none of the system libraries above
   # (fontconfig and Vulkan are both gated to native targets). Catches
@@ -230,6 +246,13 @@ jobs:
         run: |
           cargo check --target wasm32-unknown-unknown --no-default-features \
             --features svg,document-read
+
+      # A PDF download is the other obvious thing for a page to offer, and
+      # `flate2` has to resolve to its pure-Rust backend to get there.
+      - name: cargo check --target wasm32-unknown-unknown, PDF out
+        run: |
+          cargo check --target wasm32-unknown-unknown --no-default-features \
+            --features pdf,document-read
 
       # The render client's exact configuration: the canvas host plus a
       # read-only document reader, and nothing else. Checked on its own

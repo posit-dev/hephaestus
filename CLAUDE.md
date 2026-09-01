@@ -4,7 +4,7 @@ Repo-level orientation for working in `hephaestus`. Architecture, module map, an
 
 ## Project
 
-`hephaestus` is a 2D scene renderer for data visualization. The crate exposes a backend-agnostic scene API, two Vello backends over wgpu — Vello Classic (GPU compute) and Vello Hybrid (sparse strips: path processing on the CPU, a render pipeline on the GPU) — and an SVG backend that emits markup rather than pixels; future planned backends are Blend2D (CPU raster) and PDF. Performance for interactive / real-time updates on dense plots is the design driver. WASM must work.
+`hephaestus` is a 2D scene renderer for data visualization. The crate exposes a backend-agnostic scene API, two Vello backends over wgpu — Vello Classic (GPU compute) and Vello Hybrid (sparse strips: path processing on the CPU, a render pipeline on the GPU) — and two vector backends that emit markup rather than pixels: SVG, aimed at editable output, and PDF, aimed at a fixed artifact with its fonts embedded. The one future planned backend is Blend2D (CPU raster). Performance for interactive / real-time updates on dense plots is the design driver. WASM must work.
 
 The crate ships two API levels in the same source tree: a low-level scene API (`SceneBuilder` + primitives + layout) and a high-level plot API (`plot::*` — geoms, scales, and the `PlotComposition` orchestrator) built on top of it. See `src/CLAUDE.md` for the split and the rules that govern it.
 
@@ -30,13 +30,17 @@ cargo check --no-default-features --features window,vello-hybrid,png  # presenta
 cargo test --features document --test document_roundtrip # plot documents: reflow at unseen sizes
 cargo test --features svg --test svg                     # the vector backend, with and without a codec
 cargo test --features svg,png --test svg
+cargo test --features pdf --test pdf                     # the fixed vector backend
+cargo test --no-default-features --features pdf,png --test pdf  # …and its one use for a codec: bitmap color glyphs
 
 cargo clippy --all-features --all-targets -- -D warnings # treat warnings as errors
 cargo fmt                                                # rustfmt; always run before declaring a task done
 
 cargo run --example hello                                # renders examples/hello.png — visual sanity check
 cargo run --example svg_export --features svg            # one plot as both SVG and PNG, for side-by-side review
+cargo run --example pdf_export --features pdf,vello,png  # the same plot as both PDF and PNG
 cargo check --no-default-features --features document-read,svg  # renderer-free: document in, SVG out
+cargo check --no-default-features --features document-read,pdf  # …and document in, PDF out
 cargo run --example image_formats --features jpeg,tiff,webp  # all four raster writers
 cargo run --example image_geom                           # raster images placed in a panel, and in markdown
 cargo run --example document_placeholder --features vello-hybrid,document-read,png  # the static picture a page shows while the client boots
@@ -101,7 +105,8 @@ Style rules (apply everywhere, including comments in `tests/` and `examples/`):
 - **`geom-wkt`**, **`geom-wkb`**, **`geom-geojson`** (off by default) — opt-in parsers for `crate::scales::Geometry`. Each gate enables one of `Geometry::from_wkt` / `from_wkb` / `from_geojson`. Hand-rolled and dependency-free, so toggling them only affects what constructors compile, not the dependency tree.
 - **`document-read`**, **`document-write`**, **`document`** (off by default) — plot documents: capture a `PlotComposition` to a self-contained binary file and rebuild it elsewhere, so a wasm build on a website re-solves the layout at whatever size it has rather than scaling a frozen image. Hand-rolled and dependency-free, like the `geom-*` parsers. Split by direction because a consumer only ever reads; `document` enables both. See `src/document/CLAUDE.md`. Adding no dependency of their own, they are also the one useful configuration with no renderer at all: `--no-default-features --features document-write` builds a writer that compiles on rustc 1.86, which `vello` rules out.
 - **`svg`** (off by default) — vector output: a `SceneBuilder` that emits SVG text instead of pixels, so it implements `SceneBuilder` and not `Renderer`. The point is *editable* output rather than merely vector output — text arrives as real `<text>` elements naming their font, markdown links as `<a href>`, decorations as `text-decoration`, and a filled-and-stroked mark as one `<path>` rather than two stacked ones. Needs no GPU and adds only `skrifa` (already in the tree via parley, for the glyph-outline fallback), which makes `--no-default-features --features document-read,svg` a renderer-free "document in, SVG out" build on rustc 1.86. Embedding a raster image additionally needs `png`; without it an image is reported and skipped. See `src/backend/svg/CLAUDE.md`.
-- **`blend2d`**, **`pdf`** — feature placeholders only; no backend code behind them yet. Wired so dependent crates can write `features = ["blend2d"]` once they exist.
+- **`pdf`** (off by default) — fixed vector output: a `SceneBuilder` that emits a PDF file. Where `svg` aims at output someone can *edit*, this aims at output that looks the same everywhere — a figure going into a paper, a print pipeline or an archive. So every glyph a plot draws is embedded, always, as a subset font synthesized from the outlines actually used: a few kB rather than the 2.4 MB collection macOS resolves `sans-serif` to, and one code path that also handles CFF faces, variable-font instances and collections, none of which `svg` can embed. Adds `skrifa` (already in the tree via parley) and `flate2` (already there via `png`), so `--no-default-features --features document-read,pdf` is a renderer-free "document in, PDF out" build on rustc 1.86. Unlike `svg` it does not need `png` for raster images — PDF takes raw samples — but it does reach for it to decode a *bitmap* color glyph, which is how most emoji ship; without it those report `PdfWarning::MissingPngFeature`. Three things this expresses that `svg` cannot: real transparency groups, a native Gouraud mesh shading, and color emoji. See `src/backend/pdf/CLAUDE.md`.
+- **`blend2d`** — a feature placeholder only; no backend code behind it yet. Wired so dependent crates can write `features = ["blend2d"]` once it exists.
 
 The core types and traits compile with `--no-default-features` (no wgpu pulled in), so downstream crates can build on top of `SceneBuilder` without GPU dependencies.
 
@@ -175,6 +180,7 @@ See `crates/hephaestus-wasm/CLAUDE.md` for the npm side in detail.
 ## Where to look next
 
 - **`src/backend/svg/CLAUDE.md`** — the vector backend: why text is `textLength` rather than per-glyph positions, and what degrades.
+- **`src/backend/pdf/CLAUDE.md`** — the fixed vector backend: why the embedded font is synthesized rather than sliced, the pattern-matrix trap, and why this is the first backend that draws a mesh correctly.
 - **`src/CLAUDE.md`** — code architecture: API levels, two-trait split, intersection-of-backends rule, picking model, module map.
 - **Per-module `CLAUDE.md` files** under `src/scene/`, `src/backend/`, `src/backend/vello/`, `src/backend/hybrid/`, `src/layout/`, `src/composition/`, `src/document/`, `src/primitives/`, `src/plot/`, `src/plot/geom/`, `src/plot/theme/`, `src/scales/`, `src/image/`, `src/text/`, `src/text/rich/`, `src/window/`.
 - **`crates/hephaestus-wasm/CLAUDE.md`** — the wasm render client: the Rust/JS split, why WebGPU is required, and why fonts are the thing that surprises people.

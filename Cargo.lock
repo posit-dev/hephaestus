@@ -1014,6 +1014,7 @@ dependencies = [
  "chrono",
  "clipper2-rust",
  "directories",
+ "flate2",
  "futures-intrusive",
  "glifo",
  "image-webp",
