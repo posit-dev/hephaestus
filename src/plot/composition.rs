@@ -1155,13 +1155,15 @@ impl PlotComposition {
     /// plot list — multiple plots per patch are supported; later
     /// plots draw on top of earlier ones. Flips the layout's dirty
     /// flag.
-    pub fn attach_plot(&mut self, plot: Plot) {
+    pub fn attach_plot(&mut self, mut plot: Plot) {
         let id = plot.patch_id().to_string();
         self.plot_dirty.insert(id.clone(), true);
         if !self.plots.contains_key(&id) {
             self.plot_order.push(id.clone());
         }
-        self.plots.entry(id).or_default().push(plot);
+        let list = self.plots.entry(id).or_default();
+        plot.set_index_in_patch(list.len() as u32);
+        list.push(plot);
         self.layout_dirty = true;
     }
 
@@ -1485,6 +1487,36 @@ mod tests {
         assert_eq!(view.template.cols, 2);
         assert_eq!(view.template.rows, 1);
         assert_eq!(view.template.placements.len(), 2);
+    }
+
+    #[test]
+    fn attach_numbers_plots_within_their_patch() {
+        let mut view = PlotComposition::new(&comp_two());
+        view.attach_plot(Plot::new(&comp_two(), "a"));
+        view.attach_plot(Plot::new(&comp_two(), "a"));
+        view.attach_plot(Plot::new(&comp_two(), "b"));
+
+        let a = view.plots_in("a");
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0].index_in_patch(), 0);
+        assert_eq!(a[1].index_in_patch(), 1);
+        // Numbering is per patch, not global.
+        assert_eq!(view.plots_in("b")[0].index_in_patch(), 0);
+    }
+
+    #[test]
+    fn detaching_a_patch_leaves_other_patches_numbered() {
+        let mut view = PlotComposition::new(&comp_two());
+        view.attach_plot(Plot::new(&comp_two(), "a"));
+        view.attach_plot(Plot::new(&comp_two(), "b"));
+        view.attach_plot(Plot::new(&comp_two(), "b"));
+
+        // `detach_plot` removes a whole patch's list, so no surviving plot's
+        // index shifts — which is what makes `(patch_id, index)` a stable key.
+        view.detach_plot("a");
+        let b = view.plots_in("b");
+        assert_eq!(b[0].index_in_patch(), 0);
+        assert_eq!(b[1].index_in_patch(), 1);
     }
 
     #[test]

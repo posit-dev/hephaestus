@@ -14,7 +14,8 @@ use crate::geometry::{Affine, Point, Rect, Vec2};
 use crate::layout::{Measure, WidthHint};
 use crate::pick::PickId;
 use crate::plot::chrome::linear_axis::{
-    draw_axis_label, draw_linear_axis_at, AxisChromeStyle, AxisLabelAt,
+    axis_minor_ticks, axis_ticks, draw_axis_label, draw_linear_axis_at, AxisChromeStyle,
+    AxisLabelAt,
 };
 use crate::plot::chrome::text::ChromeRun;
 use crate::plot::projection::PolarProjection;
@@ -51,25 +52,8 @@ pub fn draw_radius_axis(
     if g.r_outer <= 0.0 {
         return;
     }
-    let majors: Vec<(f64, String)> = scale
-        .breaks(DEFAULT_BREAK_COUNT)
-        .iter()
-        .filter(|v| !matches!(v, Value::Null))
-        .filter_map(|v| {
-            scale
-                .map_break(v)
-                .as_number()
-                .map(|f| (f, scale.format(v, &theme.locale)))
-        })
-        .filter(|(f, _)| f.is_finite())
-        .collect();
-    let minors: Vec<f64> = scale
-        .minor_breaks(DEFAULT_BREAK_COUNT)
-        .into_iter()
-        .filter(|v| !matches!(v, Value::Null))
-        .filter_map(|v| scale.map_break(&v).as_number())
-        .filter(|f| f.is_finite())
-        .collect();
+    let majors = axis_ticks(&scale.breaks(DEFAULT_BREAK_COUNT), scale, &theme.locale);
+    let minors = axis_minor_ticks(scale, DEFAULT_BREAK_COUNT);
 
     let (ux, uy) = polar.unit_position(theta_frac);
     let start = Point::new(g.cx + g.r_inner * ux, g.cy - g.r_inner * uy);
@@ -103,12 +87,10 @@ pub fn draw_radius_axis(
             // calculation matches what the rail itself drew.
             let label_style = style.text_style.clone();
             let (max_label_w, max_label_h) =
-                majors
-                    .iter()
-                    .fold((0.0_f64, 0.0_f64), |(mw, mh), (_, label)| {
-                        let run = ChromeRun::shape(label, &label_style, dpi, style.rich.as_ref());
-                        (mw.max(run.width()), mh.max(run.line_box_height()))
-                    });
+                majors.iter().fold((0.0_f64, 0.0_f64), |(mw, mh), tick| {
+                    let run = ChromeRun::shape(&tick.label, &label_style, dpi, style.rich.as_ref());
+                    (mw.max(run.width()), mh.max(run.line_box_height()))
+                });
             // Projecting the label's bbox onto the tick direction picks
             // whichever axis the label is offset along. Equivalent to the
             // cartesian title placement past the longest label.

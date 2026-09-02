@@ -16,7 +16,9 @@
 
 use crate::geometry::{Point, Rect};
 use crate::layout::{Measure, WidthHint};
-use crate::plot::chrome::linear_axis::{draw_linear_axis_at, AxisChromeStyle};
+use crate::plot::chrome::linear_axis::{
+    axis_minor_ticks, axis_ticks, draw_linear_axis_at, AxisChromeStyle,
+};
 use crate::plot::scale::Scale;
 use crate::plot::theme::Theme;
 use crate::scales::breaks::DEFAULT_BREAK_COUNT;
@@ -57,6 +59,11 @@ pub struct Axis {
     scale_name: Option<String>,
     placement: AxisPlacement,
     title: Option<String>,
+    /// Handle minted when the axis is attached to a plot. `None` while
+    /// the axis is still free-standing — the caller holds the [`AxisId`]
+    /// that [`Plot::add_axis`](crate::plot::Plot::add_axis) returns, and
+    /// storing it here is what lets the draw walk report it back.
+    id: Option<AxisId>,
 }
 
 /// Where an axis sits relative to its plot.
@@ -93,6 +100,7 @@ impl Axis {
             scale_name: Some(scale_name.into()),
             placement,
             title: None,
+            id: None,
         }
     }
 
@@ -105,6 +113,7 @@ impl Axis {
             scale_name: None,
             placement,
             title: Some(title.into()),
+            id: None,
         }
     }
 
@@ -124,6 +133,17 @@ impl Axis {
     }
 
     /// Where the axis sits relative to its plot.
+    /// Handle this axis was attached under, or `None` if it has not been
+    /// attached to a plot.
+    pub fn id(&self) -> Option<AxisId> {
+        self.id
+    }
+
+    /// Record the handle minted at attach time.
+    pub(crate) fn set_id(&mut self, id: AxisId) {
+        self.id = Some(id);
+    }
+
     pub fn placement(&self) -> AxisPlacement {
         self.placement
     }
@@ -328,24 +348,8 @@ pub fn draw(
         ),
     };
 
-    let majors: Vec<(f64, String)> = breaks
-        .iter()
-        .filter(|v| !matches!(v, Value::Null))
-        .filter_map(|v| {
-            scale
-                .map_break(v)
-                .as_number()
-                .map(|f| (f, scale.format(v, &theme.locale)))
-        })
-        .filter(|(f, _)| f.is_finite())
-        .collect();
-    let minors: Vec<f64> = scale
-        .minor_breaks(DEFAULT_BREAK_COUNT)
-        .into_iter()
-        .filter(|v| !matches!(v, Value::Null))
-        .filter_map(|v| scale.map_break(&v).as_number())
-        .filter(|f| f.is_finite())
-        .collect();
+    let majors = axis_ticks(&breaks, scale, &theme.locale);
+    let minors = axis_minor_ticks(scale, DEFAULT_BREAK_COUNT);
 
     // Resolve the (channel, side) axis from the theme. Channel
     // is determined by which axis side this is — Bottom/Top
@@ -397,6 +401,40 @@ mod tests {
     use crate::plot::scale;
     use crate::scales::value::Value;
     use crate::scene::recording::{Op, RecordingScene};
+
+    #[test]
+    fn attaching_an_axis_records_the_handle_it_was_given() {
+        use crate::composition::{beside, Patch as CompPatch};
+        let comp = beside(CompPatch::new("a"), CompPatch::new("b"));
+        let mut plot = crate::plot::Plot::new(&comp, "a");
+
+        // Free-standing: no handle yet.
+        let axis = Axis::rail("x", AxisPlacement::Cartesian(AxisSide::Bottom));
+        assert_eq!(axis.id(), None);
+
+        let first = plot.add_axis(axis);
+        let second = plot.add_axis(Axis::rail("y", AxisPlacement::Cartesian(AxisSide::Left)));
+
+        assert_eq!(plot.axes()[0].id(), Some(first));
+        assert_eq!(plot.axes()[1].id(), Some(second));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn handles_stay_unique_across_a_clear() {
+        use crate::composition::{beside, Patch as CompPatch};
+        let comp = beside(CompPatch::new("a"), CompPatch::new("b"));
+        let mut plot = crate::plot::Plot::new(&comp, "a");
+
+        let first = plot.add_axis(Axis::rail("x", AxisPlacement::Cartesian(AxisSide::Bottom)));
+        plot.clear_axes();
+        let after = plot.add_axis(Axis::rail("x", AxisPlacement::Cartesian(AxisSide::Bottom)));
+
+        // `clear_axes` deliberately does not reset the counter, so a handle
+        // the caller still holds never silently addresses a different axis.
+        assert_ne!(first, after);
+        assert_eq!(plot.axes()[0].id(), Some(after));
+    }
 
     fn dpi_96() -> f64 {
         96.0

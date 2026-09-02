@@ -147,6 +147,13 @@ impl Plot {
 /// [`ScaleRegistry`] (owned by the orchestrator in the canonical flow).
 pub struct Plot {
     patch_id: Arc<str>,
+    /// Position of this plot within its patch's attach list. Assigned by
+    /// [`PlotComposition::attach_plot`](crate::plot::PlotComposition::attach_plot);
+    /// `0` for a plot driven directly, without the orchestrator. Together
+    /// with `patch_id` this is the pair
+    /// [`PlotComposition::update_plot_at`](crate::plot::PlotComposition::update_plot_at)
+    /// addresses plots by, and the pair a pick hit reports.
+    index_in_patch: u32,
     bindings: HashMap<String, String>,
     geoms: Vec<(GeomId, Box<dyn Geom>)>,
     next_geom_id: u32,
@@ -283,6 +290,7 @@ impl Plot {
         }
         Ok(Self {
             patch_id: Arc::from(patch_id),
+            index_in_patch: 0,
             bindings: HashMap::new(),
             geoms: Vec::new(),
             next_geom_id: 0,
@@ -405,6 +413,20 @@ impl Plot {
     /// Read accessor for the bound patch id.
     pub fn patch_id(&self) -> &str {
         &self.patch_id
+    }
+
+    /// Position of this plot within its patch's attach list.
+    ///
+    /// `(patch_id, index_in_patch)` is the pair that identifies a plot
+    /// uniquely: a patch can hold several overlaid plots.
+    pub fn index_in_patch(&self) -> u32 {
+        self.index_in_patch
+    }
+
+    /// Set the attach-list position. Called by the orchestrator as the plot
+    /// is pushed onto its patch's list.
+    pub(crate) fn set_index_in_patch(&mut self, index: u32) {
+        self.index_in_patch = index;
     }
 
     /// Borrow the coordinate projection. Defaults to
@@ -1163,6 +1185,8 @@ impl Plot {
         }
         let id = crate::plot::chrome::axis::AxisId::new(self.next_axis_id);
         self.next_axis_id += 1;
+        let mut axis = axis;
+        axis.set_id(id);
         self.axes.push(axis);
         Ok(id)
     }

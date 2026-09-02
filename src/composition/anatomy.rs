@@ -143,6 +143,66 @@ impl Slot {
         }
     }
 
+    /// The slot a [`Slot::name`] identifier came from, or `None` when the
+    /// name addresses a `place_at` region rather than an anatomical slot.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "panel" => Slot::Panel,
+            "background" => Slot::Background,
+
+            "axis_top" => Slot::AxisTop,
+            "axis_top_title" => Slot::AxisTopTitle,
+            "strip_top" => Slot::StripTop,
+            "legend_top" => Slot::LegendTop,
+
+            "axis_bottom" => Slot::AxisBottom,
+            "axis_bottom_title" => Slot::AxisBottomTitle,
+            "strip_bottom" => Slot::StripBottom,
+            "legend_bottom" => Slot::LegendBottom,
+
+            "axis_left" => Slot::AxisLeft,
+            "axis_left_title" => Slot::AxisLeftTitle,
+            "strip_left" => Slot::StripLeft,
+            "legend_left" => Slot::LegendLeft,
+
+            "axis_right" => Slot::AxisRight,
+            "axis_right_title" => Slot::AxisRightTitle,
+            "strip_right" => Slot::StripRight,
+            "legend_right" => Slot::LegendRight,
+
+            "title" => Slot::Title,
+            "subtitle" => Slot::Subtitle,
+            "caption" => Slot::Caption,
+
+            _ => return None,
+        })
+    }
+
+    /// Every anatomical slot, in declaration order.
+    pub const ALL: [Slot; 21] = [
+        Slot::Panel,
+        Slot::Background,
+        Slot::AxisTop,
+        Slot::AxisTopTitle,
+        Slot::StripTop,
+        Slot::LegendTop,
+        Slot::AxisBottom,
+        Slot::AxisBottomTitle,
+        Slot::StripBottom,
+        Slot::LegendBottom,
+        Slot::AxisLeft,
+        Slot::AxisLeftTitle,
+        Slot::StripLeft,
+        Slot::LegendLeft,
+        Slot::AxisRight,
+        Slot::AxisRightTitle,
+        Slot::StripRight,
+        Slot::LegendRight,
+        Slot::Title,
+        Slot::Subtitle,
+        Slot::Caption,
+    ];
+
     /// (row, col, row_span, col_span), 1-indexed within the per-patch
     /// 13×16 anatomy.
     pub const fn placement(self) -> (u16, u16, u16, u16) {
@@ -198,29 +258,7 @@ impl Slot {
 mod tests {
     use super::*;
 
-    const ALL_SLOTS: &[Slot] = &[
-        Slot::Panel,
-        Slot::Background,
-        Slot::AxisTop,
-        Slot::AxisTopTitle,
-        Slot::StripTop,
-        Slot::LegendTop,
-        Slot::AxisBottom,
-        Slot::AxisBottomTitle,
-        Slot::StripBottom,
-        Slot::LegendBottom,
-        Slot::AxisLeft,
-        Slot::AxisLeftTitle,
-        Slot::StripLeft,
-        Slot::LegendLeft,
-        Slot::AxisRight,
-        Slot::AxisRightTitle,
-        Slot::StripRight,
-        Slot::LegendRight,
-        Slot::Title,
-        Slot::Subtitle,
-        Slot::Caption,
-    ];
+    const ALL_SLOTS: &[Slot] = &Slot::ALL;
 
     #[test]
     fn names_are_unique() {
@@ -251,6 +289,25 @@ mod tests {
                 s.name()
             );
         }
+    }
+
+    #[test]
+    fn every_slot_round_trips_through_its_name() {
+        for &slot in ALL_SLOTS {
+            assert_eq!(
+                Slot::from_name(slot.name()),
+                Some(slot),
+                "{} did not round-trip",
+                slot.name()
+            );
+        }
+    }
+
+    #[test]
+    fn a_place_at_region_name_is_not_a_slot() {
+        assert_eq!(Slot::from_name("inset"), None);
+        assert_eq!(Slot::from_name(""), None);
+        assert_eq!(Slot::from_name("Panel"), None);
     }
 
     #[test]

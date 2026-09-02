@@ -46,6 +46,18 @@
 //! SrcOver and avoids decoding ambiguity, at the cost of a known mismatch
 //! between visual appearance and hit behaviour for translucent overlays.
 
+mod clip;
+mod geom;
+mod hilbert;
+mod index;
+mod rtree;
+mod scene;
+mod scope;
+
+pub use index::{Hit, PickIndex};
+pub use scene::PickIndexScene;
+pub use scope::{PickPath, PickScope, ScopeMode};
+
 use crate::color::Color;
 
 /// Per-draw-call hitmap directive.

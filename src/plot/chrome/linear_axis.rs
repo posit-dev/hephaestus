@@ -240,14 +240,72 @@ impl AxisChromeStyle {
 /// with a grid line drawn by the surrounding chrome — the axis line
 /// is intrinsic to "this is an axis", and cartesian + polar radius
 /// axes share that semantics.
+///
+/// `minors` carries `(break_index, frac)` per minor tick, indexed against
+/// the scale's minor-break list the same way [`AxisTick::break_index`] is.
+/// One major tick on an axis rail.
+///
+/// `break_index` addresses the scale's own break list, **not** the position
+/// of this tick within the drawn set. Nulls and breaks the scale cannot map
+/// are dropped on the way here, and an open-ended colorbar trims its first
+/// or last tick, so the two differ whenever a scale emits a break that does
+/// not survive. Carrying the true index is what lets a consumer recover the
+/// domain value as `scale.breaks(..)[break_index]`.
+pub(crate) struct AxisTick {
+    pub break_index: usize,
+    /// Position along the rail, `0..=1`.
+    pub frac: f64,
+    pub label: String,
+}
+
+/// The major ticks a scale contributes to a rail: every break it can map to
+/// a finite position, paired with its formatted label.
+///
+/// The enumeration runs **before** the filters, so a break the scale drops —
+/// a [`Value::Null`], or one it cannot map — leaves a gap in the reported
+/// indices rather than renumbering everything after it.
+pub(crate) fn axis_ticks(
+    breaks: &[crate::scales::value::Value],
+    scale: &crate::plot::scale::Scale,
+    locale: &crate::scales::Locale,
+) -> Vec<AxisTick> {
+    breaks
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| !matches!(v, crate::scales::value::Value::Null))
+        .filter_map(|(break_index, v)| {
+            scale.map_break(v).as_number().map(|frac| AxisTick {
+                break_index,
+                frac,
+                label: scale.format(v, locale),
+            })
+        })
+        .filter(|t| t.frac.is_finite())
+        .collect()
+}
+
+/// The minor ticks a scale contributes, as `(break_index, frac)`. Indexed
+/// against the scale's minor-break list exactly as [`axis_ticks`] is against
+/// its major one.
+pub(crate) fn axis_minor_ticks(scale: &crate::plot::scale::Scale, n: usize) -> Vec<(usize, f64)> {
+    scale
+        .minor_breaks(n)
+        .into_iter()
+        .enumerate()
+        .filter(|(_, v)| !matches!(v, crate::scales::value::Value::Null))
+        .filter_map(|(i, v)| scale.map_break(&v).as_number().map(|f| (i, f)))
+        .filter(|(_, f)| f.is_finite())
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_linear_axis_at(
     scene: &mut dyn SceneBuilder,
     start: Point,
     end: Point,
     tick_direction: (f64, f64),
-    majors: &[(f64, String)],
-    minors: &[f64],
+    majors: &[AxisTick],
+    minors: &[(usize, f64)],
     style: &AxisChromeStyle,
     dpi: f64,
 ) {
@@ -260,7 +318,7 @@ pub(crate) fn draw_linear_axis_at(
 
     // Minor ticks first so a major drawn at the same frac wins.
     if let Some(brush) = &style.minor_brush {
-        for &frac in minors {
+        for &(_break_index, frac) in minors {
             if !frac.is_finite() || !(0.0..=1.0).contains(&frac) {
                 continue;
             }
@@ -274,11 +332,12 @@ pub(crate) fn draw_linear_axis_at(
     }
 
     // Major ticks + labels.
-    for (frac, label) in majors {
-        if !frac.is_finite() || !(0.0..=1.0).contains(frac) {
+    for tick in majors {
+        let (frac, label) = (tick.frac, &tick.label);
+        if !frac.is_finite() || !(0.0..=1.0).contains(&frac) {
             continue;
         }
-        let pos = lerp(start, end, *frac);
+        let pos = lerp(start, end, frac);
         let tick_end = Point::new(
             pos.x + style.tick_length_px * tx,
             pos.y + style.tick_length_px * ty,
@@ -431,6 +490,40 @@ mod tests {
     use super::*;
     use crate::color::rgb;
     use crate::scene::recording::{Op, RecordingScene};
+
+    #[test]
+    fn a_dropped_break_leaves_a_gap_rather_than_shifting_later_ticks() {
+        use crate::plot::scale;
+        use crate::scales::value::Value;
+        use crate::scales::Locale;
+
+        // Breaks 1 and 3 are unmappable on a continuous scale, so the rail
+        // draws three ticks out of five.
+        let sc = scale::continuous(0.0..=1.0).with_breaks(vec![
+            Value::Number(0.0),
+            Value::String("nope".into()),
+            Value::Number(0.5),
+            Value::Null,
+            Value::Number(1.0),
+        ]);
+        let breaks = sc.breaks(5);
+        let ticks = axis_ticks(&breaks, &sc, &Locale::default());
+
+        assert_eq!(ticks.len(), 3);
+        // The survivors report where they sit in `breaks`, not where they
+        // sit in the drawn set. Numbering the survivors would give 0, 1, 2.
+        assert_eq!(
+            ticks.iter().map(|t| t.break_index).collect::<Vec<_>>(),
+            vec![0, 2, 4]
+        );
+        // And each index really does address the break it came from.
+        for t in &ticks {
+            assert_eq!(
+                sc.format(&breaks[t.break_index], &Locale::default()),
+                t.label
+            );
+        }
+    }
 
     const DPI: f64 = 96.0;
     /// A label with a break opportunity next to a same-shape control

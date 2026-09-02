@@ -9,7 +9,7 @@ use crate::brush::{Brush, Image, Sampling};
 use crate::geometry::Affine;
 use crate::mesh::Mesh;
 use crate::path::{FillRule, Path};
-use crate::pick::PickId;
+use crate::pick::{PickId, PickScope};
 use crate::style_vocab::FontSpec;
 
 pub mod recording;
@@ -86,6 +86,26 @@ pub trait SceneBuilder {
 
     /// Pop the most recently pushed layer.
     fn pop_layer(&mut self);
+
+    /// Push a pick scope. Every primitive issued until the matching
+    /// [`Self::pop_pick_scope`] inherits it as an ancestor, so the stack at
+    /// the time of a draw is that primitive's full ancestor chain.
+    ///
+    /// Orthogonal to [`Self::push_layer`]: a scope has no visual effect and
+    /// imposes no clip, and the two stacks need not nest with one another.
+    /// The only contract is that pushes and pops balance.
+    ///
+    /// Unlike every other method on this trait, ignoring this one still
+    /// produces a correct picture — the intersection-of-backends rule is
+    /// about visual capabilities, and a scope has none. So it defaults to a
+    /// no-op and a backend that does not hit-test writes nothing.
+    fn push_pick_scope(&mut self, scope: &PickScope) {
+        let _ = scope;
+    }
+
+    /// Pop the most recently pushed pick scope. Defaults to a no-op, for the
+    /// reason given on [`Self::push_pick_scope`].
+    fn pop_pick_scope(&mut self) {}
 }
 
 // ---------- glyph types ----------
