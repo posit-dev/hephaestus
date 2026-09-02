@@ -209,7 +209,7 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/primitives_demo.png");
-    hephaestus::image::write_png(&path, w, h, &pixels).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, None).expect("write png");
     println!("wrote {}", path.display());
 }
 

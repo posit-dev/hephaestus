@@ -265,7 +265,7 @@ fn a_block_image_centres_in_its_column() {
 /// back the path. Named per test so a parallel run cannot collide.
 fn temp_png(tag: &str, image: &Image) -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!("hephaestus-rich-image-{tag}.png"));
-    hephaestus::image::write_png(&path, image.width, image.height, image.data.as_ref())
+    hephaestus::image::write_png(&path, image.width, image.height, image.data.as_ref(), None)
         .expect("write the fixture");
     path
 }

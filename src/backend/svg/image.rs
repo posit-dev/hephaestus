@@ -116,7 +116,9 @@ fn data_url(image: &Image, warnings: &mut Warnings) -> Option<String> {
             }
         }
     }
-    let png = crate::image::encode_png(image.width, image.height, &pixels).ok()?;
+    // No dpi: the element carries an explicit width and height, so the
+    // embedded bytes describe pixels rather than a physical size.
+    let png = crate::image::encode_png(image.width, image.height, &pixels, None).ok()?;
     let mut url = String::from("data:image/png;base64,");
     super::base64::encode_into(&png, &mut url);
     Some(url)

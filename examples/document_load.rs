@@ -59,7 +59,7 @@ fn main() {
         renderer
             .render_to_buffer(w, h, Color::WHITE, &mut buf)
             .expect("render to buffer");
-        hephaestus::png::write_png(name, w, h, &buf).expect("write png");
+        hephaestus::png::write_png(name, w, h, &buf, Some(96.0)).expect("write png");
         println!("wrote {name} ({w}x{h})");
     }
 }

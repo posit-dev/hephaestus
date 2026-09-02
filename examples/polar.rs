@@ -245,6 +245,6 @@ fn main() {
         .render_to_buffer(w, h, bg, &mut pixels)
         .expect("render");
     let path = std::env::current_dir().unwrap().join("examples/polar.png");
-    hephaestus::image::write_png(&path, w, h, &pixels).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
     println!("wrote {}", path.display());
 }

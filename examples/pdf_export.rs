@@ -138,6 +138,7 @@ fn main() {
     renderer
         .render_to_buffer(w, h, Color::WHITE, &mut pixels)
         .expect("render");
-    hephaestus::image::write_png("examples/pdf_export.png", w, h, &pixels).expect("write png");
+    hephaestus::image::write_png("examples/pdf_export.png", w, h, &pixels, Some(dpi))
+        .expect("write png");
     println!("examples/pdf_export.png");
 }

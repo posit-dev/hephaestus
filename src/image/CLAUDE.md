@@ -6,9 +6,9 @@ Raster readers and writers. One cargo feature per format, one codec each, nothin
 
 Turns the pixel buffer a `Renderer` fills into an encoded image, and an encoded image back into pixels. Four formats, each behind its own feature: `png`, `jpeg`, `tiff`, `webp`. Every format offers the same three entry points per direction, and `src/image/png.rs` is the template for a new one:
 
-- `write_X_to<W: Write>(writer, width, height, pixels, ..)` — the primitive; the other two call it.
-- `encode_X(width, height, pixels, ..)` — the bytes in memory, for an HTTP response body, a base64 data URL, a clipboard payload.
-- `write_X(path, width, height, pixels, ..)` — `File::create` plus a `BufWriter`.
+- `write_X_to<W: Write>(writer, width, height, pixels, .., dpi)` — the primitive; the other two call it.
+- `encode_X(width, height, pixels, .., dpi)` — the bytes in memory, for an HTTP response body, a base64 data URL, a clipboard payload.
+- `write_X(path, width, height, pixels, .., dpi)` — `File::create` plus a `BufWriter`.
 - `read_X_from<R: BufRead + Seek>(reader)` — the primitive on the read side.
 - `decode_X(bytes)` — bytes already in memory.
 - `read_X(path)` — `File::open` plus a `BufReader`.
@@ -21,6 +21,19 @@ Two more read entry points name no format at all:
 - `read_image(path)` — the same, reading the whole file first, since the signature is what picks the decoder.
 
 They exist because a caller naming a *location* rather than a format cannot say which decoder it wants: `ImageRegistry::resolve` reads a path or URL for an `ImageGeom` channel or a markdown `![](…)` tag, and the file decides.
+
+## Recording the dpi
+
+Pixels alone do not say how large a picture is. A file that declares no resolution is read at whatever the viewer assumes — 72 dpi, typically — so a plot rendered at a device pixel ratio of 2 claims twice its intended physical size on a page. So every write entry point ends in an `Option<f64>` dpi: `None` records nothing, and a value lands wherever the format keeps one.
+
+- **PNG** — a `pHYs` chunk, in pixels per metre. The one format that omits the field entirely for `None`.
+- **JPEG** — the JFIF header's density fields, with the unit byte set to inches. `None` leaves the encoder's default, which declares a 1:1 pixel *aspect ratio* and no resolution.
+- **TIFF** — `XResolution` / `YResolution` with `ResolutionUnit` set to inches. The three have to be written together: the encoder writes 1/1 with no unit when the image is opened, and a resolution in inches over an unset unit reads as a bare aspect ratio.
+- **WebP** — an EXIF block, because the bitstream has no resolution field at all. It is a hand-built little-endian TIFF stream of exactly those three tags. Carrying it promotes the file to the extended (`VP8X`) container, which is why `None` matters here beyond saving bytes.
+
+Two shared helpers in `mod.rs` keep the four agreeing. `usable_dpi` is the floor and ceiling: a figure that is not finite and positive declares no resolution, so it lands on 1 dpi rather than saturating or wrapping, and each format passes the largest its own field can express. `dpi_rational` is for the two formats storing a ratio — exact for a whole number of dots per inch, and over a denominator of 10000 otherwise, so a fractional display scale survives.
+
+`sips -g dpiWidth <file>` reads all four on macOS, which is the check that the bytes say what we think they say.
 
 ## Reading
 
@@ -42,7 +55,7 @@ Every writer takes the same thing: RGBA8, **straight (un-premultiplied) alpha**,
 
 - **Encoding is not part of the `Renderer` trait.** Backends produce buffers; formats are a separate concern, which is why this module sits at the crate root rather than under `backend/`.
 - **`io::Result`, no error type of our own.** These are the only modules in the crate that surface raw `std::io`; upstream encoder errors flatten through a private `io_err` via `io::Error::other`. A format-specific error enum would be the first of its kind here — don't add one without a reason the `io::Error` message can't carry.
-- **One knob per format, and only where the format has one.** JPEG takes `quality` and a composite `background`; TIFF takes `TiffCompression`; PNG and WebP take nothing. Resist options structs until a second knob actually lands.
+- **One knob per format, and only where the format has one.** JPEG takes `quality` and a composite `background`; TIFF takes `TiffCompression`; PNG and WebP take nothing beyond the dpi, which every writer takes as its last argument. Resist options structs until a second knob actually lands.
 - **Our own enum for format choices.** `TiffCompression` is ours, mapped to the `tiff` crate's `Compression` inside the writer, for the same reason `FillRule` and `BlendMode` are ours: a dependency's enum in a public signature is a dependency in the semver contract.
 - **All encoders are pure Rust** and build for wasm. That rules out libwebp (and so rules out lossy WebP — see below); it's a constraint worth keeping.
 
@@ -58,11 +71,11 @@ Every writer takes the same thing: RGBA8, **straight (un-premultiplied) alpha**,
 ## Adding a format
 
 1. Add the feature and its optional dependency in `Cargo.toml`, next to the other three.
-2. Add `src/image/<format>.rs` with the three entry points, using `super::check_pixels` first and `super::check_dimension_limit` if the format has a cap.
+2. Add `src/image/<format>.rs` with the three entry points, using `super::check_pixels` first and `super::check_dimension_limit` if the format has a cap. `write_*_to` is the primitive; the other two delegate to it. Take the trailing dpi through `super::usable_dpi`, or `super::dpi_rational` if the field is a ratio.
 3. Add the three read entry points beside them, normalising through `super::expand_to_rgba8` and `super::from_rgba8`. If the dependency has no decoder, that is a second optional dependency on the same feature gate — see the JPEG note above.
 4. Declare the private `mod` and the gated flat re-export in `mod.rs`, with the `#[cfg_attr(docsrs, doc(cfg(..)))]` badge.
 5. Add the feature to the `any(..)` gate on `pub mod image;` in `src/lib.rs`. That gate is also why `from_rgba8` is not reachable with no format feature at all — a build that decodes nothing constructs a `brush::Image` directly.
-6. Unit tests in the writer: container magic bytes, `encode_*` and `write_*` agreeing byte-for-byte, wrong-length rejection with an untouched sink, an `encode_* → decode_*` pixel round-trip, a fewer-than-four-channel file widening to opaque RGBA, and garbage bytes reported as `InvalidData` rather than panicking.
+6. Unit tests in the writer: container magic bytes, `encode_*` and `write_*` agreeing byte-for-byte, wrong-length rejection with an untouched sink, an `encode_* → decode_*` pixel round-trip, a fewer-than-four-channel file widening to opaque RGBA, garbage bytes reported as `InvalidData` rather than panicking, a dpi read back out of the file, a `None` declaring no resolution, and an unusable dpi still producing a decodable file.
 7. Add a `#[cfg(feature = "<format>")]` case to `tests/image_writers.rs` so real rendered pixels go through it.
 8. Register it: the per-feature loop in `.github/workflows/check.yml`, the README feature table, the root `CLAUDE.md` feature list, `CHANGELOG.md`, and `examples/image_formats.rs`.
 

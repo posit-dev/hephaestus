@@ -443,15 +443,22 @@ fn render_to(
         scene.clear();
         view.render(scene, Size::new(w as f64, h as f64), dpi);
     }
-    write_buffer(renderer, w, h, bg, out_relative);
+    write_buffer(renderer, w, h, dpi, bg, out_relative);
 }
 
-fn write_buffer(renderer: &mut VelloRenderer, w: u32, h: u32, bg: Color, out_relative: &str) {
+fn write_buffer(
+    renderer: &mut VelloRenderer,
+    w: u32,
+    h: u32,
+    dpi: f64,
+    bg: Color,
+    out_relative: &str,
+) {
     let mut pixels = vec![0u8; (w * h * 4) as usize];
     renderer
         .render_to_buffer(w, h, bg, &mut pixels)
         .expect("render");
     let path = std::env::current_dir().unwrap().join(out_relative);
-    hephaestus::image::write_png(&path, w, h, &pixels).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
     println!("wrote {}", path.display());
 }

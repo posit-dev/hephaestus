@@ -22,6 +22,11 @@
 //! And the same three read entry points: `read_*` from a path, `read_*_from`
 //! for an arbitrary reader, and `decode_*` for bytes already in memory.
 //!
+//! Every write entry point ends in an `Option<f64>` dpi, recording the
+//! resolution the image was rendered at. Without one a viewer falls back to
+//! its own default, typically 72 dpi, and a plot rendered at a device pixel
+//! ratio above one claims the wrong physical size. `None` records nothing.
+//!
 //! Reading produces a [`brush::Image`](crate::brush::Image) — the type
 //! [`SceneBuilder::draw_image`](crate::scene::SceneBuilder::draw_image) and
 //! [`ImageGeom`](crate::plot::ImageGeom) consume. Whatever the file holds,
@@ -47,10 +52,7 @@ pub use jpeg::{decode_jpeg, encode_jpeg, read_jpeg, read_jpeg_from, write_jpeg, 
 
 #[cfg(feature = "png")]
 #[cfg_attr(docsrs, doc(cfg(feature = "png")))]
-pub use png::{
-    decode_png, encode_png, encode_png_dpi, read_png, read_png_from, write_png, write_png_dpi,
-    write_png_dpi_to, write_png_to,
-};
+pub use png::{decode_png, encode_png, read_png, read_png_from, write_png, write_png_to};
 
 #[cfg(feature = "tiff")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tiff")))]
@@ -247,6 +249,42 @@ pub(crate) fn expand_to_rgba8(
     Ok(out)
 }
 
+/// The denominator a fractional dpi is expressed over, which fixes the
+/// precision a resolution field records.
+#[cfg(any(feature = "tiff", feature = "webp"))]
+const DPI_DENOMINATOR: u32 = 10_000;
+
+/// A dpi figure clamped to what an image header can carry.
+///
+/// A figure that is not finite and positive declares no resolution at all, so
+/// it lands on the 1 dpi floor rather than saturating or wrapping; `max` is
+/// the largest the format's own field can express.
+pub(crate) fn usable_dpi(dpi: f64, max: f64) -> f64 {
+    if dpi.is_finite() {
+        dpi.clamp(1.0, max)
+    } else {
+        1.0
+    }
+}
+
+/// A dpi as the numerator and denominator pair a resolution field carries.
+///
+/// Exact for a whole number of dots per inch, and to four decimal places
+/// otherwise — finer than the difference between two device pixel ratios.
+#[cfg(any(feature = "tiff", feature = "webp"))]
+pub(crate) fn dpi_rational(dpi: f64) -> (u32, u32) {
+    let dpi = usable_dpi(dpi, f64::from(u32::MAX / DPI_DENOMINATOR));
+    let whole = dpi.round();
+    if (dpi - whole).abs() < f64::EPSILON {
+        (whole as u32, 1)
+    } else {
+        (
+            (dpi * f64::from(DPI_DENOMINATOR)).round() as u32,
+            DPI_DENOMINATOR,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,6 +375,27 @@ mod tests {
             let err = check_pixels(4, 3, &vec![0u8; len]).expect_err("wrong length must fail");
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         }
+    }
+
+    /// A whole number of dots per inch stays whole; anything finer is
+    /// expressed over the fixed denominator rather than rounded away.
+    #[cfg(any(feature = "tiff", feature = "webp"))]
+    #[test]
+    fn a_dpi_becomes_the_rational_a_resolution_field_carries() {
+        assert_eq!(dpi_rational(96.0), (96, 1));
+        assert_eq!(dpi_rational(144.5), (1_445_000, 10_000));
+    }
+
+    /// A figure that declares no resolution — or more than a field can hold
+    /// — is pulled back into range rather than saturating or wrapping.
+    #[test]
+    fn an_unusable_dpi_is_clamped_into_range() {
+        for dpi in [0.0, -96.0, f64::NAN, f64::NEG_INFINITY] {
+            assert_eq!(usable_dpi(dpi, 300.0), 1.0);
+        }
+        assert_eq!(usable_dpi(f64::INFINITY, 300.0), 1.0);
+        assert_eq!(usable_dpi(1e9, 300.0), 300.0);
+        assert_eq!(usable_dpi(192.0, 300.0), 192.0);
     }
 
     /// A buffer length that overflows a 32-bit `usize` must still be compared

@@ -112,7 +112,7 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/font_registration.png");
-    hephaestus::image::write_png(&path, w, h, &pixels).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
     println!("[font_registration] wrote {}", path.display());
 
     // Sanity check the style flowed through.

@@ -153,7 +153,7 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/nesting_outer_chrome_propagates.png");
-    hephaestus::image::write_png(&path, w, h, &pixels).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
     println!("wrote {}", path.display());
 
     // Sanity check: all four panels share y0, even though only the outer

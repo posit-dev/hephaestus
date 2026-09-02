@@ -171,7 +171,8 @@ fn encode(image: &crate::brush::Image) -> Option<Vec<u8>> {
     if !embeddable(image) {
         return None;
     }
-    crate::image::encode_png(image.width, image.height, image.data.as_ref()).ok()
+    // No dpi: a payload the reader hands straight back as pixels.
+    crate::image::encode_png(image.width, image.height, image.data.as_ref(), None).ok()
 }
 
 /// Every name a register can hand pixels for, sorted so the same

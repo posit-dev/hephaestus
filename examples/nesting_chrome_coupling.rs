@@ -143,7 +143,7 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/nesting_chrome_coupling.png");
-    hephaestus::image::write_png(&path, w, h, &pixels).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
     println!("wrote {}", path.display());
 
     // Print the panel y-coordinates so the user can sanity-check that

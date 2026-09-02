@@ -581,9 +581,10 @@ because `String.fromCharCode(...bytes)` overflows the argument limit on
 anything large. The URL scheme is load-bearing for the affordance, which is
 not obvious from anything about the element itself.
 
-`src/image/png.rs` writes no `pHYs` either, so the native writers have the
-same gap. Nothing here depends on that, but a `write_png` that took a dpi
-would let the two paths agree.
+The native writers reach the same place from the other side: every raster
+writer takes the render dpi, PNG's landing in that same `pHYs`. So a plot
+exported from the page and one written natively declare the same physical
+size.
 
 Two consequences worth knowing: pointer events land on the overlay rather than
 the canvas, so a host doing hover picking should listen on the container (they

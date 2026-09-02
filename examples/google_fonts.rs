@@ -96,6 +96,6 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/google_fonts.png");
-    hephaestus::image::write_png(&path, w, h, &pixels).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
     println!("[google_fonts] wrote {}", path.display());
 }

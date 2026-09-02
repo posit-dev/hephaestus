@@ -12,6 +12,10 @@
 //! - `image_formats.jpg` — JPEG has no alpha channel, so the buffer is
 //!   composited onto the background color handed to `write_jpeg`.
 //!
+//! Every file records the 96 dpi the plot was rendered at, each in the place
+//! its format keeps one: a `pHYs` chunk, the JFIF density fields, the TIFF
+//! resolution tags, and an EXIF block in the WebP container.
+//!
 //! The printed file sizes are the other point of the example: on plot output
 //! WebP is the smallest of the three lossless formats, and JPEG is the
 //! largest of the four — flat fills and hard edges are the worst case for a
@@ -80,11 +84,14 @@ fn main() {
     let tif = dir.join("image_formats.tiff");
     let webp = dir.join("image_formats.webp");
 
-    write_png(&png, w, h, &pixels).expect("write png");
+    // Each writer records the dpi the plot was rendered at, so the four files
+    // agree on their physical size rather than falling back to a viewer's own
+    // default.
+    write_png(&png, w, h, &pixels, Some(dpi)).expect("write png");
     // Quality 90, composited onto the light background the plot theme assumes.
-    write_jpeg(&jpg, w, h, &pixels, 90, rgb8(248, 248, 252)).expect("write jpeg");
-    write_tiff(&tif, w, h, &pixels, TiffCompression::Deflate).expect("write tiff");
-    write_webp(&webp, w, h, &pixels).expect("write webp");
+    write_jpeg(&jpg, w, h, &pixels, 90, rgb8(248, 248, 252), Some(dpi)).expect("write jpeg");
+    write_tiff(&tif, w, h, &pixels, TiffCompression::Deflate, Some(dpi)).expect("write tiff");
+    write_webp(&webp, w, h, &pixels, Some(dpi)).expect("write webp");
 
     for path in [&png, &jpg, &tif, &webp] {
         let bytes = std::fs::metadata(path).expect("stat").len();

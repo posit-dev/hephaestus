@@ -207,7 +207,7 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/composition_demo.png");
-    hephaestus::image::write_png(&path, w, h, &pixels).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
     println!("wrote {}", path.display());
 
     let panel_a = layout.get("plot_a", Slot::Panel).unwrap();

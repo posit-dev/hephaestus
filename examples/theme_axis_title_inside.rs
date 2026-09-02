@@ -103,6 +103,6 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/theme_axis_title_inside.png");
-    hephaestus::image::write_png(&path, w, h, &pixels).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
     println!("wrote {}", path.display());
 }

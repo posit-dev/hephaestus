@@ -89,7 +89,7 @@ fn main() {
     // this picture is what a viewer saves, and a PNG that declares nothing is
     // read as 72 dpi — a 2x render would claim twice its physical size.
     let name = "examples/document.png";
-    hephaestus::png::write_png_dpi(name, w, h, &buf, Some(dpi)).expect("write png");
+    hephaestus::png::write_png(name, w, h, &buf, Some(dpi)).expect("write png");
     println!("wrote {name} ({w}x{h} at {dpi} dpi, {css_w}x{css_h} css at {ratio}x)");
 }
 
