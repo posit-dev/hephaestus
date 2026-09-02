@@ -35,6 +35,7 @@ use crate::scene::recording::RecordingScene;
 use crate::scene::{GlyphRun, SceneBuilder};
 use crate::stroke::Stroke;
 
+mod glyph_bitmap;
 #[cfg(all(feature = "webgl", target_arch = "wasm32"))]
 mod webgl;
 #[cfg(feature = "vello-hybrid")]
@@ -331,42 +332,71 @@ impl SceneBuilder for Writer<'_> {
         if layered {
             self.scene.push_opacity_layer(run.brush_alpha);
         }
-        self.scene.set_transform(run.transform);
-        self.scene.reset_paint_transform();
-        self.scene.set_paint(paint);
 
-        let stroked = match (self.pass, run.style) {
-            (Pass::Display, Some(stroke)) => {
-                self.scene.set_stroke(stroke.clone());
-                true
-            }
-            // The pick pass fills glyph outlines whatever the display style:
-            // an outlined glyph should still be hittable in its interior.
-            _ => false,
+        // Glyphs a bitmap strike serves leave the glyph pipeline and draw as
+        // images instead; see the `glyph_bitmap` module docs for why.
+        let split = glyph_bitmap::split(
+            run.font,
+            run.font_size,
+            run.glyph_transform,
+            glyph_bitmap::foreground(run.brush),
+            run.glyphs,
+        );
+        let (outlines, strikes) = match &split {
+            Some((outlines, strikes)) => (outlines.as_slice(), strikes.as_slice()),
+            None => (run.glyphs, &[] as &[glyph_bitmap::Strike]),
         };
 
-        let glyphs = run
-            .glyphs
-            .iter()
-            .map(|g| glifo::Glyph {
-                id: g.id,
-                x: g.x,
-                y: g.y,
-            })
-            .collect::<Vec<_>>();
+        if !outlines.is_empty() {
+            self.scene.set_transform(run.transform);
+            self.scene.reset_paint_transform();
+            self.scene.set_paint(paint);
 
-        let mut builder = self
-            .scene
-            .glyph_run(self.resources, run.font.data())
-            .font_size(run.font_size)
-            .hint(run.hint);
-        if let Some(gt) = run.glyph_transform {
-            builder = builder.glyph_transform(gt);
+            let stroked = match (self.pass, run.style) {
+                (Pass::Display, Some(stroke)) => {
+                    self.scene.set_stroke(stroke.clone());
+                    true
+                }
+                // The pick pass fills glyph outlines whatever the display
+                // style: an outlined glyph should still be hittable in its
+                // interior.
+                _ => false,
+            };
+
+            let glyphs = outlines
+                .iter()
+                .map(|g| glifo::Glyph {
+                    id: g.id,
+                    x: g.x,
+                    y: g.y,
+                })
+                .collect::<Vec<_>>();
+
+            let mut builder = self
+                .scene
+                .glyph_run(self.resources, run.font.data())
+                .font_size(run.font_size)
+                .hint(run.hint);
+            if let Some(gt) = run.glyph_transform {
+                builder = builder.glyph_transform(gt);
+            }
+            if stroked {
+                builder.stroke_glyphs(glyphs.into_iter());
+            } else {
+                builder.fill_glyphs(glyphs.into_iter());
+            }
         }
-        if stroked {
-            builder.stroke_glyphs(glyphs.into_iter());
-        } else {
-            builder.fill_glyphs(glyphs.into_iter());
+
+        for strike in strikes {
+            // Alpha is already carried by the layer around the whole run,
+            // and a strike paints its own colors rather than the run brush.
+            self.draw_image(
+                &strike.image,
+                run.transform * strike.transform,
+                Sampling::Bilinear,
+                1.0,
+                pick_id,
+            );
         }
 
         if layered {
@@ -409,34 +439,51 @@ fn dimension(v: u32) -> Result<u16, BackendError> {
     })
 }
 
-/// Every distinct image the recording paints with, in first-drawn order.
+/// Every distinct image the recording paints with, in first-drawn order —
+/// including the bitmap strike behind each color glyph, which this backend
+/// draws as an image like any other.
 ///
 /// Images arrive as CPU pixels but the rasterizer only samples handles into
 /// its atlas, so each one has to be uploaded before a replay can reference it.
-fn recorded_images(ops: &RecordingScene) -> Vec<&Image> {
+fn recorded_images(ops: &RecordingScene) -> Vec<Image> {
     use crate::scene::recording::Op;
 
     let mut keys: Vec<u64> = Vec::new();
-    let mut images: Vec<&Image> = Vec::new();
+    let mut images: Vec<Image> = Vec::new();
+    let mut push = |image: Image| {
+        let key = image_key(&image);
+        if !keys.contains(&key) {
+            keys.push(key);
+            images.push(image);
+        }
+    };
     for op in &ops.ops {
-        let image = match op {
-            Op::Fill { brush, .. } | Op::Stroke { brush, .. } => match brush {
-                Brush::Image(b) => Some(&b.image),
-                _ => None,
-            },
-            Op::DrawGlyphs(run) => match &run.brush {
-                Brush::Image(b) => Some(&b.image),
-                _ => None,
-            },
-            Op::DrawImage { image, .. } => Some(image),
-            _ => None,
-        };
-        if let Some(image) = image {
-            let key = image_key(image);
-            if !keys.contains(&key) {
-                keys.push(key);
-                images.push(image);
+        match op {
+            Op::Fill { brush, .. } | Op::Stroke { brush, .. } => {
+                if let Brush::Image(b) = brush {
+                    push(b.image.clone());
+                }
             }
+            Op::DrawGlyphs(run) => {
+                if let Brush::Image(b) = &run.brush {
+                    push(b.image.clone());
+                }
+                // A bitmap strike is drawn as an image, so it needs the same
+                // upload every other image does.
+                if let Some((_, strikes)) = glyph_bitmap::split(
+                    &run.font,
+                    run.font_size,
+                    run.glyph_transform,
+                    glyph_bitmap::foreground(&run.brush),
+                    &run.glyphs,
+                ) {
+                    for strike in strikes {
+                        push(strike.image);
+                    }
+                }
+            }
+            Op::DrawImage { image, .. } => push(image.clone()),
+            _ => {}
         }
     }
     images

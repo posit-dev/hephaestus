@@ -45,6 +45,7 @@ The cost is one extra owned copy of the geometry per frame (`Op` clones paths an
 - **A resize rebuilds the renderer, the scenes, and the image atlas.** `RenderTargetConfig` and `Scene` both fix their dimensions at construction, so `Sized` holds all three together and is replaced wholesale. Uploaded images are invalidated with it.
 - **Image opacity cannot ride on the sampler.** `vello_common`'s paint encoder does `unimplemented!("Applying opacity to image commands")` for any `sampler.alpha != 1.0`. `draw_image`'s alpha becomes a `push_opacity_layer` instead. `tests/hybrid.rs::a_translucent_image_fades_instead_of_panicking` pins it.
 - **Images must be atlas handles.** The paint encoder matches only `ImageSource::OpaqueId` and panics on `ImageSource::Pixmap`, so every image is uploaded before replay can reference it. `ImageSource::from_peniko_image_data` does the format narrowing and premultiply; we take the pixmap back out of it and upload that.
+- **Bitmap color glyphs bypass the rasteriser's own strike path**, and that is not an optimisation — `glyph_bitmap.rs` exists because the upstream path is unusable here twice over. It reaches the GPU only through the glyph atlas, and the atlas takes no rotation or skew; the fallback for anything else is a `Pixmap` paint, which is the panic in the bullet above. And the atlas path paints the strike's *own colors*, so the pick pass reads an emoji back as hundreds of ids that were never drawn — measured, on one 48 px emoji. Resolved as an image instead, a strike costs one atlas upload, survives any transform, and picks as the caller's id.
 - **Masks are unreachable, deliberately.** `Scene::push_layer` panics on a mask layer, and our `push_layer` has no mask channel, so `None` is always passed.
 - **Scene dimensions are `u16`.** `MAX_DIMENSION` is the ceiling; `dimension()` reports anything past it as a `BackendError`.
 - **Blend coverage is complete.** All 16 `Mix` and 14 `Compose` variants are mapped upstream, a superset of what `backend/convert.rs` exposes, so no conversion entries are missing.
@@ -92,7 +93,8 @@ The exception is the alpha texture, which holds per-pixel coverage for antialias
 
 - **`vello_hybrid` does not re-export the paint types**, so `vello_common` is a direct dependency purely to name `ImageSource` / `PaintType` when building an image paint. Keep its version matched to what `vello_hybrid` resolves.
 - **Neither crate re-exports the glyph type**, so `glifo` is a direct dependency for `glifo::Glyph` alone. Same version-matching caveat. Both would be removable if upstream re-exported them.
-- **`default-features = false` on `vello_hybrid` matters twice.** It drops `wgpu_default`, which would otherwise pull in every wgpu backend and undo the per-platform tables in `Cargo.toml`, and it drops `png`, which nothing here decodes.
+- **`skrifa` and `png` are not optional for this backend.** Reading a face's bitmap strikes needs the first and decoding one needs the second, and a build without them draws every PNG-strike emoji as nothing. Both are already in the tree — `skrifa` via parley, `png` via this crate's own gate — so requiring them costs a compile of code the default build has anyway.
+- **`default-features = false` on `vello_hybrid` drops `wgpu_default`**, which would otherwise pull in every wgpu backend and undo the per-platform tables in `Cargo.toml`. It also drops `text`, so that one is named explicitly — without it there is no glyph pipeline at all.
 
 ## Two renderers, one scene layer
 
@@ -112,6 +114,7 @@ The WebGL renderer differs in three ways worth knowing:
 ## Files
 
 - `mod.rs` — `HybridScene`, `Writer`, `Pass`, and the shared helpers.
+- `glyph_bitmap.rs` — bitmap color glyphs: which of a run's glyphs a strike serves, the strike decoded as an image, and where it sits. Placement is Skia's arithmetic, the same the compute-shader backend and `backend/pdf/` carry; `tests/hybrid.rs::a_bitmap_color_glyph_lands_where_the_other_backend_puts_it` holds the two to the same pixels.
 - `wgpu_renderer.rs` — `Target`, `SizeBound`, `PendingPick`, `HybridRenderer`.
 - `webgl.rs` — `HybridWebGlRenderer`.
 

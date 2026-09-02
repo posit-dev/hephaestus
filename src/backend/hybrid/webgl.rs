@@ -170,11 +170,11 @@ impl HybridWebGlRenderer {
     /// Upload every image the recording needs that is not already resident.
     fn upload_images(&mut self) {
         for image in recorded_images(&self.scene.ops) {
-            let key = image_key(image);
+            let key = image_key(&image);
             if self.images.contains_key(&key) {
                 continue;
             }
-            let ImageSource::Pixmap(pixmap) = ImageSource::from_peniko_image_data(image) else {
+            let ImageSource::Pixmap(pixmap) = ImageSource::from_peniko_image_data(&image) else {
                 continue;
             };
             let transparency = pixmap.may_have_transparency();

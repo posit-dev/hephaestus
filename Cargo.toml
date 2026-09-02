@@ -43,6 +43,13 @@ vello = ["dep:vello", "dep:wgpu", "dep:pollster", "dep:futures-intrusive", "dep:
 # offer: rasterising with binary coverage (`set_aliasing_threshold`), which is
 # what an id buffer needs, and GPU buffers sized to actual scene content
 # rather than fixed caps.
+#
+# `png` and `skrifa` are not optional here: Apple Color Emoji and most
+# Android emoji ship their glyphs as PNG strikes rather than outlines, and
+# this backend resolves those itself — see `src/backend/hybrid/glyph_bitmap.rs`
+# for why the rasteriser's own strike path cannot be used. Both crates are
+# already in the tree, `skrifa` via parley and `png` via this crate's own
+# `png` gate.
 vello-hybrid = [
     "dep:vello_hybrid",
     "vello_hybrid/wgpu",
@@ -50,6 +57,8 @@ vello-hybrid = [
     "dep:glifo",
     "dep:vello_common",
     "vello_common/std",
+    "png",
+    "dep:skrifa",
     "dep:wgpu",
     "dep:pollster",
     "dep:futures-intrusive",
@@ -65,6 +74,9 @@ vello-hybrid = [
 # implies that crate's `wgpu` feature, which would defeat the point — so the
 # no-std float path (`libm`) is used instead.
 #
+# `png` and `skrifa` are required for the same reason as in `vello-hybrid`:
+# a PNG-strike emoji is resolved by this crate rather than the rasteriser.
+#
 # Only `wasm32` compiles the renderer: it talks to a `WebGl2RenderingContext`,
 # which exists nowhere else.
 webgl = [
@@ -74,6 +86,8 @@ webgl = [
     "dep:glifo",
     "dep:vello_common",
     "vello_common/libm",
+    "png",
+    "dep:skrifa",
     "dep:wasm-bindgen",
     "dep:js-sys",
     "dep:web-sys",
@@ -176,9 +190,9 @@ thiserror = "2"
 # `wgsl` (vello's shaders) + `std`; per-platform backends are added in the
 # `[target.*]` tables below.
 vello = { version = "0.10", optional = true, default-features = false, features = ["wgpu"] }
-# `default-features = false` matters twice over: it drops `wgpu_default`,
-# which would drag in every wgpu backend and undo the per-platform tables
-# below, and it drops `png`, which nothing here decodes.
+# `default-features = false` drops `wgpu_default`, which would drag in every
+# wgpu backend and undo the per-platform tables below. `text` is re-added
+# because dropping the defaults takes the glyph pipeline with it.
 vello_hybrid = { version = "0.2", optional = true, default-features = false, features = [
     "text",
 ] }

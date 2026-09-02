@@ -59,6 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Bitmap colour glyphs render on the sparse-strips backends.** Apple Color Emoji and most Android emoji carry PNG strikes rather than outlines, and `vello-hybrid` / `webgl` drew them as nothing at all. They are now resolved as images, so a strike survives rotation and picks as the caller's id; both gates imply `png` and `skrifa`.
 - **A rotated markdown label landed in the wrong place.** `TextGeom` with `"markdown"` true and a non-zero `"angle"` displaced the label by `d - R·d`, where `d` is the label box's top-left in panel pixels — hundreds of pixels away from the panel origin, and exact only at it. Correct at `angle = 0`, which is why it went unseen.
 - **`TextPathGeom`'s `"underline"` and `"strikethrough"` channels draw.** Each rule is stroked along the curve at the font's own offset and thickness, so it bends with the text instead of rotating with `"angle"`.
 

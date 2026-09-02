@@ -1232,3 +1232,186 @@ fn refreshing_the_pick_is_inert_without_picking() {
     r.set_refresh_pick(true);
     assert!(!r.refreshes_pick(), "no pick scene exists to refresh");
 }
+
+// ─── Color glyphs ───────────────────────────────────────────────────────────
+
+/// A run of one emoji, and the size to draw it at, or `None` on a machine
+/// with no emoji font — where the codepoint resolves to the same face as
+/// plain text, and asserting anything about color glyphs would be
+/// asserting about the machine.
+fn emoji_run() -> Option<(hephaestus::text::TextRun, f32)> {
+    use hephaestus::text::{run_layout_glyphs, TextRun, TextStyle};
+
+    let size = 48.0;
+    let style = TextStyle::new(size);
+    let plain = TextRun::new("A", &style, 96.0);
+    let emoji = TextRun::new("\u{1F600}", &style, 96.0);
+    let plain_glyphs = run_layout_glyphs(&plain);
+    let emoji_glyphs = run_layout_glyphs(&emoji);
+    match (plain_glyphs.first(), emoji_glyphs.first()) {
+        (Some(a), Some(b)) if a.font != b.font => Some((emoji, size)),
+        _ => {
+            println!("no emoji font resolved for U+1F600; skipping");
+            None
+        }
+    }
+}
+
+/// Draw `run` at (10, 20) under `transform` and return the frame.
+fn render_text(
+    r: &mut HybridRenderer,
+    run: &hephaestus::text::TextRun,
+    transform: Affine,
+    pick: PickId,
+) -> Vec<u8> {
+    hephaestus::text::draw_text(
+        r.scene(),
+        run,
+        10.0,
+        20.0,
+        &Brush::Solid(rgb8(0, 0, 0)),
+        transform,
+        pick,
+    );
+    let mut out = buf();
+    r.render_to_buffer(W, H, rgb8(255, 255, 255), &mut out)
+        .expect("render");
+    out
+}
+
+/// Pixels that are not the background, and the box around them.
+fn inked(out: &[u8]) -> (usize, (u32, u32, u32, u32)) {
+    let (mut x0, mut y0, mut x1, mut y1, mut n) = (W, H, 0, 0, 0);
+    for y in 0..H {
+        for x in 0..W {
+            if px(out, x, y) != [255, 255, 255, 255] {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+                n += 1;
+            }
+        }
+    }
+    (n, (x0, y0, x1, y1))
+}
+
+/// Apple Color Emoji and most Android emoji carry their glyphs as PNG
+/// strikes, and the outline beside a strike is empty — so a backend that
+/// ignores strikes draws the glyph as nothing at all.
+#[test]
+fn a_bitmap_color_glyph_draws_ink() {
+    let Some((emoji, _)) = emoji_run() else {
+        return;
+    };
+    let mut r = HybridRenderer::new().expect("hybrid renderer init");
+    let out = render_text(&mut r, &emoji, Affine::IDENTITY, PickId::Skip);
+    let (n, _) = inked(&out);
+    assert!(n > 100, "expected emoji ink, found {n} pixels");
+}
+
+/// Text either side of an emoji still draws: the run is split, not
+/// replaced.
+#[test]
+fn a_run_mixing_text_and_a_bitmap_color_glyph_draws_both() {
+    use hephaestus::text::{TextRun, TextStyle};
+
+    if emoji_run().is_none() {
+        return;
+    }
+    let style = TextStyle::new(24.0);
+    let mixed = TextRun::new("Hi \u{1F600} yes", &style, 96.0);
+    let plain = TextRun::new("Hi  yes", &style, 96.0);
+
+    let mut r = HybridRenderer::new().expect("hybrid renderer init");
+    let with_emoji = render_text(&mut r, &mixed, Affine::IDENTITY, PickId::Skip);
+    let mut r = HybridRenderer::new().expect("hybrid renderer init");
+    let without = render_text(&mut r, &plain, Affine::IDENTITY, PickId::Skip);
+
+    let (n, _) = inked(&with_emoji);
+    let (baseline, _) = inked(&without);
+    assert!(baseline > 20, "expected text ink, found {baseline} pixels");
+    assert!(
+        n > baseline,
+        "the emoji must add ink, not replace it: {n} against {baseline}"
+    );
+}
+
+/// The case the rasteriser's own strike path cannot serve: its glyph atlas
+/// takes no rotation, and what it falls back to reaches the render pipeline
+/// as CPU pixels it rejects. Drawn as an image there is nothing special
+/// about a rotated strike.
+#[test]
+fn a_rotated_bitmap_color_glyph_draws_ink() {
+    let Some((emoji, _)) = emoji_run() else {
+        return;
+    };
+    let mut r = HybridRenderer::new().expect("hybrid renderer init");
+    let out = render_text(&mut r, &emoji, Affine::rotate(0.3), PickId::Skip);
+    let (n, _) = inked(&out);
+    assert!(n > 100, "expected rotated emoji ink, found {n} pixels");
+}
+
+/// A strike paints the caller's id, not its own colors. Painting the
+/// colors is what the rasteriser's strike path does, and reading them back
+/// yields a spray of ids that were never drawn.
+#[test]
+fn a_bitmap_color_glyph_picks_as_one_id() {
+    let Some((emoji, _)) = emoji_run() else {
+        return;
+    };
+    let mut r = HybridRenderer::with_picking().expect("hybrid renderer init");
+    render_text(&mut r, &emoji, Affine::IDENTITY, PickId::Id(7));
+
+    let mut ids: Vec<u32> = Vec::new();
+    for y in 0..H {
+        for x in 0..W {
+            if let Some(id) = r.pick_at(x, y) {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+    }
+    assert_eq!(ids, vec![7], "the emoji must pick as its own id alone");
+}
+
+/// The compute-shader backend resolves strikes itself, so it is the
+/// reference for placement: the same emoji, the same size, the same
+/// origin, and the two frames should agree.
+#[cfg(feature = "vello")]
+#[test]
+fn a_bitmap_color_glyph_lands_where_the_other_backend_puts_it() {
+    use hephaestus::backend::vello::VelloRenderer;
+
+    let Some((emoji, _)) = emoji_run() else {
+        return;
+    };
+    let mut h = HybridRenderer::new().expect("hybrid renderer init");
+    let hybrid = render_text(&mut h, &emoji, Affine::IDENTITY, PickId::Skip);
+
+    let mut v = VelloRenderer::new().expect("vello renderer init");
+    hephaestus::text::draw_text(
+        v.scene(),
+        &emoji,
+        10.0,
+        20.0,
+        &Brush::Solid(rgb8(0, 0, 0)),
+        Affine::IDENTITY,
+        PickId::Skip,
+    );
+    let mut compute = buf();
+    v.render_to_buffer(W, H, rgb8(255, 255, 255), &mut compute)
+        .expect("render");
+
+    assert_eq!(inked(&hybrid).1, inked(&compute).1, "ink box");
+    let differing = hybrid
+        .chunks_exact(4)
+        .zip(compute.chunks_exact(4))
+        .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 2))
+        .count();
+    assert_eq!(
+        differing, 0,
+        "{differing} pixels disagree with the reference"
+    );
+}

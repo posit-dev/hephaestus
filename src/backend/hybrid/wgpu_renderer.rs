@@ -320,13 +320,13 @@ impl HybridRenderer {
         }
         let sized = self.sized.as_mut().expect("sized state ensured");
         for image in images {
-            let key = image_key(image);
+            let key = image_key(&image);
             if sized.images.contains_key(&key) {
                 continue;
             }
             // Their conversion handles both the format narrowing and the
             // premultiply; we only need the pixmap back out of it to upload.
-            let ImageSource::Pixmap(pixmap) = ImageSource::from_peniko_image_data(image) else {
+            let ImageSource::Pixmap(pixmap) = ImageSource::from_peniko_image_data(&image) else {
                 return Err(BackendError::Other(
                     "image conversion did not yield pixel data".into(),
                 ));
