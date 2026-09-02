@@ -57,6 +57,11 @@ const MARK_COLORS: [hephaestus::color::Color; 4] = [
 /// at one shape is caught.
 const SIZES: [(u32, u32); 4] = [(400, 300), (800, 600), (1200, 500), (500, 900)];
 
+/// Bytes before the first chunk: the 8-byte magic, then the major, minor
+/// and flags words. The tests that reach into the container by hand read
+/// their offsets from this rather than restating it.
+const HEADER: usize = 8 + 2 + 2 + 2;
+
 /// Build a composition exercising a wide slice of the plot surface:
 /// nested compositions, four geom kinds, continuous / discrete / log
 /// scales, a polar projection, a non-default theme, axes, a legend,
@@ -535,19 +540,76 @@ fn a_document_with_embedded_fonts_still_round_trips() {
     );
 }
 
-/// An unknown chunk is skipped, which is what makes a minor version
-/// additive. Simulated by appending one a reader has never heard of.
-#[test]
-fn an_unknown_chunk_is_skipped_rather_than_rejected() {
+/// Append a chunk `tag` this build has never heard of.
+fn with_extra_chunk(tag: &[u8; 4]) -> Vec<u8> {
     let comp = build();
     let mut bytes = write_composition(&comp, &WriteOptions::new()).expect("writable");
-    bytes.extend_from_slice(b"XXXX");
+    bytes.extend_from_slice(tag);
     bytes.extend_from_slice(&7u32.to_le_bytes());
     bytes.extend_from_slice(b"payload");
+    bytes
+}
 
-    read_composition(&bytes, &ReadContext::new())
+/// An unknown *ancillary* chunk — lowercase initial — is skipped, which
+/// is what makes a minor version additive.
+#[test]
+fn an_unknown_ancillary_chunk_is_skipped_rather_than_rejected() {
+    read_composition(&with_extra_chunk(b"xxxx"), &ReadContext::new())
         .map(|_| ())
-        .expect("an unknown trailing chunk should be ignored");
+        .expect("an unknown ancillary chunk should be ignored");
+}
+
+/// An unknown *critical* chunk — uppercase initial — is refused. Silently
+/// skipping something load-bearing would rebuild a plot that differs from
+/// the one written, with nothing to say so.
+#[test]
+fn an_unknown_critical_chunk_is_refused() {
+    match read_composition(&with_extra_chunk(b"XXXX"), &ReadContext::new()) {
+        Ok(_) => panic!("an unknown critical chunk must not be skipped"),
+        Err(e) => assert!(
+            e.to_string().contains("XXXX"),
+            "error should name the chunk: {e}"
+        ),
+    }
+}
+
+/// Every tag the format defines is written at most once, so a repeat is a
+/// corrupt document rather than something to read past.
+#[test]
+fn a_repeated_chunk_is_refused() {
+    let comp = build();
+    let bytes = write_composition(&comp, &WriteOptions::new()).expect("writable");
+    // The head is the first chunk, so its tag and body sit at a known
+    // offset; appending a second copy of the tag is enough.
+    let mut doubled = bytes.clone();
+    doubled.extend_from_slice(b"HEAD");
+    doubled.extend_from_slice(&0u32.to_le_bytes());
+
+    match read_composition(&doubled, &ReadContext::new()) {
+        Ok(_) => panic!("a repeated tag must be refused"),
+        Err(e) => assert!(
+            e.to_string().contains("HEAD"),
+            "error should name the chunk: {e}"
+        ),
+    }
+}
+
+/// Every flag bit is reserved, so a set one means the container is
+/// encoded in a way this build cannot interpret — refuse rather than
+/// read the chunks and hope.
+#[test]
+fn an_unknown_container_flag_is_refused() {
+    let comp = build();
+    let mut bytes = write_composition(&comp, &WriteOptions::new()).expect("writable");
+    bytes[HEADER - 2..HEADER].copy_from_slice(&1u16.to_le_bytes());
+
+    match read_composition(&bytes, &ReadContext::new()) {
+        Ok(_) => panic!("an unknown flag bit must be refused"),
+        Err(e) => assert!(
+            e.to_string().contains("flags"),
+            "error should mention flags: {e}"
+        ),
+    }
 }
 
 /// The head's hints are advisory, but a consumer that has to pick a size
@@ -591,9 +653,13 @@ fn hints_read_from_the_head_alone_without_the_chunks_behind_it() {
 
     // Truncating to the head plus its own body leaves a document that
     // `read_composition` must reject and `read_hints` must still answer.
-    let head_end =
-        12 + 4 + 4 + u32::from_le_bytes(full[16..20].try_into().expect("length field")) as usize;
-    let truncated = &full[..head_end];
+    let len_at = HEADER + 4;
+    let body_len = u32::from_le_bytes(
+        full[len_at..len_at + 4]
+            .try_into()
+            .expect("the head's length field"),
+    ) as usize;
+    let truncated = &full[..len_at + 4 + body_len];
 
     let hints = read_hints(truncated).expect("head-only document");
     assert_eq!(hints.size, Some((300.0, 200.0)));
@@ -1184,4 +1250,203 @@ fn a_markdown_title_image_round_trips_from_both_registers() {
         reloaded.image_registry_ref().contains("banner"),
         "and so should the composition's, which its title names"
     );
+}
+
+// ─── Forward compatibility ───────────────────────────────────────────────────
+//
+// The two growth rules the format rests on, each asserted against bytes
+// assembled by hand — a newer writer is the one thing this crate cannot
+// produce for itself.
+
+/// Offset of the first chunk body carrying `tag`, and its length.
+fn locate_chunk(bytes: &[u8], tag: &[u8; 4]) -> (usize, usize) {
+    let mut at = HEADER;
+    while at + 8 <= bytes.len() {
+        let len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().expect("length")) as usize;
+        if &bytes[at..at + 4] == tag {
+            return (at + 8, len);
+        }
+        at += 8 + len;
+    }
+    panic!("no {:?} chunk", std::str::from_utf8(tag).unwrap_or("????"));
+}
+
+/// Rewrite the length field of the chunk whose body starts at `body_at`.
+fn set_chunk_len(bytes: &mut [u8], body_at: usize, len: u32) {
+    bytes[body_at - 4..body_at].copy_from_slice(&len.to_le_bytes());
+}
+
+/// A chunk body may grow at its tail: the chunk's own length delimits it,
+/// so a reader that decodes the sections it knows and stops is unaffected
+/// by whatever a newer writer appended. Asserted on `HEAD`, which is where
+/// the writer's own version already rides that rule.
+#[test]
+fn a_chunk_body_that_grew_at_its_tail_still_reads() {
+    let comp = build();
+    let opts = WriteOptions::new().size_hint(321.0, 123.0);
+    let original = write_composition(&comp, &opts).expect("writable");
+
+    let (body_at, body_len) = locate_chunk(&original, b"HEAD");
+    let mut grown = original[..body_at + body_len].to_vec();
+    grown.extend_from_slice(b"\x07appended");
+    grown.extend_from_slice(&original[body_at + body_len..]);
+    set_chunk_len(&mut grown, body_at, (body_len + 9) as u32);
+
+    let hints = read_hints(&grown).expect("a head with an unknown tail should still read");
+    assert_eq!(hints.size, Some((321.0, 123.0)));
+    read_composition(&grown, &ReadContext::new()).expect("and so should the whole document");
+}
+
+/// A record may grow at its tail: it is length-prefixed, so a reader
+/// decodes the fields it knows and skips the rest. This is the property
+/// the whole `record` form exists for.
+///
+/// `THEM` opens with the theme record, so extending that record's declared
+/// length and padding it simulates a `Theme` that gained a field.
+#[test]
+fn a_record_that_grew_a_trailing_field_still_reads() {
+    let comp = build();
+    let original = write_composition(&comp, &WriteOptions::new()).expect("writable");
+    let (body_at, body_len) = locate_chunk(&original, b"THEM");
+
+    // The theme record's own length is the varint at the front of `THEM`.
+    // Every theme is far longer than 127 bytes and shorter than 16 kB, so
+    // it is two bytes wide, and bumping it keeps that width.
+    let (a, b) = (original[body_at], original[body_at + 1]);
+    assert_eq!(a & 0x80, 0x80, "expected a two-byte record length");
+    assert_eq!(b & 0x80, 0, "expected a two-byte record length");
+    let record_len = u32::from(a & 0x7f) | (u32::from(b) << 7);
+    let grown_len = record_len + 4;
+    assert!(grown_len < 1 << 14, "still two bytes");
+
+    let mut grown = original.clone();
+    grown[body_at] = 0x80 | (grown_len & 0x7f) as u8;
+    grown[body_at + 1] = (grown_len >> 7) as u8;
+    // Four bytes of a field this build has never heard of, inserted where
+    // a newer writer would have put it: at the record's end.
+    let insert_at = body_at + 2 + record_len as usize;
+    for (k, byte) in [0xde_u8, 0xad, 0xbe, 0xef].into_iter().enumerate() {
+        grown.insert(insert_at + k, byte);
+    }
+    set_chunk_len(&mut grown, body_at, (body_len + 4) as u32);
+
+    let reloaded = read_composition(&grown, &ReadContext::new())
+        .expect("a theme with an unknown trailing field should still read");
+    assert_eq!(
+        reloaded.theme_ref().locale,
+        comp.theme_ref().locale,
+        "the fields this build knows must survive the skip"
+    );
+}
+
+/// A record whose fields read *past* its declared length is corruption,
+/// not a newer document, and has to be reported rather than silently
+/// leaving the cursor misaligned for everything after it.
+#[test]
+fn a_record_that_overran_its_length_is_reported() {
+    let comp = build();
+    let original = write_composition(&comp, &WriteOptions::new()).expect("writable");
+    let (body_at, _) = locate_chunk(&original, b"THEM");
+
+    // Shrink the theme record's declared length so its own fields run off
+    // the end of it.
+    let mut corrupt = original.clone();
+    corrupt[body_at] = 0x81;
+    corrupt[body_at + 1] = 0x01;
+
+    match read_composition(&corrupt, &ReadContext::new()) {
+        Ok(_) => panic!("an overrun record must be reported"),
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("record") || msg.contains("Theme"),
+                "error should name the record: {msg}"
+            );
+        }
+    }
+}
+
+/// The composition's own image register travels too — it backs chrome
+/// that belongs to the composition rather than to any plot, so a title
+/// holding `![](…)` needs it. It rides a field of its own rather than a
+/// plot address it would have to fake.
+#[test]
+fn the_compositions_own_image_register_travels() {
+    let mut source = image_case(ImageRegistry::new(), "swatch");
+    source = source.image_registry(image_registry_of(16));
+
+    let bytes = write_composition(&source, &WriteOptions::new().embed_images(true))
+        .expect("writable with images");
+    let reloaded = read_composition(&bytes, &ReadContext::new()).expect("readable");
+
+    let restored = reloaded
+        .image_registry_ref()
+        .get("swatch")
+        .expect("the composition's own register should come back");
+    let original = gradient_image(16);
+    assert_eq!(restored.width, original.width);
+    assert_eq!(restored.height, original.height);
+    assert_eq!(
+        restored.data.as_ref(),
+        original.data.as_ref(),
+        "pixels should survive the round trip"
+    );
+
+    // And it is addressed independently of the plots: this composition's
+    // one plot has an empty register, which must stay empty.
+    assert!(
+        reloaded.plots_in("panel")[0]
+            .image_registry_ref()
+            .get("swatch")
+            .is_none(),
+        "a composition-level image must not leak into a plot's register"
+    );
+}
+
+// ─── The checked-in fixture ──────────────────────────────────────────────────
+
+/// A document written by an earlier build, checked in so that a change to
+/// the format is noticed rather than merely being self-consistent.
+///
+/// Deliberately a *read* assertion rather than a byte comparison: an
+/// additive change rewrites these bytes legitimately, and comparing them
+/// would fail on exactly the changes the format is designed to absorb.
+/// What must not change is that the bytes still rebuild the same plot.
+const FIXTURE: &[u8] = include_bytes!("fixtures/four_panel.hplot");
+
+#[test]
+fn the_checked_in_fixture_still_reads() {
+    let doc = hephaestus::document::read_document(FIXTURE, ReadContext::builtin())
+        .expect("the checked-in fixture must still read");
+
+    // The same assertion the live round-trip makes, against bytes this
+    // build did not produce.
+    let mut reloaded = doc.composition;
+    for (w, h) in SIZES {
+        let ops = draw_calls(&mut reloaded, w, h);
+        assert!(
+            ops.iter().any(|op| matches!(op, Op::DrawGlyphs(_))),
+            "the fixture should still draw its chrome at {w}x{h}"
+        );
+        assert!(
+            ops.iter().any(|op| matches!(op, Op::Fill { .. })),
+            "the fixture should still draw its marks at {w}x{h}"
+        );
+    }
+}
+
+/// Rewrite the fixture. Ignored, so it runs only when asked:
+/// `cargo test --features document --test document_roundtrip -- --ignored
+/// regenerate_the_fixture`.
+///
+/// Run it after an intentional format change, and review the diff — a
+/// changed fixture is the format changing, which is worth seeing in a
+/// commit.
+#[test]
+#[ignore = "writes tests/fixtures/four_panel.hplot; run deliberately"]
+fn regenerate_the_fixture() {
+    let comp = build();
+    let bytes = write_composition(&comp, &WriteOptions::new()).expect("writable");
+    std::fs::create_dir_all("tests/fixtures").expect("fixture directory");
+    std::fs::write("tests/fixtures/four_panel.hplot", &bytes).expect("write the fixture");
 }

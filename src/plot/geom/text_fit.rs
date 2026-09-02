@@ -29,8 +29,9 @@
 //! - `"underline"`, `"strikethrough"` — booleans.
 //! - `"text_stroke"`, `"text_linewidth"` — per-glyph outline colour and
 //!   thickness in pt, drawn behind the fill.
-//! - `"markdown"` — boolean; default `false`. When true the label is
-//!   read as marquee-flavoured markdown and shaped through
+//! - `"markdown"` — boolean; defaults to `theme.geom.text_fit.markdown`.
+//!   When true the label is read as marquee-flavoured markdown and
+//!   shaped through
 //!   [`crate::text::rich`], and the fit measures that layout — block
 //!   structure, span chrome and per-span fonts all take part in
 //!   deciding the size, and all of them draw, since a rect is the
@@ -561,7 +562,12 @@ impl Geom for TextFitGeom {
             // all needed before shaping: the rich path bakes the fill
             // in as its base brush and takes its outline from the
             // sheet, both of which the shape cache keys on. ──
-            let markdown = resolve_bool_channel_or(markdown_ch, markdown_scale, i, false);
+            let markdown = resolve_bool_channel_or(
+                markdown_ch,
+                markdown_scale,
+                i,
+                ctx.theme.geom.text_fit.markdown,
+            );
             let fill_color = override_alpha(
                 resolve_color_channel_or_theme(
                     fill_ch,
@@ -1235,6 +1241,40 @@ mod tests {
                 _ => None,
             })
             .sum()
+    }
+
+    /// With no `"markdown"` channel bound, the theme decides. The other
+    /// two text geoms have always read a theme default here; a fitted
+    /// label is the one where rich text loses nothing, so it reads one
+    /// too.
+    #[test]
+    fn markdown_theme_default_toggles_rich_path() {
+        let g = TextFitGeom::builder()
+            .set("x", vec![0.1_f64])
+            .set("y", vec![0.3_f64])
+            .set("x2", vec![0.9_f64])
+            .set("y2", vec![0.7_f64])
+            .set("text", vec!["**AB**"])
+            .set("fill", Color::new([0.0, 0.0, 0.0, 1.0]))
+            .build();
+
+        let panel = Rect::new(0.0, 0.0, 600.0, 200.0);
+        let shapes = shapes();
+        let resolver = DirectScaleResolver::new();
+
+        // Default theme: markdown off, so the markup is six literal glyphs.
+        let mut plain = RecordingScene::default();
+        g.draw(&mut plain, &ctx(panel, &shapes, &resolver));
+        assert_eq!(glyph_count(&plain), 6);
+
+        let mut theme = crate::plot::theme::Theme::default();
+        theme.geom.text_fit.markdown = true;
+        let mut rich = RecordingScene::default();
+        g.draw(
+            &mut rich,
+            &ctx(panel, &shapes, &resolver).with_theme(&theme),
+        );
+        assert_eq!(glyph_count(&rich), 2);
     }
 
     #[test]

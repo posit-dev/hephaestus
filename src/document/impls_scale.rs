@@ -139,102 +139,106 @@ impl Decode for Locale {
 #[cfg(feature = "document-write")]
 impl Encode for Scale {
     fn encode(&self, w: &mut Writer) {
-        self.scale_type_kind().encode(w);
-        self.transform().encode(w);
-        self.input_range().cloned().encode(w);
-        self.output_range().cloned().encode(w);
-        self.bins().map(<[f64]>::to_vec).encode(w);
-        self.breaks_spec().cloned().encode(w);
-        self.minor_breaks_spec().cloned().encode(w);
-        self.color_space().encode(w);
-        self.direction().encode(w);
-        self.format_spec().encode(w);
-        // `generation` and the break memo are not written: the counter
-        // only keys a cache that starts empty, so a rebuilt scale
-        // recomputes rather than trusting a number from the wire.
+        super::codec::write_record(w, |w| {
+            self.scale_type_kind().encode(w);
+            self.transform().encode(w);
+            self.input_range().cloned().encode(w);
+            self.output_range().cloned().encode(w);
+            self.bins().map(<[f64]>::to_vec).encode(w);
+            self.breaks_spec().cloned().encode(w);
+            self.minor_breaks_spec().cloned().encode(w);
+            self.color_space().encode(w);
+            self.direction().encode(w);
+            self.format_spec().encode(w);
+            // `generation` and the break memo are not written: the counter
+            // only keys a cache that starts empty, so a rebuilt scale
+            // recomputes rather than trusting a number from the wire.
+        });
     }
 }
 
 #[cfg(feature = "document-read")]
 impl Decode for Scale {
     fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
-        let kind = ScaleTypeKind::decode(r)?;
-        let transform = Transform::decode(r)?;
-        let input = Option::<InputRange>::decode(r)?;
-        let output = Option::<OutputRange>::decode(r)?;
-        let bins = Option::<Vec<f64>>::decode(r)?;
-        let breaks = Option::<BreaksSpec>::decode(r)?;
-        let minor = Option::<MinorBreaksSpec>::decode(r)?;
-        let color_space = super::codec::Decode::decode(r)?;
-        let direction = Direction::decode(r)?;
-        let format = FormatSpec::decode(r)?;
+        super::codec::read_record(r, "Scale", |r| {
+            let kind = ScaleTypeKind::decode(r)?;
+            let transform = Transform::decode(r)?;
+            let input = Option::<InputRange>::decode(r)?;
+            let output = Option::<OutputRange>::decode(r)?;
+            let bins = Option::<Vec<f64>>::decode(r)?;
+            let breaks = Option::<BreaksSpec>::decode(r)?;
+            let minor = Option::<MinorBreaksSpec>::decode(r)?;
+            let color_space = super::codec::Decode::decode(r)?;
+            let direction = Direction::decode(r)?;
+            let format = FormatSpec::decode(r)?;
 
-        let mut s = Scale::new(kind);
-        s.set_transform(transform.kind);
-        s.set_color_space(color_space);
-        s.set_direction(direction);
+            let mut s = Scale::new(kind);
+            s.set_transform(transform.kind);
+            s.set_color_space(color_space);
+            s.set_direction(direction);
 
-        match input {
-            Some(InputRange::Continuous { min, max }) => s.set_domain_continuous(min, max),
-            Some(InputRange::Discrete(values)) => s.set_domain_discrete(values),
-            None => {}
-        }
+            match input {
+                Some(InputRange::Continuous { min, max }) => s.set_domain_continuous(min, max),
+                Some(InputRange::Discrete(values)) => s.set_domain_discrete(values),
+                None => {}
+            }
 
-        match output {
-            Some(OutputRange::Numbers(v)) => s.set_range_numbers(v),
-            Some(OutputRange::Strings(v)) => s.set_range_strings(v),
-            Some(OutputRange::Colors(v)) => s.set_range_colors(v),
-            Some(OutputRange::Linetypes(v)) => s.set_range_linetypes(v),
-            None => {}
-        }
+            match output {
+                Some(OutputRange::Numbers(v)) => s.set_range_numbers(v),
+                Some(OutputRange::Strings(v)) => s.set_range_strings(v),
+                Some(OutputRange::Colors(v)) => s.set_range_colors(v),
+                Some(OutputRange::Linetypes(v)) => s.set_range_linetypes(v),
+                None => {}
+            }
 
-        if let Some(edges) = bins {
-            s.try_set_bins(edges).map_err(|e| DocumentError::Invalid {
-                what: "scale bin edges",
-                why: e.to_string(),
-            })?;
-        }
+            if let Some(edges) = bins {
+                s.try_set_bins(edges).map_err(|e| DocumentError::Invalid {
+                    what: "scale bin edges",
+                    why: e.to_string(),
+                })?;
+            }
 
-        match breaks {
-            Some(BreaksSpec::Explicit(values)) => s.set_breaks(values),
-            Some(BreaksSpec::Labeled { breaks, labels }) => {
-                if breaks.len() != labels.len() {
-                    return Err(DocumentError::Invalid {
-                        what: "labeled scale breaks",
-                        why: format!(
-                            "{} break positions paired with {} labels",
-                            breaks.len(),
-                            labels.len()
-                        ),
-                    });
+            match breaks {
+                Some(BreaksSpec::Explicit(values)) => s.set_breaks(values),
+                Some(BreaksSpec::Labeled { breaks, labels }) => {
+                    if breaks.len() != labels.len() {
+                        return Err(DocumentError::Invalid {
+                            what: "labeled scale breaks",
+                            why: format!(
+                                "{} break positions paired with {} labels",
+                                breaks.len(),
+                                labels.len()
+                            ),
+                        });
+                    }
+                    s.set_breaks_labeled(breaks.into_iter().zip(labels).collect());
                 }
-                s.set_breaks_labeled(breaks.into_iter().zip(labels).collect());
+                Some(BreaksSpec::NumericInterval(step)) => s.set_interval(step),
+                Some(BreaksSpec::TemporalInterval(i)) => s.set_temporal_interval(i),
+                None => {}
             }
-            Some(BreaksSpec::NumericInterval(step)) => s.set_interval(step),
-            Some(BreaksSpec::TemporalInterval(i)) => s.set_temporal_interval(i),
-            None => {}
-        }
 
-        match minor {
-            Some(MinorBreaksSpec::Explicit(values)) => s.set_minor_breaks(values),
-            Some(MinorBreaksSpec::CountBetween(n)) => s.set_minor_count(n),
-            Some(MinorBreaksSpec::NumericInterval(step)) => s.set_minor_interval(step),
-            Some(MinorBreaksSpec::TemporalInterval(i)) => s.set_minor_temporal_interval(i),
-            None => {}
-        }
-
-        // Two ways to end up on default labels, both deliberate.
-        // `Custom` reaches the wire only from a lossy write, and names
-        // nothing a reader could resolve. A `Named` the reader hasn't
-        // been taught is a gap in its registry — worth rendering plain
-        // ticks for rather than refusing the whole plot over cosmetics.
-        if let FormatSpec::Named(name) = &format {
-            if let Some(f) = r.ctx().formatter(name) {
-                s.set_named_format(name.clone(), move |v, loc| f(v, loc));
+            match minor {
+                Some(MinorBreaksSpec::Explicit(values)) => s.set_minor_breaks(values),
+                Some(MinorBreaksSpec::CountBetween(n)) => s.set_minor_count(n),
+                Some(MinorBreaksSpec::NumericInterval(step)) => s.set_minor_interval(step),
+                Some(MinorBreaksSpec::TemporalInterval(i)) => s.set_minor_temporal_interval(i),
+                None => {}
             }
-        }
 
-        Ok(s)
+            // Two ways to end up on default labels, both deliberate.
+            // `Custom` reaches the wire only from a lossy write, and names
+            // nothing a reader could resolve. A `Named` the reader hasn't
+            // been taught is a gap in its registry — worth rendering plain
+            // ticks for rather than refusing the whole plot over cosmetics.
+            if let FormatSpec::Named(name) = &format {
+                if let Some(f) = r.ctx().formatter(name) {
+                    s.set_named_format(name.clone(), move |v, loc| f(v, loc));
+                }
+            }
+
+            Ok(s)
+        })
     }
 }
 
@@ -442,23 +446,25 @@ mod tests {
     #[test]
     fn mismatched_break_labels_are_rejected() {
         let mut w = super::Writer::new();
-        ScaleTypeKind::Continuous.encode(&mut w);
-        Transform {
-            kind: TransformKind::Identity,
-        }
-        .encode(&mut w);
-        Option::<InputRange>::None.encode(&mut w);
-        Option::<OutputRange>::None.encode(&mut w);
-        Option::<Vec<f64>>::None.encode(&mut w);
-        Some(BreaksSpec::Labeled {
-            breaks: vec![Value::Number(1.0), Value::Number(2.0)],
-            labels: vec!["only one".to_string()],
-        })
-        .encode(&mut w);
-        Option::<MinorBreaksSpec>::None.encode(&mut w);
-        ColorSpace::Oklab.encode(&mut w);
-        Direction::Forward.encode(&mut w);
-        FormatSpec::Default.encode(&mut w);
+        crate::document::codec::write_record(&mut w, |w| {
+            ScaleTypeKind::Continuous.encode(w);
+            Transform {
+                kind: TransformKind::Identity,
+            }
+            .encode(w);
+            Option::<InputRange>::None.encode(w);
+            Option::<OutputRange>::None.encode(w);
+            Option::<Vec<f64>>::None.encode(w);
+            Some(BreaksSpec::Labeled {
+                breaks: vec![Value::Number(1.0), Value::Number(2.0)],
+                labels: vec!["only one".to_string()],
+            })
+            .encode(w);
+            Option::<MinorBreaksSpec>::None.encode(w);
+            ColorSpace::Oklab.encode(w);
+            Direction::Forward.encode(w);
+            FormatSpec::Default.encode(w);
+        });
 
         let bytes = w.finish();
         let mut r = super::Reader::new(&bytes);
@@ -476,19 +482,21 @@ mod tests {
     #[test]
     fn non_increasing_bin_edges_are_rejected() {
         let mut w = super::Writer::new();
-        ScaleTypeKind::Binned.encode(&mut w);
-        Transform {
-            kind: TransformKind::Identity,
-        }
-        .encode(&mut w);
-        Option::<InputRange>::None.encode(&mut w);
-        Option::<OutputRange>::None.encode(&mut w);
-        Some(vec![5.0, 1.0]).encode(&mut w);
-        Option::<BreaksSpec>::None.encode(&mut w);
-        Option::<MinorBreaksSpec>::None.encode(&mut w);
-        ColorSpace::Oklab.encode(&mut w);
-        Direction::Forward.encode(&mut w);
-        FormatSpec::Default.encode(&mut w);
+        crate::document::codec::write_record(&mut w, |w| {
+            ScaleTypeKind::Binned.encode(w);
+            Transform {
+                kind: TransformKind::Identity,
+            }
+            .encode(w);
+            Option::<InputRange>::None.encode(w);
+            Option::<OutputRange>::None.encode(w);
+            Some(vec![5.0, 1.0]).encode(w);
+            Option::<BreaksSpec>::None.encode(w);
+            Option::<MinorBreaksSpec>::None.encode(w);
+            ColorSpace::Oklab.encode(w);
+            Direction::Forward.encode(w);
+            FormatSpec::Default.encode(w);
+        });
 
         let bytes = w.finish();
         let mut r = super::Reader::new(&bytes);

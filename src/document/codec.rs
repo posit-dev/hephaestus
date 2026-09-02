@@ -247,6 +247,30 @@ impl<'a> Reader<'a> {
         Ok(out)
     }
 
+    /// Advance to `end`, discarding whatever is left of a record.
+    ///
+    /// The forward-compatibility primitive: a record written by a newer
+    /// build carries fields this one doesn't know, and skipping to its
+    /// declared end is what leaves the cursor aligned for whatever
+    /// follows. Reading *past* `end` means the fields disagree about
+    /// their own widths, which is corruption rather than a newer
+    /// document, so it reports rather than rewinding.
+    pub(crate) fn skip_to(
+        &mut self,
+        end: usize,
+        type_name: &'static str,
+    ) -> Result<(), DocumentError> {
+        if self.pos > end {
+            return Err(DocumentError::BadRecord {
+                type_name,
+                offset: end,
+                overran: self.pos - end,
+            });
+        }
+        self.pos = end;
+        Ok(())
+    }
+
     /// Read one byte.
     pub(crate) fn u8(&mut self) -> Result<u8, DocumentError> {
         Ok(self.take(1)?[0])
@@ -352,6 +376,41 @@ pub(crate) trait Encode {
 pub(crate) trait Decode: Sized {
     /// Consume one value from `r`.
     fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError>;
+}
+
+// ─── Framing, for hand-written records ───────────────────────────────────────
+
+/// Write `f`'s output as a length-prefixed record.
+///
+/// The hand-written counterpart to `impl_codec!`'s `record` form, for a
+/// type read through its accessors and rebuilt through its builders
+/// rather than by naming its fields. Same contract: a reader decodes
+/// the fields it knows and skips the rest, so a trailing field is a
+/// minor version bump.
+#[cfg(feature = "document-write")]
+pub(crate) fn write_record<F: FnOnce(&mut Writer)>(w: &mut Writer, f: F) {
+    let body = w.detached(f);
+    w.bytes(&body);
+}
+
+/// Read a length-prefixed record, skipping any tail `f` didn't consume.
+///
+/// `type_name` names the record in a [`DocumentError::BadRecord`] if
+/// `f` reads past the declared end.
+#[cfg(feature = "document-read")]
+pub(crate) fn read_record<T, F>(
+    r: &mut Reader<'_>,
+    type_name: &'static str,
+    f: F,
+) -> Result<T, DocumentError>
+where
+    F: FnOnce(&mut Reader<'_>) -> Result<T, DocumentError>,
+{
+    let len = r.count()?;
+    let end = r.pos() + len;
+    let out = f(r)?;
+    r.skip_to(end, type_name)?;
+    Ok(out)
 }
 
 // ─── Primitive impls ─────────────────────────────────────────────────────────
@@ -646,11 +705,13 @@ impl<V: Decode> Decode for std::collections::HashMap<String, V> {
 
 /// Generate [`Encode`] / [`Decode`] for plain-data types.
 ///
-/// Three forms — a struct with named fields, a newtype, and an enum with
-/// explicit discriminants:
+/// Four forms — a framed record, an unframed struct, a newtype, and an
+/// enum with explicit discriminants:
 ///
 /// ```ignore
 /// impl_codec! {
+///     record Theme { palette, text, line }
+///
 ///     struct Palette { paper, ink, accent }
 ///
 ///     newtype FontWeight;
@@ -666,13 +727,102 @@ impl<V: Decode> Decode for std::collections::HashMap<String, V> {
 ///
 /// Fields and variant payloads are named, never typed: the type comes
 /// from the definition by inference, so the invocation can't drift from
-/// it without failing to compile.
+/// it without failing to compile. Every form additionally emits a
+/// compile-time completeness check, so a field or variant added to the
+/// type and not to the invocation fails the build instead of being
+/// silently dropped.
+///
+/// # `record` versus `struct`
+///
+/// A **`record`** is length-prefixed, so a reader decodes the fields it
+/// knows and skips whatever a newer writer appended. That is what makes
+/// a trailing field a minor version bump. Use it for every named
+/// aggregate that could plausibly gain one — the theme tree, the
+/// composition template, a geom's parts.
+///
+/// A **`struct`** is a bare concatenation. Use it only for a type whose
+/// arity is fixed by what it means (`Point`, `Margin`, `Span`) or that
+/// appears once per data element, where a length prefix would be
+/// per-row overhead. Growing one is a major bump.
 ///
 /// Discriminants are written explicitly and are part of the file format.
 /// Adding a variant means taking the next free number; renumbering an
 /// existing one silently reinterprets every document already written.
+/// There is deliberately no graceful-degradation slot: an unknown
+/// variant is refused rather than approximated.
 macro_rules! impl_codec {
     () => {};
+
+    // ── generic framed record ──
+    //
+    // Before the non-generic form so `Sided<T> { … }` isn't first
+    // offered to a rule that expects `{` right after the name.
+    (
+        record $ty:ident < $($gen:ident),+ $(,)? > { $($field:ident),+ $(,)? }
+        $($rest:tt)*
+    ) => {
+        const _: () = {
+            #[allow(unused_variables, dead_code)]
+            fn every_field_listed<$($gen),+>(v: &$ty<$($gen),+>) {
+                let $ty { $($field),+ } = v;
+            }
+        };
+
+        #[cfg(feature = "document-write")]
+        impl<$($gen: Encode),+> Encode for $ty<$($gen),+> {
+            fn encode(&self, w: &mut Writer) {
+                let body = w.detached(|w| { $( self.$field.encode(w); )+ });
+                w.bytes(&body);
+            }
+        }
+
+        #[cfg(feature = "document-read")]
+        impl<$($gen: Decode),+> Decode for $ty<$($gen),+> {
+            fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
+                let len = r.count()?;
+                let end = r.pos() + len;
+                let out = $ty { $( $field: Decode::decode(r)?, )+ };
+                r.skip_to(end, stringify!($ty))?;
+                Ok(out)
+            }
+        }
+
+        impl_codec! { $($rest)* }
+    };
+
+    // ── framed record with named fields ──
+    (
+        record $ty:ident { $($field:ident),+ $(,)? }
+        $($rest:tt)*
+    ) => {
+        const _: () = {
+            #[allow(unused_variables, dead_code)]
+            fn every_field_listed(v: &$ty) {
+                let $ty { $($field),+ } = v;
+            }
+        };
+
+        #[cfg(feature = "document-write")]
+        impl Encode for $ty {
+            fn encode(&self, w: &mut Writer) {
+                let body = w.detached(|w| { $( self.$field.encode(w); )+ });
+                w.bytes(&body);
+            }
+        }
+
+        #[cfg(feature = "document-read")]
+        impl Decode for $ty {
+            fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
+                let len = r.count()?;
+                let end = r.pos() + len;
+                let out = $ty { $( $field: Decode::decode(r)?, )+ };
+                r.skip_to(end, stringify!($ty))?;
+                Ok(out)
+            }
+        }
+
+        impl_codec! { $($rest)* }
+    };
 
     // ── generic struct with named fields ──
     //
@@ -682,6 +832,13 @@ macro_rules! impl_codec {
         struct $ty:ident < $($gen:ident),+ $(,)? > { $($field:ident),+ $(,)? }
         $($rest:tt)*
     ) => {
+        const _: () = {
+            #[allow(unused_variables, dead_code)]
+            fn every_field_listed<$($gen),+>(v: &$ty<$($gen),+>) {
+                let $ty { $($field),+ } = v;
+            }
+        };
+
         #[cfg(feature = "document-write")]
         impl<$($gen: Encode),+> Encode for $ty<$($gen),+> {
             fn encode(&self, w: &mut Writer) {
@@ -710,6 +867,20 @@ macro_rules! impl_codec {
         }
         $($rest:tt)*
     ) => {
+        const _: () = {
+            #[allow(unused_variables, dead_code)]
+            fn every_variant_listed<$($gen),+>(v: &$ty<$($gen),+>) {
+                match v {
+                    $(
+                        $ty::$variant
+                            $( ( $($bind),+ ) )?
+                            $( { $($vfield),+ } )?
+                        => {}
+                    ),+
+                }
+            }
+        };
+
         #[cfg(feature = "document-write")]
         impl<$($gen: Encode),+> Encode for $ty<$($gen),+> {
             fn encode(&self, w: &mut Writer) {
@@ -761,6 +932,13 @@ macro_rules! impl_codec {
         struct $ty:ident { $($field:ident),+ $(,)? }
         $($rest:tt)*
     ) => {
+        const _: () = {
+            #[allow(unused_variables, dead_code)]
+            fn every_field_listed(v: &$ty) {
+                let $ty { $($field),+ } = v;
+            }
+        };
+
         #[cfg(feature = "document-write")]
         impl Encode for $ty {
             fn encode(&self, w: &mut Writer) {
@@ -783,6 +961,13 @@ macro_rules! impl_codec {
         newtype $ty:ident;
         $($rest:tt)*
     ) => {
+        const _: () = {
+            #[allow(unused_variables, dead_code)]
+            fn every_field_listed(v: &$ty) {
+                let $ty(_only) = v;
+            }
+        };
+
         #[cfg(feature = "document-write")]
         impl Encode for $ty {
             fn encode(&self, w: &mut Writer) {
@@ -811,6 +996,20 @@ macro_rules! impl_codec {
         }
         $($rest:tt)*
     ) => {
+        const _: () = {
+            #[allow(unused_variables, dead_code)]
+            fn every_variant_listed(v: &$ty) {
+                match v {
+                    $(
+                        $ty::$variant
+                            $( ( $($bind),+ ) )?
+                            $( { $($vfield),+ } )?
+                        => {}
+                    ),+
+                }
+            }
+        };
+
         #[cfg(feature = "document-write")]
         impl Encode for $ty {
             fn encode(&self, w: &mut Writer) {

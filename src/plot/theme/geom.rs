@@ -20,6 +20,8 @@
 
 use std::sync::Arc;
 
+use crate::brush::Sampling;
+use crate::plot::geom::ImageFit;
 use crate::stroke::{Cap, Join};
 
 use super::palette::ThemeColor;
@@ -55,6 +57,8 @@ pub struct GeomTheme {
     pub text_fit: TextFitDefaults,
     /// Defaults for `TextPathGeom`.
     pub text_path: TextDefaults,
+    /// Defaults for `ImageGeom`.
+    pub image: ImageDefaults,
     /// Stroke width for shape markers stamped into linetype dash
     /// patterns (used by `LineGeom` and descendants when a
     /// `Marker(...)` step appears in the linetype), pt.
@@ -77,6 +81,7 @@ impl Default for GeomTheme {
             text: TextDefaults::default(),
             text_fit: TextFitDefaults::default(),
             text_path: TextDefaults::default(),
+            image: ImageDefaults::default(),
             marker_outline_pt: 0.5,
         }
     }
@@ -282,6 +287,13 @@ pub struct TextFitDefaults {
     pub text_stroke: Option<ThemeColor>,
     /// Default per-glyph outline thickness in pt.
     pub text_linewidth_pt: f64,
+    /// Interpret each row's `"text"` value as marquee-flavoured markdown
+    /// and shape it as a
+    /// [`RichTextRun`](crate::text::rich::RichTextRun) when no
+    /// `"markdown"` channel is bound. See [`TextDefaults::markdown`];
+    /// a fitted label is the one text geom where rich text loses
+    /// nothing, since a rect is the shape it lays out for.
+    pub markdown: bool,
 }
 
 impl Default for TextFitDefaults {
@@ -301,6 +313,44 @@ impl Default for TextFitDefaults {
             strikethrough: false,
             text_stroke: None,
             text_linewidth_pt: 1.0,
+            markdown: false,
+        }
+    }
+}
+
+/// Defaults for [`ImageGeom`](crate::plot::geom::ImageGeom).
+///
+/// The geometric channels an image shares with `RectGeom` — the band
+/// offsets — stay constants in the geom, as `RectGeom`'s do. What is here
+/// is the part a theme has an opinion about: where a sized image sits in
+/// its box, how an aspect mismatch is resolved, how it is filtered, and
+/// how opaque it is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageDefaults {
+    /// `"anchor_x"` fallback (0 = left, 0.5 = center, 1 = right).
+    pub anchor_x: f64,
+    /// `"anchor_y"` fallback (0 = top, 0.5 = center, 1 = bottom).
+    pub anchor_y: f64,
+    /// How an image whose aspect ratio differs from its box is scaled
+    /// into it, when no `"fit"` channel is bound.
+    pub fit: ImageFit,
+    /// Filtering used when the image is drawn at other than its native
+    /// size, when no `"sampling"` channel is bound.
+    pub sampling: Sampling,
+    /// Multiplied with the image's own alpha when no `"opacity"` channel
+    /// is bound. `1.0` leaves the image's alpha alone.
+    pub opacity: f64,
+}
+
+impl Default for ImageDefaults {
+    /// Centred, stretched to its box, bilinear, fully opaque.
+    fn default() -> Self {
+        Self {
+            anchor_x: 0.5,
+            anchor_y: 0.5,
+            fit: ImageFit::Stretch,
+            sampling: Sampling::Bilinear,
+            opacity: 1.0,
         }
     }
 }

@@ -292,6 +292,33 @@ pub(crate) fn resolve_cap_channel(
         .unwrap_or(default)
 }
 
+/// Resolve a fit channel from a string-named value. Recognizes
+/// `"stretch"` / `"contain"` / `"cover"`; falls back to `default`
+/// otherwise.
+pub(crate) fn resolve_fit_channel(
+    channel: Option<&Channel>,
+    scale: Option<&Scale>,
+    i: usize,
+    default: super::image::ImageFit,
+) -> super::image::ImageFit {
+    resolve_value(channel, scale, i)
+        .and_then(|v| v.as_str().and_then(super::image::fit_from_str))
+        .unwrap_or(default)
+}
+
+/// Resolve a sampling channel from a string-named value. Recognizes
+/// `"nearest"` / `"bilinear"`; falls back to `default` otherwise.
+pub(crate) fn resolve_sampling_channel(
+    channel: Option<&Channel>,
+    scale: Option<&Scale>,
+    i: usize,
+    default: crate::brush::Sampling,
+) -> crate::brush::Sampling {
+    resolve_value(channel, scale, i)
+        .and_then(|v| v.as_str().and_then(super::image::sampling_from_str))
+        .unwrap_or(default)
+}
+
 /// Resolve a join channel from a string-named value. Recognizes
 /// `"miter"` / `"round"` / `"bevel"`; falls back to `default` otherwise.
 pub(crate) fn resolve_join_channel(

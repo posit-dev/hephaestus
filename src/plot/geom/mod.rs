@@ -61,7 +61,7 @@ pub mod wedge;
 pub use bspline::BSplineGeom;
 pub use ellipse::EllipseGeom;
 pub use geometry::GeometryGeom;
-pub use image::ImageGeom;
+pub use image::{ImageFit, ImageGeom};
 pub use line::LineGeom;
 pub use point::PointGeom;
 pub use polygon::PolygonGeom;

@@ -86,7 +86,7 @@ pub(crate) struct GenericMapping {
 }
 
 impl_codec! {
-    struct GenericMapping { kind, families }
+    record GenericMapping { kind, families }
 }
 
 /// The fonts a document carries: the faces themselves, plus what each
@@ -101,7 +101,7 @@ pub(crate) struct EmbeddedFonts {
 }
 
 impl_codec! {
-    struct EmbeddedFonts { faces, generics }
+    record EmbeddedFonts { faces, generics }
 }
 
 /// What a composition's text could ask for: named families, and the

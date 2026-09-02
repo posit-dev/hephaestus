@@ -62,23 +62,54 @@ pub const FORMAT_VERSION_MAJOR: u16 = wire::VERSION_MAJOR;
 pub const FORMAT_VERSION_MINOR: u16 = wire::VERSION_MINOR;
 
 /// Why a document could not be read or written.
+///
+/// Non-exhaustive: a new reason is not a breaking change, so match with a
+/// wildcard arm.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum DocumentError {
     /// The bytes don't start with the document magic.
     #[error("not a hephaestus plot document (bad magic)")]
     BadMagic,
 
-    /// The document's major version postdates this build. Minor bumps
-    /// read fine — unknown chunks are skipped — so only a major
-    /// mismatch lands here.
+    /// The document's major version differs from this build's. A minor
+    /// bump reads fine — a record grows at its tail and an ancillary
+    /// chunk is skippable — so only a major mismatch lands here.
     #[error(
-        "plot document format version {found} is newer than this build reads (supports up to {supported})"
+        "plot document format version {found} is not the version this build reads ({supported})"
     )]
     UnsupportedVersion {
         /// Major version found in the document.
         found: u16,
-        /// Highest major version this build reads.
+        /// The one major version this build reads.
         supported: u16,
+    },
+
+    /// The container's flags word has a bit this build doesn't know.
+    /// Every bit is reserved, so a set one means the body is encoded in
+    /// a way this reader cannot interpret.
+    #[error("plot document sets unknown container flags {bits:#06x}")]
+    UnsupportedFlags {
+        /// The bits that were set and not recognised.
+        bits: u16,
+    },
+
+    /// A chunk this build doesn't know is tagged critical — an
+    /// uppercase initial — so skipping it would rebuild a plot that
+    /// silently differs from the one written.
+    #[error("plot document holds unknown critical chunk {tag:?}")]
+    UnknownCriticalChunk {
+        /// The tag that couldn't be resolved.
+        tag: String,
+    },
+
+    /// A tag appears more than once. Every tag the format defines is
+    /// written at most once, so this is a corrupt or hand-edited
+    /// document.
+    #[error("plot document repeats the {tag:?} chunk")]
+    DuplicateChunk {
+        /// The tag that appeared twice.
+        tag: String,
     },
 
     /// A value ran past the end of the input.
@@ -104,6 +135,21 @@ pub enum DocumentError {
         tag: u64,
         /// Offset the tag was read from.
         offset: usize,
+    },
+
+    /// A record's fields read past the length the record declared.
+    /// Distinct from a newer document, which declares a *longer* record
+    /// and is read by skipping the tail this build doesn't know.
+    #[error(
+        "plot document {type_name} record overran its length by {overran} bytes at offset {offset}"
+    )]
+    BadRecord {
+        /// Name of the record whose fields overran.
+        type_name: &'static str,
+        /// Offset the record was declared to end at.
+        offset: usize,
+        /// How far past that end the fields read.
+        overran: usize,
     },
 
     /// A length-prefixed string wasn't valid UTF-8.
@@ -261,6 +307,10 @@ pub fn write_composition(
         opts.background.encode(w);
         opts.size_hint.encode(w);
         opts.dpi_hint.encode(w);
+        // Provenance, and the worked example of a chunk body growing at
+        // its tail: a reader that stops after the hints skips this, which
+        // is what made adding it a minor bump rather than a major one.
+        env!("CARGO_PKG_VERSION").to_string().encode(w);
     });
 
     wire::assemble(
@@ -290,6 +340,7 @@ pub fn write_composition(
 /// anything out — an aspect ratio for a container, or a background to clear to.
 #[cfg(feature = "document-read")]
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct DocumentHints {
     /// Color the writer expected the scene to be rasterised over.
     pub background: Option<crate::color::Color>,
@@ -308,12 +359,15 @@ pub fn read_hints(bytes: &[u8]) -> Result<DocumentHints, DocumentError> {
     let chunks = wire::parse(bytes)?;
     let body = wire::chunk(&chunks, wire::CHUNK_HEAD)
         .ok_or(DocumentError::MissingChunk { tag: "HEAD" })?;
-    decode_head(body, read::default_context()).map(|(_, hints)| hints)
+    decode_head(body, read::default_context()).map(|(_, hints, _)| hints)
 }
 
 /// Decode the head chunk: the root composition's id, plus the hints.
 #[cfg(feature = "document-read")]
-fn decode_head(body: &[u8], ctx: &ReadContext) -> Result<(String, DocumentHints), DocumentError> {
+fn decode_head(
+    body: &[u8],
+    ctx: &ReadContext,
+) -> Result<(String, DocumentHints, Option<String>), DocumentError> {
     use codec::{Decode, Reader};
 
     let mut r = Reader::with_context(body, ctx);
@@ -323,7 +377,15 @@ fn decode_head(body: &[u8], ctx: &ReadContext) -> Result<(String, DocumentHints)
         size: Option::<(f64, f64)>::decode(&mut r)?,
         dpi: Option::<f64>::decode(&mut r)?,
     };
-    Ok((root_id, hints))
+    // Anything past the hints is a later addition. Reading it when it is
+    // there and stopping when it is not is the tolerance that makes a
+    // chunk body tail-extensible — see `wire`'s module docs.
+    let writer_version = if r.is_empty() {
+        None
+    } else {
+        Some(String::decode(&mut r)?)
+    };
+    Ok((root_id, hints, writer_version))
 }
 
 /// Rebuild the composition a document holds.
@@ -344,12 +406,21 @@ pub fn read_composition(
 
 /// A document read in one pass.
 #[cfg(feature = "document-read")]
+#[non_exhaustive]
 pub struct ReadDocument {
     /// The live composition, ready to render at any size.
     pub composition: crate::plot::PlotComposition,
     /// What the writer had in mind, for a consumer that has to choose a size
     /// or a clear color before it has laid anything out.
     pub hints: DocumentHints,
+    /// Version of this crate that wrote the document.
+    ///
+    /// Provenance rather than configuration — nothing about rebuilding the
+    /// plot consults it. It is here because a client and the process writing
+    /// its documents have to agree on the format major, and a mismatch is
+    /// otherwise reported with nothing to say which build produced the bytes.
+    /// `None` only for a document whose head predates the field.
+    pub writer_version: Option<String>,
 }
 
 /// Rebuild a document's composition and return its hints alongside.
@@ -419,7 +490,7 @@ pub fn read_document(bytes: &[u8], ctx: &ReadContext) -> Result<ReadDocument, Do
         tables.set_sheets(sheets);
     }
 
-    let (root_id, hints) = decode_head(required(&chunks, wire::CHUNK_HEAD)?, ctx)?;
+    let (root_id, hints, writer_version) = decode_head(required(&chunks, wire::CHUNK_HEAD)?, ctx)?;
 
     let theme = {
         let body = required(&chunks, wire::CHUNK_THEME)?;
@@ -497,5 +568,9 @@ pub fn read_document(bytes: &[u8], ctx: &ReadContext) -> Result<ReadDocument, Do
         images::apply_if_supported(&embedded, &mut composition);
     }
 
-    Ok(ReadDocument { composition, hints })
+    Ok(ReadDocument {
+        composition,
+        hints,
+        writer_version,
+    })
 }

@@ -33,7 +33,7 @@ use super::codec::{Encode, Writer};
 #[cfg(feature = "document-read")]
 use super::DocumentError;
 use crate::layout::Axis as LayoutAxis;
-use crate::layout::{CellId, Extent, Inset, Placement, Track};
+use crate::layout::{Extent, Inset, Placement, Track};
 use crate::plot::chrome::axis::{Axis, AxisPlacement, PolarRing};
 use crate::plot::chrome::legend::{
     AestheticSource, BinSpacing, ColorbarSpec, Legend, LegendBody, LegendKey, LegendKeySpec,
@@ -53,28 +53,109 @@ impl_codec! {
         1 => Height,
     }
 
-    newtype CellId;
-
-    enum Extent {
-        0 => Sum { px, inches, percent },
-        1 => Min(a, b),
-        2 => Max(a, b),
-        // `grid` is a `CellId` handed out by the layout solver, so it
-        // means nothing in another process. The wire form exists so the
-        // format needn't change if track references ever become
-        // portable; the write-side validation pass refuses a document
-        // that would depend on one.
-        3 => TrackOf { grid, axis, track, span },
-    }
-
     enum Track {
         0 => Fixed(extent),
         1 => Fr(share),
         2 => Auto,
     }
 
-    struct Inset { left, right, top, bottom, width, height }
-    struct Placement { row, col, row_span, col_span, inset }
+    record Inset { left, right, top, bottom, width, height }
+    record Placement { row, col, row_span, col_span, inset }
+}
+
+// A cross-grid track reference is the one `Extent` a document cannot
+// express. `grid` is a `CellId` the layout solver hands out per solve, so
+// it names nothing outside the process that allocated it — which is why
+// `write::check_template_tracks` refuses a template carrying one. The
+// references that drive alignment are not affected: `composition/build.rs`
+// generates those while lowering a template to a grid, so they are rebuilt
+// on load and never travel.
+//
+// The wire form is kept, and kept *symbolic*: whatever makes a reference
+// portable will name its target, the way a composition template already
+// names itself, so a string is the shape that survives that design. A
+// varint `CellId` would not, which is what made the previous form a
+// promise it could not keep.
+//
+// Both directions are deliberately inert rather than lossy. Encoding
+// writes an empty name, which the validation pass has already made
+// unreachable; decoding refuses instead of fabricating a `CellId` from a
+// number, since a fabricated one indexes an arbitrary other grid and
+// misplaces every track that reads it.
+#[cfg(feature = "document-write")]
+impl Encode for Extent {
+    fn encode(&self, w: &mut Writer) {
+        match self {
+            Extent::Sum {
+                px,
+                inches,
+                percent,
+            } => {
+                w.varint(0);
+                px.encode(w);
+                inches.encode(w);
+                percent.encode(w);
+            }
+            Extent::Min(a, b) => {
+                w.varint(1);
+                a.encode(w);
+                b.encode(w);
+            }
+            Extent::Max(a, b) => {
+                w.varint(2);
+                a.encode(w);
+                b.encode(w);
+            }
+            Extent::TrackOf {
+                grid: _,
+                axis,
+                track,
+                span,
+            } => {
+                w.varint(3);
+                String::new().encode(w);
+                axis.encode(w);
+                track.encode(w);
+                span.encode(w);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "document-read")]
+impl Decode for Extent {
+    fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
+        let offset = r.pos();
+        Ok(match r.varint()? {
+            0 => Extent::Sum {
+                px: f64::decode(r)?,
+                inches: f64::decode(r)?,
+                percent: f64::decode(r)?,
+            },
+            1 => Extent::Min(Box::decode(r)?, Box::decode(r)?),
+            2 => Extent::Max(Box::decode(r)?, Box::decode(r)?),
+            3 => {
+                let name = String::decode(r)?;
+                LayoutAxis::decode(r)?;
+                u16::decode(r)?;
+                u16::decode(r)?;
+                return Err(DocumentError::Invalid {
+                    what: "track reference",
+                    why: format!(
+                        "extent references tracks on grid {name:?}, which this build cannot \
+                         resolve to a live grid"
+                    ),
+                });
+            }
+            other => {
+                return Err(DocumentError::BadDiscriminant {
+                    type_name: "Extent",
+                    tag: other,
+                    offset,
+                })
+            }
+        })
+    }
 }
 
 // ─── Projections ─────────────────────────────────────────────────────────────
@@ -90,7 +171,7 @@ impl_codec! {
         1 => Chord,
     }
 
-    struct CustomProjection { outline, x_major, x_minor, y_major, y_minor, x_channel, y_channel }
+    record CustomProjection { outline, x_major, x_minor, y_major, y_minor, x_channel, y_channel }
 
     enum Projection {
         0 => Cartesian,
@@ -106,38 +187,42 @@ impl_codec! {
 #[cfg(feature = "document-write")]
 impl Encode for PolarProjection {
     fn encode(&self, w: &mut Writer) {
-        self.angle_channel().encode(w);
-        self.radius_channel().encode(w);
-        self.theta_start().encode(w);
-        self.theta_end().encode(w);
-        self.inner_radius_frac().encode(w);
-        self.outer_radius_frac().encode(w);
-        self.edge_style().encode(w);
-        self.theta_break_fracs().to_vec().encode(w);
-        self.is_fit_to_bbox().encode(w);
+        super::codec::write_record(w, |w| {
+            self.angle_channel().encode(w);
+            self.radius_channel().encode(w);
+            self.theta_start().encode(w);
+            self.theta_end().encode(w);
+            self.inner_radius_frac().encode(w);
+            self.outer_radius_frac().encode(w);
+            self.edge_style().encode(w);
+            self.theta_break_fracs().to_vec().encode(w);
+            self.is_fit_to_bbox().encode(w);
+        });
     }
 }
 
 #[cfg(feature = "document-read")]
 impl Decode for PolarProjection {
     fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
-        let angle = String::decode(r)?;
-        let radius = String::decode(r)?;
-        let theta_start = f64::decode(r)?;
-        let theta_end = f64::decode(r)?;
-        let inner = f64::decode(r)?;
-        let outer = f64::decode(r)?;
-        let edges = PolarEdgeStyle::decode(r)?;
-        let breaks = Vec::<f64>::decode(r)?;
-        let fit = bool::decode(r)?;
-        Ok(PolarProjection::full_circle()
-            .channels(angle, radius)
-            .theta_range(theta_start, theta_end)
-            .inner_radius(inner)
-            .outer_radius(outer)
-            .edges(edges)
-            .theta_breaks(breaks)
-            .fit_to_bbox(fit))
+        super::codec::read_record(r, "PolarProjection", |r| {
+            let angle = String::decode(r)?;
+            let radius = String::decode(r)?;
+            let theta_start = f64::decode(r)?;
+            let theta_end = f64::decode(r)?;
+            let inner = f64::decode(r)?;
+            let outer = f64::decode(r)?;
+            let edges = PolarEdgeStyle::decode(r)?;
+            let breaks = Vec::<f64>::decode(r)?;
+            let fit = bool::decode(r)?;
+            Ok(PolarProjection::full_circle()
+                .channels(angle, radius)
+                .theta_range(theta_start, theta_end)
+                .inner_radius(inner)
+                .outer_radius(outer)
+                .edges(edges)
+                .theta_breaks(breaks)
+                .fit_to_bbox(fit))
+        })
     }
 }
 
@@ -169,28 +254,32 @@ impl_codec! {
 #[cfg(feature = "document-write")]
 impl Encode for Axis {
     fn encode(&self, w: &mut Writer) {
-        self.scale_name().map(str::to_string).encode(w);
-        self.placement().encode(w);
-        self.title_ref().map(str::to_string).encode(w);
+        super::codec::write_record(w, |w| {
+            self.scale_name().map(str::to_string).encode(w);
+            self.placement().encode(w);
+            self.title_ref().map(str::to_string).encode(w);
+        });
     }
 }
 
 #[cfg(feature = "document-read")]
 impl Decode for Axis {
     fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
-        let scale_name = Option::<String>::decode(r)?;
-        let placement = AxisPlacement::decode(r)?;
-        let title = Option::<String>::decode(r)?;
-        let axis = match (scale_name, &title) {
-            (Some(name), _) => Axis::rail(name, placement),
-            // A rail-less axis still reserves its title slot, and
-            // `title_only` is the only way to build one.
-            (None, Some(t)) => Axis::title_only(t.clone(), placement),
-            (None, None) => Axis::title_only(String::new(), placement),
-        };
-        Ok(match title {
-            Some(t) => axis.title(t),
-            None => axis,
+        super::codec::read_record(r, "Axis", |r| {
+            let scale_name = Option::<String>::decode(r)?;
+            let placement = AxisPlacement::decode(r)?;
+            let title = Option::<String>::decode(r)?;
+            let axis = match (scale_name, &title) {
+                (Some(name), _) => Axis::rail(name, placement),
+                // A rail-less axis still reserves its title slot, and
+                // `title_only` is the only way to build one.
+                (None, Some(t)) => Axis::title_only(t.clone(), placement),
+                (None, None) => Axis::title_only(String::new(), placement),
+            };
+            Ok(match title {
+                Some(t) => axis.title(t),
+                None => axis,
+            })
         })
     }
 }
@@ -230,9 +319,9 @@ impl_codec! {
         1 => Fixed(value),
     }
 
-    struct LegendKeySpec { kind, bindings }
-    struct StackBody { keys, binned }
-    struct ColorbarSpec { samples, stepped, bindings }
+    record LegendKeySpec { kind, bindings }
+    record StackBody { keys, binned }
+    record ColorbarSpec { samples, stepped, bindings }
 
     enum LegendBody {
         0 => Stack(body),
@@ -244,7 +333,7 @@ impl_codec! {
         1 => Equal,
     }
 
-    struct Legend {
+    record Legend {
         side,
         title,
         domain_scale,
@@ -284,19 +373,23 @@ pub(crate) struct GeomParts {
 #[cfg(feature = "document-write")]
 impl Encode for GeomParts {
     fn encode(&self, w: &mut Writer) {
-        self.kind.encode(w);
-        self.keys.encode(w);
-        self.channels.encode(w);
+        super::codec::write_record(w, |w| {
+            self.kind.encode(w);
+            self.keys.encode(w);
+            self.channels.encode(w);
+        });
     }
 }
 
 #[cfg(feature = "document-read")]
 impl Decode for GeomParts {
     fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
-        Ok(GeomParts {
-            kind: String::decode(r)?,
-            keys: Option::decode(r)?,
-            channels: HashMap::decode(r)?,
+        super::codec::read_record(r, "GeomParts", |r| {
+            Ok(GeomParts {
+                kind: String::decode(r)?,
+                keys: Option::decode(r)?,
+                channels: HashMap::decode(r)?,
+            })
         })
     }
 }
@@ -346,9 +439,9 @@ impl_codec! {
         2 => Composition(nested),
     }
 
-    struct PlacementTemplate { row, col, span, element }
+    record PlacementTemplate { row, col, span, element }
 
-    struct CompositionTemplate {
+    record CompositionTemplate {
         id,
         rows,
         cols,
@@ -360,7 +453,7 @@ impl_codec! {
         placements,
     }
 
-    struct CompositionChrome {
+    record CompositionChrome {
         title,
         subtitle,
         caption,
@@ -380,45 +473,47 @@ use crate::plot::composition::{
 #[cfg(feature = "document-write")]
 impl Encode for Plot {
     fn encode(&self, w: &mut Writer) {
-        self.patch_id().to_string().encode(w);
+        super::codec::write_record(w, |w| {
+            self.patch_id().to_string().encode(w);
 
-        let mut bindings: Vec<(&str, &str)> = self.bindings().collect();
-        bindings.sort_unstable_by_key(|(channel, _)| *channel);
-        w.varint(bindings.len() as u64);
-        for (channel, scale) in bindings {
-            channel.encode(w);
-            scale.encode(w);
-        }
+            let mut bindings: Vec<(&str, &str)> = self.bindings().collect();
+            bindings.sort_unstable_by_key(|(channel, _)| *channel);
+            w.varint(bindings.len() as u64);
+            for (channel, scale) in bindings {
+                channel.encode(w);
+                scale.encode(w);
+            }
 
-        self.title_ref().map(str::to_string).encode(w);
-        self.subtitle_ref().map(str::to_string).encode(w);
-        self.caption_ref().map(str::to_string).encode(w);
+            self.title_ref().map(str::to_string).encode(w);
+            self.subtitle_ref().map(str::to_string).encode(w);
+            self.caption_ref().map(str::to_string).encode(w);
 
-        // Strips are indexed by side, so the array position carries the
-        // meaning and no side tag is needed.
-        let strips: [Option<String>; 4] = [
-            AxisSide::Left,
-            AxisSide::Right,
-            AxisSide::Bottom,
-            AxisSide::Top,
-        ]
-        .map(|side| self.strip_at(side).map(str::to_string));
-        strips.encode(w);
+            // Strips are indexed by side, so the array position carries the
+            // meaning and no side tag is needed.
+            let strips: [Option<String>; 4] = [
+                AxisSide::Left,
+                AxisSide::Right,
+                AxisSide::Bottom,
+                AxisSide::Top,
+            ]
+            .map(|side| self.strip_at(side).map(str::to_string));
+            strips.encode(w);
 
-        self.axes().to_vec().encode(w);
-        self.legends().to_vec().encode(w);
-        self.projection_ref().encode(w);
-        self.is_clipped().encode(w);
-        self.tracks_identity().encode(w);
-        self.aspect_ratio_ref().encode(w);
-        self.aspect_mode_ref().encode(w);
-        self.theme_override_ref().cloned().encode(w);
+            self.axes().to_vec().encode(w);
+            self.legends().to_vec().encode(w);
+            self.projection_ref().encode(w);
+            self.is_clipped().encode(w);
+            self.tracks_identity().encode(w);
+            self.aspect_ratio_ref().encode(w);
+            self.aspect_mode_ref().encode(w);
+            self.theme_override_ref().cloned().encode(w);
 
-        // Only the geoms that can name themselves. A geom returning
-        // `None` from `kind` has already been reported by the write-side
-        // validation pass, so skipping it here can't silently drop one.
-        let parts: Vec<GeomParts> = self.geoms().filter_map(|(_, g)| geom_parts(g)).collect();
-        parts.encode(w);
+            // Only the geoms that can name themselves. A geom returning
+            // `None` from `kind` has already been reported by the write-side
+            // validation pass, so skipping it here can't silently drop one.
+            let parts: Vec<GeomParts> = self.geoms().filter_map(|(_, g)| geom_parts(g)).collect();
+            parts.encode(w);
+        });
     }
 }
 
@@ -433,68 +528,71 @@ pub(crate) fn decode_plot(
     r: &mut Reader<'_>,
     composition: &crate::composition::Composition,
 ) -> Result<Plot, DocumentError> {
-    let patch_id = String::decode(r)?;
-    let mut plot = Plot::try_new(composition, &patch_id).map_err(|e| DocumentError::Invalid {
-        what: "plot patch binding",
-        why: e.to_string(),
-    })?;
+    super::codec::read_record(r, "Plot", |r| {
+        let patch_id = String::decode(r)?;
+        let mut plot =
+            Plot::try_new(composition, &patch_id).map_err(|e| DocumentError::Invalid {
+                what: "plot patch binding",
+                why: e.to_string(),
+            })?;
 
-    let bindings = r.count()?;
-    for _ in 0..bindings {
-        let channel = String::decode(r)?;
-        let scale = String::decode(r)?;
-        plot.set_binding(channel, scale);
-    }
+        let bindings = r.count()?;
+        for _ in 0..bindings {
+            let channel = String::decode(r)?;
+            let scale = String::decode(r)?;
+            plot.set_binding(channel, scale);
+        }
 
-    if let Some(t) = Option::<String>::decode(r)? {
-        plot.set_title(t);
-    }
-    if let Some(t) = Option::<String>::decode(r)? {
-        plot = plot.subtitle(t);
-    }
-    if let Some(t) = Option::<String>::decode(r)? {
-        plot = plot.caption(t);
-    }
+        if let Some(t) = Option::<String>::decode(r)? {
+            plot.set_title(t);
+        }
+        if let Some(t) = Option::<String>::decode(r)? {
+            plot = plot.subtitle(t);
+        }
+        if let Some(t) = Option::<String>::decode(r)? {
+            plot = plot.caption(t);
+        }
 
-    let strips = <[Option<String>; 4]>::decode(r)?;
-    for (side, text) in [
-        AxisSide::Left,
-        AxisSide::Right,
-        AxisSide::Bottom,
-        AxisSide::Top,
-    ]
-    .into_iter()
-    .zip(strips)
-    {
-        plot.set_strip(side, text);
-    }
-
-    for axis in Vec::<Axis>::decode(r)? {
-        plot.add_axis(axis);
-    }
-    for legend in Vec::<Legend>::decode(r)? {
-        plot.add_legend(legend);
-    }
-
-    plot = plot.projection(Projection::decode(r)?);
-    plot = plot.clip(bool::decode(r)?);
-    plot = plot.track_identity(bool::decode(r)?);
-    if let Some(ratio) = Option::<f64>::decode(r)? {
-        plot = plot.aspect_ratio(ratio);
-    }
-    plot = plot.aspect_mode(crate::plot::AspectMode::decode(r)?);
-    plot.set_theme_override(Option::decode(r)?);
-
-    let parts = Vec::<GeomParts>::decode(r)?;
-    let geoms: Vec<Box<dyn crate::plot::Geom>> = parts
+        let strips = <[Option<String>; 4]>::decode(r)?;
+        for (side, text) in [
+            AxisSide::Left,
+            AxisSide::Right,
+            AxisSide::Bottom,
+            AxisSide::Top,
+        ]
         .into_iter()
-        .map(|p| p.build(r))
-        .collect::<Result<_, _>>()?;
-    for geom in geoms {
-        plot.add_boxed_geom(geom);
-    }
+        .zip(strips)
+        {
+            plot.set_strip(side, text);
+        }
 
-    Ok(plot)
+        for axis in Vec::<Axis>::decode(r)? {
+            plot.add_axis(axis);
+        }
+        for legend in Vec::<Legend>::decode(r)? {
+            plot.add_legend(legend);
+        }
+
+        plot = plot.projection(Projection::decode(r)?);
+        plot = plot.clip(bool::decode(r)?);
+        plot = plot.track_identity(bool::decode(r)?);
+        if let Some(ratio) = Option::<f64>::decode(r)? {
+            plot = plot.aspect_ratio(ratio);
+        }
+        plot = plot.aspect_mode(crate::plot::AspectMode::decode(r)?);
+        plot.set_theme_override(Option::decode(r)?);
+
+        let parts = Vec::<GeomParts>::decode(r)?;
+        let geoms: Vec<Box<dyn crate::plot::Geom>> = parts
+            .into_iter()
+            .map(|p| p.build(r))
+            .collect::<Result<_, _>>()?;
+        for geom in geoms {
+            plot.add_boxed_geom(geom);
+        }
+
+        Ok(plot)
+    })
 }
 
 impl_codec! {

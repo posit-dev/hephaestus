@@ -34,7 +34,7 @@ Mixing these — palette references + Option-per-field cascade + Inherit/Blank/S
 - **`cascade.rs`** — `PerChannel<T>` and `Sided<T>` — the wholesale-cascade containers used for grid lines and strips.
 - **`axis.rs`** — `AxisTheme`, `PerAxis` (three-layer per-field cascade), `ResolvedAxis` (the bundle returned by `PerAxis::resolve`), and `axis_concrete_defaults()`.
 - **`legend.rs`** — `LegendTheme` with `KeyTheme` / `BarTheme` sub-structs and `Direction` (`Auto` / `Horizontal` / `Vertical`).
-- **`geom.rs`** — `GeomTheme` and the per-geom default sub-structs (`PointDefaults`, `LineDefaults`, `ShapeDefaults`, `TextDefaults`, `TextFitDefaults`).
+- **`geom.rs`** — `GeomTheme` and the per-geom default sub-structs (`PointDefaults`, `LineDefaults`, `ShapeDefaults`, `TextDefaults`, `TextFitDefaults`, `ImageDefaults`).
 - **`theme.rs`** — the top-level `Theme` struct, its sparse `ThemePart` mirror, and `SharedTheme = Arc<Theme>`. `Theme::rich_text` holds the `Arc<RichTextStyleSheet>` every markdown-enabled text slot resolves selectors through; `ThemePart::rich_text` overrides it per plot.
 - **`builtin.rs`** — pre-built variants: `Theme::default()` / `dark()` / `minimal()` / `classic()` / `bw()` / `void()`.
 
@@ -115,7 +115,9 @@ Three things worth knowing:
 - No channel bound → theme default applies.
 - Theme default is `None` (colours) → the geom emits nothing for that aesthetic (the pre-theme "channel-or-nothing" semantic).
 
-The defaults are intentionally minimal — only style-related values a theme might reasonably override. Geometric / semantic constants (rect band offsets, B-spline degree, partial-wedge sweep) stay as constants in each geom because they describe meaning, not appearance.
+The defaults are intentionally minimal — only style-related values a theme might reasonably override. Geometric / semantic constants (rect and image band offsets, B-spline degree, partial-wedge sweep) stay as constants in each geom because they describe meaning, not appearance.
+
+**The line runs between meaning and appearance, not between numbers and colours.** `TextDefaults` themes `anchor_x` / `anchor_y` and `ImageDefaults` themes the same pair plus `fit`, `sampling` and `opacity` — all positional or numeric, all things a figure has one opinion about. A band offset is on the other side of the line because ±0.5 on a `RectGeom` *is* the bar-chart reading of the data, not a look.
 
 `Theme::default()`'s built-in `GeomTheme` leaves colour fields at `None` to preserve historic semantics; a populated palette-anchored theme is the role of the ggplot2-style defaults extension.
 

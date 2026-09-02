@@ -25,12 +25,15 @@ use super::codec::{Decode, Reader};
 use super::codec::{Encode, Writer};
 #[cfg(feature = "document-read")]
 use super::DocumentError;
+use crate::brush::Sampling;
+use crate::plot::geom::ImageFit;
 use crate::plot::theme::legend::Direction as LegendDirection;
 use crate::plot::theme::{
     AlignTo, AxisTheme, BarTheme, Element, FontFamily, FontFeature, FontSpec, FontStyle,
-    FontVariation, FontWeight, FontWidth, GeomTheme, KeyTheme, LegendTheme, LineDefaults,
-    LineElement, PerAxis, PerChannel, PointDefaults, RectElement, Rotation, ShapeDefaults, Sided,
-    TextDefaults, TextElement, TextFitDefaults, Theme, ThemePart, TitleLocation,
+    FontVariation, FontWeight, FontWidth, GeomTheme, ImageDefaults, KeyTheme, LegendTheme,
+    LineDefaults, LineElement, PerAxis, PerChannel, PointDefaults, RectElement, Rotation,
+    ShapeDefaults, Sided, TextDefaults, TextElement, TextFitDefaults, Theme, ThemePart,
+    TitleLocation,
 };
 use crate::text::rich::style::Direction as RichDirection;
 use crate::text::rich::{
@@ -50,8 +53,8 @@ impl_codec! {
         2 => Set(v),
     }
 
-    struct PerChannel<T> { all, by_channel }
-    struct Sided<T> { all, by_channel, by_channel_side }
+    record PerChannel<T> { all, by_channel }
+    record Sided<T> { all, by_channel, by_channel_side }
 }
 
 // ─── Fonts ───────────────────────────────────────────────────────────────────
@@ -89,7 +92,7 @@ impl_codec! {
 
     struct FontFeature { tag, value }
     struct FontVariation { tag, value }
-    struct FontSpec { family, weight, width, style, features, variations }
+    record FontSpec { family, weight, width, style, features, variations }
 }
 
 // ─── Elements ────────────────────────────────────────────────────────────────
@@ -106,7 +109,7 @@ impl_codec! {
         2 => Across,
     }
 
-    struct TextElement {
+    record TextElement {
         font,
         color,
         size_pt,
@@ -123,8 +126,8 @@ impl_codec! {
         markdown,
     }
 
-    struct LineElement { color, linewidth_pt, linetype, cap, join }
-    struct RectElement { fill, color, linewidth_pt, linetype, corner_radius }
+    record LineElement { color, linewidth_pt, linetype, cap, join }
+    record RectElement { fill, color, linewidth_pt, linetype, corner_radius }
 }
 
 // ─── Axis ────────────────────────────────────────────────────────────────────
@@ -135,7 +138,7 @@ impl_codec! {
         1 => Inside,
     }
 
-    struct AxisTheme {
+    record AxisTheme {
         title,
         text,
         line,
@@ -148,7 +151,7 @@ impl_codec! {
         title_location,
     }
 
-    struct PerAxis { all, by_channel, by_channel_side }
+    record PerAxis { all, by_channel, by_channel_side }
 }
 
 // ─── Legend ──────────────────────────────────────────────────────────────────
@@ -160,19 +163,32 @@ impl_codec! {
         2 => Vertical,
     }
 
-    struct KeyTheme { frame, width, height, spacing }
-    struct BarTheme { length, width, frame }
-    struct LegendTheme { background, title, margin, padding, direction, axis, key, bar }
+    record KeyTheme { frame, width, height, spacing }
+    record BarTheme { length, width, frame }
+    record LegendTheme { background, title, margin, padding, direction, axis, key, bar }
 }
 
 // ─── Geom defaults ───────────────────────────────────────────────────────────
 
 impl_codec! {
-    struct PointDefaults { size_pt, shape, fill, stroke, stroke_width_pt }
-    struct LineDefaults { stroke, linewidth_pt, cap, join }
-    struct ShapeDefaults { fill, stroke, linewidth_pt, cap, join }
+    enum ImageFit {
+        0 => Stretch,
+        1 => Contain,
+        2 => Cover,
+    }
 
-    struct TextDefaults {
+    enum Sampling {
+        0 => Nearest,
+        1 => Bilinear,
+    }
+
+    record ImageDefaults { anchor_x, anchor_y, fit, sampling, opacity }
+
+    record PointDefaults { size_pt, shape, fill, stroke, stroke_width_pt }
+    record LineDefaults { stroke, linewidth_pt, cap, join }
+    record ShapeDefaults { fill, stroke, linewidth_pt, cap, join }
+
+    record TextDefaults {
         size_pt,
         weight,
         fill,
@@ -189,7 +205,7 @@ impl_codec! {
         markdown,
     }
 
-    struct TextFitDefaults {
+    record TextFitDefaults {
         min_font_pt,
         max_font_pt,
         weight,
@@ -202,9 +218,10 @@ impl_codec! {
         strikethrough,
         text_stroke,
         text_linewidth_pt,
+        markdown,
     }
 
-    struct GeomTheme {
+    record GeomTheme {
         point,
         line,
         segment,
@@ -218,6 +235,7 @@ impl_codec! {
         text,
         text_fit,
         text_path,
+        image,
         marker_outline_pt,
     }
 }
@@ -253,7 +271,7 @@ impl_codec! {
         1 => Absolute(pt),
     }
 
-    struct TextStyle {
+    record TextStyle {
         size_pt,
         families,
         weight,
@@ -318,7 +336,7 @@ impl_codec! {
         22 => Bullet,
     }
 
-    struct StyleDelta {
+    record StyleDelta {
         family,
         weight,
         italic,
@@ -379,25 +397,29 @@ impl Decode for FieldSet {
 /// interning impl without overlapping a blanket one.
 #[cfg(feature = "document-write")]
 pub(crate) fn encode_sheet(sheet: &RichTextStyleSheet, w: &mut Writer) {
-    let mut entries: Vec<(&str, &StyleDelta)> = sheet.iter().collect();
-    entries.sort_unstable_by_key(|(name, _)| *name);
-    w.varint(entries.len() as u64);
-    for (name, delta) in entries {
-        name.encode(w);
-        delta.encode(w);
-    }
+    super::codec::write_record(w, |w| {
+        let mut entries: Vec<(&str, &StyleDelta)> = sheet.iter().collect();
+        entries.sort_unstable_by_key(|(name, _)| *name);
+        w.varint(entries.len() as u64);
+        for (name, delta) in entries {
+            name.encode(w);
+            delta.encode(w);
+        }
+    });
 }
 
 /// Read a style sheet's contents. See [`encode_sheet`].
 #[cfg(feature = "document-read")]
 pub(crate) fn decode_sheet(r: &mut Reader<'_>) -> Result<RichTextStyleSheet, DocumentError> {
-    let n = r.count()?;
-    let mut sheet = RichTextStyleSheet::empty();
-    for _ in 0..n {
-        let name = String::decode(r)?;
-        sheet.set(name, StyleDelta::decode(r)?);
-    }
-    Ok(sheet)
+    super::codec::read_record(r, "RichTextStyleSheet", |r| {
+        let n = r.count()?;
+        let mut sheet = RichTextStyleSheet::empty();
+        for _ in 0..n {
+            let name = String::decode(r)?;
+            sheet.set(name, StyleDelta::decode(r)?);
+        }
+        Ok(sheet)
+    })
 }
 
 #[cfg(feature = "document-write")]
@@ -422,7 +444,7 @@ impl Decode for std::sync::Arc<RichTextStyleSheet> {
 // ─── Theme ───────────────────────────────────────────────────────────────────
 
 impl_codec! {
-    struct Theme {
+    record Theme {
         palette,
         text,
         line,
@@ -451,7 +473,7 @@ impl_codec! {
         rich_text,
     }
 
-    struct ThemePart {
+    record ThemePart {
         palette,
         text,
         line,

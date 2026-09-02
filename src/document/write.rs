@@ -11,7 +11,11 @@ use crate::layout::{Extent, Inset, Track};
 use crate::plot::{FormatSpec, PlotComposition};
 
 /// Something in a plot that a document can't carry.
+///
+/// Non-exhaustive: a new kind of problem is not a breaking change, so
+/// match with a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UnsupportedItem {
     /// A scale carries an anonymous formatter closure. Give it a name
     /// with
@@ -99,7 +103,11 @@ impl std::fmt::Display for UnsupportedItem {
 }
 
 /// How a document is written.
+///
+/// Non-exhaustive: build one with [`Self::new`] and the setters below, so
+/// a new option is not a breaking change.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct WriteOptions {
     /// Degrade what can't be carried instead of refusing.
     ///

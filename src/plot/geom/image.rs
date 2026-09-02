@@ -89,30 +89,22 @@ use crate::primitives::rect as rect_path;
 use crate::scene::SceneBuilder;
 
 use super::resolve::{
-    pt_to_px, resolve_angle_channel, resolve_number_channel, resolve_number_channel_or,
-    resolve_pick_id, resolve_position, resolve_str_channel_or,
+    pt_to_px, resolve_angle_channel, resolve_fit_channel, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, resolve_position, resolve_sampling_channel,
+    resolve_str_channel_or,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
 //
-// These are geometric rather than stylistic, so they live here rather than on
-// `theme.geom.*` — see `src/plot/theme/CLAUDE.md`.
+// The band offsets are geometric rather than stylistic, so they live here
+// rather than on `theme.geom.*` — exactly as `RectGeom`'s do. Anchor, fit,
+// sampling and opacity are appearance, and live on `theme.geom.image`.
 
-/// Default anchor on both axes: the image is centred on `(x, y)`.
-const DEFAULT_ANCHOR: f64 = 0.5;
 /// Default band offset on every edge. Zero, so an image sits on the band's
 /// centre until told otherwise.
 const DEFAULT_BAND: f64 = 0.0;
-/// Default opacity: fully opaque, so only the image's own alpha applies.
-const DEFAULT_OPACITY: f64 = 1.0;
-/// Default sampling mode. Bilinear suits photographic content; pixel art
-/// asks for `"nearest"`.
-const DEFAULT_SAMPLING: &str = "bilinear";
-/// Default aspect-fit mode. Filling the box exactly matches what `RectGeom`
-/// does with the same corner channels.
-const DEFAULT_FIT: &str = "stretch";
 
 const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("image", ExpectedOutput::Strings),
@@ -143,8 +135,11 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
 
 /// How an image whose aspect ratio differs from its target box is scaled
 /// into it.
+///
+/// Also the type of [`ImageDefaults::fit`](crate::plot::theme::ImageDefaults::fit),
+/// which is what a row with no `"fit"` channel resolves to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Fit {
+pub enum ImageFit {
     /// Fill the box on both axes, distorting the image.
     Stretch,
     /// Scale uniformly until the image fits inside the box.
@@ -153,21 +148,24 @@ enum Fit {
     Cover,
 }
 
-/// The `"fit"` channel's string vocabulary. Anything unrecognised reads as
-/// the default, matching how `"cap"` and `"join"` treat an unknown name.
-fn fit_from_str(s: &str) -> Fit {
+/// The `"fit"` channel's string vocabulary. `None` for a name outside it,
+/// which falls back to the theme default — how `"cap"` and `"join"` treat
+/// an unknown name too.
+pub(crate) fn fit_from_str(s: &str) -> Option<ImageFit> {
     match s {
-        "contain" => Fit::Contain,
-        "cover" => Fit::Cover,
-        _ => Fit::Stretch,
+        "stretch" => Some(ImageFit::Stretch),
+        "contain" => Some(ImageFit::Contain),
+        "cover" => Some(ImageFit::Cover),
+        _ => None,
     }
 }
 
-/// The `"sampling"` channel's string vocabulary.
-fn sampling_from_str(s: &str) -> crate::brush::Sampling {
+/// The `"sampling"` channel's string vocabulary. See [`fit_from_str`].
+pub(crate) fn sampling_from_str(s: &str) -> Option<crate::brush::Sampling> {
     match s {
-        "nearest" => crate::brush::Sampling::Nearest,
-        _ => crate::brush::Sampling::Bilinear,
+        "nearest" => Some(crate::brush::Sampling::Nearest),
+        "bilinear" => Some(crate::brush::Sampling::Bilinear),
+        _ => None,
     }
 }
 
@@ -422,10 +420,18 @@ impl Geom for ImageGeom {
                 continue;
             }
 
-            let anchor_x =
-                resolve_number_channel_or(anchor_x_ch, anchor_x_scale, i, DEFAULT_ANCHOR);
-            let anchor_y =
-                resolve_number_channel_or(anchor_y_ch, anchor_y_scale, i, DEFAULT_ANCHOR);
+            let anchor_x = resolve_number_channel_or(
+                anchor_x_ch,
+                anchor_x_scale,
+                i,
+                ctx.theme.geom.image.anchor_x,
+            );
+            let anchor_y = resolve_number_channel_or(
+                anchor_y_ch,
+                anchor_y_scale,
+                i,
+                ctx.theme.geom.image.anchor_y,
+            );
 
             // A data-space extent spans anchor→far edge; an absolute one is
             // placed around the anchor by the anchor fractions.
@@ -449,16 +455,16 @@ impl Geom for ImageGeom {
             }
 
             // ── Fit the image's pixel space into the target box. ──
-            let fit = fit_from_str(&resolve_str_channel_or(fit_ch, fit_scale, i, DEFAULT_FIT));
+            let fit = resolve_fit_channel(fit_ch, fit_scale, i, ctx.theme.geom.image.fit);
             let fill_x = target.width() / img_w;
             let fill_y = target.height() / img_h;
             let (sx, sy) = match fit {
-                Fit::Stretch => (fill_x, fill_y),
-                Fit::Contain => {
+                ImageFit::Stretch => (fill_x, fill_y),
+                ImageFit::Contain => {
                     let s = fill_x.min(fill_y);
                     (s, s)
                 }
-                Fit::Cover => {
+                ImageFit::Cover => {
                     let s = fill_x.max(fill_y);
                     (s, s)
                 }
@@ -483,14 +489,19 @@ impl Geom for ImageGeom {
                 Affine::rotate_about(-angle, centre)
             };
 
-            let sampling = sampling_from_str(&resolve_str_channel_or(
+            let sampling = resolve_sampling_channel(
                 sampling_ch,
                 sampling_scale,
                 i,
-                DEFAULT_SAMPLING,
-            ));
-            let opacity = resolve_number_channel_or(opacity_ch, opacity_scale, i, DEFAULT_OPACITY)
-                .clamp(0.0, 1.0) as f32;
+                ctx.theme.geom.image.sampling,
+            );
+            let opacity = resolve_number_channel_or(
+                opacity_ch,
+                opacity_scale,
+                i,
+                ctx.theme.geom.image.opacity,
+            )
+            .clamp(0.0, 1.0) as f32;
             let pick = resolve_pick_id(pick_id_ch, pick_id_scale, i);
 
             // `draw_image`'s transform maps the image's own pixel space
@@ -501,7 +512,7 @@ impl Geom for ImageGeom {
 
             // Only `Cover` overflows its box, so only it pays for a clip.
             let clipped =
-                fit == Fit::Cover && (drawn_w > target.width() || drawn_h > target.height());
+                fit == ImageFit::Cover && (drawn_w > target.width() || drawn_h > target.height());
             if clipped {
                 scene.push_layer(
                     crate::blend::BlendMode::NORMAL,
@@ -1408,6 +1419,56 @@ mod tests {
             ),
         );
         assert_eq!(only_image(&scene).1, Sampling::Bilinear);
+    }
+
+    /// With no channel bound, `theme.geom.image` decides. An image is a
+    /// mark like any other, so sampling, opacity, fit and anchor are
+    /// themeable rather than constants buried in this file.
+    #[test]
+    fn the_theme_supplies_sampling_opacity_and_fit() {
+        // `"wide"` is 20x10 into a square box, so `contain` letterboxes it
+        // and the anchor decides where the slack goes — three theme fields
+        // observable in one draw.
+        let g = ImageGeom::builder()
+            .set("image", "wide")
+            .set("x", Raw(vec![0.0_f64]))
+            .set("y", Raw(vec![0.0_f64]))
+            .set("x2", Raw(vec![1.0_f64]))
+            .set("y2", Raw(vec![1.0_f64]))
+            .build();
+        let (shapes, images) = (shapes(), registry());
+        let resolver = DirectScaleResolver::new();
+
+        let mut theme = crate::plot::theme::Theme::default();
+        theme.geom.image.sampling = Sampling::Nearest;
+        theme.geom.image.opacity = 0.25;
+        theme.geom.image.fit = ImageFit::Contain;
+        theme.geom.image.anchor_y = 0.0;
+
+        let mut scene = RecordingScene::new();
+        g.draw(
+            &mut scene,
+            &ctx(
+                GeomRect::new(0.0, 0.0, 100.0, 100.0),
+                &shapes,
+                &images,
+                &resolver,
+            )
+            .with_theme(&theme),
+        );
+
+        let (transform, sampling, alpha, _) = only_image(&scene);
+        assert_eq!(sampling, Sampling::Nearest);
+        assert!((alpha - 0.25).abs() < 1e-6, "themed opacity, got {alpha}");
+        // Contain into a 100x100 box: 20x10 scales by 5 to 100x50, and
+        // `anchor_y = 0.0` puts it against the top.
+        let drawn = drawn_box(transform, 20.0, 10.0);
+        assert!((drawn.width() - 100.0).abs() < 1e-6, "got {drawn:?}");
+        assert!((drawn.height() - 50.0).abs() < 1e-6, "got {drawn:?}");
+        assert!(
+            (drawn.y0 - 0.0).abs() < 1e-6,
+            "themed anchor, got {drawn:?}"
+        );
     }
 
     #[test]

@@ -788,10 +788,19 @@ natively; a bundler that does not can pass `init({ module_or_path })`.
 **The document format major version is a hard compatibility boundary, and
 semver has to carry it.** `read_composition` refuses a major it does not know —
 equality, not a floor — so a site pinned to one release can only read documents
-written at the same major. `documentFormatVersion()` exposes it so a build step
-can assert rather than discovering the mismatch as a plot that never appears,
-and a format major bump must be a **major npm release**. Nothing at runtime can
-recover from getting this wrong.
+written at the same major. The format is at **major 2**.
+`documentFormatVersion()` exposes it so a build step can assert rather than
+discovering the mismatch as a plot that never appears, and a format major bump
+must be a **major npm release**. Nothing at runtime can recover from getting
+this wrong.
+
+What the boundary now costs is much less than it did. Within a major, a record
+grows at its tail and an ancillary chunk is skippable, so most format additions
+no longer move the number at all — see `src/document/CLAUDE.md` for which
+changes are minor and which are not. A reader also refuses an unknown
+**critical** chunk rather than skipping it, so a client too old for a document
+says so instead of drawing a plot that quietly differs. `ReadDocument`
+carries `writer_version`, which is what to log when a mismatch does happen.
 
 Serve the wasm as `Content-Type: application/wasm` (streaming instantiation)
 with brotli — 833 kB against 2.9 MB raw. A CDN does both. Given GPU init is

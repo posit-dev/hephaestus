@@ -70,17 +70,21 @@ pub(crate) struct ImageEntry {
 #[cfg(feature = "document-write")]
 impl Encode for ImageEntry {
     fn encode(&self, w: &mut Writer) {
-        self.name.encode(w);
-        w.bytes(&self.png);
+        super::codec::write_record(w, |w| {
+            self.name.encode(w);
+            w.bytes(&self.png);
+        });
     }
 }
 
 #[cfg(feature = "document-read")]
 impl Decode for ImageEntry {
     fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
-        Ok(ImageEntry {
-            name: String::decode(r)?,
-            png: r.bytes()?.to_vec(),
+        super::codec::read_record(r, "ImageEntry", |r| {
+            Ok(ImageEntry {
+                name: String::decode(r)?,
+                png: r.bytes()?.to_vec(),
+            })
         })
     }
 }
@@ -96,18 +100,21 @@ pub(crate) struct PlotImages {
 }
 
 impl_codec! {
-    struct PlotImages { patch, index, entries }
+    record PlotImages { patch, index, entries }
 }
 
-/// Every image a document carries.
+/// Every image a document carries: the composition's own registry,
+/// which backs chrome that belongs to the composition rather than to a
+/// plot, plus one list per plot.
 #[cfg(any(feature = "document-read", feature = "document-write"))]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct EmbeddedImages {
+    pub(crate) composition: Vec<ImageEntry>,
     pub(crate) plots: Vec<PlotImages>,
 }
 
 impl_codec! {
-    struct EmbeddedImages { plots }
+    record EmbeddedImages { composition, plots }
 }
 
 /// Collect and encode every image the composition's plots hold.
@@ -118,16 +125,8 @@ impl_codec! {
 #[cfg(all(feature = "document-write", feature = "png"))]
 pub(crate) fn collect(comp: &PlotComposition) -> EmbeddedImages {
     let mut plots = Vec::new();
-    for (patch, index, registry) in registries(comp) {
-        let mut entries = Vec::new();
-        for name in carried_names(registry) {
-            let Some(image) = registry.resolve(&name) else {
-                continue;
-            };
-            if let Some(png) = encode(&image) {
-                entries.push(ImageEntry { name, png });
-            }
-        }
+    for (patch, index, registry) in plot_registries(comp) {
+        let entries = entries_of(registry);
         if !entries.is_empty() {
             plots.push(PlotImages {
                 patch,
@@ -136,7 +135,29 @@ pub(crate) fn collect(comp: &PlotComposition) -> EmbeddedImages {
             });
         }
     }
-    EmbeddedImages { plots }
+    EmbeddedImages {
+        composition: entries_of(comp.image_registry_ref()),
+        plots,
+    }
+}
+
+/// Encode every image one registry can hand out.
+///
+/// Sorted by name, so the same registry writes the same bytes whatever
+/// order it was filled in. An image the encoder refuses is skipped —
+/// `unembeddable` is what reports it.
+#[cfg(all(feature = "document-write", feature = "png"))]
+fn entries_of(registry: &crate::image_registry::ImageRegistry) -> Vec<ImageEntry> {
+    let mut entries = Vec::new();
+    for name in carried_names(registry) {
+        let Some(image) = registry.resolve(&name) else {
+            continue;
+        };
+        if let Some(png) = encode(&image) {
+            entries.push(ImageEntry { name, png });
+        }
+    }
+    entries
 }
 
 /// Whether this build can put `image` on the wire.
@@ -192,20 +213,14 @@ fn carried_names(registry: &crate::image_registry::ImageRegistry) -> Vec<String>
     names
 }
 
-/// The index a composition-level register is addressed by. No patch
-/// holds this many plots, so it cannot collide with one — and a reader
-/// that predates it looks for a plot that isn't there and skips the
-/// entry.
-#[cfg(any(
-    feature = "document-write",
-    all(feature = "document-read", feature = "png")
-))]
-pub(crate) const COMPOSITION_INDEX: u32 = u32::MAX;
-
-/// Every image registry in the composition, with the address the reader
-/// will use to find its plot again.
+/// Every plot's image registry, with the address the reader will use to
+/// find that plot again: patch id plus position within the patch.
+///
+/// The composition's own registry is not here — it is addressed by a
+/// field of its own on [`EmbeddedImages`] rather than by a plot address
+/// it would have to fake.
 #[cfg(feature = "document-write")]
-fn registries(
+fn plot_registries(
     comp: &PlotComposition,
 ) -> Vec<(String, u32, &crate::plot::image_registry::ImageRegistry)> {
     let mut patches: Vec<&str> = comp.plots().map(|(id, _)| id).collect();
@@ -220,13 +235,6 @@ fn registries(
             }
             out.push((patch.to_string(), index as u32, registry));
         }
-    }
-    // The composition's own chrome — a title naming an image — reads a
-    // register of its own, addressed by the root id and an index no
-    // plot occupies.
-    let registry = comp.image_registry_ref();
-    if !is_empty(registry) {
-        out.push((comp.root_id.clone(), COMPOSITION_INDEX, registry));
     }
     out
 }
@@ -246,7 +254,7 @@ fn is_empty(registry: &crate::image_registry::ImageRegistry) -> bool {
 #[cfg(feature = "document-write")]
 pub(crate) fn unembeddable(comp: &PlotComposition) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    for (patch, _, registry) in registries(comp) {
+    let mut report = |patch: &str, registry: &crate::image_registry::ImageRegistry| {
         for name in carried_names(registry) {
             let Some(image) = registry.resolve(&name) else {
                 continue;
@@ -254,8 +262,14 @@ pub(crate) fn unembeddable(comp: &PlotComposition) -> Vec<(String, String)> {
             if embeddable(&image) {
                 continue;
             }
-            out.push((patch.clone(), name));
+            out.push((patch.to_string(), name));
         }
+    };
+    // Empty patch for the composition's own registry, matching how
+    // `shapes::unnameable` reports one.
+    report("", comp.image_registry_ref());
+    for (patch, _, registry) in plot_registries(comp) {
+        report(&patch, registry);
     }
     out
 }
@@ -268,6 +282,11 @@ pub(crate) fn unembeddable(comp: &PlotComposition) -> Vec<(String, String)> {
 /// decode is skipped, leaving rows that name it drawing nothing.
 #[cfg(all(feature = "document-read", feature = "png"))]
 pub(crate) fn apply(embedded: &EmbeddedImages, comp: &mut PlotComposition) {
+    for entry in &embedded.composition {
+        if let Ok(image) = crate::image::decode_png(&entry.png) {
+            comp.image_registry_mut().insert(entry.name.clone(), image);
+        }
+    }
     for plot in &embedded.plots {
         let decoded: Vec<(String, crate::brush::Image)> = plot
             .entries
@@ -279,13 +298,6 @@ pub(crate) fn apply(embedded: &EmbeddedImages, comp: &mut PlotComposition) {
             })
             .collect();
         if decoded.is_empty() {
-            continue;
-        }
-        if plot.index == COMPOSITION_INDEX {
-            let registry = comp.image_registry_mut();
-            for (name, image) in decoded {
-                registry.insert(name, image);
-            }
             continue;
         }
         comp.update_plot_at(&plot.patch, plot.index as usize, |p| {

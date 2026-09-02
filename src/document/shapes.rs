@@ -94,7 +94,7 @@ pub(crate) struct ShapeEntry {
 }
 
 impl_codec! {
-    struct ShapeEntry { name, shape }
+    record ShapeEntry { name, shape }
 }
 
 /// The shape deltas one plot carries, addressed the way the reader
@@ -108,7 +108,7 @@ pub(crate) struct PlotShapes {
 }
 
 impl_codec! {
-    struct PlotShapes { patch, index, entries }
+    record PlotShapes { patch, index, entries }
 }
 
 /// Every shape delta in a document: the composition's own registry,
@@ -121,7 +121,7 @@ pub(crate) struct EmbeddedShapes {
 }
 
 impl_codec! {
-    struct EmbeddedShapes { composition, plots }
+    record EmbeddedShapes { composition, plots }
 }
 
 /// Reduce a live shape to its wire form, or `None` when it cannot be

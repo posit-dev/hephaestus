@@ -52,7 +52,7 @@ impl_codec! {
         1 => Srgb,
     }
 
-    struct Palette { paper, ink, accent }
+    record Palette { paper, ink, accent }
 
     enum ThemeColor {
         0 => Fixed(color),
