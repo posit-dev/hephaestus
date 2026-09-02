@@ -22,6 +22,7 @@ use crate::geometry::{Affine, Point, Rect};
 use crate::path::{FillRule, Path};
 use crate::pick::PickId;
 use crate::plot::chrome::linear_axis::{stroke_from_line_element, stroke_from_rect_border};
+use crate::plot::pick::{item_scope, part_scope, part_scope_for_channel, PlotPart};
 use crate::plot::projection::{PolarEdgeStyle, PolarProjection, Projection};
 use crate::plot::scale::Scale;
 use crate::plot::theme::{LineElement, RectElement, Theme};
@@ -81,7 +82,9 @@ pub(crate) fn draw_panel_chrome(
         _ => FillRule::NonZero,
     };
     if let Some(bg) = theme.panel_background.as_set() {
+        scene.push_pick_scope(&part_scope(PlotPart::PanelBackground));
         fill_rect_element(scene, bg, &theme.palette, &outline_path, bg_fill_rule);
+        scene.pop_pick_scope();
     }
 
     // Grid lines, per channel. Wrapped in a `push_layer` clip so
@@ -126,6 +129,7 @@ pub(crate) fn draw_panel_chrome(
             draw_grid_lines(
                 scene,
                 scale,
+                0,
                 |frac| channel_grid_path(projection, panel, 0, frac),
                 major_0,
                 minor_0,
@@ -137,6 +141,7 @@ pub(crate) fn draw_panel_chrome(
             draw_grid_lines(
                 scene,
                 scale,
+                1,
                 |frac| channel_grid_path(projection, panel, 1, frac),
                 major_1,
                 minor_1,
@@ -149,7 +154,9 @@ pub(crate) fn draw_panel_chrome(
 
     // Panel outline.
     if let Some(border) = theme.panel_border.as_set() {
+        scene.push_pick_scope(&part_scope(PlotPart::PanelOutline));
         stroke_rect_element_border(scene, border, &theme.palette, &outline_path, dpi);
+        scene.pop_pick_scope();
     }
 }
 
@@ -208,9 +215,15 @@ fn stroke_rect_element_border(
 /// are optional theme elements — `None` (Blank or unresolved)
 /// suppresses that level entirely.
 #[allow(clippy::too_many_arguments)]
+/// Stroke one channel's grid lines.
+///
+/// `channel` is the `PerChannel` coordinate the theme files these elements
+/// under, and is what the part frame reports, so a hit on a gridline names
+/// the theme slot that styled it.
 fn draw_grid_lines<F>(
     scene: &mut dyn SceneBuilder,
     scale: &Scale,
+    channel: u8,
     mut path_at: F,
     major: Option<&LineElement>,
     minor: Option<&LineElement>,
@@ -233,7 +246,14 @@ fn draw_grid_lines<F>(
     let major_resolved = major.map(|el| (stroke_from_line_element(el, dpi), resolve_color(el)));
 
     if let Some((stroke, brush)) = &minor_resolved {
-        for v in scale.minor_breaks(DEFAULT_BREAK_COUNT) {
+        scene.push_pick_scope(&part_scope_for_channel(PlotPart::GridMinor, channel));
+        // `enumerate` before the guards, so the ordinal addresses the
+        // scale's own break list — see the note in `chrome::axis::draw`.
+        for (break_index, v) in scale
+            .minor_breaks(DEFAULT_BREAK_COUNT)
+            .into_iter()
+            .enumerate()
+        {
             if matches!(v, Value::Null) {
                 continue;
             }
@@ -242,12 +262,16 @@ fn draw_grid_lines<F>(
                 _ => continue,
             };
             if let Some(path) = path_at(frac) {
+                scene.push_pick_scope(&item_scope(break_index as u32));
                 scene.stroke(stroke, Affine::IDENTITY, brush, None, &path, PickId::Skip);
+                scene.pop_pick_scope();
             }
         }
+        scene.pop_pick_scope();
     }
     if let Some((stroke, brush)) = &major_resolved {
-        for v in scale.breaks(DEFAULT_BREAK_COUNT) {
+        scene.push_pick_scope(&part_scope_for_channel(PlotPart::GridMajor, channel));
+        for (break_index, v) in scale.breaks(DEFAULT_BREAK_COUNT).into_iter().enumerate() {
             if matches!(v, Value::Null) {
                 continue;
             }
@@ -256,9 +280,12 @@ fn draw_grid_lines<F>(
                 _ => continue,
             };
             if let Some(path) = path_at(frac) {
+                scene.push_pick_scope(&item_scope(break_index as u32));
                 scene.stroke(stroke, Affine::IDENTITY, brush, None, &path, PickId::Skip);
+                scene.pop_pick_scope();
             }
         }
+        scene.pop_pick_scope();
     }
 }
 

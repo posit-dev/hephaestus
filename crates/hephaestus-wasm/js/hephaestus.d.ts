@@ -87,7 +87,7 @@ export interface PlotViewOptions {
   colorScheme?: 'light' | 'dark' | 'auto';
   /** Track the canvas's CSS box with a ResizeObserver. Default `true`. */
   autoResize?: boolean;
-  /** Allocate a pick target and read it back per frame. Default `false`. */
+  /** Record a hit index while drawing, enabling `pickAt`. Default `false`. */
   picking?: boolean;
   /**
    * Give the canvas the context menu an ordinary image has. A string names
@@ -147,7 +147,7 @@ export class PlotView {
 
   /**
    * The row id under a point, in CSS pixels, or `undefined` for empty space.
-   * Needs `picking: true`; may lag the visible frame slightly.
+   * Needs `picking: true`.
    */
   pickAt(cssX: number, cssY: number): number | undefined;
 

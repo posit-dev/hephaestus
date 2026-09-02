@@ -29,8 +29,12 @@ use crate::stroke::{Cap, Join, Stroke};
 
 use super::{Channel, GeomContext};
 
-/// Maximum valid pick id — the 24-bit `PickId` encoding budget.
-pub(crate) const MAX_PICK_ID: u32 = 0xFF_FFFF;
+/// Largest pick id a channel can resolve to.
+///
+/// The whole `u32` range. Ids used to be packed into a texture's colour
+/// channels, which capped them at 24 bits; the index carries them as numbers,
+/// so nothing narrows them.
+pub(crate) const MAX_PICK_ID: u32 = u32::MAX;
 
 /// A `(channel, scale)` reference pair carried through draw-time
 /// channel bundles. Bundling halves the field count of per-geom
@@ -452,7 +456,7 @@ pub(crate) fn band_width_at(scale: Option<&Scale>, raw: &Value) -> f64 {
 /// Resolve a `"pick_id"` channel to a [`PickId`] for row `i`.
 ///
 /// - `channel == None` → `PickId::Skip` (picking opt-out — the channel is
-///   unset, so this geom doesn't participate in the hitmap).
+///   unset, so this geom carries no authoring id).
 /// - The raw value (Constant or `Data[i]`, run through `scale` if any)
 ///   must be a finite non-negative integer ≤ `MAX_PICK_ID`. Otherwise
 ///   the row reports `PickId::Skip` — same convention as `is_finite`

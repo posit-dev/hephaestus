@@ -1401,7 +1401,7 @@ mod tests {
         PointGeom::builder()
             .set("x", vec![0.5_f64])
             .set("y", vec![0.5_f64])
-            .set("pick_id", Raw(0x100_0000_i64))
+            .set("pick_id", Raw(-1_i64))
             .build();
     }
 

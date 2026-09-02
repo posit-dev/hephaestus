@@ -410,6 +410,15 @@ impl Plot {
         self.track_identity
     }
 
+    /// This plot's frame in the pick-scope tree.
+    ///
+    /// Pushed by each `draw_*_into` rather than by the orchestrator, because
+    /// those are public and documented as drivable by hand: a stand-alone
+    /// caller should still get a plot frame, just a shorter path.
+    fn pick_scope(&self) -> crate::pick::PickScope {
+        crate::plot::pick::plot_scope(&self.patch_id, self.index_in_patch)
+    }
+
     /// Read accessor for the bound patch id.
     pub fn patch_id(&self) -> &str {
         &self.patch_id
@@ -940,6 +949,18 @@ impl Plot {
         theme: &crate::plot::theme::Theme,
         dpi: f64,
     ) {
+        scene.push_pick_scope(&self.pick_scope());
+        self.draw_patch_background_into_inner(scene, layout, theme, dpi);
+        scene.pop_pick_scope();
+    }
+
+    fn draw_patch_background_into_inner(
+        &self,
+        scene: &mut dyn SceneBuilder,
+        layout: &crate::composition::CompositionLayout,
+        theme: &crate::plot::theme::Theme,
+        dpi: f64,
+    ) {
         let Some(bg_slot) = theme.plot_background.as_set() else {
             return;
         };
@@ -965,6 +986,13 @@ impl Plot {
         } else {
             rect.to_path(0.0)
         };
+        // Fill and border are siblings under one part: "the plot
+        // background" is one target, and a hover does not care which of the
+        // two primitives it landed on.
+        scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Background));
+        scene.push_pick_scope(&crate::plot::pick::part_scope(
+            crate::plot::pick::PlotPart::PlotBackground,
+        ));
         if let Some(fill) = bg.fill {
             let brush = crate::brush::Brush::Solid(fill.resolve(&theme.palette));
             scene.fill(
@@ -997,6 +1025,8 @@ impl Plot {
                 crate::pick::PickId::Skip,
             );
         }
+        scene.pop_pick_scope();
+        scene.pop_pick_scope();
     }
 
     /// Paint the projection's panel chrome — background fill, grid
@@ -1007,6 +1037,21 @@ impl Plot {
     /// earlier plot's geoms when the earlier plot has `clip = false`
     /// and its geoms spill into the later panel.
     pub fn draw_panel_chrome_into(
+        &self,
+        scene: &mut dyn SceneBuilder,
+        layout: &crate::composition::CompositionLayout,
+        registry: &ScaleRegistry,
+        dpi: f64,
+        theme: &crate::plot::theme::Theme,
+    ) {
+        scene.push_pick_scope(&self.pick_scope());
+        scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Panel));
+        self.draw_panel_chrome_into_inner(scene, layout, registry, dpi, theme);
+        scene.pop_pick_scope();
+        scene.pop_pick_scope();
+    }
+
+    fn draw_panel_chrome_into_inner(
         &self,
         scene: &mut dyn SceneBuilder,
         layout: &crate::composition::CompositionLayout,
@@ -1055,6 +1100,21 @@ impl Plot {
     /// Picking is opt-in per geom via the `"pick_id"` channel;
     /// geoms without one emit `PickId::Skip` for every primitive.
     pub fn draw_geoms_into(
+        &mut self,
+        scene: &mut dyn SceneBuilder,
+        layout: &crate::composition::CompositionLayout,
+        registry: &ScaleRegistry,
+        dpi: f64,
+        theme: &crate::plot::theme::Theme,
+    ) {
+        scene.push_pick_scope(&self.pick_scope());
+        scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Panel));
+        self.draw_geoms_into_inner(scene, layout, registry, dpi, theme);
+        scene.pop_pick_scope();
+        scene.pop_pick_scope();
+    }
+
+    fn draw_geoms_into_inner(
         &mut self,
         scene: &mut dyn SceneBuilder,
         layout: &crate::composition::CompositionLayout,
@@ -1116,8 +1176,10 @@ impl Plot {
                 path,
             );
         }
-        for (_, geom) in self.geoms.iter() {
+        for (id, geom) in self.geoms.iter() {
+            scene.push_pick_scope(&crate::plot::pick::geom_scope(*id));
             geom.draw(scene, &ctx);
+            scene.pop_pick_scope();
         }
         if clip_path.is_some() {
             scene.pop_layer();
@@ -1764,6 +1826,19 @@ impl Plot {
         dpi: f64,
         theme: &crate::plot::theme::Theme,
     ) {
+        scene.push_pick_scope(&self.pick_scope());
+        self.draw_chrome_into_inner(scene, layout, registry, dpi, theme);
+        scene.pop_pick_scope();
+    }
+
+    fn draw_chrome_into_inner(
+        &self,
+        scene: &mut dyn SceneBuilder,
+        layout: &crate::composition::CompositionLayout,
+        registry: &ScaleRegistry,
+        dpi: f64,
+        theme: &crate::plot::theme::Theme,
+    ) {
         use crate::brush::Brush;
         use crate::text::TextRun;
 
@@ -2341,7 +2416,7 @@ mod tests {
             "outline pass must precede the fill: {first_stroked} vs {first_filled}"
         );
 
-        // The fill owns picking; the outline stays out of the hitmap.
+        // The fill owns picking; the outline is not indexed.
         assert_eq!(stroked[0].pick_id, crate::pick::PickId::Skip);
         assert_eq!(filled[0].pick_id, crate::pick::PickId::Id(7));
         // Same glyphs, so the outline traces the visible text.

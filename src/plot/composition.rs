@@ -1293,6 +1293,14 @@ impl PlotComposition {
             .map(|plot| self.effective_theme_for(plot))
             .collect();
 
+        // Phases 1-4 all sit under the root composition. A plot's drawing is
+        // not contiguous — each phase walks every plot before the next
+        // starts — but the scope stack is a logical path, not a bracket
+        // around a run of ops, so each phase simply re-establishes
+        // `composition → plot`. The scope tree interns paths, so the
+        // repeated prefixes cost nothing.
+        scene.push_pick_scope(&crate::plot::pick::composition_scope(&self.root_id));
+
         for (plot, effective) in self.plots_in_order().zip(&plot_themes) {
             plot.draw_patch_background_into(scene, layout, effective, dpi);
         }
@@ -1336,6 +1344,7 @@ impl PlotComposition {
         for (plot, effective) in self.plots_in_order().zip(&plot_themes) {
             plot.draw_chrome_into(scene, layout, &self.scales, dpi, effective);
         }
+        scene.pop_pick_scope();
 
         // Phase 5: composition-level chrome. Drawn last so a shared
         // title / legend paints over the canonical chrome band it
@@ -1347,6 +1356,9 @@ impl PlotComposition {
             .iter()
             .filter_map(|id| self.chrome.get(id).map(|c| (id, c)))
         {
+            // Composition chrome has no owning plot, so its path is one
+            // frame shorter and `PlotPath::plot` reports `None` for it.
+            scene.push_pick_scope(&crate::plot::pick::composition_scope(comp_id));
             chrome.draw_into(
                 comp_id,
                 scene,
@@ -1357,6 +1369,7 @@ impl PlotComposition {
                 dpi,
                 &self.theme,
             );
+            scene.pop_pick_scope();
         }
 
         // Clear dirty bits after a successful render.
@@ -1472,7 +1485,7 @@ fn matches_expected(expected: super::geom::ExpectedOutput, found: &'static str) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::composition::{beside, Patch as CompPatch};
+    use crate::composition::{beside, Patch as CompPatch, Slot};
     use crate::plot::geom::PointGeom;
     use crate::plot::scale;
 
@@ -1711,6 +1724,82 @@ mod tests {
             a.y0,
             title.y1
         );
+    }
+
+    #[test]
+    fn every_drawn_op_sits_in_a_balanced_scope() {
+        use crate::scene::recording::{Op, RecordingScene};
+        let mut view = view_two_plots();
+        let mut scene = RecordingScene::default();
+        view.render(&mut scene, Size::new(600.0, 400.0), 96.0);
+
+        // Balance: the stack returns to empty, and never goes negative.
+        let mut depth = 0i32;
+        for op in &scene.ops {
+            match op {
+                Op::PushPickScope { .. } => depth += 1,
+                Op::PopPickScope => depth -= 1,
+                _ => {}
+            }
+            assert!(depth >= 0, "pick scopes went negative");
+        }
+        assert_eq!(depth, 0, "pick scopes left unbalanced");
+    }
+
+    #[test]
+    fn a_gridline_reports_its_plot_region_part_and_break() {
+        use crate::plot::pick::{PlotPart, PlotPath};
+        use crate::scene::recording::{Op, RecordingScene};
+        let mut view = view_two_plots();
+        view.insert_scale("x", scale::continuous(0.0..=1.0));
+        view.update_plot("a", |p| {
+            p.set_binding("x", "x");
+        });
+        let mut scene = RecordingScene::default();
+        view.render(&mut scene, Size::new(600.0, 400.0), 96.0);
+
+        // Find a stroke drawn under the major-grid part.
+        let found = scene.ops.iter().enumerate().find_map(|(i, op)| {
+            if !matches!(op, Op::Stroke { .. }) {
+                return None;
+            }
+            let frames = scene.scope_at(i);
+            frames
+                .iter()
+                .any(|f| f.name() == Some(PlotPart::GridMajor.name()))
+                .then_some((i, frames))
+        });
+        let (_, frames) = found.expect("a major gridline should be drawn");
+
+        let kinds: Vec<&str> = frames.iter().map(|f| f.kind()).collect();
+        assert_eq!(
+            kinds,
+            vec!["composition", "plot", "region", "part", "item"],
+            "unexpected grammar: {kinds:?}"
+        );
+        // The names line up with the anatomy and the theme's own addressing.
+        assert_eq!(frames[1].name(), Some("a"));
+        assert_eq!(frames[1].index(), Some(0));
+        assert_eq!(frames[2].name(), Some(Slot::Panel.name()));
+        assert_eq!(frames[3].index(), Some(0), "channel 0 gridlines");
+        assert!(frames[4].index().is_some(), "a break ordinal");
+
+        // And the typed view decodes the same path.
+        let mut tree = crate::pick::PickIndexScene::new(RecordingScene::new(), true);
+        view.render(&mut tree, Size::new(600.0, 400.0), 96.0);
+        let hits = tree
+            .index()
+            .hits_in(crate::geometry::Rect::new(0.0, 0.0, 600.0, 400.0));
+        let p = hits
+            .iter()
+            .map(|h| PlotPath::new(h.path))
+            .find(|p| p.part() == Some(PlotPart::GridMajor))
+            .expect("the index should hold a major gridline");
+        assert_eq!(p.plot(), Some(("a", 0)));
+        assert_eq!(p.region(), Some(Slot::Panel));
+        assert_eq!(p.part_channel(), Some(0));
+        assert!(p.item().is_some());
+        assert_eq!(p.composition(), Some(super::ROOT_COMPOSITION_ID));
     }
 
     #[test]

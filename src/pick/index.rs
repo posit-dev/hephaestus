@@ -162,7 +162,7 @@ impl PickIndex {
             return;
         }
         let shape = self.store.intern_path(path);
-        let local = self.store.path(shape).bounding_box();
+        let local = self.store.path_bounds(shape);
         let even_odd = geom::is_even_odd(rule);
         self.push_entry(transform, local, Geom::Fill { shape, even_odd }, pick_id);
     }
@@ -268,6 +268,10 @@ impl PickIndex {
         {
             return;
         }
+        // `get_mut` rather than `borrow_mut`: recording takes `&mut self`, so
+        // the invalidation needs no runtime borrow check, and this runs once
+        // per primitive.
+        *self.tree.get_mut() = None;
         self.leaves.push(to_bbox(device));
         self.entries.push(Entry {
             inv,
@@ -277,7 +281,6 @@ impl PickIndex {
             clip: self.clips.current(),
             scope: self.scopes.current(),
         });
-        *self.tree.borrow_mut() = None;
     }
 
     // ── Queries ─────────────────────────────────────────────────────────
@@ -540,6 +543,17 @@ mod tests {
             }
             out
         }
+    }
+
+    /// The index has to be movable to a worker thread for the tree build to
+    /// be offloadable at all. It is deliberately not `Sync`: the lazy tree
+    /// and the query scratch buffers live behind `RefCell`.
+    #[test]
+    fn the_index_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<PickIndex>();
+        assert_send::<HilbertRtree>();
+        assert_send::<Vec<Bbox>>();
     }
 
     /// A scatter of small circles plus a few stroked lines and rects, with

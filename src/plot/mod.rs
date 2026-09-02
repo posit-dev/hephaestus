@@ -26,6 +26,7 @@ pub mod chrome;
 pub mod composition;
 pub mod diff;
 pub mod geom;
+pub mod pick;
 #[allow(clippy::module_inception)]
 pub mod plot;
 pub mod projection;
@@ -45,6 +46,7 @@ pub use geom::{
     RectGeom, RibbonBSplineGeom, RibbonGeom, ScaleResolver, SegmentGeom, WedgeGeom,
 };
 pub use geom::{TextFitGeom, TextGeom, TextPathGeom};
+pub use pick::{PlotPart, PlotPath};
 pub use plot::{AspectMode, GeomId, Plot};
 pub use projection::{ChromeStrategy, CustomProjection, Projection};
 pub use scale::{

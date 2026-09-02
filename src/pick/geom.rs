@@ -9,6 +9,7 @@
 //! transform.
 
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 
 use crate::geometry::{flatten, Affine, PathEl, Point, Rect, Shape};
 
@@ -28,20 +29,28 @@ const CHUNK: usize = 64;
 /// than the copy saves, and they do not repeat the way markers do.
 const INTERN_MAX_ELEMENTS: usize = 64;
 
-/// Interning is a frame-to-frame cache; past this many entries it is reset
-/// wholesale rather than grown without bound.
-const INTERN_MAX_SHAPES: usize = 4096;
-
 /// Half-width floor, in device pixels, for stroke hit testing.
 ///
 /// A hairline is one pixel of ink and impossible to hit exactly, so it gets
-/// a pick target a pixel wide either side. The intent the hitmap expressed
+/// a pick target a pixel wide either side. The intent the old pick pass met
 /// by widening the stroke it rasterised, without distorting anything drawn.
 const MIN_HIT_HALF_WIDTH_PX: f64 = 1.0;
 
 /// Miter joins can push a stroke past `half_width` from the centreline; this
 /// bounds how far a chunk's box is grown to allow for it.
 const MITER_BBOX_LIMIT: f64 = 4.0;
+
+/// A stored path: where its elements live, and its bounds.
+///
+/// The bounds are cached because computing them is not cheap — a tight box
+/// around a cubic means solving for the curve's extrema — and every mark
+/// sharing a marker shape would otherwise recompute the same answer.
+#[derive(Debug, Clone, Copy)]
+struct PathSlot {
+    start: u32,
+    len: u32,
+    bbox: Rect,
+}
 
 /// Handle into the shared path arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,12 +84,22 @@ pub(crate) enum Geom {
 }
 
 /// Shared storage for everything the exact tests read.
+///
+/// Paths live in one flat arena of elements rather than as a `Vec<BezPath>`:
+/// a scene that draws a hundred thousand *distinct* paths — a low-level
+/// caller placing each mark in absolute coordinates rather than reusing one
+/// marker under a transform — would otherwise pay a hundred thousand
+/// allocations. Slices of the arena are hit-tested directly, since kurbo
+/// implements `Shape` for `&[PathEl]`.
 #[derive(Debug, Default)]
 pub(crate) struct GeomStore {
-    paths: Vec<Path>,
+    path_els: Vec<PathEl>,
+    /// One slot per [`ShapeId`], indexing `path_els`.
+    path_ranges: Vec<PathSlot>,
     /// Content hash → shapes sharing it. Collisions are resolved by
-    /// comparing the paths outright.
-    intern: HashMap<u64, Vec<u32>>,
+    /// comparing the elements outright, and the key is already a hash, so
+    /// hashing it again would be pure cost — hence [`PassThrough`].
+    intern: HashMap<u64, Vec<u32>, BuildHasherDefault<PassThrough>>,
     /// Flattened polylines, one entry per `(shape, tolerance)` pair.
     polys: Vec<Vec<Point>>,
     poly_cache: HashMap<(u32, i32), u32>,
@@ -89,42 +108,59 @@ pub(crate) struct GeomStore {
 }
 
 impl GeomStore {
-    /// Drop everything a frame accumulated. The intern table survives — the
-    /// same marker shapes recur every frame — unless it has grown past
-    /// [`INTERN_MAX_SHAPES`].
+    /// Drop everything a frame accumulated, keeping the allocations.
     pub(crate) fn clear(&mut self) {
+        self.path_els.clear();
+        self.path_ranges.clear();
+        self.intern.clear();
         self.polys.clear();
         self.poly_cache.clear();
         self.tris.clear();
-        if self.paths.len() > INTERN_MAX_SHAPES {
-            self.paths.clear();
-            self.intern.clear();
-        }
     }
 
-    /// Store `path`, reusing an identical one already held.
+    /// Store `path`, reusing an identical one already held this frame.
     pub(crate) fn intern_path(&mut self, path: &Path) -> ShapeId {
-        if path.elements().len() > INTERN_MAX_ELEMENTS {
-            self.paths.push(path.clone());
-            return ShapeId(self.paths.len() as u32 - 1);
-        }
-        let key = hash_path(path);
-        if let Some(bucket) = self.intern.get(&key) {
-            for &id in bucket {
-                if &self.paths[id as usize] == path {
-                    return ShapeId(id);
+        let els = path.elements();
+        // Long paths are stored without hashing: the hash would cost more
+        // than the lookup saves, and they do not repeat the way markers do.
+        if els.len() <= INTERN_MAX_ELEMENTS {
+            let key = hash_path(els);
+            if let Some(bucket) = self.intern.get(&key) {
+                for &id in bucket {
+                    let slot = self.path_ranges[id as usize];
+                    if &self.path_els[slot.start as usize..(slot.start + slot.len) as usize] == els
+                    {
+                        return ShapeId(id);
+                    }
                 }
             }
+            let id = self.push_els(els);
+            self.intern.entry(key).or_default().push(id.0);
+            return id;
         }
-        self.paths.push(path.clone());
-        let id = self.paths.len() as u32 - 1;
-        self.intern.entry(key).or_default().push(id);
-        ShapeId(id)
+        self.push_els(els)
     }
 
-    /// Borrow a stored path.
-    pub(crate) fn path(&self, id: ShapeId) -> &Path {
-        &self.paths[id.0 as usize]
+    fn push_els(&mut self, els: &[PathEl]) -> ShapeId {
+        let start = self.path_els.len() as u32;
+        self.path_els.extend_from_slice(els);
+        self.path_ranges.push(PathSlot {
+            start,
+            len: els.len() as u32,
+            bbox: els.bounding_box(),
+        });
+        ShapeId(self.path_ranges.len() as u32 - 1)
+    }
+
+    /// Borrow a stored path's elements.
+    pub(crate) fn path(&self, id: ShapeId) -> &[PathEl] {
+        let slot = self.path_ranges[id.0 as usize];
+        &self.path_els[slot.start as usize..(slot.start + slot.len) as usize]
+    }
+
+    /// A stored path's bounds, computed once when it was stored.
+    pub(crate) fn path_bounds(&self, id: ShapeId) -> Rect {
+        self.path_ranges[id.0 as usize].bbox
     }
 
     /// Flatten a stored path at `tolerance`, reusing an earlier flattening
@@ -142,30 +178,29 @@ impl GeomStore {
             return (PolyId(existing), runs);
         }
         let mut pts: Vec<Point> = Vec::new();
+        let slot = self.path_ranges[id.0 as usize];
+        let els: Vec<PathEl> =
+            self.path_els[slot.start as usize..(slot.start + slot.len) as usize].to_vec();
         // `f64::NAN` marks a subpath break, so one flat buffer can hold a
         // path with holes without a parallel index.
-        flatten(
-            self.paths[id.0 as usize].iter(),
-            tolerance.max(1e-6),
-            |el| {
-                match el {
-                    PathEl::MoveTo(p) => {
-                        if !pts.is_empty() {
-                            pts.push(BREAK);
-                        }
-                        pts.push(p);
+        flatten(els.iter().copied(), tolerance.max(1e-6), |el| {
+            match el {
+                PathEl::MoveTo(p) => {
+                    if !pts.is_empty() {
+                        pts.push(BREAK);
                     }
-                    PathEl::LineTo(p) => pts.push(p),
-                    PathEl::ClosePath => {
-                        // Close the ring so the last edge is testable.
-                        if let Some(start) = last_subpath_start(&pts) {
-                            pts.push(start);
-                        }
-                    }
-                    _ => {}
+                    pts.push(p);
                 }
-            },
-        );
+                PathEl::LineTo(p) => pts.push(p),
+                PathEl::ClosePath => {
+                    // Close the ring so the last edge is testable.
+                    if let Some(ring_start) = last_subpath_start(&pts) {
+                        pts.push(ring_start);
+                    }
+                }
+                _ => {}
+            }
+        });
         self.polys.push(pts);
         let poly = self.polys.len() as u32 - 1;
         self.poly_cache.insert(key, poly);
@@ -231,6 +266,28 @@ impl GeomStore {
                     .any(|t| point_in_triangle(p, t[0], t[1], t[2]))
             }
         }
+    }
+}
+
+/// A hasher for keys that are already hashes.
+///
+/// The intern table is keyed by a content hash of a path's elements, so the
+/// default SipHash would be a second hash over a good one. Only ever fed a
+/// single `u64`; anything else would defeat it, so `write` says so.
+#[derive(Default)]
+pub(crate) struct PassThrough(u64);
+
+impl Hasher for PassThrough {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, _bytes: &[u8]) {
+        unreachable!("PassThrough only accepts a single u64 key");
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.0 = n;
     }
 }
 
@@ -363,7 +420,7 @@ fn tolerance_bucket(tolerance: f64) -> i32 {
     (tolerance.log2() * 4.0).round() as i32
 }
 
-fn hash_path(path: &Path) -> u64 {
+fn hash_path(els: &[PathEl]) -> u64 {
     // FNV-1a over the element bit patterns. Only a bucket key — equality is
     // still checked outright — so speed matters more than distribution.
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -371,7 +428,7 @@ fn hash_path(path: &Path) -> u64 {
         h ^= bits;
         h = h.wrapping_mul(0x1000_0000_01b3);
     };
-    for el in path.elements() {
+    for el in els {
         let (tag, pts): (u64, &[Point]) = match el {
             PathEl::MoveTo(p) => (1, std::slice::from_ref(p)),
             PathEl::LineTo(p) => (2, std::slice::from_ref(p)),
@@ -385,7 +442,7 @@ fn hash_path(path: &Path) -> u64 {
             feed(p.y.to_bits());
         }
     }
-    feed(path.elements().len() as u64);
+    feed(els.len() as u64);
     h
 }
 
@@ -436,14 +493,14 @@ mod tests {
         let ic = s.intern_path(&c);
         assert_eq!(ia, ib, "identical paths must intern to one shape");
         assert_ne!(ia, ic);
-        assert_eq!(s.paths.len(), 2);
+        assert_eq!(s.path_ranges.len(), 2);
 
         // Repeating the same shape ten thousand times stores it once — the
         // scatter-marker case the whole scheme exists for.
         for _ in 0..10_000 {
             assert_eq!(s.intern_path(&a), ia);
         }
-        assert_eq!(s.paths.len(), 2);
+        assert_eq!(s.path_ranges.len(), 2);
     }
 
     #[test]
@@ -461,15 +518,18 @@ mod tests {
     }
 
     #[test]
-    fn clear_keeps_the_shape_cache_but_drops_per_frame_geometry() {
+    fn clear_drops_everything_a_frame_accumulated() {
         let mut s = store();
         let p = primitives::circle(Point::new(0.0, 0.0), 3.0);
         let id = s.intern_path(&p);
         s.flatten_path(id, 0.25);
         s.clear();
-        assert!(s.polys.is_empty(), "flattenings are per frame");
-        // Shapes recur every frame, so the table survives.
-        assert_eq!(s.intern_path(&p), id);
+        assert!(s.polys.is_empty());
+        assert!(s.path_els.is_empty());
+        assert!(s.path_ranges.is_empty());
+        // Interning starts over, which costs a handful of hashes: the
+        // distinct *shapes* in a frame are few even when the marks are many.
+        assert_eq!(s.intern_path(&p), ShapeId(0));
     }
 
     #[test]
@@ -563,7 +623,7 @@ mod tests {
         let mut annulus = primitives::circle(Point::new(0.0, 0.0), 10.0);
         annulus.extend(primitives::circle(Point::new(0.0, 0.0), 5.0).iter());
         let shape = s.intern_path(&annulus);
-        let local = s.path(shape).bounding_box();
+        let local = s.path_bounds(shape);
 
         let in_ring = Point::new(7.5, 0.0);
         let in_hole = Point::new(0.0, 0.0);

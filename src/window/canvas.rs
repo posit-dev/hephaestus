@@ -17,7 +17,6 @@ use crate::color::Color;
 use crate::geometry::{Point, Size};
 use crate::window::renderer::HostRenderer;
 use crate::window::surface::WindowSurface;
-use crate::window::PickSource as _;
 use crate::window::BASE_DPI;
 use crate::window::{Event, EventCtx, Frame, WindowApp, WindowConfig, WindowError};
 
@@ -115,14 +114,12 @@ impl CanvasHost {
             app.draw(&mut frame);
         }
 
-        // Deferring rather than `render_to_texture`: the trait method blocks
-        // on the pick readback, which a browser main thread cannot do.
         let renderer = &mut self.renderer;
         let background = self.background;
         self.surface.draw_frame(
             |view| {
                 renderer
-                    .render_to_texture_deferring_pick(view, width, height, background)
+                    .render_to_texture(view, width, height, background)
                     .map_err(WindowError::from)
             },
             || {},
@@ -141,17 +138,13 @@ impl CanvasHost {
             _ => {}
         }
 
-        // Drain before borrowing the renderer for the context: `EventCtx`
-        // holds it immutably, so the app cannot drain from inside a handler.
-        let _ = self.renderer.try_finish_pick();
-
         let (width, height) = self.surface.size();
         let redraw = Cell::new(false);
         // Nothing on a canvas host can honour an exit request — the page owns
         // the element's lifetime — so the flag is accepted and dropped.
         let mut exit = false;
         let mut ctx = EventCtx {
-            renderer: &self.renderer,
+            index: self.renderer.pick_index(),
             redraw: &redraw,
             cursor: self.cursor,
             size: Size::new(width as f64, height as f64),
@@ -172,19 +165,22 @@ impl CanvasHost {
         self.dpi = dpi;
     }
 
-    /// The pick id at a device-pixel coordinate.
+    /// The topmost pick id at a device-pixel coordinate.
     ///
-    /// Always `None` unless [`WindowConfig::picking`] was enabled. Drains a
-    /// landed readback first, which is why this takes `&mut self`.
-    ///
-    /// The readback is never waited on, so the hitmap can describe a frame or
-    /// two behind what is on screen — invisible for hover, and the price of
-    /// not blocking. Coordinates are device pixels, matching [`Self::size`].
-    pub fn pick_at(&mut self, x: u32, y: u32) -> Option<u32> {
-        // A failed drain means the readback errored, not that the pixel has
-        // no id; either way there is nothing to report for this query.
-        let _ = self.renderer.try_finish_pick();
-        self.renderer.pick_at(x, y)
+    /// Always `None` unless [`WindowConfig::picking`] was enabled. Answers
+    /// from the index the scene built as it was drawn, so it describes the
+    /// frame on screen rather than lagging it. Coordinates are device pixels,
+    /// matching [`Self::size`].
+    pub fn pick_at(&self, x: f64, y: f64) -> Option<u32> {
+        self.renderer
+            .pick_index()?
+            .pick_at(crate::geometry::Point::new(x, y))
+    }
+
+    /// The hit index for the last drawn frame, for hits carrying their scope
+    /// chain and for rectangle and lasso queries.
+    pub fn pick_index(&self) -> Option<&crate::pick::PickIndex> {
+        self.renderer.pick_index()
     }
 
     /// Drawing surface size in device pixels.

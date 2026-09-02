@@ -10,9 +10,9 @@
 //!   dragging between displays of different densities keeps text crisp and
 //!   physical sizes constant.
 //! - **Picking.** Each point carries a `pick_id`; hovering reports the row
-//!   under the cursor and redraws it enlarged. `pick_interval` caps how often
-//!   the hitmap is rebuilt, which matters at high point counts because the
-//!   pick pass rasterises the scene a second time.
+//!   under the cursor and redraws it enlarged. The scene records a spatial
+//!   index as it draws, so a hover is a CPU query against the frame on
+//!   screen — there is no second rasterisation and nothing to read back.
 //!
 //! The point count is the first CLI argument, so the same scene scales up for
 //! a rough feel of how the pipeline copes:
@@ -29,8 +29,7 @@
 //! rows.
 //!
 //! A second argument names the backend, in a build that compiled both in. The
-//! sparse-strip one has no draw cap at all, and picks without ever reporting an
-//! id that was not drawn:
+//! sparse-strip one has no draw cap at all:
 //!
 //! ```sh
 //! cargo run --release --example window --features window,vello-hybrid -- 200000 hybrid
@@ -43,7 +42,6 @@ use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom};
 use hephaestus::scales::chrome::AxisSide;
 use hephaestus::window::{run, Backend, Event, EventCtx, Frame, WindowApp, WindowConfig};
-use std::time::Duration;
 
 const BASE_SIZE: f64 = 1.0;
 const HOVER_SIZE: f64 = 7.0;
@@ -89,7 +87,7 @@ impl WindowApp for Demo {
     fn event(&mut self, ctx: &mut EventCtx<'_>, event: Event) {
         match event {
             Event::CursorMoved { position } => {
-                let hit = ctx.pick_at(position.x.max(0.0) as u32, position.y.max(0.0) as u32);
+                let hit = ctx.pick_at(position.x, position.y);
                 if hit != self.hovered {
                     self.hovered = hit;
                     self.rebuild_geom();
@@ -211,12 +209,7 @@ fn main() {
         .size(900, 560)
         .background(rgb8(248, 248, 252))
         .picking(true)
-        .backend(backend)
-        // The pick pass rasterises the whole scene a second time, so at high
-        // point counts it can cost as much as the visible frame. Capping how
-        // often it runs keeps a resize drag responsive; the hitmap goes at most
-        // this stale, which a pointer cannot notice.
-        .pick_interval(Duration::from_millis(30));
+        .backend(backend);
 
     if let Err(err) = run(config, Demo::new(points)) {
         eprintln!("window: {err}");

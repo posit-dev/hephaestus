@@ -155,35 +155,41 @@ impl ClipStack {
 /// hundreds of thousands of near-identical paths.
 pub(crate) fn as_axis_rect(path: &Path) -> Option<Rect> {
     use crate::geometry::PathEl;
-    let mut pts: Vec<Point> = Vec::with_capacity(5);
+    // A fixed buffer, not a `Vec`: this runs on every fill, and one heap
+    // allocation per mark is a real cost at scatter densities.
+    let mut pts = [Point::ZERO; 5];
+    let mut n = 0usize;
     for el in path.elements() {
         match el {
             PathEl::MoveTo(p) => {
-                if !pts.is_empty() {
+                if n != 0 {
                     return None; // more than one subpath
                 }
-                pts.push(*p);
+                pts[0] = *p;
+                n = 1;
             }
             PathEl::LineTo(p) => {
-                if pts.is_empty() || pts.len() > 4 {
+                if n == 0 || n >= 5 {
                     return None;
                 }
-                pts.push(*p);
+                pts[n] = *p;
+                n += 1;
             }
             PathEl::ClosePath => {}
             _ => return None, // any curve disqualifies it
         }
     }
     // A closed rect is 4 corners, or 5 with the first repeated.
-    if pts.len() == 5 {
+    if n == 5 {
         if !near(pts[4], pts[0]) {
             return None;
         }
-        pts.pop();
+        n = 4;
     }
-    if pts.len() != 4 {
+    if n != 4 {
         return None;
     }
+    let pts = &pts[..4];
     // An axis-aligned rect uses exactly two x values and two y values, and
     // its four corners are the four distinct pairings of them.
     let (mut xs, mut ys): (Vec<f64>, Vec<f64>) = (

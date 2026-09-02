@@ -15,7 +15,7 @@ use crate::backend::hybrid::HybridWebGlRenderer;
 use crate::color::Color;
 use crate::geometry::{Point, Size};
 use crate::scene::SceneBuilder as _;
-use crate::window::{Event, EventCtx, Frame, PickSource, WindowApp, WindowConfig, WindowError};
+use crate::window::{Event, EventCtx, Frame, WindowApp, WindowConfig, WindowError};
 
 /// Presents a scene onto an existing `<canvas>` through WebGL2.
 pub struct WebGlHost {
@@ -81,7 +81,7 @@ impl WebGlHost {
         // here: accepted and dropped, as on the wgpu canvas host.
         let mut exit = false;
         let mut ctx = EventCtx {
-            renderer: &self.renderer,
+            index: self.renderer.pick_index(),
             redraw: &redraw,
             cursor: self.cursor,
             size,
@@ -106,21 +106,18 @@ impl WebGlHost {
         Ok(())
     }
 
-    /// Id at a device-pixel coordinate of the last refreshed hitmap.
+    /// The topmost pick id at a device-pixel coordinate.
     ///
-    /// Always `None` unless [`WindowConfig::picking`] was enabled. Reads a
-    /// CPU-side hitmap, so calling it per pointer event is cheap.
-    pub fn pick_at(&self, x: u32, y: u32) -> Option<u32> {
-        self.renderer.pick_at(x, y)
+    /// Always `None` unless [`WindowConfig::picking`] was enabled. Answers
+    /// from a CPU-side index, so calling it per pointer event is cheap.
+    pub fn pick_at(&self, x: f64, y: f64) -> Option<u32> {
+        self.renderer.pick_at(crate::geometry::Point::new(x, y))
     }
 
-    /// Control whether the coming frame refreshes the hitmap.
-    ///
-    /// The pick pass rasterises the scene a second time and reads it back
-    /// synchronously, so a page redrawing faster than it queries — mid-resize,
-    /// or while animating — should leave it alone for a frame or two.
-    pub fn set_refresh_pick(&mut self, refresh: bool) {
-        self.renderer.set_refresh_pick(refresh);
+    /// The hit index for the last drawn frame, for hits carrying their scope
+    /// chain and for rectangle and lasso queries.
+    pub fn pick_index(&self) -> Option<&crate::pick::PickIndex> {
+        self.renderer.pick_index()
     }
 
     /// Drawing surface size in device pixels.
@@ -137,11 +134,5 @@ impl WebGlHost {
     /// Set the colour the scene is rasterised over for later frames.
     pub fn set_background(&mut self, background: Color) {
         self.background = background;
-    }
-}
-
-impl PickSource for HybridWebGlRenderer {
-    fn pick_at(&self, x: u32, y: u32) -> Option<u32> {
-        HybridWebGlRenderer::pick_at(self, x, y)
     }
 }

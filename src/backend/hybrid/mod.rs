@@ -30,7 +30,7 @@ use crate::brush::{Brush, Image, Sampling};
 use crate::geometry::Affine;
 use crate::mesh::Mesh;
 use crate::path::{FillRule, Path};
-use crate::pick::{self, PickId};
+use crate::pick::{PickId, PickScope};
 use crate::scene::recording::RecordingScene;
 use crate::scene::{GlyphRun, SceneBuilder};
 use crate::stroke::Stroke;
@@ -45,21 +45,6 @@ mod wgpu_renderer;
 pub use webgl::HybridWebGlRenderer;
 #[cfg(feature = "vello-hybrid")]
 pub use wgpu_renderer::HybridRenderer;
-
-/// Coverage a pick pixel must exceed to be painted at all.
-///
-/// The midpoint: a pixel belongs to whichever mark covers most of it. Any
-/// value disables antialiasing; the choice only decides which side of a
-/// half-covered pixel wins.
-const PICK_ALIASING_THRESHOLD: u8 = 128;
-
-/// Minimum stroke width (in pixels) the pick pass uses, so hairline strokes
-/// remain hittable even when the visual stroke is sub-pixel.
-///
-/// Binary coverage makes this load-bearing rather than a nicety: a stroke
-/// thinner than the threshold covers no pixel past
-/// [`PICK_ALIASING_THRESHOLD`] and would vanish from the hitmap entirely.
-const MIN_PICK_STROKE_WIDTH: f64 = 2.0;
 
 /// Largest scene dimension the rasterizer accepts, in pixels.
 ///
@@ -153,18 +138,17 @@ impl SceneBuilder for HybridScene {
     fn pop_layer(&mut self) {
         self.ops.pop_layer();
     }
+
+    fn push_pick_scope(&mut self, scope: &PickScope) {
+        self.ops.push_pick_scope(scope);
+    }
+
+    fn pop_pick_scope(&mut self) {
+        self.ops.pop_pick_scope();
+    }
 }
 
 // ---------- replay ----------
-
-/// Which of the two scenes a replay is filling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Pass {
-    /// The visible frame: the caller's brushes, blend modes and antialiasing.
-    Display,
-    /// The id buffer: solid encoded ids, normalized blending, binary coverage.
-    Pick,
-}
 
 /// Key identifying an image's pixels, so one upload serves every draw of it.
 ///
@@ -175,34 +159,26 @@ fn image_key(image: &Image) -> u64 {
 }
 
 /// Replays recorded draws into a `vello_hybrid::Scene`.
-///
-/// One writer per pass. The pick pass differs in three ways: solid ids
-/// replace brushes, blending and layer alpha are normalized so ids cannot
-/// fade toward the no-hit sentinel, and hairline strokes are widened.
 struct Writer<'a> {
     scene: &'a mut Scene,
     resources: &'a mut Resources,
-    pass: Pass,
     /// Atlas handle per image, filled in before replay — uploading needs the
     /// device, which a [`SceneBuilder`] has no access to.
     images: &'a HashMap<u64, ImageSource>,
 }
 
 impl Writer<'_> {
-    /// Paint for a draw, or `None` when this pass should skip the draw.
-    fn paint(&self, brush: &Brush, pick_id: PickId) -> Option<PaintType> {
-        match self.pass {
-            Pass::Display => match brush {
-                Brush::Solid(color) => Some((*color).into()),
-                Brush::Gradient(gradient) => Some(gradient.clone().into()),
-                Brush::Image(image) => self.image_paint(
-                    &image.image,
-                    image.sampler.quality,
-                    image.sampler.x_extend,
-                    image.sampler.y_extend,
-                ),
-            },
-            Pass::Pick => pick::raw_id(pick_id).map(|id| pick::id_to_color(id).into()),
+    /// Paint for a draw, or `None` when the draw should be skipped.
+    fn paint(&self, brush: &Brush) -> Option<PaintType> {
+        match brush {
+            Brush::Solid(color) => Some((*color).into()),
+            Brush::Gradient(gradient) => Some(gradient.clone().into()),
+            Brush::Image(image) => self.image_paint(
+                &image.image,
+                image.sampler.quality,
+                image.sampler.x_extend,
+                image.sampler.y_extend,
+            ),
         }
     }
 
@@ -255,9 +231,9 @@ impl SceneBuilder for Writer<'_> {
         brush: &Brush,
         brush_transform: Option<Affine>,
         path: &Path,
-        pick_id: PickId,
+        _pick_id: PickId,
     ) {
-        let Some(paint) = self.paint(brush, pick_id) else {
+        let Some(paint) = self.paint(brush) else {
             return;
         };
         self.set_placement(transform, brush_transform);
@@ -273,17 +249,13 @@ impl SceneBuilder for Writer<'_> {
         brush: &Brush,
         brush_transform: Option<Affine>,
         path: &Path,
-        pick_id: PickId,
+        _pick_id: PickId,
     ) {
-        let Some(paint) = self.paint(brush, pick_id) else {
+        let Some(paint) = self.paint(brush) else {
             return;
         };
-        let mut stroke = stroke.clone();
-        if self.pass == Pass::Pick && stroke.width < MIN_PICK_STROKE_WIDTH {
-            stroke.width = MIN_PICK_STROKE_WIDTH;
-        }
         self.set_placement(transform, brush_transform);
-        self.scene.set_stroke(stroke);
+        self.scene.set_stroke(stroke.clone());
         self.scene.set_paint(paint);
         self.scene.stroke_path(path);
     }
@@ -294,24 +266,19 @@ impl SceneBuilder for Writer<'_> {
         transform: Affine,
         sampling: Sampling,
         alpha: f32,
-        pick_id: PickId,
+        _pick_id: PickId,
     ) {
         let bounds = crate::geometry::Rect::new(0.0, 0.0, image.width.into(), image.height.into());
-        let paint = match self.pass {
-            Pass::Display => self.image_paint(
-                image,
-                convert::sampling_to_quality(sampling),
-                peniko::Extend::Pad,
-                peniko::Extend::Pad,
-            ),
-            Pass::Pick => pick::raw_id(pick_id).map(|id| pick::id_to_color(id).into()),
-        };
-        let Some(paint) = paint else {
+        let Some(paint) = self.image_paint(
+            image,
+            convert::sampling_to_quality(sampling),
+            peniko::Extend::Pad,
+            peniko::Extend::Pad,
+        ) else {
             return;
         };
-        // Image opacity has to be a layer rather than a sampler field; the
-        // pick pass ignores it, since a faded id is a wrong id.
-        let layered = self.pass == Pass::Display && alpha < 1.0;
+        // Image opacity has to be a layer rather than a sampler field.
+        let layered = alpha < 1.0;
         if layered {
             self.scene.push_opacity_layer(alpha);
         }
@@ -324,11 +291,11 @@ impl SceneBuilder for Writer<'_> {
         }
     }
 
-    fn draw_glyphs(&mut self, run: &GlyphRun<'_>, pick_id: PickId) {
-        let Some(paint) = self.paint(run.brush, pick_id) else {
+    fn draw_glyphs(&mut self, run: &GlyphRun<'_>, _pick_id: PickId) {
+        let Some(paint) = self.paint(run.brush) else {
             return;
         };
-        let layered = self.pass == Pass::Display && run.brush_alpha < 1.0;
+        let layered = run.brush_alpha < 1.0;
         if layered {
             self.scene.push_opacity_layer(run.brush_alpha);
         }
@@ -352,15 +319,12 @@ impl SceneBuilder for Writer<'_> {
             self.scene.reset_paint_transform();
             self.scene.set_paint(paint);
 
-            let stroked = match (self.pass, run.style) {
-                (Pass::Display, Some(stroke)) => {
+            let stroked = match run.style {
+                Some(stroke) => {
                     self.scene.set_stroke(stroke.clone());
                     true
                 }
-                // The pick pass fills glyph outlines whatever the display
-                // style: an outlined glyph should still be hittable in its
-                // interior.
-                _ => false,
+                None => false,
             };
 
             let glyphs = outlines
@@ -395,7 +359,7 @@ impl SceneBuilder for Writer<'_> {
                 run.transform * strike.transform,
                 Sampling::Bilinear,
                 1.0,
-                pick_id,
+                PickId::Skip,
             );
         }
 
@@ -410,20 +374,13 @@ impl SceneBuilder for Writer<'_> {
 
     fn push_layer(&mut self, blend: BlendMode, alpha: f32, transform: Affine, clip: &Path) {
         self.scene.set_transform(transform);
-        match self.pass {
-            Pass::Display => self.scene.push_layer(
-                Some(clip),
-                Some(convert::blend_mode(blend)),
-                Some(alpha),
-                None,
-                None,
-            ),
-            // Mirror the clip so subsequent draws are clipped identically,
-            // but drop the blend mode and alpha: either would distort the
-            // encoded ids, and a translucent layer would fade them toward
-            // the no-hit sentinel.
-            Pass::Pick => self.scene.push_layer(Some(clip), None, None, None, None),
-        }
+        self.scene.push_layer(
+            Some(clip),
+            Some(convert::blend_mode(blend)),
+            Some(alpha),
+            None,
+            None,
+        );
     }
 
     fn pop_layer(&mut self) {

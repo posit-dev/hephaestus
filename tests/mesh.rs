@@ -126,7 +126,7 @@ fn draw_mesh_pick_round_trip() {
     let mut buf = vec![0u8; (W * H * 4) as usize];
     r.render_to_buffer(W, H, rgb8(0, 0, 0), &mut buf)
         .expect("render");
-    assert_eq!(r.pick_at(100, 100), Some(42));
+    assert_eq!(r.pick_at(Point::new(100.0, 100.0)), Some(42));
     // Outside the triangle: no hit.
-    assert_eq!(r.pick_at(5, 5), None);
+    assert_eq!(r.pick_at(Point::new(5.0, 5.0)), None);
 }

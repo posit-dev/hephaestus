@@ -27,9 +27,10 @@ pub trait SceneBuilder {
     /// Fill `path` with `brush`. `transform` applies to the path; `brush_transform`
     /// optionally transforms the brush coordinates (e.g. to rotate a gradient).
     ///
-    /// `pick_id` controls how (or whether) this primitive appears in the
-    /// hitmap when picking is enabled on the backend. Pass [`PickId::Skip`]
-    /// for purely decorative content.
+    /// `pick_id` is the authoring layer's handle for whatever this draws.
+    /// A scene that hit-tests records it; a rasteriser ignores it, and the
+    /// vector backends surface it (SVG emits `data-pick-id`). Pass
+    /// [`PickId::Skip`] for content that carries no id of its own.
     fn fill(
         &mut self,
         rule: FillRule,

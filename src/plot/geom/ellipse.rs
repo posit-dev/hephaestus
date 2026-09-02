@@ -755,14 +755,27 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "must be a non-negative integer")]
-    fn pick_id_above_24_bit_panics_at_build() {
+    fn pick_id_past_24_bits_is_accepted() {
+        // Ids were capped at 24 bits only because they were packed into a
+        // texture's colour channels. The index carries them as numbers.
         EllipseGeom::builder()
             .set("x", vec![0.0_f64])
             .set("y", vec![0.0_f64])
             .set("x2", vec![1.0_f64])
             .set("y2", vec![1.0_f64])
             .set("pick_id", 0x100_0000_i64)
+            .build();
+    }
+
+    #[test]
+    #[should_panic(expected = "must be a non-negative integer")]
+    fn a_negative_pick_id_panics_at_build() {
+        EllipseGeom::builder()
+            .set("x", vec![0.0_f64])
+            .set("y", vec![0.0_f64])
+            .set("x2", vec![1.0_f64])
+            .set("y2", vec![1.0_f64])
+            .set("pick_id", -1_i64)
             .build();
     }
 
