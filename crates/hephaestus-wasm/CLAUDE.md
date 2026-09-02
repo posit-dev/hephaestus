@@ -24,7 +24,7 @@ Node has no DOM, so nothing here can exercise the canvas paths — which is how 
 
 
 The wasm render client: a page loads this, points it at a `<canvas>` and a
-`.hplot` document, and gets a plot that reflows on resize and follows
+`.hep` document, and gets a plot that reflows on resize and follows
 light/dark.
 
 Its own workspace, not a member of the crate above it. See the note in
@@ -299,7 +299,7 @@ it did not on the wgpu one.**
 
 The honest fix is not to shave the boot but to stop waiting for it. A producer
 that links `hephaestus` natively emits both halves of the same composition — a
-`.hplot` that reflows and a PNG that is instant — and puts the picture in the
+`.hep` that reflows and a PNG that is instant — and puts the picture in the
 served HTML. It is on screen after an HTML parse and a PNG decode; the client
 boots behind it. `PlotView.create`'s `placeholder` option adopts that `<img>`
 and retires it in the same task as the first draw, so **one paint** both
@@ -658,7 +658,7 @@ references.
 
 ## Images and shapes arrive with the document
 
-A `.hplot` carries the marker shapes a plot registered (always) and, when the
+A `.hep` carries the marker shapes a plot registered (always) and, when the
 writer asked for it, the raster images an `ImageGeom` names. Both land in the
 right plot's registry during `read_composition`, so nothing here has to
 participate.
@@ -812,7 +812,7 @@ exact-version URL is the integrity story.
 ### The fallback story, for whoever ships this
 
 `isSupported()` is a hard gate, so a producer should emit a static image beside
-the `.hplot` — and that is the same artifact the `placeholder` option wants, so
+the `.hep` — and that is the same artifact the `placeholder` option wants, so
 one thing covers both the fast path and the unsupported one. Pass the `<img>`
 to `PlotView.create` and it is the placeholder where the renderer works and the
 final answer where it does not, because nothing touches it until there is a
@@ -821,10 +821,10 @@ frame to reveal. `www/index.html?nowasm=1` is that case, on purpose.
 ## Running the demo
 
 ```sh
-cargo run --example document_save --features document-write   # examples/document.hplot
+cargo run --example document_save --features document-write   # examples/document.hep
 cargo run --example document_placeholder \
   --features vello-hybrid,document-read,png                   # examples/document.png
-cp examples/document.hplot examples/document.png crates/hephaestus-wasm/www/
+cp examples/document.hep examples/document.png crates/hephaestus-wasm/www/
 cd crates/hephaestus-wasm
 ./build.sh                           # or ./build.sh --dev for panic messages
 node bench/server.mjs --port 8080    # serve the crate dir, not www/
@@ -842,7 +842,7 @@ Then open <http://localhost:8080/www/>. Two things about that:
 
 None of the three generated files is committed, and the page degrades
 gracefully without them: no `document.png` shows the text placeholder behind
-it, and no `document.hplot` reports what to run. `?nowasm=1` skips the module
+it, and no `document.hep` reports what to run. `?nowasm=1` skips the module
 entirely, which is the unsupported-browser path.
 
 A page that wants its own typography drops a TTF at `www/font.ttf` and

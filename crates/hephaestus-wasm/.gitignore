@@ -8,8 +8,8 @@
 /Cargo.lock
 # All supplied locally by whoever runs the demo; see www/index.html. The
 # document and the picture are generated — `document_save` writes
-# examples/document.hplot and `document_placeholder` writes
+# examples/document.hep and `document_placeholder` writes
 # examples/document.png, and both of those are gitignored too.
 /www/font.ttf
-/www/document.hplot
+/www/document.hep
 /www/document.png

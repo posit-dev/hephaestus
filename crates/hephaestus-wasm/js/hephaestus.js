@@ -204,7 +204,7 @@ export async function registerDefaultFonts() {
 export class PlotView {
   /**
    * @param {HTMLCanvasElement} canvas
-   * @param {Uint8Array|ArrayBuffer} doc bytes of a `.hplot` document.
+   * @param {Uint8Array|ArrayBuffer} doc bytes of a `.hep` document.
    * @param {{ colorScheme?: 'light'|'dark'|'auto', autoResize?: boolean,
    *           picking?: boolean, saveOnRightClick?: boolean|string,
    *           defaultFont?: boolean, placeholder?: HTMLImageElement|string }} [opts]

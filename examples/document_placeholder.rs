@@ -1,4 +1,4 @@
-//! Rasterizes `examples/document.hplot` to `examples/document.png` — the
+//! Rasterizes `examples/document.hep` to `examples/document.png` — the
 //! static picture a host shows while the wasm render client boots.
 //!
 //! This is the reference for a producer that links `hephaestus` natively and
@@ -50,7 +50,7 @@ fn main() {
 
     register_client_fonts();
 
-    let path = "examples/document.hplot";
+    let path = "examples/document.hep";
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => {

@@ -8,7 +8,7 @@ examples/*.jpg
 examples/*.tiff
 examples/*.webp
 # Written by examples/document_save.rs, read by document_load.
-examples/*.hplot
+examples/*.hep
 tests/*.png
 .claude/
 PLAN.md

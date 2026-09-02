@@ -14,11 +14,11 @@ generate both from the repository root:
 ```sh
 cargo run --example document_save --features document-write
 cargo run --example document_placeholder --features vello-hybrid,document-read,png
-cp examples/document.hplot examples/document.png crates/hephaestus-wasm/www/
+cp examples/document.hep examples/document.png crates/hephaestus-wasm/www/
 cd crates/hephaestus-wasm && ./build.sh
 ```
 
-Neither artifact is committed — `examples/*.png` and `examples/*.hplot` are
+Neither artifact is committed — `examples/*.png` and `examples/*.hep` are
 ignored — so a fresh checkout runs those four lines first.
 
 ## `pixel-diff.mjs` — is a native pre-render the same picture?

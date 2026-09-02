@@ -1412,7 +1412,7 @@ fn the_compositions_own_image_register_travels() {
 /// additive change rewrites these bytes legitimately, and comparing them
 /// would fail on exactly the changes the format is designed to absorb.
 /// What must not change is that the bytes still rebuild the same plot.
-const FIXTURE: &[u8] = include_bytes!("fixtures/four_panel.hplot");
+const FIXTURE: &[u8] = include_bytes!("fixtures/four_panel.hep");
 
 #[test]
 fn the_checked_in_fixture_still_reads() {
@@ -1443,10 +1443,10 @@ fn the_checked_in_fixture_still_reads() {
 /// changed fixture is the format changing, which is worth seeing in a
 /// commit.
 #[test]
-#[ignore = "writes tests/fixtures/four_panel.hplot; run deliberately"]
+#[ignore = "writes tests/fixtures/four_panel.hep; run deliberately"]
 fn regenerate_the_fixture() {
     let comp = build();
     let bytes = write_composition(&comp, &WriteOptions::new()).expect("writable");
     std::fs::create_dir_all("tests/fixtures").expect("fixture directory");
-    std::fs::write("tests/fixtures/four_panel.hplot", &bytes).expect("write the fixture");
+    std::fs::write("tests/fixtures/four_panel.hep", &bytes).expect("write the fixture");
 }

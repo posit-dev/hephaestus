@@ -46,14 +46,14 @@ const TYPES = {
   '.ttf': 'font/ttf',
   '.woff2': 'font/woff2',
   '.png': 'image/png',
-  '.hplot': 'application/octet-stream',
+  '.hep': 'application/octet-stream',
   '.ts': 'text/plain; charset=utf-8',
   '.txt': 'text/plain; charset=utf-8',
 };
 
 // Only text-ish and wasm payloads are worth compressing; a PNG or a TTF is
 // already compressed and brotli-ing it measures nothing useful.
-const COMPRESSIBLE = new Set(['.html', '.js', '.mjs', '.json', '.wasm', '.hplot']);
+const COMPRESSIBLE = new Set(['.html', '.js', '.mjs', '.json', '.wasm', '.hep']);
 
 // Compressed bodies are held rather than recomputed: quality 11 over 3 MB is
 // seconds, and every run of the harness would pay it again.

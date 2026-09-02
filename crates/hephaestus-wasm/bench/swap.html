@@ -69,8 +69,8 @@
     try {
       const { default: init, PlotView } = await import('../dist/hephaestus.js');
       await init();
-      const res = await fetch('../www/document.hplot');
-      if (!res.ok) throw new Error(`document.hplot: ${res.status}`);
+      const res = await fetch('../www/document.hep');
+      if (!res.ok) throw new Error(`document.hep: ${res.status}`);
       const view = await PlotView.create(canvas, new Uint8Array(await res.arrayBuffer()), {
         colorScheme: 'light',
         saveOnRightClick: 'plot.png',

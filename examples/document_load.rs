@@ -1,4 +1,4 @@
-//! Reads `examples/document.hplot` and renders it at two sizes.
+//! Reads `examples/document.hep` and renders it at two sizes.
 //!
 //! Deliberately built with `document-read` and **not** `document-write`:
 //! a consumer compiles only the half it uses, and this example is the
@@ -21,7 +21,7 @@ use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
 
 fn main() {
-    let path = "examples/document.hplot";
+    let path = "examples/document.hep";
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => {

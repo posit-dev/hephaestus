@@ -1,4 +1,4 @@
-//! Writes a plot to `examples/document.hplot`.
+//! Writes a plot to `examples/document.hep`.
 //!
 //! The point of the pairing with `document_load` is that this binary
 //! needs the data, the fonts and the plot code, while the loader needs
@@ -111,7 +111,7 @@ fn main() {
         .dpi_hint(96.0);
     let bytes = write_composition(&view, &opts).expect("this plot is writable");
 
-    let path = "examples/document.hplot";
+    let path = "examples/document.hep";
     std::fs::write(path, &bytes).expect("write the document");
     println!("wrote {path} ({} bytes)", bytes.len());
     println!("now run: cargo run --example document_load --features document-read,png");

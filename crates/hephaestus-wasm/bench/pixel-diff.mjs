@@ -14,7 +14,7 @@
 // Expects, from the repository root:
 //   cargo run --example document_save --features document-write
 //   cargo run --example document_placeholder --features vello-hybrid,document-read,png
-//   cp examples/document.hplot crates/hephaestus-wasm/www/
+//   cp examples/document.hep crates/hephaestus-wasm/www/
 //   ./build.sh
 
 import { readFile, writeFile } from 'node:fs/promises';

@@ -161,11 +161,11 @@
 
   // Generated, not committed:
   //   cargo run --example document_save --features document-write
-  //   cp examples/document.hplot crates/hephaestus-wasm/www/
-  const docResponse = await fetch('./document.hplot');
+  //   cp examples/document.hep crates/hephaestus-wasm/www/
+  const docResponse = await fetch('./document.hep');
   if (!docResponse.ok) {
     fail(
-      'www/document.hplot is missing.',
+      'www/document.hep is missing.',
       'Generate it with <code>cargo run --example document_save --features ' +
         'document-write</code> and copy it into <code>www/</code>.',
     );
