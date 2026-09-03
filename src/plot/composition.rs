@@ -575,6 +575,10 @@ impl CompositionChrome {
             ) else {
                 continue;
             };
+            scene.push_pick_scope(&crate::plot::pick::region_scope(slot));
+            scene.push_pick_scope(&crate::plot::pick::part_scope(
+                crate::plot::pick::text_slot_part(slot),
+            ));
             draw_text_element_in_rect(
                 scene,
                 text,
@@ -587,6 +591,8 @@ impl CompositionChrome {
                 Some(&theme.rich_text),
                 images,
             );
+            scene.pop_pick_scope();
+            scene.pop_pick_scope();
         }
 
         let text_defaults = text_concrete_defaults();
@@ -611,6 +617,12 @@ impl CompositionChrome {
                 .or(text_defaults.angle)
                 .expect("text_concrete_defaults sets angle");
             let style = crate::plot::chrome::text::text_style_from(&el, root_pt);
+            scene.push_pick_scope(&crate::plot::pick::region_scope(cartesian_axis_title_slot(
+                side,
+            )));
+            scene.push_pick_scope(&crate::plot::pick::part_scope(
+                crate::plot::pick::PlotPart::AxisTitle,
+            ));
             if matches!(el.markdown, Some(true)) {
                 crate::plot::chrome::text::draw_axis_title_markdown(
                     scene,
@@ -625,19 +637,22 @@ impl CompositionChrome {
                     side,
                     angle,
                 );
-                continue;
+            } else {
+                let run = TextRun::new(title, &style, dpi);
+                let outline =
+                    crate::plot::chrome::text::text_outline_from(&el, &theme.palette, dpi);
+                draw_axis_title(
+                    scene,
+                    &run,
+                    rect,
+                    side,
+                    &Brush::Solid(color.resolve(&theme.palette)),
+                    outline.as_ref(),
+                    angle,
+                );
             }
-            let run = TextRun::new(title, &style, dpi);
-            let outline = crate::plot::chrome::text::text_outline_from(&el, &theme.palette, dpi);
-            draw_axis_title(
-                scene,
-                &run,
-                rect,
-                side,
-                &Brush::Solid(color.resolve(&theme.palette)),
-                outline.as_ref(),
-                angle,
-            );
+            scene.pop_pick_scope();
+            scene.pop_pick_scope();
         }
 
         // Must collapse identically to `wire` for the measured space
@@ -649,9 +664,11 @@ impl CompositionChrome {
                 continue;
             }
             if let Some(rect) = layout.get(comp_id, slot) {
+                scene.push_pick_scope(&crate::plot::pick::region_scope(slot));
                 crate::plot::chrome::legend::render_legend_stack(
                     &group, side, rect, registry, shapes, images, scene, dpi, theme,
                 );
+                scene.pop_pick_scope();
             }
         }
     }
@@ -1155,13 +1172,15 @@ impl PlotComposition {
     /// plot list — multiple plots per patch are supported; later
     /// plots draw on top of earlier ones. Flips the layout's dirty
     /// flag.
-    pub fn attach_plot(&mut self, plot: Plot) {
+    pub fn attach_plot(&mut self, mut plot: Plot) {
         let id = plot.patch_id().to_string();
         self.plot_dirty.insert(id.clone(), true);
         if !self.plots.contains_key(&id) {
             self.plot_order.push(id.clone());
         }
-        self.plots.entry(id).or_default().push(plot);
+        let list = self.plots.entry(id).or_default();
+        plot.set_index_in_patch(list.len() as u32);
+        list.push(plot);
         self.layout_dirty = true;
     }
 
@@ -1297,6 +1316,14 @@ impl PlotComposition {
             .map(|plot| self.effective_theme_for(plot))
             .collect();
 
+        // Phases 1-6 all sit under the root composition. A plot's drawing is
+        // not contiguous — each phase walks every plot before the next
+        // starts — but the scope stack is a logical path, not a bracket
+        // around a run of ops, so each phase simply re-establishes
+        // `composition → plot`. The scope tree interns paths, so the
+        // repeated prefixes cost nothing.
+        scene.push_pick_scope(&crate::plot::pick::composition_scope(&self.root_id));
+
         for (plot, effective) in self.plots_in_order().zip(&plot_themes) {
             plot.draw_patch_background_into(scene, layout, effective, dpi);
         }
@@ -1356,6 +1383,7 @@ impl PlotComposition {
         for (plot, effective) in self.plots_in_order().zip(&plot_themes) {
             plot.draw_labels_into(scene, layout, &self.scales, dpi, effective);
         }
+        scene.pop_pick_scope();
 
         // Phase 7: composition-level chrome, which is labels too — a
         // shared title, shared axis titles, legends serving every
@@ -1369,6 +1397,9 @@ impl PlotComposition {
             .iter()
             .filter_map(|id| self.chrome.get(id).map(|c| (id, c)))
         {
+            // Composition chrome has no owning plot, so its path is one
+            // frame shorter and `PlotPath::plot` reports `None` for it.
+            scene.push_pick_scope(&crate::plot::pick::composition_scope(comp_id));
             chrome.draw_into(
                 comp_id,
                 scene,
@@ -1379,6 +1410,7 @@ impl PlotComposition {
                 dpi,
                 &self.theme,
             );
+            scene.pop_pick_scope();
         }
 
         // Clear dirty bits after a successful render.
@@ -1494,7 +1526,7 @@ fn matches_expected(expected: super::geom::ExpectedOutput, found: &'static str) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::composition::{beside, Patch as CompPatch};
+    use crate::composition::{beside, Patch as CompPatch, Slot};
     use crate::plot::geom::PointGeom;
     use crate::plot::scale;
 
@@ -1509,6 +1541,36 @@ mod tests {
         assert_eq!(view.template.cols, 2);
         assert_eq!(view.template.rows, 1);
         assert_eq!(view.template.placements.len(), 2);
+    }
+
+    #[test]
+    fn attach_numbers_plots_within_their_patch() {
+        let mut view = PlotComposition::new(&comp_two());
+        view.attach_plot(Plot::new(&comp_two(), "a"));
+        view.attach_plot(Plot::new(&comp_two(), "a"));
+        view.attach_plot(Plot::new(&comp_two(), "b"));
+
+        let a = view.plots_in("a");
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0].index_in_patch(), 0);
+        assert_eq!(a[1].index_in_patch(), 1);
+        // Numbering is per patch, not global.
+        assert_eq!(view.plots_in("b")[0].index_in_patch(), 0);
+    }
+
+    #[test]
+    fn detaching_a_patch_leaves_other_patches_numbered() {
+        let mut view = PlotComposition::new(&comp_two());
+        view.attach_plot(Plot::new(&comp_two(), "a"));
+        view.attach_plot(Plot::new(&comp_two(), "b"));
+        view.attach_plot(Plot::new(&comp_two(), "b"));
+
+        // `detach_plot` removes a whole patch's list, so no surviving plot's
+        // index shifts — which is what makes `(patch_id, index)` a stable key.
+        view.detach_plot("a");
+        let b = view.plots_in("b");
+        assert_eq!(b[0].index_in_patch(), 0);
+        assert_eq!(b[1].index_in_patch(), 1);
     }
 
     #[test]
@@ -1888,6 +1950,206 @@ mod tests {
             a.y0,
             title.y1
         );
+    }
+
+    /// A composition with axes, strips, a legend and text in every slot, so
+    /// the whole chrome vocabulary is exercised at once.
+    fn richly_dressed() -> PlotComposition {
+        use crate::plot::chrome::axis::{Axis, AxisPlacement};
+        use crate::plot::geom::PointGeom;
+        use crate::scales::chrome::AxisSide;
+
+        let mut view = PlotComposition::new(&comp_two().id("outer")).title("Figure");
+        view.insert_scale("x", scale::continuous(0.0..=1.0));
+        view.insert_scale("y", scale::continuous(0.0..=1.0));
+
+        let mut plot = crate::plot::Plot::new(&comp_two(), "a");
+        plot.set_binding("x", "x");
+        plot.set_binding("y", "y");
+        plot.add_axis(Axis::rail("x", AxisPlacement::Cartesian(AxisSide::Bottom)).title("X"));
+        plot.add_axis(Axis::rail("y", AxisPlacement::Cartesian(AxisSide::Left)).title("Y"));
+        plot.set_strip(AxisSide::Top, Some("facet".to_string()));
+        plot.set_title("Plot");
+        plot.add_geom(
+            PointGeom::builder()
+                .set("x", vec![0.2_f64, 0.8])
+                .set("y", vec![0.3_f64, 0.7])
+                .set("fill", crate::color::Color::new([1.0, 0.0, 0.0, 1.0]))
+                .set("pick_id", vec![1.0_f64, 2.0])
+                .build(),
+        );
+        view.attach_plot(plot);
+        view
+    }
+
+    #[test]
+    fn every_chrome_part_reports_a_well_formed_path() {
+        use crate::plot::pick::{PlotPart, PlotPath};
+        use std::collections::BTreeSet;
+
+        let mut view = richly_dressed();
+        let mut sc =
+            crate::pick::PickIndexScene::new(crate::scene::recording::RecordingScene::new(), true);
+        view.render(&mut sc, Size::new(800.0, 600.0), 96.0);
+
+        let hits = sc
+            .index()
+            .hits_in(crate::geometry::Rect::new(0.0, 0.0, 800.0, 600.0));
+        let mut parts: BTreeSet<&str> = BTreeSet::new();
+        for h in &hits {
+            let p = PlotPath::new(h.path);
+            // Every indexed primitive sits in a composition and a region.
+            assert!(p.composition().is_some(), "no composition frame");
+            let Some(part) = p.part() else {
+                // The only unpartitioned hits are geom marks, which carry an
+                // authoring id instead.
+                assert!(p.geom().is_some() && h.id().is_some(), "orphan hit");
+                continue;
+            };
+            assert!(p.region().is_some(), "{} has no region", part.name());
+            parts.insert(part.name());
+
+            // Anything reporting an ordinal must name the scale it indexes.
+            if p.item().is_some() && matches!(part, PlotPart::AxisTick | PlotPart::AxisTickLabel) {
+                assert!(p.scale().is_some(), "{} names no scale", part.name());
+            }
+            // Axis chrome carries the axis handle it belongs to.
+            if matches!(
+                part,
+                PlotPart::AxisLine | PlotPart::AxisTick | PlotPart::AxisTickLabel
+            ) {
+                assert!(p.axis().is_some(), "{} has no axis frame", part.name());
+            }
+        }
+
+        // `AxisLine` is absent by design: the default theme sets
+        // `axis.line = Element::Blank`, so no rail is drawn to index.
+        assert!(!parts.contains(PlotPart::AxisLine.name()));
+
+        // The vocabulary this fixture should light up.
+        for want in [
+            PlotPart::PlotBackground,
+            PlotPart::PanelBackground,
+            PlotPart::GridMajor,
+            PlotPart::AxisTick,
+            PlotPart::AxisTickLabel,
+            PlotPart::AxisTitle,
+            PlotPart::StripBackground,
+            PlotPart::StripLabel,
+            PlotPart::Title,
+        ] {
+            assert!(
+                parts.contains(want.name()),
+                "{} never appeared; got {parts:?}",
+                want.name()
+            );
+        }
+    }
+
+    #[test]
+    fn a_figure_title_has_no_owning_plot() {
+        use crate::plot::pick::{PlotPart, PlotPath};
+        let mut view = richly_dressed();
+        let mut sc =
+            crate::pick::PickIndexScene::new(crate::scene::recording::RecordingScene::new(), true);
+        view.render(&mut sc, Size::new(800.0, 600.0), 96.0);
+
+        let hits = sc
+            .index()
+            .hits_in(crate::geometry::Rect::new(0.0, 0.0, 800.0, 600.0));
+        let titles: Vec<PlotPath<'_>> = hits
+            .iter()
+            .map(|h| PlotPath::new(h.path))
+            .filter(|p| p.part() == Some(PlotPart::Title))
+            .collect();
+        assert!(!titles.is_empty(), "no title was drawn");
+
+        // Composition chrome is one frame shorter than plot chrome: the
+        // figure title belongs to the figure, not to either plot.
+        assert!(
+            titles.iter().any(|p| p.plot().is_none()),
+            "the composition title should report no plot"
+        );
+        assert!(
+            titles.iter().any(|p| p.plot() == Some(("a", 0))),
+            "the plot title should report its plot"
+        );
+    }
+
+    #[test]
+    fn every_drawn_op_sits_in_a_balanced_scope() {
+        use crate::scene::recording::{Op, RecordingScene};
+        let mut view = view_two_plots();
+        let mut scene = RecordingScene::default();
+        view.render(&mut scene, Size::new(600.0, 400.0), 96.0);
+
+        // Balance: the stack returns to empty, and never goes negative.
+        let mut depth = 0i32;
+        for op in &scene.ops {
+            match op {
+                Op::PushPickScope { .. } => depth += 1,
+                Op::PopPickScope => depth -= 1,
+                _ => {}
+            }
+            assert!(depth >= 0, "pick scopes went negative");
+        }
+        assert_eq!(depth, 0, "pick scopes left unbalanced");
+    }
+
+    #[test]
+    fn a_gridline_reports_its_plot_region_part_and_break() {
+        use crate::plot::pick::{PlotPart, PlotPath};
+        use crate::scene::recording::{Op, RecordingScene};
+        let mut view = view_two_plots();
+        view.insert_scale("x", scale::continuous(0.0..=1.0));
+        view.update_plot("a", |p| {
+            p.set_binding("x", "x");
+        });
+        let mut scene = RecordingScene::default();
+        view.render(&mut scene, Size::new(600.0, 400.0), 96.0);
+
+        // Find a stroke drawn under the major-grid part.
+        let found = scene.ops.iter().enumerate().find_map(|(i, op)| {
+            if !matches!(op, Op::Stroke { .. }) {
+                return None;
+            }
+            let frames = scene.scope_at(i);
+            frames
+                .iter()
+                .any(|f| f.name() == Some(PlotPart::GridMajor.name()))
+                .then_some((i, frames))
+        });
+        let (_, frames) = found.expect("a major gridline should be drawn");
+
+        let kinds: Vec<&str> = frames.iter().map(|f| f.kind()).collect();
+        assert_eq!(
+            kinds,
+            vec!["composition", "plot", "region", "part", "item"],
+            "unexpected grammar: {kinds:?}"
+        );
+        // The names line up with the anatomy and the theme's own addressing.
+        assert_eq!(frames[1].name(), Some("a"));
+        assert_eq!(frames[1].index(), Some(0));
+        assert_eq!(frames[2].name(), Some(Slot::Panel.name()));
+        assert_eq!(frames[3].index(), Some(0), "channel 0 gridlines");
+        assert!(frames[4].index().is_some(), "a break ordinal");
+
+        // And the typed view decodes the same path.
+        let mut tree = crate::pick::PickIndexScene::new(RecordingScene::new(), true);
+        view.render(&mut tree, Size::new(600.0, 400.0), 96.0);
+        let hits = tree
+            .index()
+            .hits_in(crate::geometry::Rect::new(0.0, 0.0, 600.0, 400.0));
+        let p = hits
+            .iter()
+            .map(|h| PlotPath::new(h.path))
+            .find(|p| p.part() == Some(PlotPart::GridMajor))
+            .expect("the index should hold a major gridline");
+        assert_eq!(p.plot(), Some(("a", 0)));
+        assert_eq!(p.region(), Some(Slot::Panel));
+        assert_eq!(p.part_channel(), Some(0));
+        assert!(p.item().is_some());
+        assert_eq!(p.composition(), Some(super::ROOT_COMPOSITION_ID));
     }
 
     #[test]

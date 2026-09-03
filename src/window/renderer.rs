@@ -130,13 +130,14 @@ impl HostRenderer {
         }
     }
 
-    /// Control whether the coming render refreshes the hitmap.
-    pub(crate) fn set_refresh_pick(&mut self, refresh: bool) {
+    /// The hit index the scene built while it was drawn, when this renderer
+    /// was built with picking.
+    pub(crate) fn pick_index(&self) -> Option<&crate::pick::PickIndex> {
         match self {
             #[cfg(feature = "vello")]
-            Self::Vello(r) => r.set_refresh_pick(refresh),
+            Self::Vello(r) => r.pick_index(),
             #[cfg(feature = "vello-hybrid")]
-            Self::Hybrid(r) => r.set_refresh_pick(refresh),
+            Self::Hybrid(r) => r.pick_index(),
         }
     }
 
@@ -163,49 +164,6 @@ impl HostRenderer {
             Self::Vello(r) => r.render_to_texture(view, width, height, background),
             #[cfg(feature = "vello-hybrid")]
             Self::Hybrid(r) => r.render_to_texture(view, width, height, background),
-        }
-    }
-
-    /// Rasterise into `view` and submit the pick pass without waiting on it.
-    ///
-    /// The browser host's counterpart to
-    /// [`Self::render_to_texture`], whose pick readback would park the main
-    /// thread. Pair with [`Self::try_finish_pick`].
-    #[cfg(all(feature = "canvas", target_arch = "wasm32"))]
-    pub(crate) fn render_to_texture_deferring_pick(
-        &mut self,
-        view: &wgpu::TextureView,
-        width: u32,
-        height: u32,
-        background: Color,
-    ) -> Result<(), BackendError> {
-        match self {
-            #[cfg(feature = "vello")]
-            Self::Vello(r) => r.render_to_texture_deferring_pick(view, width, height, background),
-            #[cfg(feature = "vello-hybrid")]
-            Self::Hybrid(r) => r.render_to_texture_deferring_pick(view, width, height, background),
-        }
-    }
-
-    /// Drain a deferred pick readback into the hitmap, if it has landed.
-    #[cfg(all(feature = "canvas", target_arch = "wasm32"))]
-    pub(crate) fn try_finish_pick(&mut self) -> Result<bool, BackendError> {
-        match self {
-            #[cfg(feature = "vello")]
-            Self::Vello(r) => r.try_finish_pick(),
-            #[cfg(feature = "vello-hybrid")]
-            Self::Hybrid(r) => r.try_finish_pick(),
-        }
-    }
-}
-
-impl crate::window::PickSource for HostRenderer {
-    fn pick_at(&self, x: u32, y: u32) -> Option<u32> {
-        match self {
-            #[cfg(feature = "vello")]
-            Self::Vello(r) => r.pick_at(x, y),
-            #[cfg(feature = "vello-hybrid")]
-            Self::Hybrid(r) => r.pick_at(x, y),
         }
     }
 }

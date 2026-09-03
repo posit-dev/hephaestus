@@ -25,6 +25,7 @@ use crate::pick::PickId;
 use crate::plot::chrome::axis::axis_side_to_channel_side;
 use crate::plot::chrome::linear_axis::{pt_to_px, stroke_from_rect_border};
 use crate::plot::chrome::text::{draw_text_element_in_rect, rotated_bbox, text_style_from};
+use crate::plot::pick::{part_scope, PlotPart};
 use crate::plot::theme::HAlign;
 use crate::plot::theme::{
     rect_concrete_defaults, text_concrete_defaults, RectElement, Rotation, TextElement, Theme,
@@ -326,7 +327,9 @@ pub fn draw_strip(
     let bg = resolved_background(theme, side);
     let bg_path = bg.as_ref().map(|el| strip_background_path(el, rect, dpi));
     if let (Some(el), Some(path)) = (bg.as_ref(), bg_path.as_ref()) {
+        scene.push_pick_scope(&part_scope(PlotPart::StripBackground));
         paint_strip_background(scene, el, path, theme, dpi);
+        scene.pop_pick_scope();
     }
 
     let root_pt = crate::plot::chrome::root_text_pt(theme);
@@ -377,6 +380,7 @@ pub fn draw_strip(
     if let Some(path) = clipping {
         scene.push_layer(BlendMode::default(), 1.0, Affine::IDENTITY, path);
     }
+    scene.push_pick_scope(&part_scope(PlotPart::StripLabel));
     draw_text_element_in_rect(
         scene,
         text,
@@ -392,6 +396,7 @@ pub fn draw_strip(
     if clipping.is_some() {
         scene.pop_layer();
     }
+    scene.pop_pick_scope();
 }
 
 /// Shift the four-side padding so the visible cap-band centers in

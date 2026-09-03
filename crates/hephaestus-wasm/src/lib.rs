@@ -244,9 +244,10 @@ impl PlotHandle {
     /// synchronously. Fails if the document is unreadable or if no WebGPU
     /// adapter is available — see [`is_supported`].
     ///
-    /// `picking` allocates a second render target and reads it back after
-    /// every frame, so it stays off unless [`Self::pick_at`] is going to be
-    /// called.
+    /// `picking` makes the scene record a spatial hit index as it is drawn.
+    /// That costs CPU per draw call whether or not anything is queried, so it
+    /// stays off unless [`Self::pick_at`] is going to be called. Nothing is
+    /// read back from the GPU either way.
     #[wasm_bindgen(js_name = create)]
     pub async fn create(
         canvas: web_sys::HtmlCanvasElement,
@@ -340,11 +341,10 @@ impl PlotHandle {
     /// pixels, so scale a pointer event by the device pixel ratio. Always
     /// `undefined` unless `picking` was passed to [`Self::create`].
     ///
-    /// The readback is never waited on, so this can answer from a frame or
-    /// two ago. That is invisible for hover and is what keeps the call off
-    /// the main thread's critical path.
+    /// Answers from the index the scene built while it was drawn, so it
+    /// always describes the frame on screen.
     #[wasm_bindgen(js_name = pickAt)]
-    pub fn pick_at(&mut self, x: u32, y: u32) -> Option<u32> {
+    pub fn pick_at(&self, x: f64, y: f64) -> Option<u32> {
         self.host.pick_at(x, y)
     }
 

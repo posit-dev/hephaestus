@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **Chrome is pickable.** `SceneBuilder::push_pick_scope` / `pop_pick_scope` record the tree a primitive is drawn in, and `plot::pick` names it: a hit on an axis tick label, gridline, legend key, strip or title reports its plot, region, part and ordinal through `PlotPath`, and the scope stack is the path an event bubbles along.
+- **`PickIndex::hits_at` returns every hit, topmost first**, each carrying its scope chain — it costs the same as topmost-only. `pick_at` remains the one-number convenience.
+- **Rectangle and lasso queries.** `hits_in` (bounds intersect), `hits_within` (bounds enclosed, and exact) and `hits_in_path` (bounds-centre inside a path) for brushing and marquee selection, plus `*_into` variants that reuse a caller's buffer.
+- **`Slot::from_name` and `Slot::ALL`** — the reverse of `Slot::name`, so a region name recovered from a hit round-trips back into `CompositionLayout::get`.
+- **`Plot::index_in_patch` and `Axis::id`** — a plot's position within its patch's attach list, and the handle an axis was attached under. `(patch_id, index_in_patch)` is the pair `update_plot_at` already addresses plots by.
+- **`RecordingScene::draw_ops` and `scope_at`** — the ops that draw something, and the pick-scope stack in effect at an op.
+
+### Changed
+
+- **Picking is a CPU spatial index built while a scene is drawn, not a second rasterization.** Every renderer's `Renderer::Scene` is a `PickIndexScene`, so hit testing rides on the scene and a vector backend or a renderer-free build answers the same way a GPU one does. `with_picking` and `pick_at` keep their names; `pick_at` takes a `Point` and no longer lags the frame it describes. At 100k marks the cost falls from 59 ms to ~7 ms on the sparse-strips backend, and no GPU readback happens at all.
+- **`PickId::Id` spans the full `u32` range with nothing reserved.** Both the 24-bit cap and `Id(0)`'s equivalence to `Block` were artifacts of packing ids into a texture's color channels, where an uncovered pixel decoded to zero. `MAX_PICK_ID`, the build-time panic above `0xFF_FFFF` and `pick::raw_id` are gone, and a `pick_id` channel of row indices no longer has to start at 1. Occlusion is `PickId::Block` alone.
+- **`PickId::Skip` means "no authoring id" rather than "not pickable".** A primitive is indexed when its id is not `Skip` *or* its innermost pick scope is a target — which is how chrome participates without a `PickId` argument at every chrome call site. A geom with no `pick_id` channel is still recorded nowhere.
+- **SVG emits `<g data-pick-kind=…>` for pick scopes** under the existing `SvgConfig::pick_ids` flag, so an exported plot groups by axis, part and item rather than arriving as a flat list of paths.
+- **A dashed stroke is hittable along its gaps, a glyph run picks as its layout box, and stroke caps and joins hit as round.** The index tests geometry rather than rasterized coverage; the differences are sub-pixel to a few pixels and on the generous side.
+
+### Removed
+
+- **The GPU hitmap.** `hitmap`, `try_finish_pick`, `render_to_texture_deferring_pick`, `set_refresh_pick` and `refreshes_pick` on both wgpu renderers; `WindowConfig::pick_interval`; `pick::id_to_color` and `pick::decode`. The pick pass they served no longer exists, and lazy tree construction subsumes the throttle: a window redrawing faster than it is queried builds nothing.
+
 ## 0.3.0
 
 ### Added

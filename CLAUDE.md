@@ -22,7 +22,7 @@ cargo +1.86 check --no-default-features --features document-write --ignore-rust-
 
 cargo test                                               # all tests
 cargo test --test smoke                                  # the GPU smoke test (requires a working wgpu adapter)
-cargo test --test picking                                # picking round-trip
+cargo test --test pick_index                             # hit testing; needs no features at all
 cargo test --test image_geom                             # raster images through PlotComposition
 cargo test --no-default-features --features vello-hybrid --test hybrid  # the sparse-strips backend, end to end
 cargo test --test window_blit                            # the window presentation blit, headless
@@ -114,7 +114,7 @@ The core types and traits compile with `--no-default-features` (no wgpu pulled i
 
 The following belong in higher layers or other crates and should not land here:
 
-- **Animation runtime** — picking emits pixel ids (see `src/CLAUDE.md`) and the `window` feature delivers them to an event handler, but tweening states and animation scheduling live in the host.
+- **Animation runtime** — picking reports hits (see `src/CLAUDE.md`) and the `window` feature delivers them to an event handler, but tweening states and animation scheduling live in the host.
 - **Filter effects** — blur, drop shadow, etc. Outside the Vello-∩-Blend2D intersection that governs the scene API.
 - **Font selection / loading at the `SceneBuilder` level** — the scene API consumes already-positioned glyphs. Shaping and font discovery live in the `text` module (parley-backed); a host that wants its own shaper can replace it behind the `TextRun` / `draw_text` surface.
 

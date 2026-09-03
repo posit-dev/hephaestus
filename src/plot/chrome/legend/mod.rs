@@ -60,6 +60,7 @@ use crate::geometry::{Affine, Point, Rect};
 use crate::layout::Measure;
 use crate::pick::PickId;
 use crate::plot::chrome::linear_axis::{draw_axis_label, pt_to_px, AxisLabelAt};
+use crate::plot::pick::{item_scope, legend_scope, part_scope, PlotPart};
 use crate::plot::scale::ScaleRegistry;
 // Inter-legend (and panel ↔ legend) gap parents — shared with
 // `Theme::default()` so the `Length::Rel` resolve parent matches the
@@ -346,17 +347,16 @@ pub fn render_legend_stack(
         // The stack already measured every child to place it; passing
         // that measure down saves re-shaping every label and re-solving
         // the discrete-stack grid a second time per legend per frame.
+        // One frame per block, numbered within this side's stack. The
+        // index is post-collapse — compatible legends are merged before
+        // they get here — so it addresses what was drawn, not what was
+        // asked for.
+        let block = legends[*orig_idx];
+        scene.push_pick_scope(&legend_scope(*orig_idx as u32, &block.domain_scale));
         render_legend_with_measure(
-            legends[*orig_idx],
-            measure,
-            registry,
-            shapes,
-            images,
-            sub_rect,
-            scene,
-            dpi,
-            theme,
+            block, measure, registry, shapes, images, sub_rect, scene, dpi, theme,
         );
+        scene.pop_pick_scope();
         cursor += cross + inter_gap_px;
     }
 }
@@ -425,7 +425,9 @@ pub(crate) fn render_legend_with_measure(
     // Background fill + border, sourced from the resolved
     // LegendTheme. Painted under the legend body so keys + text layer
     // on top.
+    scene.push_pick_scope(&part_scope(PlotPart::LegendBackground));
     paint_legend_background(scene, lt, &theme.palette, draw_rect, dpi);
+    scene.pop_pick_scope();
 
     match &legend.body {
         LegendBody::Stack(stack) if stack.binned => render_binned_stack_body(
@@ -724,6 +726,7 @@ fn render_stack_body(
 
     if let (Some(title), Some(paint)) = (&legend.title, &styles.title) {
         let run = ChromeRun::shape(title, &paint.style, dpi, paint.rich.as_ref());
+        scene.push_pick_scope(&part_scope(PlotPart::LegendTitle));
         run.draw(
             scene,
             title_x,
@@ -733,6 +736,7 @@ fn render_stack_body(
             Affine::IDENTITY,
             PickId::Skip,
         );
+        scene.pop_pick_scope();
     }
 
     let key_frame = lt.key.frame.as_set();
@@ -743,14 +747,22 @@ fn render_stack_body(
         let (swatch_local, label_local) = &layout.entries[idx];
         let swatch_rect = translate_rect(*swatch_local, entries_x, entries_y);
         let label_rect = translate_rect(*label_local, entries_x, entries_y);
+        // One item frame per row. The row index addresses the domain
+        // scale's break list, so a consumer recovers the level it names.
+        scene.push_pick_scope(&item_scope(idx as u32));
         // Per-row key frame: fill paints under the key (so a key
         // with a transparent rect / point shape lets the frame's
         // fill show through), stroke paints on top.
+        // Fill under, stroke over, so a transparent key shows the frame
+        // through. Both halves are the same target.
         if let Some(frame_el) = key_frame {
+            scene.push_pick_scope(&part_scope(PlotPart::LegendKeyFrame));
             paint_rect_frame(scene, frame_el, palette, swatch_rect, dpi, true, false);
+            scene.pop_pick_scope();
         }
-        for key in keys {
+        for (k, key) in keys.iter().enumerate() {
             let resolved = resolve_key(key, registry, v);
+            scene.push_pick_scope(&part_scope(PlotPart::LegendKey).with_index(k as u32));
             render_key(
                 key.kind,
                 &resolved,
@@ -763,13 +775,17 @@ fn render_stack_body(
                 theme,
                 images,
             );
+            scene.pop_pick_scope();
         }
         if let Some(frame_el) = key_frame {
+            scene.push_pick_scope(&part_scope(PlotPart::LegendKeyFrame));
             paint_rect_frame(scene, frame_el, palette, swatch_rect, dpi, false, true);
+            scene.pop_pick_scope();
         }
         if let Some(paint) = &styles.label {
             let label = domain.format(v, locale);
             let anchor = Point::new(label_rect.x0, (label_rect.y0 + label_rect.y1) * 0.5);
+            scene.push_pick_scope(&part_scope(PlotPart::LegendLabel));
             draw_axis_label(
                 scene,
                 &label,
@@ -783,7 +799,9 @@ fn render_stack_body(
                 },
                 dpi,
             );
+            scene.pop_pick_scope();
         }
+        scene.pop_pick_scope();
     }
 }
 

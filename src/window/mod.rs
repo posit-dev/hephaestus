@@ -137,7 +137,6 @@ pub struct WindowConfig {
     present_mode: PresentMode,
     #[cfg(any(feature = "vello", feature = "vello-hybrid"))]
     backend: Backend,
-    pick_interval: Option<std::time::Duration>,
 }
 
 impl WindowConfig {
@@ -153,7 +152,6 @@ impl WindowConfig {
             present_mode: PresentMode::default(),
             #[cfg(any(feature = "vello", feature = "vello-hybrid"))]
             backend: Backend::default(),
-            pick_interval: None,
         }
     }
 
@@ -170,30 +168,14 @@ impl WindowConfig {
         self
     }
 
-    /// Enable picking, making [`EventCtx::pick_at`] report ids.
+    /// Enable hit testing, making [`EventCtx::pick_at`] and the other
+    /// queries answer.
     ///
-    /// Picking costs a full-frame GPU readback on every rendered frame, so it
-    /// stays off unless asked for.
+    /// The scene records a spatial index as it is drawn, which costs CPU per
+    /// draw call whether or not anything is queried, so it stays off unless
+    /// asked for. Nothing is read back from the GPU either way.
     pub fn picking(mut self, picking: bool) -> Self {
         self.picking = picking;
-        self
-    }
-
-    /// Refresh the hitmap at most this often, rather than every frame.
-    ///
-    /// The pick pass is a second rasterisation of the whole scene. On the
-    /// sparse-strip backend that means a second CPU strip generation and costs
-    /// about what the display pass does — measured at 100k marks, a frame goes
-    /// from 88 ms to 150 ms with it. A window that redraws faster than a person
-    /// can query it — during a resize drag, or while animating — is paying that
-    /// for hitmaps nobody reads.
-    ///
-    /// With an interval set, frames in between reuse the previous hitmap, so
-    /// [`EventCtx::pick_at`] stays answerable but may describe a slightly older
-    /// frame. A few milliseconds is invisible to a pointer; the default is
-    /// `None`, which refreshes every frame.
-    pub fn pick_interval(mut self, interval: std::time::Duration) -> Self {
-        self.pick_interval = Some(interval);
         self
     }
 
@@ -268,19 +250,9 @@ impl Frame<'_> {
     }
 }
 
-/// Anything that can answer a pick query for [`EventCtx`].
-///
-/// An abstraction rather than a concrete renderer because the wgpu hosts and
-/// the WebGL2 one own entirely different renderers — and a WebGL2 build has no
-/// wgpu types at all to name.
-pub(crate) trait PickSource {
-    /// Id at a device-pixel coordinate of the last refreshed hitmap.
-    fn pick_at(&self, x: u32, y: u32) -> Option<u32>;
-}
-
 /// What an event handler can inspect and ask for.
 pub struct EventCtx<'a> {
-    renderer: &'a dyn PickSource,
+    index: Option<&'a crate::pick::PickIndex>,
     // A flag rather than a direct call into the windowing backend: it keeps
     // winit out of everything but `app.rs`, and lets the canvas host share
     // this type. The host acts on it once the handler returns.
@@ -292,12 +264,31 @@ pub struct EventCtx<'a> {
 }
 
 impl EventCtx<'_> {
-    /// The pick id at a device-pixel coordinate of the last drawn frame.
+    /// The topmost pick id at a device-pixel coordinate of the last drawn
+    /// frame.
     ///
-    /// Always `None` unless [`WindowConfig::picking`] was enabled. Reads a
-    /// CPU-side hitmap, so calling it per pointer event is cheap.
-    pub fn pick_at(&self, x: u32, y: u32) -> Option<u32> {
-        self.renderer.pick_at(x, y)
+    /// Always `None` unless [`WindowConfig::picking`] was enabled. Answers
+    /// from a CPU-side index, so calling it per pointer event is cheap and
+    /// never lags the frame.
+    pub fn pick_at(&self, x: f64, y: f64) -> Option<u32> {
+        self.index?.pick_at(Point::new(x, y))
+    }
+
+    /// Every hit at a device-pixel coordinate, topmost first, each carrying
+    /// the scope chain it was drawn inside — the path an event bubbles along.
+    ///
+    /// Chrome participates: a hover over an axis tick label reports a target
+    /// even though chrome carries no authoring id.
+    pub fn hits_at(&self, x: f64, y: f64) -> Vec<crate::pick::Hit<'_>> {
+        self.index
+            .map(|ix| ix.hits_at(Point::new(x, y)))
+            .unwrap_or_default()
+    }
+
+    /// The hit index for the last drawn frame, for rectangle and lasso
+    /// queries. `None` unless [`WindowConfig::picking`] was enabled.
+    pub fn pick_index(&self) -> Option<&crate::pick::PickIndex> {
+        self.index
     }
 
     /// The last known cursor position in device pixels, if it is over the

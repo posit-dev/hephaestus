@@ -606,10 +606,6 @@ name = "mesh"
 required-features = ["vello"]
 
 [[test]]
-name = "picking"
-required-features = ["vello"]
-
-[[test]]
 name = "hybrid"
 required-features = ["vello-hybrid"]
 

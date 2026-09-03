@@ -208,8 +208,9 @@ export class PlotView {
    * @param {{ colorScheme?: 'light'|'dark'|'auto', autoResize?: boolean,
    *           picking?: boolean, saveOnRightClick?: boolean|string,
    *           defaultFont?: boolean, placeholder?: HTMLImageElement|string }} [opts]
-   *   `picking` allocates a second render target and reads it back after
-   *   every frame, so leave it off unless `pickAt` is going to be called.
+   *   `picking` makes the scene record a hit index as it draws, which costs
+   *   CPU per draw call, so leave it off unless `pickAt` is going to be
+   *   called.
    *   `saveOnRightClick` gives the canvas an ordinary image's context menu.
    *   Pass a string to name the saved file — a bare `true` uses `plot.png`.
    *   The name is a hint: a `data:` URL has no path for a browser to take a
@@ -567,13 +568,12 @@ export class PlotView {
    * otherwise get wrong on a high-density display.
    *
    * Returns `undefined` unless the view was created with `picking: true`.
-   * The hitmap may lag the visible frame slightly, since the readback is
-   * never waited on.
+   * Always describes the frame on screen.
    */
   pickAt(cssX, cssY) {
     if (this._freed) return undefined;
     const ratio = this.canvas.width / (this.canvas.clientWidth || this.canvas.width);
-    return this.handle.pickAt(Math.round(cssX * ratio), Math.round(cssY * ratio));
+    return this.handle.pickAt(cssX * ratio, cssY * ratio);
   }
 
   /**

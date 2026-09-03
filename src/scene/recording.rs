@@ -10,7 +10,7 @@ use crate::brush::{Brush, Image, Sampling};
 use crate::geometry::Affine;
 use crate::mesh::Mesh;
 use crate::path::{FillRule, Path};
-use crate::pick::PickId;
+use crate::pick::{PickId, PickScope};
 use crate::stroke::Stroke;
 use crate::style_vocab::FontSpec;
 
@@ -53,6 +53,10 @@ pub enum Op {
         clip: Path,
     },
     PopLayer,
+    PushPickScope {
+        scope: PickScope,
+    },
+    PopPickScope,
 }
 
 /// Owned counterpart of `GlyphRun<'_>` for storage in `Op::DrawGlyphs`.
@@ -116,6 +120,36 @@ impl RecordingScene {
     /// Construct an empty recording scene.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The ops that draw something, skipping pick-scope bookkeeping.
+    ///
+    /// What a test asserting "here is what got drawn" wants: pushing scopes
+    /// changes the op list without changing the picture, and an assertion
+    /// about the picture should not have to know that.
+    pub fn draw_ops(&self) -> impl Iterator<Item = &Op> {
+        self.ops
+            .iter()
+            .filter(|op| !matches!(op, Op::PushPickScope { .. } | Op::PopPickScope))
+    }
+
+    /// The pick-scope stack in effect at `ops[i]`, outermost first.
+    ///
+    /// The natural way to assert scoping: draw into a recording, find the op
+    /// you care about, and read the path it was drawn under. An unbalanced
+    /// pop is ignored, matching what the index does with one.
+    pub fn scope_at(&self, i: usize) -> Vec<&PickScope> {
+        let mut stack: Vec<&PickScope> = Vec::new();
+        for op in self.ops.iter().take(i) {
+            match op {
+                Op::PushPickScope { scope } => stack.push(scope),
+                Op::PopPickScope => {
+                    stack.pop();
+                }
+                _ => {}
+            }
+        }
+        stack
     }
 
     /// Issue every recorded op against `scene`, in order.
@@ -190,6 +224,8 @@ impl RecordingScene {
                     clip,
                 } => scene.push_layer(*blend, *alpha, *transform, clip),
                 Op::PopLayer => scene.pop_layer(),
+                Op::PushPickScope { scope } => scene.push_pick_scope(scope),
+                Op::PopPickScope => scene.pop_pick_scope(),
             }
         }
     }
@@ -300,6 +336,16 @@ impl SceneBuilder for RecordingScene {
 
     fn pop_layer(&mut self) {
         self.ops.push(Op::PopLayer);
+    }
+
+    fn push_pick_scope(&mut self, scope: &PickScope) {
+        self.ops.push(Op::PushPickScope {
+            scope: scope.clone(),
+        });
+    }
+
+    fn pop_pick_scope(&mut self) {
+        self.ops.push(Op::PopPickScope);
     }
 }
 

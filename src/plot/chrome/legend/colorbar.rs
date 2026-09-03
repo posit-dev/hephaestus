@@ -15,7 +15,9 @@ use crate::geometry::Shape as _;
 use crate::geometry::{Affine, Point, Rect};
 use crate::path::{FillRule, Path};
 use crate::pick::PickId;
+use crate::plot::chrome::linear_axis::AxisTick;
 use crate::plot::chrome::text::ChromeRun;
+use crate::plot::pick::{part_scope, PlotPart};
 use crate::plot::scale::ScaleRegistry;
 use crate::scales::breaks::DEFAULT_BREAK_COUNT;
 use crate::scales::chrome::LegendSide;
@@ -438,6 +440,9 @@ pub(super) fn render_colorbar_body(
     if let Some(frame_el) = frame {
         paint_rect_frame(scene, frame_el, palette, bar_rect, dpi, true, false);
     }
+    // Bar and frame are one target: hovering the ramp should not report
+    // something different depending on whether the pointer is over its edge.
+    scene.push_pick_scope(&part_scope(PlotPart::ColorbarBar));
     draw_gradient_bar(
         domain,
         spec,
@@ -453,6 +458,7 @@ pub(super) fn render_colorbar_body(
     if let Some(frame_el) = frame {
         paint_rect_frame(scene, frame_el, palette, bar_rect, dpi, false, true);
     }
+    scene.pop_pick_scope();
     let _ = samples; // sample count carried on the spec, used inside draw_gradient_bar
 
     // Axis along the bar's long edge — uses the shared linear-axis
@@ -491,23 +497,39 @@ pub(super) fn render_colorbar_body(
 /// is in [`BinSpacing::Equal`] mode so the tick rail's labels still
 /// report the underlying break values but their positions line up
 /// with the equal-width bin / colour blocks.
-fn colorbar_majors_remap_equal(majors: &[(f64, String)]) -> Vec<(f64, String)> {
+fn colorbar_majors_remap_equal(majors: &[AxisTick]) -> Vec<AxisTick> {
     let n = majors.len();
     if n <= 1 {
-        return majors.to_vec();
+        return majors
+            .iter()
+            .map(|t| AxisTick {
+                break_index: t.break_index,
+                frac: t.frac,
+                label: t.label.clone(),
+            })
+            .collect();
     }
     majors
         .iter()
         .enumerate()
-        .map(|(i, (_, label))| (i as f64 / (n - 1) as f64, label.clone()))
+        .map(|(i, t)| AxisTick {
+            // Position is remapped; identity is not.
+            break_index: t.break_index,
+            frac: i as f64 / (n - 1) as f64,
+            label: t.label.clone(),
+        })
         .collect()
 }
 
 /// Drop the first and / or last element from a majors slice when the
 /// caller has marked the corresponding outer bin as open. Operates on
-/// the per-break `(frac, label)` pairs `draw_linear_axis_at`
-/// consumes — the swatches / gradient blocks themselves are unaffected.
-fn open_end_trim(majors: &[(f64, String)], open_lower: bool, open_upper: bool) -> &[(f64, String)] {
+/// the per-break [`AxisTick`]s `draw_linear_axis_at` consumes — the
+/// swatches / gradient blocks themselves are unaffected.
+///
+/// Trimming shifts positions but not identities: each surviving tick keeps
+/// the `break_index` it arrived with, so an open-ended colorbar still
+/// reports the break a tick actually came from.
+fn open_end_trim(majors: &[AxisTick], open_lower: bool, open_upper: bool) -> &[AxisTick] {
     let start = if open_lower && !majors.is_empty() {
         1
     } else {
@@ -535,7 +557,7 @@ fn open_end_trim(majors: &[(f64, String)], open_lower: bool, open_upper: bool) -
 fn colorbar_majors(
     domain: &crate::plot::scale::Scale,
     locale: &crate::scales::Locale,
-) -> Vec<(f64, String)> {
+) -> Vec<AxisTick> {
     let (min, max) = match domain.input_range() {
         Some(crate::scales::input::InputRange::Continuous { min, max }) => (*min, *max),
         _ => return Vec::new(),
@@ -544,17 +566,22 @@ fn colorbar_majors(
     if !span.is_finite() || span.abs() < f64::EPSILON {
         return Vec::new();
     }
+    // `enumerate` before the filters — see the note in `chrome::axis::draw`.
     domain
         .breaks(DEFAULT_BREAK_COUNT)
         .iter()
-        .filter(|v| !matches!(v, Value::Null))
-        .filter_map(|v| {
+        .enumerate()
+        .filter(|(_, v)| !matches!(v, Value::Null))
+        .filter_map(|(break_index, v)| {
             let n = v.as_number().or_else(|| v.as_temporal_f64())?;
             if !n.is_finite() {
                 return None;
             }
-            let frac = (n - min) / span;
-            Some((frac, domain.format(v, locale)))
+            Some(AxisTick {
+                break_index,
+                frac: (n - min) / span,
+                label: domain.format(v, locale),
+            })
         })
         .collect()
 }
@@ -764,13 +791,23 @@ mod tests {
         assert!(bin_midpoints(&[5.0]).is_empty());
         assert!(bin_midpoints(&[5.0, 5.0]).is_empty());
     }
-    fn sample_majors() -> Vec<(f64, String)> {
+    /// A tick whose `break_index` is deliberately *not* its position, so a
+    /// test that confuses the two fails.
+    fn tick(break_index: usize, frac: f64, label: &str) -> AxisTick {
+        AxisTick {
+            break_index,
+            frac,
+            label: label.to_string(),
+        }
+    }
+
+    fn sample_majors() -> Vec<AxisTick> {
         vec![
-            (0.0, "0".into()),
-            (0.25, "1".into()),
-            (0.5, "2".into()),
-            (0.75, "3".into()),
-            (1.0, "4".into()),
+            tick(10, 0.0, "0"),
+            tick(11, 0.25, "1"),
+            tick(12, 0.5, "2"),
+            tick(13, 0.75, "3"),
+            tick(14, 1.0, "4"),
         ]
     }
 
@@ -779,8 +816,8 @@ mod tests {
         let m = sample_majors();
         let trimmed = open_end_trim(&m, true, false);
         assert_eq!(trimmed.len(), 4);
-        assert_eq!(trimmed[0].1, "1");
-        assert_eq!(trimmed[3].1, "4");
+        assert_eq!(trimmed[0].label, "1");
+        assert_eq!(trimmed[3].label, "4");
     }
 
     #[test]
@@ -788,8 +825,8 @@ mod tests {
         let m = sample_majors();
         let trimmed = open_end_trim(&m, false, true);
         assert_eq!(trimmed.len(), 4);
-        assert_eq!(trimmed[0].1, "0");
-        assert_eq!(trimmed[3].1, "3");
+        assert_eq!(trimmed[0].label, "0");
+        assert_eq!(trimmed[3].label, "3");
     }
 
     #[test]
@@ -797,8 +834,8 @@ mod tests {
         let m = sample_majors();
         let trimmed = open_end_trim(&m, true, true);
         assert_eq!(trimmed.len(), 3);
-        assert_eq!(trimmed[0].1, "1");
-        assert_eq!(trimmed[2].1, "3");
+        assert_eq!(trimmed[0].label, "1");
+        assert_eq!(trimmed[2].label, "3");
     }
 
     #[test]
@@ -809,12 +846,25 @@ mod tests {
     }
 
     #[test]
+    fn trimming_shifts_positions_but_not_break_indices() {
+        // The whole point of carrying `break_index`: after a trim, a tick's
+        // position in the drawn set no longer matches its position in the
+        // scale's break list, and the identity that survives is the latter.
+        let m = sample_majors();
+        let trimmed = open_end_trim(&m, true, true);
+        assert_eq!(
+            trimmed.iter().map(|t| t.break_index).collect::<Vec<_>>(),
+            vec![11, 12, 13]
+        );
+    }
+
+    #[test]
     fn open_trim_handles_short_slices() {
         // Single element + open_lower yields empty.
-        let one = vec![(0.5_f64, "mid".to_string())];
+        let one = vec![tick(0, 0.5, "mid")];
         assert!(open_end_trim(&one, true, false).is_empty());
         // Empty slice in is empty slice out.
-        let empty: Vec<(f64, String)> = vec![];
+        let empty: Vec<AxisTick> = vec![];
         assert!(open_end_trim(&empty, true, true).is_empty());
     }
 
@@ -822,32 +872,39 @@ mod tests {
     fn equal_remap_spaces_majors_uniformly() {
         // Pathological proportional split with five breaks.
         let m = vec![
-            (0.0, "0".into()),
-            (0.01, "1".into()),
-            (0.05, "5".into()),
-            (0.5, "50".into()),
-            (1.0, "100".into()),
+            tick(3, 0.0, "0"),
+            tick(4, 0.01, "1"),
+            tick(5, 0.05, "5"),
+            tick(6, 0.5, "50"),
+            tick(7, 1.0, "100"),
         ];
         let remapped = colorbar_majors_remap_equal(&m);
         assert_eq!(remapped.len(), 5);
         // Labels preserved in order.
-        assert_eq!(remapped[0].1, "0");
-        assert_eq!(remapped[4].1, "100");
+        assert_eq!(remapped[0].label, "0");
+        assert_eq!(remapped[4].label, "100");
+        // Remapping moves ticks; it does not renumber them.
+        assert_eq!(
+            remapped.iter().map(|t| t.break_index).collect::<Vec<_>>(),
+            vec![3, 4, 5, 6, 7]
+        );
         // Fractions are i / (n - 1) = i / 4.
-        for (i, (frac, _)) in remapped.iter().enumerate() {
+        for (i, t) in remapped.iter().enumerate() {
             let expected = i as f64 / 4.0;
             assert!(
-                (frac - expected).abs() < 1e-12,
-                "remap[{i}] = {frac}, expected {expected}"
+                (t.frac - expected).abs() < 1e-12,
+                "remap[{i}] = {}, expected {expected}",
+                t.frac
             );
         }
     }
 
     #[test]
     fn equal_remap_short_slice_is_passthrough() {
-        let single = vec![(0.42_f64, "lonely".to_string())];
+        let single = vec![tick(9, 0.42, "lonely")];
         let remapped = colorbar_majors_remap_equal(&single);
         assert_eq!(remapped.len(), 1);
-        assert!((remapped[0].0 - 0.42).abs() < 1e-12);
+        assert!((remapped[0].frac - 0.42).abs() < 1e-12);
+        assert_eq!(remapped[0].break_index, 9);
     }
 }

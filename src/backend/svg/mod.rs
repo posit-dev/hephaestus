@@ -32,7 +32,7 @@ use crate::color::Color;
 use crate::geometry::{Affine, Size};
 use crate::mesh::Mesh;
 use crate::path::{FillRule, Path};
-use crate::pick::PickId;
+use crate::pick::{PickId, PickScope};
 use crate::scene::{GlyphRun, SceneBuilder};
 
 use defs::{DefKind, Defs};
@@ -66,6 +66,10 @@ pub enum SvgWarning {
     /// More layers were pushed than popped; the difference was closed
     /// at write time.
     UnbalancedLayers,
+    /// A pick scope was popped where a layer was open, or popped with
+    /// nothing open. The group was left alone rather than closing an
+    /// element it did not open.
+    UnbalancedScopes,
     /// A glyph run arrived with no source text and no outline path to
     /// fall back on.
     TextWithoutSource,
@@ -247,7 +251,13 @@ pub struct SvgScene {
     body: String,
     defs: Defs,
     warnings: Warnings,
-    depth: usize,
+    /// Open `<g>` elements, innermost last.
+    ///
+    /// Tagged rather than a plain count because layers and pick scopes both
+    /// emit groups and their stacks are independent — a scope opened inside
+    /// a layer need not close inside it. Popping the wrong kind would emit
+    /// `</g>` against the wrong element and produce malformed XML.
+    groups: Vec<GroupKind>,
     pending: Option<PendingFill>,
     /// Runs accumulating toward one `<text>` element.
     block: text::TextBlock,
@@ -281,7 +291,7 @@ impl SvgScene {
             body: String::new(),
             defs: Defs::default(),
             warnings: Warnings::default(),
-            depth: 0,
+            groups: Vec::new(),
             pending: None,
             block: text::TextBlock::default(),
             fonts: fonts::FontRegistry::default(),
@@ -368,6 +378,20 @@ impl SvgScene {
     }
 
     /// Append the picking attributes, when the config asks for them.
+    /// Close the innermost `<g>`, provided it is the kind being closed.
+    ///
+    /// A mismatch means the two stacks were interleaved rather than nested;
+    /// emitting `</g>` anyway would close the wrong element, so the pop is
+    /// dropped and noted instead.
+    fn close_group(&mut self, kind: GroupKind, warning: SvgWarning) {
+        if self.groups.last() != Some(&kind) {
+            self.warnings.note(warning);
+            return;
+        }
+        self.groups.pop();
+        self.body.push_str("</g>");
+    }
+
     fn write_pick(&mut self, pick: PickId) {
         let on = self.config.pick_ids;
         write_pick_to(&mut self.body, pick, on);
@@ -512,7 +536,7 @@ impl SvgScene {
         }
         // A scene may leave layers open; closing them keeps the
         // document well-formed, which matters more than the warning.
-        for _ in 0..self.depth {
+        for _ in 0..self.groups.len() {
             out.push_str("</g>");
         }
         out.push_str("</svg>");
@@ -529,7 +553,7 @@ impl SceneBuilder for SvgScene {
         self.defs.clear();
         self.warnings.0.clear();
         self.root_font = text::RootFont::default();
-        self.depth = 0;
+        self.groups.clear();
         self.pending = None;
     }
 
@@ -783,19 +807,53 @@ impl SceneBuilder for SvgScene {
             self.body.push_str(" style=\"isolation:isolate\"");
         }
         self.body.push('>');
-        self.depth += 1;
+        self.groups.push(GroupKind::Layer);
     }
 
     fn pop_layer(&mut self) {
         self.flush_block();
         self.flush_pending();
-        if self.depth == 0 {
-            self.warnings.note(SvgWarning::UnbalancedLayers);
+        self.close_group(GroupKind::Layer, SvgWarning::UnbalancedLayers);
+    }
+
+    fn push_pick_scope(&mut self, scope: &PickScope) {
+        if !self.config.pick_ids {
             return;
         }
-        self.depth -= 1;
-        self.body.push_str("</g>");
+        self.flush_block();
+        self.flush_pending();
+        self.body.push_str("<g data-pick-kind=\"");
+        escape_attr(&mut self.body, scope.kind());
+        self.body.push('"');
+        if let Some(name) = scope.name() {
+            self.body.push_str(" data-pick-name=\"");
+            escape_attr(&mut self.body, name);
+            self.body.push('"');
+        }
+        if let Some(index) = scope.index() {
+            self.body.push_str(" data-pick-index=\"");
+            self.body.push_str(&index.to_string());
+            self.body.push('"');
+        }
+        self.body.push('>');
+        self.groups.push(GroupKind::Scope);
     }
+
+    fn pop_pick_scope(&mut self) {
+        if !self.config.pick_ids {
+            return;
+        }
+        self.flush_block();
+        self.flush_pending();
+        self.close_group(GroupKind::Scope, SvgWarning::UnbalancedScopes);
+    }
+}
+
+/// What an open `<g>` was opened for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupKind {
+    Layer,
+    Scope,
 }
 
 /// CSS `mix-blend-mode` keyword for a mix function.

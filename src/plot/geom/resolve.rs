@@ -29,8 +29,12 @@ use crate::stroke::{Cap, Join, Stroke};
 
 use super::{Channel, GeomContext};
 
-/// Maximum valid pick id — the 24-bit `PickId` encoding budget.
-pub(crate) const MAX_PICK_ID: u32 = 0xFF_FFFF;
+/// Largest pick id a channel can resolve to.
+///
+/// The whole `u32` range. Ids used to be packed into a texture's colour
+/// channels, which capped them at 24 bits; the index carries them as numbers,
+/// so nothing narrows them.
+pub(crate) const MAX_PICK_ID: u32 = u32::MAX;
 
 /// A `(channel, scale)` reference pair carried through draw-time
 /// channel bundles. Bundling halves the field count of per-geom
@@ -452,7 +456,7 @@ pub(crate) fn band_width_at(scale: Option<&Scale>, raw: &Value) -> f64 {
 /// Resolve a `"pick_id"` channel to a [`PickId`] for row `i`.
 ///
 /// - `channel == None` → `PickId::Skip` (picking opt-out — the channel is
-///   unset, so this geom doesn't participate in the hitmap).
+///   unset, so this geom carries no authoring id).
 /// - The raw value (Constant or `Data[i]`, run through `scale` if any)
 ///   must be a finite non-negative integer ≤ `MAX_PICK_ID`. Otherwise
 ///   the row reports `PickId::Skip` — same convention as `is_finite`
@@ -460,9 +464,8 @@ pub(crate) fn band_width_at(scale: Option<&Scale>, raw: &Value) -> f64 {
 ///   time (an ordinal scale producing a fractional output would be a
 ///   bug; loudly skipping is more discoverable than silently
 ///   truncating).
-/// - Value `0` → `PickId::Block` (occlude without reporting). Documented
-///   contract so callers whose row indices start at 0 shift to 1+ if
-///   they want their rows pickable.
+/// - `0` is an ordinary id. It was the no-hit sentinel only while ids were
+///   packed into a texture, so a row-index column no longer has to shift.
 ///
 /// Grouped geoms (LineGeom / PolygonGeom) call this with the mark's
 /// `first_row` index so each mark gets one pick id from its first
@@ -480,12 +483,7 @@ pub(crate) fn resolve_pick_id(
     if !n.is_finite() || n < 0.0 || n > MAX_PICK_ID as f64 || n.trunc() != n {
         return PickId::Skip;
     }
-    let id = n as u32;
-    if id == 0 {
-        PickId::Block
-    } else {
-        PickId::Id(id)
-    }
+    PickId::Id(n as u32)
 }
 
 /// Stroke `path` honouring the full linetype contract — marker-free

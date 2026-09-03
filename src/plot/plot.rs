@@ -147,6 +147,13 @@ impl Plot {
 /// [`ScaleRegistry`] (owned by the orchestrator in the canonical flow).
 pub struct Plot {
     patch_id: Arc<str>,
+    /// Position of this plot within its patch's attach list. Assigned by
+    /// [`PlotComposition::attach_plot`](crate::plot::PlotComposition::attach_plot);
+    /// `0` for a plot driven directly, without the orchestrator. Together
+    /// with `patch_id` this is the pair
+    /// [`PlotComposition::update_plot_at`](crate::plot::PlotComposition::update_plot_at)
+    /// addresses plots by, and the pair a pick hit reports.
+    index_in_patch: u32,
     bindings: HashMap<String, String>,
     geoms: Vec<(GeomId, Box<dyn Geom>)>,
     next_geom_id: u32,
@@ -283,6 +290,7 @@ impl Plot {
         }
         Ok(Self {
             patch_id: Arc::from(patch_id),
+            index_in_patch: 0,
             bindings: HashMap::new(),
             geoms: Vec::new(),
             next_geom_id: 0,
@@ -402,9 +410,32 @@ impl Plot {
         self.track_identity
     }
 
+    /// This plot's frame in the pick-scope tree.
+    ///
+    /// Pushed by each `draw_*_into` rather than by the orchestrator, because
+    /// those are public and documented as drivable by hand: a stand-alone
+    /// caller should still get a plot frame, just a shorter path.
+    fn pick_scope(&self) -> crate::pick::PickScope {
+        crate::plot::pick::plot_scope(&self.patch_id, self.index_in_patch)
+    }
+
     /// Read accessor for the bound patch id.
     pub fn patch_id(&self) -> &str {
         &self.patch_id
+    }
+
+    /// Position of this plot within its patch's attach list.
+    ///
+    /// `(patch_id, index_in_patch)` is the pair that identifies a plot
+    /// uniquely: a patch can hold several overlaid plots.
+    pub fn index_in_patch(&self) -> u32 {
+        self.index_in_patch
+    }
+
+    /// Set the attach-list position. Called by the orchestrator as the plot
+    /// is pushed onto its patch's list.
+    pub(crate) fn set_index_in_patch(&mut self, index: u32) {
+        self.index_in_patch = index;
     }
 
     /// Borrow the coordinate projection. Defaults to
@@ -918,6 +949,18 @@ impl Plot {
         theme: &crate::plot::theme::Theme,
         dpi: f64,
     ) {
+        scene.push_pick_scope(&self.pick_scope());
+        self.draw_patch_background_into_inner(scene, layout, theme, dpi);
+        scene.pop_pick_scope();
+    }
+
+    fn draw_patch_background_into_inner(
+        &self,
+        scene: &mut dyn SceneBuilder,
+        layout: &crate::composition::CompositionLayout,
+        theme: &crate::plot::theme::Theme,
+        dpi: f64,
+    ) {
         let Some(bg_slot) = theme.plot_background.as_set() else {
             return;
         };
@@ -943,6 +986,13 @@ impl Plot {
         } else {
             rect.to_path(0.0)
         };
+        // Fill and border are siblings under one part: "the plot
+        // background" is one target, and a hover does not care which of the
+        // two primitives it landed on.
+        scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Background));
+        scene.push_pick_scope(&crate::plot::pick::part_scope(
+            crate::plot::pick::PlotPart::PlotBackground,
+        ));
         if let Some(fill) = bg.fill {
             let brush = crate::brush::Brush::Solid(fill.resolve(&theme.palette));
             scene.fill(
@@ -975,6 +1025,8 @@ impl Plot {
                 crate::pick::PickId::Skip,
             );
         }
+        scene.pop_pick_scope();
+        scene.pop_pick_scope();
     }
 
     /// Paint the panel chrome that always sits under the geoms —
@@ -996,6 +1048,8 @@ impl Plot {
         let Some(panel) = self.drawable_panel(layout) else {
             return;
         };
+        scene.push_pick_scope(&self.pick_scope());
+        scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Panel));
         self.with_panel_scales(panel, registry, |scales| {
             crate::plot::chrome::panel::draw_panel_chrome(
                 scene,
@@ -1006,6 +1060,8 @@ impl Plot {
                 theme,
             );
         });
+        scene.pop_pick_scope();
+        scene.pop_pick_scope();
     }
 
     /// The panel rect, when the layout resolved one with area.
@@ -1049,6 +1105,21 @@ impl Plot {
     /// Picking is opt-in per geom via the `"pick_id"` channel;
     /// geoms without one emit `PickId::Skip` for every primitive.
     pub fn draw_geoms_into(
+        &mut self,
+        scene: &mut dyn SceneBuilder,
+        layout: &crate::composition::CompositionLayout,
+        registry: &ScaleRegistry,
+        dpi: f64,
+        theme: &crate::plot::theme::Theme,
+    ) {
+        scene.push_pick_scope(&self.pick_scope());
+        scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Panel));
+        self.draw_geoms_into_inner(scene, layout, registry, dpi, theme);
+        scene.pop_pick_scope();
+        scene.pop_pick_scope();
+    }
+
+    fn draw_geoms_into_inner(
         &mut self,
         scene: &mut dyn SceneBuilder,
         layout: &crate::composition::CompositionLayout,
@@ -1110,8 +1181,10 @@ impl Plot {
                 path,
             );
         }
-        for (_, geom) in self.geoms.iter() {
+        for (id, geom) in self.geoms.iter() {
+            scene.push_pick_scope(&crate::plot::pick::geom_scope(*id));
             geom.draw(scene, &ctx);
+            scene.pop_pick_scope();
         }
         if clip_path.is_some() {
             scene.pop_layer();
@@ -1210,6 +1283,8 @@ impl Plot {
         }
         let id = crate::plot::chrome::axis::AxisId::new(self.next_axis_id);
         self.next_axis_id += 1;
+        let mut axis = axis;
+        axis.set_id(id);
         self.axes.push(axis);
         Ok(id)
     }
@@ -1665,6 +1740,14 @@ impl Plot {
                 if let (Some(panel_rect), Some(scale)) = (panel, resolve_scale(scale_name)) {
                     let slot = cartesian_axis_slot(side);
                     if let Some(slot_rect) = layout.get(&self.patch_id, slot) {
+                        // A cartesian axis sits in its anatomical slot, so the
+                        // region frame names that slot; the axis frame carries
+                        // the handle it was attached under.
+                        scene.push_pick_scope(&crate::plot::pick::region_scope(slot));
+                        scene.push_pick_scope(&crate::plot::pick::axis_scope(
+                            axis.id(),
+                            axis.scale_name(),
+                        ));
                         crate::plot::chrome::axis::draw(
                             scale,
                             scene,
@@ -1675,6 +1758,8 @@ impl Plot {
                             theme,
                             &self.images,
                         );
+                        scene.pop_pick_scope();
+                        scene.pop_pick_scope();
                     }
                 }
             }
@@ -1698,6 +1783,14 @@ impl Plot {
     ) {
         use crate::plot::chrome::axis::{AxisPlacement, PolarRing};
         for axis in &self.axes {
+            if matches!(axis.placement(), AxisPlacement::Cartesian(_)) {
+                continue;
+            }
+            // A polar axis is drawn inside the panel and reserves no
+            // anatomical slot, so its region frame is the panel; the axis
+            // frame is what tells it from the cartesian pass.
+            scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Panel));
+            scene.push_pick_scope(&crate::plot::pick::axis_scope(axis.id(), axis.scale_name()));
             match axis.placement() {
                 AxisPlacement::Cartesian(_) => {}
                 AxisPlacement::PolarRadius { theta_frac } => {
@@ -1743,6 +1836,8 @@ impl Plot {
                     }
                 }
             }
+            scene.pop_pick_scope();
+            scene.pop_pick_scope();
         }
     }
 
@@ -1761,7 +1856,9 @@ impl Plot {
             let Some(rect) = layout.get(&self.patch_id, strip_slot(side)) else {
                 continue;
             };
+            scene.push_pick_scope(&crate::plot::pick::region_scope(strip_slot(side)));
             draw_strip(scene, text, rect, side, theme, dpi, &self.images);
+            scene.pop_pick_scope();
         }
     }
 
@@ -1818,8 +1915,11 @@ impl Plot {
         dpi: f64,
         theme: &crate::plot::theme::Theme,
     ) {
+        scene.push_pick_scope(&self.pick_scope());
+
         // Panel outline — the boundary the geoms are clipped against.
         if let Some(panel) = self.drawable_panel(layout) {
+            scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Panel));
             self.with_panel_scales(panel, registry, |scales| {
                 crate::plot::chrome::panel::draw_panel_outline(
                     scene,
@@ -1830,6 +1930,7 @@ impl Plot {
                     theme,
                 );
             });
+            scene.pop_pick_scope();
         }
 
         // Axes — explicit, no defaults. A polar axis carries its own
@@ -1846,6 +1947,8 @@ impl Plot {
         // shaped text into the matching slot rect. A strip labels the
         // panel it borders, so it layers with the frame around it.
         self.draw_strips_into(scene, layout, dpi, theme);
+
+        scene.pop_pick_scope();
     }
 
     /// Render the legends and the text that names the plot — side and
@@ -1866,6 +1969,8 @@ impl Plot {
     ) {
         use crate::plot::theme::TitleLocation;
 
+        scene.push_pick_scope(&self.pick_scope());
+
         // Legends — render each side's stack of attached legends
         // into the matching slot. Mirrors the wiring loop, and must
         // collapse identically to it for the measured space to match.
@@ -1876,6 +1981,7 @@ impl Plot {
                 continue;
             }
             if let Some(rect) = layout.get(&self.patch_id, slot) {
+                scene.push_pick_scope(&crate::plot::pick::region_scope(slot));
                 crate::plot::chrome::legend::render_legend_stack(
                     &group,
                     side,
@@ -1887,6 +1993,7 @@ impl Plot {
                     dpi,
                     theme,
                 );
+                scene.pop_pick_scope();
             }
         }
 
@@ -1912,6 +2019,9 @@ impl Plot {
                 }
                 let slot_rect =
                     crate::plot::chrome::legend::resolve_anchor(panel, anchor, inset_px, (w, h));
+                // An in-panel legend reserves no chrome band, so its region
+                // is the panel it overlays rather than a legend slot.
+                scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Panel));
                 crate::plot::chrome::legend::render_legend_stack(
                     &group,
                     crate::scales::chrome::LegendSide::Right,
@@ -1923,6 +2033,7 @@ impl Plot {
                     dpi,
                     theme,
                 );
+                scene.pop_pick_scope();
             }
         }
 
@@ -1946,6 +2057,10 @@ impl Plot {
             ) else {
                 continue;
             };
+            scene.push_pick_scope(&crate::plot::pick::region_scope(slot));
+            scene.push_pick_scope(&crate::plot::pick::part_scope(
+                crate::plot::pick::text_slot_part(slot),
+            ));
             draw_text_element_in_rect(
                 scene,
                 text,
@@ -1958,6 +2073,8 @@ impl Plot {
                 Some(&theme.rich_text),
                 &self.images,
             );
+            scene.pop_pick_scope();
+            scene.pop_pick_scope();
         }
 
         // Axis title slots — sourced from `Axis::title` on each
@@ -1968,6 +2085,8 @@ impl Plot {
         for location in [TitleLocation::Outside, TitleLocation::Inside] {
             self.draw_axis_titles_into(scene, layout, dpi, theme, location);
         }
+
+        scene.pop_pick_scope();
     }
 
     // Axis titles for every attached cartesian axis whose resolved
@@ -2023,6 +2142,14 @@ impl Plot {
                 TitleLocation::Outside => {
                     let slot = cartesian_axis_title_slot(side);
                     if let Some(rect) = layout.get(&self.patch_id, slot) {
+                        scene.push_pick_scope(&crate::plot::pick::region_scope(slot));
+                        scene.push_pick_scope(&crate::plot::pick::axis_scope(
+                            axis.id(),
+                            axis.scale_name(),
+                        ));
+                        scene.push_pick_scope(&crate::plot::pick::part_scope(
+                            crate::plot::pick::PlotPart::AxisTitle,
+                        ));
                         if markdown {
                             let fill_col = color.resolve(&theme.palette);
                             draw_axis_title_markdown(
@@ -2049,12 +2176,25 @@ impl Plot {
                                 angle,
                             );
                         }
+                        scene.pop_pick_scope();
+                        scene.pop_pick_scope();
+                        scene.pop_pick_scope();
                     }
                 }
                 TitleLocation::Inside => {
                     let Some(panel) = layout.get(&self.patch_id, Slot::Panel) else {
                         continue;
                     };
+                    // An inside title reserves no chrome band, so its region
+                    // is the panel it sits against rather than a title slot.
+                    scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Panel));
+                    scene.push_pick_scope(&crate::plot::pick::axis_scope(
+                        axis.id(),
+                        axis.scale_name(),
+                    ));
+                    scene.push_pick_scope(&crate::plot::pick::part_scope(
+                        crate::plot::pick::PlotPart::AxisTitle,
+                    ));
                     // Resolve the angle so the strip dims and the
                     // draw helper see a concrete rotation.
                     let baseline_deg: f32 = match side {
@@ -2133,6 +2273,9 @@ impl Plot {
                         Some(&theme.rich_text),
                         &self.images,
                     );
+                    scene.pop_pick_scope();
+                    scene.pop_pick_scope();
+                    scene.pop_pick_scope();
                 }
             }
         }
@@ -2454,7 +2597,7 @@ mod tests {
             "outline pass must precede the fill: {first_stroked} vs {first_filled}"
         );
 
-        // The fill owns picking; the outline stays out of the hitmap.
+        // The fill owns picking; the outline is not indexed.
         assert_eq!(stroked[0].pick_id, crate::pick::PickId::Skip);
         assert_eq!(filled[0].pick_id, crate::pick::PickId::Id(7));
         // Same glyphs, so the outline traces the visible text.

@@ -265,12 +265,11 @@ pub fn validate_channel_lengths(channels: &HashMap<String, Channel>, n: usize, g
 
 /// Validate the `"pick_id"` channel if present. Constants and Data
 /// columns whose values are knowable at build time are checked to be
-/// finite non-negative integers ≤ `0xFF_FFFF` (the 24-bit pick budget).
-/// Scale-routed values are deferred to per-row draw resolution (the
-/// output depends on draw-time scale state and can't be checked here).
+/// finite non-negative integers within `u32`. Scale-routed values are
+/// deferred to per-row draw resolution (the output depends on draw-time
+/// scale state and can't be checked here).
 ///
-/// `0` is permitted — it maps to [`PickId::Block`](crate::pick::PickId)
-/// per the user-controlled pick-id contract.
+/// `0` is permitted and ordinary: no id value is reserved.
 pub fn validate_pick_id_channel(channels: &HashMap<String, Channel>, geom_label: &str) {
     let ch = match channels.get("pick_id") {
         Some(c) => c,
@@ -278,9 +277,9 @@ pub fn validate_pick_id_channel(channels: &HashMap<String, Channel>, geom_label:
     };
     let check = |v: &Value, where_: &str| {
         match v.as_number() {
-        Some(n) if n.is_finite() && n >= 0.0 && n <= 0xFF_FFFF as f64 && n.trunc() == n => {}
+        Some(n) if n.is_finite() && n >= 0.0 && n <= u32::MAX as f64 && n.trunc() == n => {}
         Some(n) => panic!(
-            "{geom_label}::build: \"pick_id\" {where_} must be a non-negative integer ≤ 0xFFFFFF, got {n}"
+            "{geom_label}::build: \"pick_id\" {where_} must be a non-negative integer that fits u32, got {n}"
         ),
         None => panic!(
             "{geom_label}::build: \"pick_id\" {where_} must be numeric (Number/Date/DateTime/Time/Duration), got {v:?}"

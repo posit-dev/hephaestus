@@ -49,8 +49,6 @@ struct State {
     window: Arc<Window>,
     surface: WindowSurface,
     renderer: HostRenderer,
-    /// When the hitmap was last refreshed, for `WindowConfig::pick_interval`.
-    last_pick: Option<std::time::Instant>,
     dpi: f64,
 }
 
@@ -113,7 +111,6 @@ impl<A: WindowApp> Driver<A> {
             surface,
             renderer,
             dpi,
-            last_pick: None,
         })
     }
 
@@ -124,20 +121,6 @@ impl<A: WindowApp> Driver<A> {
         };
         let (width, height) = state.surface.size();
         let size = Size::new(width as f64, height as f64);
-
-        // Decide before drawing: on the sparse-strip backend the pick pass is
-        // skipped during the *replay*, not just at rasterisation, so this has
-        // to be known before any draw reaches the scene.
-        if let Some(interval) = self.config.pick_interval {
-            let now = std::time::Instant::now();
-            let due = state
-                .last_pick
-                .is_none_or(|last| now.duration_since(last) >= interval);
-            state.renderer.set_refresh_pick(due);
-            if due {
-                state.last_pick = Some(now);
-            }
-        }
 
         state.renderer.scene().clear();
         {
@@ -176,7 +159,7 @@ impl<A: WindowApp> Driver<A> {
         let mut exit = false;
         let redraw = Cell::new(false);
         let mut ctx = EventCtx {
-            renderer: &state.renderer,
+            index: state.renderer.pick_index(),
             redraw: &redraw,
             cursor: self.cursor,
             size: Size::new(width as f64, height as f64),

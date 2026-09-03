@@ -27,31 +27,30 @@ How many steps a frame takes depends on the backend, and `Backend::can_present_d
 
 Both shapes live behind `WindowSurface::draw_frame`, which acquires the frame, hands the renderer whichever view it should draw into, blits if there is an intermediate, and presents. Acquiring *before* rendering is what direct presentation requires, and the blit path does not mind.
 
-`tests/window_blit.rs` pins the indirect path headlessly: same usage flags, same blitter, asserted pixel-identical to `render_to_buffer`. `tests/hybrid.rs::presenting_directly_matches_the_intermediate_format` pins the direct one, and `::picking_survives_a_bgra_target` pins the consequence below.
+`tests/window_blit.rs` pins the indirect path headlessly: same usage flags, same blitter, asserted pixel-identical to `render_to_buffer`. `tests/hybrid.rs::presenting_directly_matches_the_intermediate_format` pins the direct one.
 
 ## Quirks worth remembering
 
 - **Non-sRGB swap chain, deliberately.** `pick_surface_format` accepts only `Rgba8Unorm` / `Bgra8Unorm`. The intermediate is `Rgba8Unorm` and the blit is a plain copy, so an sRGB swap chain would apply the transfer function a second time.
-- **Direct presentation puts the pick target in the surface's format.** One `vello_hybrid::Renderer` targets one format and the pick pass shares it, so on the usual `Bgra8Unorm` surface the encoded ids come back with red and blue transposed. `read_hitmap` swaps them; removing that swap makes `picking_survives_a_bgra_target` fail rather than quietly returning wrong ids.
 - **The target contract is the backend's to state, not this module's.** `WgpuRenderer::REQUIRED_TARGET_USAGE` and `TARGET_IS_PREMULTIPLIED` both differ between backends. `surface.rs` takes the usage as a constructor argument and remembers it so a resize reallocates the same way; it hardcodes only `BLIT_USAGE`, which is its own need.
 - **Alpha convention differs by backend and the blit ignores it.** The compute-shader backend writes straight alpha, the sparse-strip one premultiplied. Presenting `CompositeAlphaMode::Opaque` makes that irrelevant — the conventions coincide at alpha 255 — which is the only reason one blit serves both. A translucent window would have to consult `TARGET_IS_PREMULTIPLIED` and convert.
 - **`CompositeAlphaMode::Opaque`.** The renderer emits straight (un-premultiplied) alpha. Presenting opaque means the compositor ignores the alpha channel rather than reading it as premultiplied. A translucent window would need a premultiplying blit shader; that is not built.
 - **`size` is physical pixels, `dpi` is `96.0 * scale_factor`.** That pair is what makes theme lengths in pt / mm come out the right physical size on a high-density display. `BASE_DPI` in `mod.rs` is the one place 96 appears.
 - **Zero-sized resizes are ignored.** A minimised window reports 0 × 0, which neither a swap chain nor a texture accepts.
 - **Redraw is on demand.** A resize schedules a frame; otherwise the app asks via `EventCtx::request_redraw`, or sets `WindowConfig::continuous_redraw`.
-- **Picking costs a whole second rasterisation per frame.** When enabled, the pick pass rasterises the scene again and reads the result back, whether or not `pick_at` is ever called — on the sparse-strip backend that is a second CPU strip generation and roughly doubles the frame. Off by default for that reason, and `WindowConfig::pick_interval` caps how often it runs when it is on. A window that redraws faster than a person queries it (a resize drag, an animation) should set one.
+- **Picking costs CPU while drawing, not a second rasterisation.** `WindowConfig::picking` makes the scene record a hit index as the frame is authored — measured at ~7 ms per 100k marks, against the ~59 ms the old second rasterisation cost. It is still off by default, because filling the index is paid whether or not `pick_at` is ever called. There is no throttle any more and none is needed: the R-tree is built lazily on the first query after a frame, so a window redrawing faster than it is queried never builds one.
 - **`resumed` can fire more than once.** The window is built on the first one only; Android-style resume cycles hit this.
 - **Errors escape through a field.** `ApplicationHandler` methods return `()`, so a failed frame stores the `WindowError` on the driver and exits the loop; `run` returns it.
 - **winit is not in the public API.** `Event` / `MouseButton` / `PresentMode` are ours, so swapping the windowing backend would not be a breaking change. Keep it that way — nothing winit-shaped should appear outside `app.rs`. `EventCtx` carries a `&Cell<bool>` rather than calling `request_redraw` directly for exactly this reason: it is what lets the canvas host share the type.
-- **Two browser hosts, and which one a bundle carries is a feature choice.** `CanvasHost` goes through wgpu and therefore needs WebGPU; `WebGlHost` talks WebGL2 directly and needs neither. `EventCtx` reaches its renderer through the `PickSource` trait rather than naming a concrete one, which is what lets both build the same event context — a WebGL2 build has no wgpu types to name.
+- **Two browser hosts, and which one a bundle carries is a feature choice.** `CanvasHost` goes through wgpu and therefore needs WebGPU; `WebGlHost` talks WebGL2 directly and needs neither. `EventCtx` holds a `&PickIndex` rather than a renderer, which is what lets both build the same event context — a WebGL2 build has no wgpu types to name, and the index is the same type either way.
 - **The canvas host requests `BROWSER_WEBGPU` only, on either wgpu backend.** For the compute-shader one it is forced: WebGL2 has no compute stage, so a GL adapter would be found and then fail deep inside pipeline creation. The sparse-strip backend has no such constraint — it rasterises through a render pipeline — but `Cargo.toml` still does not compile wgpu's `webgl` feature on wasm, so there is no GL adapter to find either way. Enabling wgpu's `webgl` feature would work but costs +1.2 MB, since it drags in shader translation. Going below WebGPU is instead `WebGlHost`'s job, which talks WebGL2 directly and carries no wgpu at all.
 - **Device acquisition is async on the web.** `WindowSurface::new_async` is the real constructor; `new` is a `pollster::block_on` wrapper over it for the desktop path. A browser main thread has nothing to park.
-- **Picking never blocks, and so can lag.** `WgpuRenderer::render_to_texture` parks the calling thread on the pick readback, which a browser main thread cannot do. `CanvasHost` uses `VelloRenderer::render_to_texture_deferring_pick` instead: it submits the readback and moves on, and `try_finish_pick` drains it when it lands. The hitmap can therefore describe a frame or two behind what is on screen. A frame whose predecessor is still in flight skips its own pick submit rather than queueing a second `map_async` on a buffer that is still mapped, which would be a validation error.
+- **Picking never blocks and never lags.** It used to do both: the readback parked the calling thread, which a browser main thread cannot do, so `CanvasHost` submitted it and drained it a frame or two later — and the answers described an older frame. With the index there is nothing to read back, so `render_to_texture` is the same call on every host and a query always describes what is on screen.
 
 ## Files
 
 - `mod.rs` — the public surface: `run`, `WindowApp`, `WindowConfig`, `PresentMode`, `Frame`, `EventCtx`, `WindowError`. Also the `compile_error!` that fires when a presentation feature is enabled with no backend behind it.
-- `renderer.rs` — `Backend` (public selection) and `HostRenderer` (the boxed per-backend enum, plus the deferred-pick pair the browser host needs). Compiled only where a wgpu backend is.
+- `renderer.rs` — `Backend` (public selection) and `HostRenderer` (the boxed per-backend enum). Compiled only where a wgpu backend is.
 - `webgl_host.rs` — `WebGlHost`: the same `render` / `resize` / `dispatch` surface as `CanvasHost`, against a canvas's WebGL2 context. No surface, no swap chain, no blit — the canvas's default framebuffer is the target — and no wgpu in the build at all.
 - `event.rs` — `Event` and `MouseButton`.
 - `surface.rs` — `WindowSurface`: adapter / device selection against the surface, swap-chain config, the intermediate texture, the blit, and `present`.
@@ -67,6 +66,7 @@ Both shapes live behind `WindowSurface::draw_frame`, which acquires the frame, h
 ## Cross-references
 
 - `backend/` — `WgpuRenderer`, the trait this module hosts, and the texture contract it documents.
-- `backend/vello/` and `backend/hybrid/` — `with_device` / `with_device_and_picking`, and the per-frame pick readback each provides.
+- `backend/vello/` and `backend/hybrid/` — `with_device` / `with_device_and_picking`, which is the flag on each renderer's `PickIndexScene`.
+- `pick/` — the index `EventCtx` queries.
 - `examples/window.rs` — the end-to-end demo: resize re-layout plus hover picking.
 - `crates/hephaestus-wasm/` — the wasm render client built on `CanvasHost`; the page-facing API and the resize / light-dark wiring live there, not here.

@@ -1,13 +1,20 @@
 //! End-to-end tests for the Hybrid backend.
 //!
-//! The picking cases are the point of the backend: binary coverage means an
-//! edge pixel carries exactly one id, so an id read back from a boundary
-//! between two marks is one of the two rather than a blend of both.
+//! The picking cases check that hit testing survives every render path —
+//! buffer, texture, and both device-sharing constructors — and that turning
+//! it on changes no drawn pixel.
 
 use hephaestus::backend::hybrid::HybridRenderer;
 use hephaestus::color::rgb8;
+use hephaestus::geometry::Point;
 use hephaestus::{Affine, Brush, FillRule, PickId, Rect, Renderer, SceneBuilder};
 use kurbo::Shape;
+
+/// The topmost id at a point. Renderers expose the index rather than
+/// forwarding every query, so a test asks it the same way a host would.
+fn pick(r: &HybridRenderer, p: Point) -> Option<u32> {
+    r.pick_index()?.pick_at(p)
+}
 
 const W: u32 = 100;
 const H: u32 = 100;
@@ -19,6 +26,26 @@ fn buf() -> Vec<u8> {
 fn px(buf: &[u8], x: u32, y: u32) -> [u8; 4] {
     let i = ((y * W + x) * 4) as usize;
     [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
+}
+
+#[test]
+fn a_scene_can_be_rendered_at_two_sizes_in_a_row() {
+    let mut r = HybridRenderer::new().expect("hybrid renderer init");
+    fill(
+        r.scene(),
+        Rect::new(0.0, 0.0, 10.0, 10.0),
+        [0, 255, 0],
+        PickId::Skip,
+    );
+    let mut small = vec![0u8; 40 * 40 * 4];
+    r.render_to_buffer(40, 40, rgb8(0, 0, 0), &mut small)
+        .expect("small render");
+    let mut large = vec![0u8; 120 * 90 * 4];
+    r.render_to_buffer(120, 90, rgb8(0, 0, 0), &mut large)
+        .expect("large render");
+
+    assert_eq!(&small[0..4], &[0, 255, 0, 255], "fill survives resize");
+    assert_eq!(&large[0..4], &[0, 255, 0, 255]);
 }
 
 /// Fill `rect` with `color`, tagged `pick`.
@@ -48,99 +75,6 @@ fn renders_a_solid_fill_over_the_background() {
 
     assert_eq!(px(&out, 50, 50), [255, 0, 0, 255], "inside the fill");
     assert_eq!(px(&out, 5, 5), [255, 255, 255, 255], "background");
-}
-
-#[test]
-fn pick_at_returns_none_when_picking_disabled() {
-    let mut r = HybridRenderer::new().expect("hybrid renderer init");
-    let mut out = buf();
-    fill(
-        r.scene(),
-        Rect::new(20.0, 20.0, 80.0, 80.0),
-        [255, 0, 0],
-        PickId::Id(7),
-    );
-    r.render_to_buffer(W, H, rgb8(0, 0, 0), &mut out)
-        .expect("render");
-    assert_eq!(r.pick_at(50, 50), None);
-}
-
-#[test]
-fn pick_at_reports_the_id_under_the_pixel() {
-    let mut r = HybridRenderer::with_picking().expect("hybrid renderer init");
-    let mut out = buf();
-    fill(
-        r.scene(),
-        Rect::new(20.0, 20.0, 80.0, 80.0),
-        [255, 0, 0],
-        PickId::Id(42),
-    );
-    r.render_to_buffer(W, H, rgb8(0, 0, 0), &mut out)
-        .expect("render");
-
-    assert_eq!(r.pick_at(50, 50), Some(42), "inside the mark");
-    assert_eq!(r.pick_at(5, 5), None, "empty space");
-}
-
-/// The case the compute-shader backend cannot pass.
-///
-/// Two overlapping circles: the upper circle's antialiased edge falls on the
-/// lower one, and an antialiased pick pass blends their two ids into a ramp of
-/// values that are neither, all at full alpha and so indistinguishable from
-/// real hits. Measured against the compute-shader backend, this exact scene
-/// yields 28 ids that were never drawn. Binary coverage cannot produce one.
-#[test]
-fn overlapping_picked_marks_never_blend_into_a_third_id() {
-    let mut r = HybridRenderer::with_picking().expect("hybrid renderer init");
-    let mut out = buf();
-    // Far apart in value, so any blend lands nowhere near either id.
-    for (shape, color, id) in [
-        (kurbo::Circle::new((40.0, 50.0), 28.0), [255, 0, 0], 0x20u32),
-        (kurbo::Circle::new((62.0, 50.0), 28.0), [0, 0, 255], 0xC0u32),
-    ] {
-        r.scene().fill(
-            FillRule::NonZero,
-            Affine::IDENTITY,
-            &Brush::Solid(rgb8(color[0], color[1], color[2])),
-            None,
-            &shape.to_path(0.1),
-            PickId::Id(id),
-        );
-    }
-    r.render_to_buffer(W, H, rgb8(0, 0, 0), &mut out)
-        .expect("render");
-
-    let mut seen = std::collections::BTreeSet::new();
-    for raw in r.hitmap().expect("picking enabled") {
-        if let Some(id) = hephaestus::pick::decode(*raw) {
-            seen.insert(id);
-        }
-    }
-    assert_eq!(
-        seen,
-        [0x20, 0xC0].into_iter().collect(),
-        "hitmap holds an id that was never drawn"
-    );
-}
-
-#[test]
-fn a_scene_can_be_rendered_at_two_sizes_in_a_row() {
-    let mut r = HybridRenderer::new().expect("hybrid renderer init");
-    fill(
-        r.scene(),
-        Rect::new(0.0, 0.0, 10.0, 10.0),
-        [0, 255, 0],
-        PickId::Skip,
-    );
-    let mut small = vec![0u8; 40 * 40 * 4];
-    r.render_to_buffer(40, 40, rgb8(0, 0, 0), &mut small)
-        .expect("small render");
-    let mut large = vec![0u8; 120 * 90 * 4];
-    r.render_to_buffer(120, 90, rgb8(0, 0, 0), &mut large)
-        .expect("large render");
-
-    assert_eq!(&small[0..4], &[0, 255, 0, 255], "fill survives resize");
-    assert_eq!(&large[0..4], &[0, 255, 0, 255]);
 }
 
 // ─── Alpha convention ───────────────────────────────────────────────────────
@@ -256,7 +190,11 @@ fn a_mesh_triangle_rasterises() {
         .expect("render");
 
     assert_eq!(px(&out, 50, 40)[1], 200, "mesh interior");
-    assert_eq!(r.pick_at(50, 40), Some(5), "mesh carries its pick id");
+    assert_eq!(
+        pick(&r, Point::new(50.0, 40.0)),
+        Some(5),
+        "mesh carries its pick id"
+    );
 }
 
 // ─── Images ─────────────────────────────────────────────────────────────────
@@ -296,7 +234,11 @@ fn an_image_is_uploaded_and_sampled() {
     assert_eq!(px(&out, 25, 25), [255, 0, 0, 255], "top-left source pixel");
     assert_eq!(px(&out, 75, 25), [0, 255, 0, 255], "top-right");
     assert_eq!(px(&out, 25, 75), [0, 0, 255, 255], "bottom-left");
-    assert_eq!(r.pick_at(50, 50), Some(9), "image carries its pick id");
+    assert_eq!(
+        pick(&r, Point::new(50.0, 50.0)),
+        Some(9),
+        "image carries its pick id"
+    );
 }
 
 /// Image opacity cannot ride on the sampler — the shared paint encoder
@@ -518,8 +460,8 @@ fn picking_survives_the_texture_path() {
     r.render_to_texture(&view, W, H, rgb8(0, 0, 0))
         .expect("texture render");
 
-    assert_eq!(r.pick_at(50, 50), Some(77));
-    assert_eq!(r.pick_at(5, 5), None);
+    assert_eq!(pick(&r, Point::new(50.0, 50.0)), Some(77));
+    assert_eq!(pick(&r, Point::new(5.0, 5.0)), None);
 }
 
 /// An isolated wgpu device, standing in for the one a window's swap chain
@@ -758,7 +700,11 @@ fn picking_does_not_change_the_buffered_display() {
         "enabling picking altered the display output"
     );
     // And the hitmap is still populated, so the split did not cost the pick.
-    assert_eq!(r.pick_at(44, 52), Some(2), "circle should be hittable");
+    assert_eq!(
+        pick(&r, Point::new(44.0, 52.0)),
+        Some(2),
+        "circle should be hittable"
+    );
 }
 
 /// Same invariant on the windowing path, which had its own copy of the bug.
@@ -1153,20 +1099,24 @@ fn picking_survives_a_bgra_target() {
                 .expect("render");
         }
         assert_eq!(
-            r.pick_at(50, 50),
+            pick(&r, Point::new(50.0, 50.0)),
             Some(id),
             "id came back wrong on a {format:?} target"
         );
-        assert_eq!(r.pick_at(5, 5), None, "empty space on {format:?}");
+        assert_eq!(
+            pick(&r, Point::new(5.0, 5.0)),
+            None,
+            "empty space on {format:?}"
+        );
     }
 }
 
-// ─── Skipping the pick pass ─────────────────────────────────────────────────
+// ─── Redrawing without querying ─────────────────────────────────────────────
 
-/// With the pick pass off, the hitmap keeps answering from the last render
-/// that refreshed it, and a later refresh brings it up to date.
+/// The index is rebuilt from scratch each frame, so a redraw that changes an
+/// id changes the answer — there is no stale-hitmap window to reason about.
 #[test]
-fn skipping_the_pick_pass_holds_the_previous_hitmap() {
+fn a_redraw_replaces_the_previous_index() {
     let mut out = buf();
     let mut r = HybridRenderer::with_picking().expect("init");
     let square = Rect::new(20.0, 20.0, 80.0, 80.0);
@@ -1174,63 +1124,36 @@ fn skipping_the_pick_pass_holds_the_previous_hitmap() {
     fill(r.scene(), square, [255, 0, 0], PickId::Id(11));
     r.render_to_buffer(W, H, rgb8(0, 0, 0), &mut out)
         .expect("render");
-    assert_eq!(r.pick_at(50, 50), Some(11));
+    assert_eq!(pick(&r, Point::new(50.0, 50.0)), Some(11));
 
-    // Re-tag the same geometry, but skip the pick pass: the display follows
-    // the new scene while the hitmap still describes the old one.
-    r.set_refresh_pick(false);
     r.scene().clear();
     fill(r.scene(), square, [0, 255, 0], PickId::Id(22));
     r.render_to_buffer(W, H, rgb8(0, 0, 0), &mut out)
         .expect("render");
-    assert_eq!(px(&out, 50, 50), [0, 255, 0, 255], "display did update");
+    assert_eq!(px(&out, 50, 50), [0, 255, 0, 255], "display updated");
     assert_eq!(
-        r.pick_at(50, 50),
-        Some(11),
-        "hitmap should be the stale one"
+        pick(&r, Point::new(50.0, 50.0)),
+        Some(22),
+        "and so did the index"
     );
-
-    // Turn it back on and the next render catches up.
-    r.set_refresh_pick(true);
-    r.scene().clear();
-    fill(r.scene(), square, [0, 255, 0], PickId::Id(22));
-    r.render_to_buffer(W, H, rgb8(0, 0, 0), &mut out)
-        .expect("render");
-    assert_eq!(r.pick_at(50, 50), Some(22), "hitmap should have caught up");
 }
 
-/// Skipping the pick pass must not change a display pixel — the whole point
-/// is that it is invisible except in the hitmap.
+/// A renderer built without picking answers nothing and says so.
 #[test]
-fn skipping_the_pick_pass_does_not_change_the_display() {
-    let mut refreshed = buf();
-    let mut r = HybridRenderer::with_picking().expect("init");
-    coverage_sensitive_scene(r.scene());
-    r.render_to_buffer(W, H, rgb8(0, 0, 0), &mut refreshed)
-        .expect("render");
-
-    let mut skipped = buf();
-    let mut r = HybridRenderer::with_picking().expect("init");
-    r.set_refresh_pick(false);
-    coverage_sensitive_scene(r.scene());
-    r.render_to_buffer(W, H, rgb8(0, 0, 0), &mut skipped)
-        .expect("render");
-
-    assert_eq!(
-        first_difference(&refreshed, &skipped),
-        None,
-        "skipping the pick pass altered the display"
-    );
-    assert!(!r.refreshes_pick());
-}
-
-/// The flag is inert on a renderer built without picking.
-#[test]
-fn refreshing_the_pick_is_inert_without_picking() {
+fn a_renderer_without_picking_holds_no_index() {
     let mut r = HybridRenderer::new().expect("init");
-    assert!(!r.refreshes_pick());
-    r.set_refresh_pick(true);
-    assert!(!r.refreshes_pick(), "no pick scene exists to refresh");
+    let mut out = buf();
+    fill(
+        r.scene(),
+        Rect::new(20.0, 20.0, 80.0, 80.0),
+        [255, 0, 0],
+        PickId::Id(11),
+    );
+    r.render_to_buffer(W, H, rgb8(0, 0, 0), &mut out)
+        .expect("render");
+    assert!(r.pick_index().is_none());
+    assert!(r.pick_index().is_none());
+    assert_eq!(pick(&r, Point::new(50.0, 50.0)), None);
 }
 
 // ─── Color glyphs ───────────────────────────────────────────────────────────
@@ -1352,9 +1275,9 @@ fn a_rotated_bitmap_color_glyph_draws_ink() {
     assert!(n > 100, "expected rotated emoji ink, found {n} pixels");
 }
 
-/// A strike paints the caller's id, not its own colors. Painting the
-/// colors is what the rasteriser's strike path does, and reading them back
-/// yields a spray of ids that were never drawn.
+/// A colour glyph picks as the caller's id, whole. The rasteriser splits it
+/// into a bitmap strike drawn as an image, which must not become a pick
+/// target of its own.
 #[test]
 fn a_bitmap_color_glyph_picks_as_one_id() {
     let Some((emoji, _)) = emoji_run() else {
@@ -1366,7 +1289,7 @@ fn a_bitmap_color_glyph_picks_as_one_id() {
     let mut ids: Vec<u32> = Vec::new();
     for y in 0..H {
         for x in 0..W {
-            if let Some(id) = r.pick_at(x, y) {
+            if let Some(id) = pick(&r, Point::new(f64::from(x), f64::from(y))) {
                 if !ids.contains(&id) {
                     ids.push(id);
                 }
