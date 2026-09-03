@@ -777,7 +777,7 @@ For a consumer, the version *is* the URL:
 ```html
 <script type="module">
   import init, { PlotView } from
-    'https://cdn.jsdelivr.net/npm/hephaestus-wasm@0.2.0/hephaestus.js';
+    'https://cdn.jsdelivr.net/npm/hephaestus-wasm@0.3.0/hephaestus.js';
 </script>
 ```
 

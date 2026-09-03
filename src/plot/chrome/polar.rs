@@ -1,5 +1,5 @@
 //! Polar axis renderers. Per-axis entry points called from
-//! `draw_chrome_into` for each `Axis` whose placement is
+//! `draw_frame_into` for each `Axis` whose placement is
 //! polar-shaped. Cartesian axes go through
 //! [`crate::plot::chrome::axis`]; the in-panel grid (rings + spokes
 //! + background) goes through [`crate::plot::chrome::panel`].

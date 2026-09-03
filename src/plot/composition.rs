@@ -14,7 +14,7 @@
 //!    bound to a patch id from the composition.
 //! 3. User calls `render(scene, size, dpi)`. The orchestrator rebuilds
 //!    the composition with each plot's chrome wired in, solves, and
-//!    drives `draw_chrome_into` + `draw_panel_into` per plot. Layout is
+//!    drives each plot's draw passes in layering order. Layout is
 //!    cached and reused across renders when nothing layout-affecting
 //!    has changed.
 //!
@@ -1259,11 +1259,17 @@ impl PlotComposition {
     /// Re-solves the layout when needed; reuses the cached solve
     /// otherwise.
     ///
-    /// Render order: all plots' chrome first,
-    /// then all plots' panels. This preserves "chrome under panel"
-    /// occlusion: a geom that extends past its panel rect is clipped by
-    /// the push_layer in `draw_panel_into`, so it can't visually escape
-    /// into another plot's chrome.
+    /// Render order: patch backgrounds, panel backgrounds + grids, the
+    /// frames of unclipped plots, geoms, the frames of clipped plots,
+    /// then every plot's labels and the composition's own chrome.
+    ///
+    /// Legends and titles always sit over the data — they are there to
+    /// be read. A plot's frame (panel outline, axes, strips) takes its
+    /// side from [`Plot::is_clipped`]: over the geoms when they are
+    /// clipped, since a mark cut against the outline would otherwise
+    /// show its cut edge lying half across that outline, and under them
+    /// when they are not, since a mark meant to cross the boundary
+    /// should read as continuous rather than sliced.
     pub fn render(&mut self, scene: &mut dyn SceneBuilder, size: Size, dpi: f64) {
         // Detect size/dpi change → layout invalidates implicitly.
         let size_or_dpi_changed = match (self.last_size, self.last_dpi) {
@@ -1310,7 +1316,7 @@ impl PlotComposition {
             .map(|plot| self.effective_theme_for(plot))
             .collect();
 
-        // Phases 1-4 all sit under the root composition. A plot's drawing is
+        // Phases 1-6 all sit under the root composition. A plot's drawing is
         // not contiguous — each phase walks every plot before the next
         // starts — but the scope stack is a logical path, not a bracket
         // around a run of ops, so each phase simply re-establishes
@@ -1331,7 +1337,16 @@ impl PlotComposition {
             plot.draw_panel_chrome_into(scene, layout, &self.scales, dpi, effective);
         }
 
-        // Phase 3: geoms. Each plot installs its own clip (if
+        // Phase 3: the frames of plots that don't clip. Their geoms
+        // are meant to cross the panel boundary, so the outline, axes
+        // and strips go underneath and the mark stays continuous.
+        for (plot, effective) in self.plots_in_order().zip(&plot_themes) {
+            if !plot.is_clipped() {
+                plot.draw_frame_into(scene, layout, &self.scales, dpi, effective);
+            }
+        }
+
+        // Phase 4: geoms. Each plot installs its own clip (if
         // enabled) and paints its geoms; cross-plot overlays layer
         // in attach order. Picking is opt-in per geom via the
         // `"pick_id"` channel; the orchestrator does no ticket
@@ -1353,21 +1368,30 @@ impl PlotComposition {
             }
         }
 
-        // Phase 4: axes + legends + plot text. Cartesian axes
-        // render in the patch's anatomical axis slots; polar axes
-        // render inside the panel area (without the panel clip),
-        // letting labels bleed beyond the inscribed disk and the
-        // axis lines paint over the panel background.
+        // Phase 5: the frames of plots that do clip. A clipped mark on
+        // the boundary is cut against the panel outline, so the outline
+        // is stroked over it — otherwise the cut edge sits half across
+        // the line that produced it.
         for (plot, effective) in self.plots_in_order().zip(&plot_themes) {
-            plot.draw_chrome_into(scene, layout, &self.scales, dpi, effective);
+            if plot.is_clipped() {
+                plot.draw_frame_into(scene, layout, &self.scales, dpi, effective);
+            }
+        }
+
+        // Phase 6: every plot's labels — legends, title / subtitle /
+        // caption, axis titles. Over the data, always.
+        for (plot, effective) in self.plots_in_order().zip(&plot_themes) {
+            plot.draw_labels_into(scene, layout, &self.scales, dpi, effective);
         }
         scene.pop_pick_scope();
 
-        // Phase 5: composition-level chrome. Drawn last so a shared
-        // title / legend paints over the canonical chrome band it
-        // shares with the border facets' own chrome (see
-        // `build_wrapped_composition`: both resolve to the same
-        // anatomical row, the composition's spanning the full width).
+        // Phase 7: composition-level chrome, which is labels too — a
+        // shared title, shared axis titles, legends serving every
+        // facet. Drawn after the per-plot labels so a shared title
+        // paints over the canonical chrome band it shares with the
+        // border facets' own (see `build_wrapped_composition`: both
+        // resolve to the same anatomical row, the composition's
+        // spanning the full width).
         for (comp_id, chrome) in self
             .chrome_order
             .iter()
@@ -1686,6 +1710,191 @@ mod tests {
             PlotComposition::new(&comp_two()).with_plot(crate::plot::Plot::new(&comp_two(), "a"));
         let mut scene = crate::scene::recording::RecordingScene::default();
         view.render(&mut scene, Size::new(400.0, 300.0), 96.0);
+    }
+
+    // ── Draw order ──
+
+    /// Ops recorded by a one-plot view, plus the index of the geom's
+    /// own fill. Every draw-order test asks what sits on which side of
+    /// that index.
+    fn ops_around_geom(
+        plot: crate::plot::Plot,
+        theme: Option<crate::plot::theme::Theme>,
+    ) -> (Vec<crate::scene::recording::Op>, usize) {
+        use crate::scene::recording::Op;
+        let mut view = PlotComposition::new(&comp_two())
+            .add_scale("x", scale::continuous(0.0..=1.0))
+            .add_scale("y", scale::continuous(0.0..=1.0))
+            .add_scale(
+                "cat",
+                scale::discrete([crate::scales::value::Value::String(std::sync::Arc::from(
+                    "a",
+                ))])
+                .range_colors([crate::color::Color::new([1.0, 0.0, 0.0, 1.0])]),
+            )
+            .with_plot(plot);
+        if let Some(theme) = theme {
+            view.set_theme(theme);
+        }
+        let mut scene = crate::scene::recording::RecordingScene::default();
+        view.render(&mut scene, Size::new(600.0, 400.0), 96.0);
+        let at = scene
+            .ops
+            .iter()
+            .position(|op| {
+                matches!(
+                    op,
+                    Op::Fill {
+                        pick_id: crate::pick::PickId::Id(7),
+                        ..
+                    }
+                )
+            })
+            .expect("the geom draws a picked fill");
+        (scene.ops, at)
+    }
+
+    /// A point geom that reports itself through pick id 7.
+    fn picked_point() -> Box<dyn crate::plot::geom::Geom> {
+        Box::new(
+            PointGeom::builder()
+                .set("x", vec![0.5_f64])
+                .set("y", vec![0.5_f64])
+                .set("fill", crate::color::Color::new([0.0, 0.0, 1.0, 1.0]))
+                .set("pick_id", vec![7_i64])
+                .build(),
+        )
+    }
+
+    fn plot_with_labels(clip: bool) -> crate::plot::Plot {
+        use crate::plot::chrome::legend::{Legend, LegendKeySpec};
+        let mut plot = crate::plot::Plot::new(&comp_two(), "a")
+            .bind("x", "x")
+            .bind("y", "y")
+            .clip(clip);
+        plot.set_title("Title");
+        plot.add_axis(
+            crate::plot::chrome::axis::Axis::rail(
+                "x",
+                crate::plot::chrome::axis::AxisPlacement::Cartesian(AxisSide::Bottom),
+            )
+            .title("X"),
+        );
+        plot.add_legend(Legend::new("cat").key(LegendKeySpec::rect().scaled("fill", "cat")));
+        plot.add_boxed_geom(picked_point());
+        plot
+    }
+
+    /// Legends and titles are there to be read, so they sit over the
+    /// data whether or not the geoms are clipped.
+    #[test]
+    fn labels_draw_over_geoms_however_the_plot_clips() {
+        use crate::scene::recording::Op;
+        for clip in [true, false] {
+            let (ops, geom) = ops_around_geom(plot_with_labels(clip), None);
+            let labels = ops[geom..]
+                .iter()
+                .filter(|op| matches!(op, Op::DrawGlyphs(_)))
+                .count();
+            assert!(
+                labels > 0,
+                "clip = {clip}: the title, axis title and legend text draw over the geom"
+            );
+        }
+    }
+
+    /// The panel outline is the same line a clipped mark is cut
+    /// against, so it goes over the geoms when they clip and under
+    /// them when they don't.
+    #[test]
+    fn the_panel_frame_follows_the_clip_flag() {
+        use crate::plot::theme::{Element, Length, RectElement, Theme, ThemeColor};
+        use crate::scene::recording::Op;
+
+        // A panel border at a width nothing else in the plot uses, so
+        // the outline stroke is identifiable among the ops.
+        const BORDER_PT: f64 = 3.5;
+        let bordered = || Theme {
+            panel_border: Element::Set(RectElement {
+                color: Some(ThemeColor::Ink),
+                linewidth_pt: Some(Length::Abs(BORDER_PT)),
+                ..Default::default()
+            }),
+            ..Theme::default()
+        };
+        // (outlines before the geom, outlines after it)
+        let outlines = |clip: bool| {
+            let (ops, geom) = ops_around_geom(plot_with_labels(clip), Some(bordered()));
+            let want = BORDER_PT * 96.0 / 72.0;
+            let count = |slice: &[Op]| {
+                slice
+                    .iter()
+                    .filter(|op| {
+                        matches!(op, Op::Stroke { stroke, .. } if (stroke.width - want).abs() < 1e-4)
+                    })
+                    .count()
+            };
+            (count(&ops[..geom]), count(&ops[geom..]))
+        };
+
+        assert_eq!(
+            outlines(true),
+            (0, 1),
+            "a clipped plot strokes its panel outline over the geoms"
+        );
+        assert_eq!(
+            outlines(false),
+            (1, 0),
+            "an unclipped plot strokes its panel outline under the geoms"
+        );
+    }
+
+    /// Axes and strips take the frame's side, not the labels'.
+    #[test]
+    fn axes_and_strips_follow_the_clip_flag() {
+        use crate::scene::recording::Op;
+
+        // (glyph runs before the geom, glyph runs after it)
+        let axis_text = |clip: bool| {
+            let mut plot = crate::plot::Plot::new(&comp_two(), "a")
+                .bind("x", "x")
+                .bind("y", "y")
+                .clip(clip);
+            plot.add_axis(crate::plot::chrome::axis::Axis::rail(
+                "x",
+                crate::plot::chrome::axis::AxisPlacement::Cartesian(AxisSide::Bottom),
+            ));
+            plot.set_strip(AxisSide::Top, Some("facet".to_string()));
+            plot.add_boxed_geom(picked_point());
+            let (ops, geom) = ops_around_geom(plot, None);
+            let count = |slice: &[Op]| {
+                slice
+                    .iter()
+                    .filter(|op| matches!(op, Op::DrawGlyphs(_)))
+                    .count()
+            };
+            (count(&ops[..geom]), count(&ops[geom..]))
+        };
+
+        let (before_clipped, after_clipped) = axis_text(true);
+        assert_eq!(
+            before_clipped, 0,
+            "a clipped plot draws no axis text under the geoms"
+        );
+        assert!(
+            after_clipped > 0,
+            "a clipped plot draws its tick labels and strip over the geoms"
+        );
+
+        let (before_unclipped, after_unclipped) = axis_text(false);
+        assert_eq!(
+            after_unclipped, 0,
+            "an unclipped plot draws no axis text over the geoms"
+        );
+        assert_eq!(
+            before_unclipped, after_clipped,
+            "the same runs, on the other side of the geoms"
+        );
     }
 
     // ── Composition-level chrome ──

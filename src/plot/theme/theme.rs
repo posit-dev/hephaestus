@@ -197,7 +197,7 @@ impl Default for Theme {
                     ..FontSpec::default()
                 },
                 align: Some(HAlign::Start),
-                valign: Some(VAlign::Middle),
+                valign: Some(VAlign::Top),
                 margin: Some(Margin::new(
                     Length::Abs(0.0),
                     Length::Abs(0.0),
@@ -208,7 +208,7 @@ impl Default for Theme {
             }),
             plot_subtitle: Element::Set(TextElement {
                 align: Some(HAlign::Start),
-                valign: Some(VAlign::Middle),
+                valign: Some(VAlign::Top),
                 margin: Some(Margin::new(
                     Length::Abs(0.0),
                     Length::Abs(0.0),
@@ -220,7 +220,7 @@ impl Default for Theme {
             plot_caption: Element::Set(TextElement {
                 size_pt: Some(Length::Rel(0.8)),
                 align: Some(HAlign::End),
-                valign: Some(VAlign::Middle),
+                valign: Some(VAlign::Top),
                 margin: Some(Margin::new(
                     Length::Abs(HALF_LINE_PT),
                     Length::Abs(0.0),

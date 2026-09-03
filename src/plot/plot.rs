@@ -1029,13 +1029,14 @@ impl Plot {
         scene.pop_pick_scope();
     }
 
-    /// Paint the projection's panel chrome — background fill, grid
-    /// lines, and outline stroke — into the panel slot. No geoms.
-    /// Called as the orchestrator's phase-2 pass across every plot
-    /// so all panel backgrounds settle before any geom is drawn —
-    /// otherwise a later plot's panel background would overpaint an
-    /// earlier plot's geoms when the earlier plot has `clip = false`
-    /// and its geoms spill into the later panel.
+    /// Paint the panel chrome that always sits under the geoms —
+    /// background fill and grid lines. The outline is
+    /// [`Self::draw_frame_into`], which layers with the axes. Called
+    /// across every plot before any geom is drawn, so all panel
+    /// backgrounds settle first — otherwise a later plot's panel
+    /// background would overpaint an earlier plot's geoms when the
+    /// earlier plot has `clip = false` and its geoms spill into the
+    /// later panel.
     pub fn draw_panel_chrome_into(
         &self,
         scene: &mut dyn SceneBuilder,
@@ -1044,58 +1045,62 @@ impl Plot {
         dpi: f64,
         theme: &crate::plot::theme::Theme,
     ) {
+        let Some(panel) = self.drawable_panel(layout) else {
+            return;
+        };
         scene.push_pick_scope(&self.pick_scope());
         scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Panel));
-        self.draw_panel_chrome_into_inner(scene, layout, registry, dpi, theme);
-        scene.pop_pick_scope();
-        scene.pop_pick_scope();
-    }
-
-    fn draw_panel_chrome_into_inner(
-        &self,
-        scene: &mut dyn SceneBuilder,
-        layout: &crate::composition::CompositionLayout,
-        registry: &ScaleRegistry,
-        dpi: f64,
-        theme: &crate::plot::theme::Theme,
-    ) {
-        let panel = match layout.get(&self.patch_id, Slot::Panel) {
-            Some(r) => r,
-            None => return,
-        };
-        if panel.x1 <= panel.x0 || panel.y1 <= panel.y0 {
-            return;
-        }
-        {
-            let overlay = self.build_aspect_overlay(panel, registry);
-            let lookup = |name: &str| -> Option<&Scale> {
-                let scale_name = self.bindings.get(name)?;
-                overlay
-                    .get(scale_name.as_str())
-                    .or_else(|| registry.get(scale_name))
-            };
-            let channels = self.projection.consume_channels();
-            let channel_0 = channels.first().and_then(|n| lookup(n));
-            let channel_1 = channels.get(1).and_then(|n| lookup(n));
+        self.with_panel_scales(panel, registry, |scales| {
             crate::plot::chrome::panel::draw_panel_chrome(
                 scene,
                 &self.projection,
                 panel,
-                crate::plot::chrome::panel::PanelScales {
-                    channel_0,
-                    channel_1,
-                },
+                scales,
                 dpi,
                 theme,
             );
-        }
+        });
+        scene.pop_pick_scope();
+        scene.pop_pick_scope();
+    }
+
+    /// The panel rect, when the layout resolved one with area.
+    fn drawable_panel(&self, layout: &crate::composition::CompositionLayout) -> Option<Rect> {
+        let panel = layout.get(&self.patch_id, Slot::Panel)?;
+        (panel.x1 > panel.x0 && panel.y1 > panel.y0).then_some(panel)
+    }
+
+    // The scales the projection consumes, resolved against any
+    // range-mode aspect expansion. Takes a closure because the overlay
+    // the scales may borrow from is built here.
+    fn with_panel_scales<R>(
+        &self,
+        panel: Rect,
+        registry: &ScaleRegistry,
+        f: impl FnOnce(crate::plot::chrome::panel::PanelScales<'_>) -> R,
+    ) -> R {
+        let overlay = self.build_aspect_overlay(panel, registry);
+        let lookup = |name: &str| -> Option<&Scale> {
+            let scale_name = self.bindings.get(name)?;
+            overlay
+                .get(scale_name.as_str())
+                .or_else(|| registry.get(scale_name))
+        };
+        let channels = self.projection.consume_channels();
+        let channel_0 = channels.first().and_then(|n| lookup(n));
+        let channel_1 = channels.get(1).and_then(|n| lookup(n));
+        f(crate::plot::chrome::panel::PanelScales {
+            channel_0,
+            channel_1,
+        })
     }
 
     /// Draw geoms into the panel slot. Installs a clip layer using
     /// the projection's outline path when [`Plot::clip`] is `true`
-    /// (the default). Phase-3 pass of the orchestrator render — all
-    /// panel chromes have been painted by phase 2, so geoms layer
-    /// cleanly without later chrome erasing earlier spilled output.
+    /// (the default). The orchestrator runs this after every plot's
+    /// panel chrome and outer chrome, so an unclipped geom spilling
+    /// past its panel paints over the chrome around it instead of
+    /// being erased by chrome drawn later.
     ///
     /// Picking is opt-in per geom via the `"pick_id"` channel;
     /// geoms without one emit `PickId::Skip` for every primitive.
@@ -1187,10 +1192,12 @@ impl Plot {
         self.dirty = false;
     }
 
-    /// One-call panel draw: panel chrome + geoms in sequence.
+    /// One-call panel draw: panel background + grid, then geoms.
     /// Convenience for stand-alone (non-orchestrator) callers that
-    /// only have one plot per patch. The orchestrator's render
-    /// flow splits these so multi-plot patches phase correctly.
+    /// only have one plot per patch. The orchestrator's render flow
+    /// splits these so multi-plot patches phase correctly. Draws no
+    /// panel outline — that belongs to [`Self::draw_frame_into`], on
+    /// whichever side of the geoms this plot's clip flag puts it.
     pub fn draw_panel_into(
         &mut self,
         scene: &mut dyn SceneBuilder,
@@ -1201,6 +1208,35 @@ impl Plot {
     ) {
         self.draw_panel_chrome_into(scene, layout, registry, dpi, theme);
         self.draw_geoms_into(scene, layout, registry, dpi, theme);
+    }
+
+    /// Draw the whole plot into `layout` in the right order, frame
+    /// included. Convenience for stand-alone (non-orchestrator)
+    /// callers: it holds the one rule a caller assembling the passes
+    /// by hand has to get right, which is that the frame follows
+    /// [`Self::is_clipped`].
+    ///
+    /// `PlotComposition::render` doesn't use this — it interleaves the
+    /// passes across every attached plot so that one plot's background
+    /// can't overpaint another's spilled geoms.
+    pub fn draw_into(
+        &mut self,
+        scene: &mut dyn SceneBuilder,
+        layout: &crate::composition::CompositionLayout,
+        registry: &ScaleRegistry,
+        dpi: f64,
+        theme: &crate::plot::theme::Theme,
+    ) {
+        self.draw_patch_background_into(scene, layout, theme, dpi);
+        self.draw_panel_chrome_into(scene, layout, registry, dpi, theme);
+        if !self.clip {
+            self.draw_frame_into(scene, layout, registry, dpi, theme);
+        }
+        self.draw_geoms_into(scene, layout, registry, dpi, theme);
+        if self.clip {
+            self.draw_frame_into(scene, layout, registry, dpi, theme);
+        }
+        self.draw_labels_into(scene, layout, registry, dpi, theme);
     }
 }
 
@@ -1371,7 +1407,7 @@ impl Plot {
         // cell (when its `scale_name` is set) and / or a title cell
         // (when its `title` is set) to the matching anatomical
         // slots. Polar axes wire nothing here; they render in-panel
-        // from `draw_chrome_into`.
+        // from `draw_labels_into`.
         patch = self.wire_axes(patch, registry, dpi, theme);
 
         // Legends — explicitly composed by the caller via
@@ -1379,7 +1415,7 @@ impl Plot {
         // current scales, then aggregated per side into one
         // `LegendStackMeasure` cell through `legend_stack_measure`.
         // In-panel legends reserve zero chrome space and render
-        // against the resolved panel rect from `draw_chrome_into`.
+        // against the resolved panel rect from `draw_labels_into`.
         patch = self.wire_legends(patch, registry, dpi, theme);
 
         // Strips — facet labels populated via `Plot::strip(side, _)`.
@@ -1673,7 +1709,10 @@ impl Plot {
         patch
     }
 
-    fn draw_axes_into(
+    // Cartesian axes only — they draw into the outer axis slots.
+    // Polar axes have no outer slot and go through
+    // `draw_polar_axes_into`, in the same phase.
+    fn draw_cartesian_axes_into(
         &self,
         scene: &mut dyn SceneBuilder,
         layout: &crate::composition::CompositionLayout,
@@ -1682,7 +1721,7 @@ impl Plot {
         dpi: f64,
         theme: &crate::plot::theme::Theme,
     ) {
-        use crate::plot::chrome::axis::{AxisPlacement, PolarRing};
+        use crate::plot::chrome::axis::AxisPlacement;
         // Range-mode aspect adjustment expands one of the bound x / y
         // scales — axes whose `scale_name` matches that scale must
         // render against the expanded range so ticks line up with the
@@ -1694,41 +1733,66 @@ impl Plot {
         let resolve_scale =
             |name: &str| -> Option<&Scale> { overlay.get(name).or_else(|| registry.get(name)) };
         for axis in &self.axes {
-            // Region and axis frames wrap every axis whatever its placement.
-            // A cartesian axis sits in its anatomical slot; a polar one is
-            // drawn inside the panel, so it is the `axis` frame rather than
-            // the region that tells the two apart.
-            let region = match axis.placement() {
-                AxisPlacement::Cartesian(side) => cartesian_axis_slot(side),
-                _ => Slot::Panel,
+            let AxisPlacement::Cartesian(side) = axis.placement() else {
+                continue;
             };
-            scene.push_pick_scope(&crate::plot::pick::region_scope(region));
+            if let Some(scale_name) = axis.scale_name() {
+                if let (Some(panel_rect), Some(scale)) = (panel, resolve_scale(scale_name)) {
+                    let slot = cartesian_axis_slot(side);
+                    if let Some(slot_rect) = layout.get(&self.patch_id, slot) {
+                        // A cartesian axis sits in its anatomical slot, so the
+                        // region frame names that slot; the axis frame carries
+                        // the handle it was attached under.
+                        scene.push_pick_scope(&crate::plot::pick::region_scope(slot));
+                        scene.push_pick_scope(&crate::plot::pick::axis_scope(
+                            axis.id(),
+                            axis.scale_name(),
+                        ));
+                        crate::plot::chrome::axis::draw(
+                            scale,
+                            scene,
+                            slot_rect,
+                            panel_rect,
+                            side,
+                            dpi,
+                            theme,
+                            &self.images,
+                        );
+                        scene.pop_pick_scope();
+                        scene.pop_pick_scope();
+                    }
+                }
+            }
+            // Cartesian titles render through the title-slot path the
+            // same way `Plot::title` does — handled by
+            // `draw_axis_titles_into`.
+        }
+    }
+
+    // Polar axes — drawn inside the panel rect, without the panel clip,
+    // so labels bleed past the inscribed disk. A disk has no outside to
+    // put them in, which is the only thing separating these from the
+    // cartesian pass: both are scaffolding and both go under the geoms.
+    fn draw_polar_axes_into(
+        &self,
+        scene: &mut dyn SceneBuilder,
+        panel: Option<Rect>,
+        registry: &ScaleRegistry,
+        dpi: f64,
+        theme: &crate::plot::theme::Theme,
+    ) {
+        use crate::plot::chrome::axis::{AxisPlacement, PolarRing};
+        for axis in &self.axes {
+            if matches!(axis.placement(), AxisPlacement::Cartesian(_)) {
+                continue;
+            }
+            // A polar axis is drawn inside the panel and reserves no
+            // anatomical slot, so its region frame is the panel; the axis
+            // frame is what tells it from the cartesian pass.
+            scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Panel));
             scene.push_pick_scope(&crate::plot::pick::axis_scope(axis.id(), axis.scale_name()));
             match axis.placement() {
-                AxisPlacement::Cartesian(side) => {
-                    if let Some(scale_name) = axis.scale_name() {
-                        if let (Some(panel_rect), Some(scale)) = (panel, resolve_scale(scale_name))
-                        {
-                            let slot = cartesian_axis_slot(side);
-                            if let Some(slot_rect) = layout.get(&self.patch_id, slot) {
-                                crate::plot::chrome::axis::draw(
-                                    scale,
-                                    scene,
-                                    slot_rect,
-                                    panel_rect,
-                                    side,
-                                    dpi,
-                                    theme,
-                                    &self.images,
-                                );
-                            }
-                        }
-                    }
-                    // Cartesian titles render through the title-slot
-                    // path the same way `Plot::title` does — handled
-                    // by the title-slot draw loop below in
-                    // `draw_chrome_into`.
-                }
+                AxisPlacement::Cartesian(_) => {}
                 AxisPlacement::PolarRadius { theta_frac } => {
                     if let Some(scale_name) = axis.scale_name() {
                         if let (Some(panel_rect), Some(polar), Some(scale)) =
@@ -1829,10 +1893,21 @@ impl Plot {
         patch
     }
 
-    /// Render axes + text blocks into the resolved chrome slots from
-    /// `layout`. Slots not populated by [`Self::wire`] are skipped
-    /// (lookup returns `None`).
-    pub fn draw_chrome_into(
+    /// Render the chrome that frames the plotting area — the panel
+    /// outline, the axes (Cartesian and polar), and the facet strips.
+    ///
+    /// Which side of the geoms this belongs on depends on
+    /// [`Plot::is_clipped`], and the orchestrator calls it in whichever
+    /// pass matches. Clipped geoms are cut against the panel outline,
+    /// so the frame goes *over* them: a mark sitting on the boundary
+    /// otherwise shows its cut edge lying half across the outline it
+    /// was cut by. Unclipped geoms are meant to cross the boundary, so
+    /// the frame goes *under* them and the mark reads as continuous
+    /// rather than sliced.
+    ///
+    /// Legends and titles are [`Self::draw_labels_into`] and sit above
+    /// the geoms either way.
+    pub fn draw_frame_into(
         &self,
         scene: &mut dyn SceneBuilder,
         layout: &crate::composition::CompositionLayout,
@@ -1841,11 +1916,50 @@ impl Plot {
         theme: &crate::plot::theme::Theme,
     ) {
         scene.push_pick_scope(&self.pick_scope());
-        self.draw_chrome_into_inner(scene, layout, registry, dpi, theme);
+
+        // Panel outline — the boundary the geoms are clipped against.
+        if let Some(panel) = self.drawable_panel(layout) {
+            scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Panel));
+            self.with_panel_scales(panel, registry, |scales| {
+                crate::plot::chrome::panel::draw_panel_outline(
+                    scene,
+                    &self.projection,
+                    panel,
+                    scales,
+                    dpi,
+                    theme,
+                );
+            });
+            scene.pop_pick_scope();
+        }
+
+        // Axes — explicit, no defaults. A polar axis carries its own
+        // title inline, since placing it needs the label extents the
+        // axis pass measures; that puts a polar axis title in this
+        // layer rather than with the other titles. It sits beyond the
+        // label rail, out past anything a clipped geom can reach.
+        let panel = layout.get(&self.patch_id, Slot::Panel);
+        self.draw_cartesian_axes_into(scene, layout, panel, registry, dpi, theme);
+        self.draw_polar_axes_into(scene, panel, registry, dpi, theme);
+
+        // Facet strips — one per side with a label installed via
+        // `Plot::strip`. The chrome helper paints the background +
+        // shaped text into the matching slot rect. A strip labels the
+        // panel it borders, so it layers with the frame around it.
+        self.draw_strips_into(scene, layout, dpi, theme);
+
         scene.pop_pick_scope();
     }
 
-    fn draw_chrome_into_inner(
+    /// Render the legends and the text that names the plot — side and
+    /// in-panel legends, the title / subtitle / caption, and the axis
+    /// titles. Always drawn over the geoms: a label is there to be
+    /// read, and a legend anchored into the panel carries an opaque
+    /// background precisely so it can sit on the data.
+    ///
+    /// Slots not populated by [`Self::wire`] are skipped (lookup
+    /// returns `None`).
+    pub fn draw_labels_into(
         &self,
         scene: &mut dyn SceneBuilder,
         layout: &crate::composition::CompositionLayout,
@@ -1853,17 +1967,9 @@ impl Plot {
         dpi: f64,
         theme: &crate::plot::theme::Theme,
     ) {
-        use crate::brush::Brush;
-        use crate::text::TextRun;
+        use crate::plot::theme::TitleLocation;
 
-        // Axes — explicit, no defaults.
-        let panel = layout.get(&self.patch_id, Slot::Panel);
-        self.draw_axes_into(scene, layout, panel, registry, dpi, theme);
-
-        // Facet strips — one per side with a label installed via
-        // `Plot::strip`. The chrome helper paints the background +
-        // shaped text into the matching slot rect.
-        self.draw_strips_into(scene, layout, dpi, theme);
+        scene.push_pick_scope(&self.pick_scope());
 
         // Legends — render each side's stack of attached legends
         // into the matching slot. Mirrors the wiring loop, and must
@@ -1891,9 +1997,9 @@ impl Plot {
             }
         }
 
-        // In-panel legends — overlay on top of the panel rect at
-        // their anchor / inset. They reserve no chrome space; the
-        // panel rect they paint into comes from the solved layout.
+        // In-panel legends — overlay on the panel rect at their anchor
+        // / inset. They reserve no chrome space; the panel rect they
+        // paint into comes from the solved layout.
         if let Some(panel) = layout.get(&self.patch_id, Slot::Panel) {
             for (anchor, inset_pt, group) in legends_grouped_in_panel(&collapsed) {
                 if group.is_empty() {
@@ -1972,13 +2078,35 @@ impl Plot {
         }
 
         // Axis title slots — sourced from `Axis::title` on each
-        // attached cartesian axis. `TitleLocation::Outside` (default)
-        // draws into the matching outer slot reserved at wire time;
-        // `TitleLocation::Inside` draws a strip flush against the
-        // panel edge instead, reserving no outer chrome. Polar axis
-        // titles render inline through `draw_axes_into`.
+        // attached cartesian axis. `TitleLocation::Outside` (the
+        // default) draws into the matching outer slot reserved at wire
+        // time; `Inside` draws a strip flush against the panel edge
+        // instead, reserving no outer chrome.
+        for location in [TitleLocation::Outside, TitleLocation::Inside] {
+            self.draw_axis_titles_into(scene, layout, dpi, theme, location);
+        }
+
+        scene.pop_pick_scope();
+    }
+
+    // Axis titles for every attached cartesian axis whose resolved
+    // title location is `want`. The two locations paint in different
+    // phases — outer slots under the geoms, inside strips over them —
+    // so each pass takes only the axes belonging to it.
+    fn draw_axis_titles_into(
+        &self,
+        scene: &mut dyn SceneBuilder,
+        layout: &crate::composition::CompositionLayout,
+        dpi: f64,
+        theme: &crate::plot::theme::Theme,
+        want: crate::plot::theme::TitleLocation,
+    ) {
+        use crate::brush::Brush;
         use crate::plot::chrome::axis::{axis_side_to_channel_side, AxisPlacement};
         use crate::plot::theme::{text_concrete_defaults, Rotation, TitleLocation};
+        use crate::text::TextRun;
+
+        let root_pt = crate::plot::chrome::root_text_pt(theme);
         let text_defaults = text_concrete_defaults();
         for axis in &self.axes {
             let Some(title) = axis.title_ref() else {
@@ -1989,6 +2117,9 @@ impl Plot {
             };
             let (ch, side_idx) = axis_side_to_channel_side(side);
             let resolved = theme.resolved_axis(ch, side_idx);
+            if resolved.title_location != want {
+                continue;
+            }
             let Some(el) = resolved.title else { continue };
             let style = text_style_from(&el, root_pt);
             let color = el
