@@ -5,11 +5,11 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.4.0
 
 ### Changed
 
-- **The PNG writers take a `PngCompression`**, before their trailing dpi, the way the TIFF writers take a `TiffCompression`. `Balanced` matches the previous output byte for byte; `Fast` encodes a dense frame in 8 ms rather than 146 ms, for about half again the bytes, which is what a host serialising a PNG per animation frame needs.
+- **The PNG writers take a `PngCompression`**, before their trailing dpi, the way the TIFF writers take a `TiffCompression`. `Balanced` matches the previous output byte for byte; `Fast` encodes a dense frame in 8 ms rather than 146 ms, for about half again the bytes, which is what a host serializing a PNG per animation frame needs. **Breaking:** `write_png` / `write_png_to` / `encode_png` gained the argument.
 
 ## 0.3.0
 
