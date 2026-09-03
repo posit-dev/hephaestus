@@ -12,6 +12,7 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::brush::Brush;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::geometry::{Affine, Rect};
+use hephaestus::image::PngCompression;
 use hephaestus::pick::PickId;
 use hephaestus::plot::theme::{HAlign, Palette, ThemeColor};
 use hephaestus::primitives::rect as rect_path;
@@ -330,6 +331,7 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/rich_text_marquee_parity.png");
-    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, PngCompression::Balanced, Some(dpi))
+        .expect("write png");
     println!("wrote {}", path.display());
 }

@@ -7,6 +7,7 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{Composition, Patch, Span};
 use hephaestus::geometry::Size;
+use hephaestus::image::PngCompression;
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::chrome::legend::{Legend, LegendKeySpec};
 use hephaestus::plot::theme::{Element, Length, Margin, RectElement, Theme, ThemeColor};
@@ -184,6 +185,7 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/theme_plot_background.png");
-    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, PngCompression::Balanced, Some(dpi))
+        .expect("write png");
     println!("wrote {}", path.display());
 }

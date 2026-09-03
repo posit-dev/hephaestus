@@ -14,6 +14,7 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{Composition, Patch, Span};
 use hephaestus::geometry::Size;
+use hephaestus::image::PngCompression;
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::theme::{FontFamily, Theme};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom, TextGeom};
@@ -96,6 +97,7 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/google_fonts.png");
-    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, PngCompression::Balanced, Some(dpi))
+        .expect("write png");
     println!("[google_fonts] wrote {}", path.display());
 }

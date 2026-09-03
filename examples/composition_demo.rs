@@ -10,6 +10,7 @@
 use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{beside, Composition, Patch, Slot, Span};
+use hephaestus::image::PngCompression;
 use hephaestus::layout::{Cell, Track};
 use hephaestus::stroke::Stroke;
 use hephaestus::text::{draw_text_in_rect, TextRun, TextStyle};
@@ -207,7 +208,8 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/composition_demo.png");
-    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, PngCompression::Balanced, Some(dpi))
+        .expect("write png");
     println!("wrote {}", path.display());
 
     let panel_a = layout.get("plot_a", Slot::Panel).unwrap();

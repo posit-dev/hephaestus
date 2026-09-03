@@ -25,7 +25,9 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{Composition, Patch, Span};
 use hephaestus::geometry::Size;
-use hephaestus::image::{write_jpeg, write_png, write_tiff, write_webp, TiffCompression};
+use hephaestus::image::{
+    write_jpeg, write_png, write_tiff, write_webp, PngCompression, TiffCompression,
+};
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom};
 use hephaestus::scales::chrome::AxisSide;
@@ -87,7 +89,7 @@ fn main() {
     // Each writer records the dpi the plot was rendered at, so the four files
     // agree on their physical size rather than falling back to a viewer's own
     // default.
-    write_png(&png, w, h, &pixels, Some(dpi)).expect("write png");
+    write_png(&png, w, h, &pixels, PngCompression::Balanced, Some(dpi)).expect("write png");
     // Quality 90, composited onto the light background the plot theme assumes.
     write_jpeg(&jpg, w, h, &pixels, 90, rgb8(248, 248, 252), Some(dpi)).expect("write jpeg");
     write_tiff(&tif, w, h, &pixels, TiffCompression::Deflate, Some(dpi)).expect("write tiff");

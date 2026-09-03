@@ -193,7 +193,14 @@ fn encode(image: &crate::brush::Image) -> Option<Vec<u8>> {
         return None;
     }
     // No dpi: a payload the reader hands straight back as pixels.
-    crate::image::encode_png(image.width, image.height, image.data.as_ref(), None).ok()
+    crate::image::encode_png(
+        image.width,
+        image.height,
+        image.data.as_ref(),
+        crate::image::PngCompression::Balanced,
+        None,
+    )
+    .ok()
 }
 
 /// Every name a register can hand pixels for, sorted so the same

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Changed
+
+- **The PNG writers take a `PngCompression`**, before their trailing dpi, the way the TIFF writers take a `TiffCompression`. `Balanced` matches the previous output byte for byte; `Fast` encodes a dense frame in 8 ms rather than 146 ms, for about half again the bytes, which is what a host serialising a PNG per animation frame needs.
+
 ## 0.3.0
 
 ### Added

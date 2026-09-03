@@ -25,6 +25,7 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{beside, Patch};
 use hephaestus::geometry::Size;
+use hephaestus::image::PngCompression;
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::theme::{Element, TextElement, Theme};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom};
@@ -138,7 +139,14 @@ fn main() {
     renderer
         .render_to_buffer(w, h, Color::WHITE, &mut pixels)
         .expect("render");
-    hephaestus::image::write_png("examples/pdf_export.png", w, h, &pixels, Some(dpi))
-        .expect("write png");
+    hephaestus::image::write_png(
+        "examples/pdf_export.png",
+        w,
+        h,
+        &pixels,
+        PngCompression::Balanced,
+        Some(dpi),
+    )
+    .expect("write png");
     println!("examples/pdf_export.png");
 }

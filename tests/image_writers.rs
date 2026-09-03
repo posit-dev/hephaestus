@@ -46,7 +46,9 @@ fn render() -> Vec<u8> {
 #[cfg(feature = "png")]
 #[test]
 fn png_encodes_rendered_pixels() {
-    let bytes = hephaestus::image::encode_png(W, H, &render(), None).expect("encode png");
+    use hephaestus::image::PngCompression;
+    let bytes = hephaestus::image::encode_png(W, H, &render(), PngCompression::Balanced, None)
+        .expect("encode png");
     assert_eq!(
         &bytes[..8],
         &[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']
@@ -103,7 +105,9 @@ const DPI: f64 = 192.0;
 #[cfg(feature = "png")]
 #[test]
 fn png_records_the_render_dpi() {
-    let bytes = hephaestus::image::encode_png(W, H, &render(), Some(DPI)).expect("encode png");
+    use hephaestus::image::PngCompression;
+    let bytes = hephaestus::image::encode_png(W, H, &render(), PngCompression::Balanced, Some(DPI))
+        .expect("encode png");
     let reader = png::Decoder::new(std::io::Cursor::new(bytes))
         .read_info()
         .expect("read info");

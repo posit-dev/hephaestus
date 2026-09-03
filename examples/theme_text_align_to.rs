@@ -13,6 +13,7 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb, rgb8, Color};
 use hephaestus::composition::{beside, Patch};
 use hephaestus::geometry::Size;
+use hephaestus::image::PngCompression;
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::chrome::legend::Legend;
 use hephaestus::plot::theme::{AlignTo, Element, HAlign, Theme};
@@ -133,6 +134,7 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/theme_text_align_to.png");
-    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, PngCompression::Balanced, Some(dpi))
+        .expect("write png");
     println!("wrote {}", path.display());
 }

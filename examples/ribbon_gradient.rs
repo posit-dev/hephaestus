@@ -18,6 +18,7 @@
 use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::geometry::Affine;
+use hephaestus::image::PngCompression;
 use hephaestus::mesh::Mesh;
 use hephaestus::pick::PickId;
 use hephaestus::primitives::{
@@ -396,7 +397,8 @@ fn render_mesh(
         .render_to_buffer(w, h, bg, &mut pixels)
         .expect("render");
     let path = std::env::current_dir().unwrap().join(out);
-    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, PngCompression::Balanced, Some(dpi))
+        .expect("write png");
     println!("wrote {}", path.display());
 }
 
@@ -422,6 +424,7 @@ fn render_meshes(
         .render_to_buffer(w, h, bg, &mut pixels)
         .expect("render");
     let path = std::env::current_dir().unwrap().join(out);
-    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, PngCompression::Balanced, Some(dpi))
+        .expect("write png");
     println!("wrote {}", path.display());
 }

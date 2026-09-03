@@ -13,6 +13,7 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{grid, Composition, Element, Patch};
 use hephaestus::geometry::Size;
+use hephaestus::image::PngCompression;
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::theme::{pt, Length, Margin, RectElement, Sided, Theme, ThemeColor};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom};
@@ -121,6 +122,7 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/facet_strips.png");
-    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, PngCompression::Balanced, Some(dpi))
+        .expect("write png");
     println!("wrote {}", path.display());
 }

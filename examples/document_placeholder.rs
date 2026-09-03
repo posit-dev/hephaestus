@@ -38,6 +38,7 @@ use hephaestus::backend::hybrid::HybridRenderer;
 use hephaestus::color::Color;
 use hephaestus::document::{read_composition, read_hints, ReadContext};
 use hephaestus::geometry::Size;
+use hephaestus::png::PngCompression;
 use hephaestus::scene::SceneBuilder;
 use hephaestus::text::GenericFamilyKind;
 use hephaestus::Renderer;
@@ -89,7 +90,8 @@ fn main() {
     // this picture is what a viewer saves, and a PNG that declares nothing is
     // read as 72 dpi — a 2x render would claim twice its physical size.
     let name = "examples/document.png";
-    hephaestus::png::write_png(name, w, h, &buf, Some(dpi)).expect("write png");
+    hephaestus::png::write_png(name, w, h, &buf, PngCompression::Balanced, Some(dpi))
+        .expect("write png");
     println!("wrote {name} ({w}x{h} at {dpi} dpi, {css_w}x{css_h} css at {ratio}x)");
 }
 

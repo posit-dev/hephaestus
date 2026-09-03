@@ -20,6 +20,7 @@
 //!   center, end} demonstrated by placing the same fitted string in
 //!   9 rects with each combination.
 
+use hephaestus::image::PngCompression;
 use std::sync::Arc;
 
 use hephaestus::backend::vello::VelloRenderer;
@@ -445,6 +446,7 @@ fn render_to(
         .render_to_buffer(w, h, bg, &mut pixels)
         .expect("render");
     let path = std::env::current_dir().unwrap().join(out_relative);
-    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, PngCompression::Balanced, Some(dpi))
+        .expect("write png");
     println!("wrote {}", path.display());
 }

@@ -4,6 +4,7 @@
 use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::brush::Gradient;
 use hephaestus::color::{rgb, rgb8, rgba, Color};
+use hephaestus::image::PngCompression;
 use hephaestus::stroke::{Cap, Join, Stroke};
 use hephaestus::{
     Affine, BlendMode, Brush, Compose, FillRule, Mix, Path, PickId, Point, Rect, Renderer,
@@ -91,6 +92,7 @@ fn main() {
         .expect("render");
 
     let path = std::env::current_dir().unwrap().join("examples/hello.png");
-    hephaestus::image::write_png(&path, w, h, &pixels, None).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, PngCompression::Balanced, None)
+        .expect("write png");
     println!("wrote {}", path.display());
 }

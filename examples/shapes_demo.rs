@@ -4,6 +4,7 @@
 
 use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
+use hephaestus::image::PngCompression;
 use hephaestus::shape::{builtin, ShapeKind, ShapeRegistry, ShapeStyle};
 use hephaestus::stroke::{Cap, Join, Stroke};
 use hephaestus::{
@@ -187,6 +188,7 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/shapes_demo.png");
-    hephaestus::image::write_png(&path, W, H, &pixels, None).expect("write png");
+    hephaestus::image::write_png(&path, W, H, &pixels, PngCompression::Balanced, None)
+        .expect("write png");
     println!("wrote {}", path.display());
 }

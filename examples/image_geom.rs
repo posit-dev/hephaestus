@@ -18,6 +18,7 @@
 //! PNG codec in `hephaestus::image`, so the example also exercises the
 //! encoder and decoder against each other.
 
+use hephaestus::image::PngCompression;
 use std::sync::Arc;
 
 use hephaestus::backend::vello::VelloRenderer;
@@ -283,7 +284,9 @@ fn main() {
 
 /// Round-trip pixels through the PNG codec on the way into an `Image`.
 fn via_png(width: u32, height: u32, pixels: Vec<u8>) -> Image {
-    let bytes = hephaestus::image::encode_png(width, height, &pixels, None).expect("encode");
+    let bytes =
+        hephaestus::image::encode_png(width, height, &pixels, PngCompression::Balanced, None)
+            .expect("encode");
     hephaestus::image::decode_png(&bytes).expect("decode")
 }
 
@@ -368,6 +371,7 @@ fn render_to(
         .render_to_buffer(w, h, bg, &mut pixels)
         .expect("render");
     let path = std::env::current_dir().unwrap().join(out_relative);
-    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, PngCompression::Balanced, Some(dpi))
+        .expect("write png");
     println!("wrote {}", path.display());
 }

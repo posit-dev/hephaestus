@@ -15,6 +15,7 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{beside, Composition, Patch};
 use hephaestus::geometry::Size;
+use hephaestus::image::PngCompression;
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement, PolarRing};
 use hephaestus::plot::projection::{PolarProjection, Projection};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom, RectGeom, SegmentGeom};
@@ -245,6 +246,7 @@ fn main() {
         .render_to_buffer(w, h, bg, &mut pixels)
         .expect("render");
     let path = std::env::current_dir().unwrap().join("examples/polar.png");
-    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, PngCompression::Balanced, Some(dpi))
+        .expect("write png");
     println!("wrote {}", path.display());
 }

@@ -18,6 +18,7 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{Composition, Patch, Span};
 use hephaestus::geometry::Size;
+use hephaestus::image::PngCompression;
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::theme::{Element, Length, TextElement, Theme, ThemeColor};
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom, TextGeom};
@@ -156,6 +157,7 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/text_outline.png");
-    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, PngCompression::Balanced, Some(dpi))
+        .expect("write png");
     println!("wrote {}", path.display());
 }

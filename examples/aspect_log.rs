@@ -28,6 +28,7 @@ use hephaestus::backend::vello::VelloRenderer;
 use hephaestus::color::{rgb8, Color};
 use hephaestus::composition::{grid, Composition, Patch};
 use hephaestus::geometry::Size;
+use hephaestus::image::PngCompression;
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::{scale, AspectMode, LineGeom, Plot, PlotComposition, PointGeom};
 use hephaestus::scales::chrome::AxisSide;
@@ -156,6 +157,7 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/aspect_log.png");
-    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, PngCompression::Balanced, Some(dpi))
+        .expect("write png");
     println!("wrote {}", path.display());
 }

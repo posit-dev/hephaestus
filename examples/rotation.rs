@@ -15,6 +15,7 @@
 //!   shapes rotate around their own centroids, holes stay with their
 //!   outer ring.
 
+use hephaestus::image::PngCompression;
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, FRAC_PI_6, PI};
 use std::sync::Arc;
 
@@ -421,6 +422,7 @@ fn render_to(
         .render_to_buffer(w, h, bg, &mut pixels)
         .expect("render");
     let path = std::env::current_dir().unwrap().join(out_relative);
-    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, PngCompression::Balanced, Some(dpi))
+        .expect("write png");
     println!("wrote {}", path.display());
 }

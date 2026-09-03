@@ -3,6 +3,7 @@
 //! polygon (with hole), a multi-polygon, a line string, and a multi-point
 //! — all rendered as one geom call with one fill / stroke per row.
 
+use hephaestus::image::PngCompression;
 use std::sync::Arc;
 
 use hephaestus::backend::vello::VelloRenderer;
@@ -142,6 +143,7 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/geometry_1_mixed.png");
-    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, PngCompression::Balanced, Some(dpi))
+        .expect("write png");
     println!("wrote {}", path.display());
 }

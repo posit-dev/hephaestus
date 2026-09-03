@@ -11,6 +11,7 @@
 //! on every text geom (axis labels, legend, title, data labels), so
 //! the registered font replaces the platform default end-to-end.
 
+use hephaestus::image::PngCompression;
 use std::path::PathBuf;
 
 use hephaestus::backend::vello::VelloRenderer;
@@ -112,7 +113,8 @@ fn main() {
     let path = std::env::current_dir()
         .unwrap()
         .join("examples/font_registration.png");
-    hephaestus::image::write_png(&path, w, h, &pixels, Some(dpi)).expect("write png");
+    hephaestus::image::write_png(&path, w, h, &pixels, PngCompression::Balanced, Some(dpi))
+        .expect("write png");
     println!("[font_registration] wrote {}", path.display());
 
     // Sanity check the style flowed through.
