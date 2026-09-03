@@ -19,8 +19,8 @@
 //!
 //! Power users that want to drive the solve/draw cycle by hand can use
 //! the lower-level [`Plot`] primitives directly with an explicit
-//! [`ScaleRegistry`]. See `Plot::wire` / `Plot::draw_chrome_into` /
-//! `Plot::draw_panel_into`.
+//! [`ScaleRegistry`]. See `Plot::wire` and `Plot::draw_into`, which
+//! runs a plot's draw passes in the order the layering rules ask for.
 
 pub mod chrome;
 pub mod composition;

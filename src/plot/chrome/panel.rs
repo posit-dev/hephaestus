@@ -1,14 +1,19 @@
 //! Panel chrome — the visuals **inside** the plotting area, shared
 //! by every projection.
 //!
-//! Every projection's panel chrome has the same structure, drawn in
-//! this order so geoms paint on top:
+//! Every projection's panel chrome has the same structure:
 //!
 //! 1. **Background** fill, bounded by the panel outline.
 //! 2. **Minor grid lines**, one set per channel (x / y for Cartesian,
 //!    theta / radius for Polar) at each `scale.minor_breaks()` position.
 //! 3. **Major grid lines**, same shape at each `scale.breaks()` position.
 //! 4. **Panel outline stroke**, the boundary of the plotting area.
+//!
+//! The first three are [`draw_panel_chrome`] and always sit under the
+//! geoms. The outline is [`draw_panel_outline`], drawn in its own pass
+//! because which side of the geoms it belongs on depends on whether
+//! they are clipped — see the draw-order convention in
+//! `src/plot/CLAUDE.md`.
 //!
 //! The projection contributes the geometry — what the outline path
 //! looks like, what a "grid line" is for each channel — via the
@@ -43,10 +48,11 @@ pub(crate) struct PanelScales<'a> {
     pub channel_1: Option<&'a Scale>,
 }
 
-/// Draw the in-panel chrome: background fill, minor + major grid
-/// lines for each channel, panel outline stroke. Drawn before the
-/// geoms so they paint on top. Every visual element is sourced from
-/// `theme` — `Element::Blank` skips that piece of chrome entirely.
+/// Draw the in-panel chrome that always sits under the geoms:
+/// background fill, then minor + major grid lines for each channel.
+/// The outline is [`draw_panel_outline`]. Every visual element is
+/// sourced from `theme` — `Element::Blank` skips that piece of chrome
+/// entirely.
 pub(crate) fn draw_panel_chrome(
     scene: &mut dyn SceneBuilder,
     projection: &Projection,
@@ -146,11 +152,33 @@ pub(crate) fn draw_panel_chrome(
         }
     }
     scene.pop_layer();
+}
 
-    // Panel outline.
-    if let Some(border) = theme.panel_border.as_set() {
-        stroke_rect_element_border(scene, border, &theme.palette, &outline_path, dpi);
+/// Stroke the panel outline — the boundary of the plotting area, and
+/// the same path the geoms are clipped against when they are clipped.
+/// `theme.panel_border` set to `Element::Blank` skips it.
+pub(crate) fn draw_panel_outline(
+    scene: &mut dyn SceneBuilder,
+    projection: &Projection,
+    panel: Rect,
+    scales: PanelScales<'_>,
+    dpi: f64,
+    theme: &Theme,
+) {
+    if panel.x1 <= panel.x0 || panel.y1 <= panel.y0 {
+        return;
     }
+    let Some(border) = theme.panel_border.as_set() else {
+        return;
+    };
+    let outline_path = panel_outline_path(
+        projection,
+        panel,
+        panel_corner_radius_px(theme, dpi),
+        scales.channel_0,
+        scales.channel_1,
+    );
+    stroke_rect_element_border(scene, border, &theme.palette, &outline_path, dpi);
 }
 
 fn fill_rect_element(
