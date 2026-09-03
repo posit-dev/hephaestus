@@ -381,8 +381,8 @@ impl<'a> ScaleResolver for DirectScaleResolver<'a> {
 /// resolved value is the 24-bit id reported by
 /// [`pick_at`](crate::backend::vello::VelloRenderer::pick_at). Unset
 /// channel → `PickId::Skip` for the whole geom (no participation in
-/// no authoring id); resolved value `0` → `PickId::Block` (occlude without
-/// reporting); otherwise → `PickId::Id(value)`. The context does not
+/// no authoring id); any other resolved value → `PickId::Id(value)`, `0`
+/// included, since no id value is reserved. The context does not
 /// allocate or track ids — the user owns the namespace.
 pub struct GeomContext<'a> {
     pub panel_rect: Rect,

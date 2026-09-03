@@ -17,6 +17,7 @@ use crate::path::{FillRule, Path};
 use crate::pick::PickId;
 use crate::plot::chrome::linear_axis::AxisTick;
 use crate::plot::chrome::text::ChromeRun;
+use crate::plot::pick::{part_scope, PlotPart};
 use crate::plot::scale::ScaleRegistry;
 use crate::scales::breaks::DEFAULT_BREAK_COUNT;
 use crate::scales::chrome::LegendSide;
@@ -439,6 +440,9 @@ pub(super) fn render_colorbar_body(
     if let Some(frame_el) = frame {
         paint_rect_frame(scene, frame_el, palette, bar_rect, dpi, true, false);
     }
+    // Bar and frame are one target: hovering the ramp should not report
+    // something different depending on whether the pointer is over its edge.
+    scene.push_pick_scope(&part_scope(PlotPart::ColorbarBar));
     draw_gradient_bar(
         domain,
         spec,
@@ -454,6 +458,7 @@ pub(super) fn render_colorbar_body(
     if let Some(frame_el) = frame {
         paint_rect_frame(scene, frame_el, palette, bar_rect, dpi, false, true);
     }
+    scene.pop_pick_scope();
     let _ = samples; // sample count carried on the spec, used inside draw_gradient_bar
 
     // Axis along the bar's long edge — uses the shared linear-axis

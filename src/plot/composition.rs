@@ -575,6 +575,10 @@ impl CompositionChrome {
             ) else {
                 continue;
             };
+            scene.push_pick_scope(&crate::plot::pick::region_scope(slot));
+            scene.push_pick_scope(&crate::plot::pick::part_scope(
+                crate::plot::pick::text_slot_part(slot),
+            ));
             draw_text_element_in_rect(
                 scene,
                 text,
@@ -587,6 +591,8 @@ impl CompositionChrome {
                 Some(&theme.rich_text),
                 images,
             );
+            scene.pop_pick_scope();
+            scene.pop_pick_scope();
         }
 
         let text_defaults = text_concrete_defaults();
@@ -611,6 +617,12 @@ impl CompositionChrome {
                 .or(text_defaults.angle)
                 .expect("text_concrete_defaults sets angle");
             let style = crate::plot::chrome::text::text_style_from(&el, root_pt);
+            scene.push_pick_scope(&crate::plot::pick::region_scope(cartesian_axis_title_slot(
+                side,
+            )));
+            scene.push_pick_scope(&crate::plot::pick::part_scope(
+                crate::plot::pick::PlotPart::AxisTitle,
+            ));
             if matches!(el.markdown, Some(true)) {
                 crate::plot::chrome::text::draw_axis_title_markdown(
                     scene,
@@ -625,19 +637,22 @@ impl CompositionChrome {
                     side,
                     angle,
                 );
-                continue;
+            } else {
+                let run = TextRun::new(title, &style, dpi);
+                let outline =
+                    crate::plot::chrome::text::text_outline_from(&el, &theme.palette, dpi);
+                draw_axis_title(
+                    scene,
+                    &run,
+                    rect,
+                    side,
+                    &Brush::Solid(color.resolve(&theme.palette)),
+                    outline.as_ref(),
+                    angle,
+                );
             }
-            let run = TextRun::new(title, &style, dpi);
-            let outline = crate::plot::chrome::text::text_outline_from(&el, &theme.palette, dpi);
-            draw_axis_title(
-                scene,
-                &run,
-                rect,
-                side,
-                &Brush::Solid(color.resolve(&theme.palette)),
-                outline.as_ref(),
-                angle,
-            );
+            scene.pop_pick_scope();
+            scene.pop_pick_scope();
         }
 
         // Must collapse identically to `wire` for the measured space
@@ -649,9 +664,11 @@ impl CompositionChrome {
                 continue;
             }
             if let Some(rect) = layout.get(comp_id, slot) {
+                scene.push_pick_scope(&crate::plot::pick::region_scope(slot));
                 crate::plot::chrome::legend::render_legend_stack(
                     &group, side, rect, registry, shapes, images, scene, dpi, theme,
                 );
+                scene.pop_pick_scope();
             }
         }
     }
@@ -1723,6 +1740,130 @@ mod tests {
             "both panels sit below the title band, got panel y0 {} vs title y1 {}",
             a.y0,
             title.y1
+        );
+    }
+
+    /// A composition with axes, strips, a legend and text in every slot, so
+    /// the whole chrome vocabulary is exercised at once.
+    fn richly_dressed() -> PlotComposition {
+        use crate::plot::chrome::axis::{Axis, AxisPlacement};
+        use crate::plot::geom::PointGeom;
+        use crate::scales::chrome::AxisSide;
+
+        let mut view = PlotComposition::new(&comp_two().id("outer")).title("Figure");
+        view.insert_scale("x", scale::continuous(0.0..=1.0));
+        view.insert_scale("y", scale::continuous(0.0..=1.0));
+
+        let mut plot = crate::plot::Plot::new(&comp_two(), "a");
+        plot.set_binding("x", "x");
+        plot.set_binding("y", "y");
+        plot.add_axis(Axis::rail("x", AxisPlacement::Cartesian(AxisSide::Bottom)).title("X"));
+        plot.add_axis(Axis::rail("y", AxisPlacement::Cartesian(AxisSide::Left)).title("Y"));
+        plot.set_strip(AxisSide::Top, Some("facet".to_string()));
+        plot.set_title("Plot");
+        plot.add_geom(
+            PointGeom::builder()
+                .set("x", vec![0.2_f64, 0.8])
+                .set("y", vec![0.3_f64, 0.7])
+                .set("fill", crate::color::Color::new([1.0, 0.0, 0.0, 1.0]))
+                .set("pick_id", vec![1.0_f64, 2.0])
+                .build(),
+        );
+        view.attach_plot(plot);
+        view
+    }
+
+    #[test]
+    fn every_chrome_part_reports_a_well_formed_path() {
+        use crate::plot::pick::{PlotPart, PlotPath};
+        use std::collections::BTreeSet;
+
+        let mut view = richly_dressed();
+        let mut sc =
+            crate::pick::PickIndexScene::new(crate::scene::recording::RecordingScene::new(), true);
+        view.render(&mut sc, Size::new(800.0, 600.0), 96.0);
+
+        let hits = sc
+            .index()
+            .hits_in(crate::geometry::Rect::new(0.0, 0.0, 800.0, 600.0));
+        let mut parts: BTreeSet<&str> = BTreeSet::new();
+        for h in &hits {
+            let p = PlotPath::new(h.path);
+            // Every indexed primitive sits in a composition and a region.
+            assert!(p.composition().is_some(), "no composition frame");
+            let Some(part) = p.part() else {
+                // The only unpartitioned hits are geom marks, which carry an
+                // authoring id instead.
+                assert!(p.geom().is_some() && h.id().is_some(), "orphan hit");
+                continue;
+            };
+            assert!(p.region().is_some(), "{} has no region", part.name());
+            parts.insert(part.name());
+
+            // Anything reporting an ordinal must name the scale it indexes.
+            if p.item().is_some() && matches!(part, PlotPart::AxisTick | PlotPart::AxisTickLabel) {
+                assert!(p.scale().is_some(), "{} names no scale", part.name());
+            }
+            // Axis chrome carries the axis handle it belongs to.
+            if matches!(
+                part,
+                PlotPart::AxisLine | PlotPart::AxisTick | PlotPart::AxisTickLabel
+            ) {
+                assert!(p.axis().is_some(), "{} has no axis frame", part.name());
+            }
+        }
+
+        // `AxisLine` is absent by design: the default theme sets
+        // `axis.line = Element::Blank`, so no rail is drawn to index.
+        assert!(!parts.contains(PlotPart::AxisLine.name()));
+
+        // The vocabulary this fixture should light up.
+        for want in [
+            PlotPart::PlotBackground,
+            PlotPart::PanelBackground,
+            PlotPart::GridMajor,
+            PlotPart::AxisTick,
+            PlotPart::AxisTickLabel,
+            PlotPart::AxisTitle,
+            PlotPart::StripBackground,
+            PlotPart::StripLabel,
+            PlotPart::Title,
+        ] {
+            assert!(
+                parts.contains(want.name()),
+                "{} never appeared; got {parts:?}",
+                want.name()
+            );
+        }
+    }
+
+    #[test]
+    fn a_figure_title_has_no_owning_plot() {
+        use crate::plot::pick::{PlotPart, PlotPath};
+        let mut view = richly_dressed();
+        let mut sc =
+            crate::pick::PickIndexScene::new(crate::scene::recording::RecordingScene::new(), true);
+        view.render(&mut sc, Size::new(800.0, 600.0), 96.0);
+
+        let hits = sc
+            .index()
+            .hits_in(crate::geometry::Rect::new(0.0, 0.0, 800.0, 600.0));
+        let titles: Vec<PlotPath<'_>> = hits
+            .iter()
+            .map(|h| PlotPath::new(h.path))
+            .filter(|p| p.part() == Some(PlotPart::Title))
+            .collect();
+        assert!(!titles.is_empty(), "no title was drawn");
+
+        // Composition chrome is one frame shorter than plot chrome: the
+        // figure title belongs to the figure, not to either plot.
+        assert!(
+            titles.iter().any(|p| p.plot().is_none()),
+            "the composition title should report no plot"
+        );
+        assert!(
+            titles.iter().any(|p| p.plot() == Some(("a", 0))),
+            "the plot title should report its plot"
         );
     }
 

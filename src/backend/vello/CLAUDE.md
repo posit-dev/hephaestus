@@ -4,12 +4,12 @@ Vello backend: implements `SceneBuilder` against a `vello::Scene` and `Renderer`
 
 ## What this module does
 
-`VelloScene` (in `mod.rs`) wraps a `vello::Scene` and translates our restricted enums to peniko's wider set via `../convert.rs`. `VelloRenderer` owns the wgpu device, queue, and the cached `HeadlessTarget` (storage texture + readback buffer) needed to render headlessly. When picking is enabled (`VelloRenderer::with_picking()`), every draw call is also recorded into a parallel pick `vello::Scene`, rasterised into a second target, and read back to power `pick_at(x, y) -> Option<u32>`.
+`VelloScene` (in `mod.rs`) wraps a `vello::Scene` and translates our restricted enums to peniko's wider set via `../convert.rs`. `VelloRenderer` owns the wgpu device, queue, and the cached `HeadlessTarget` (storage texture + readback buffer) needed to render headlessly. Its `Renderer::Scene` is a `PickIndexScene<VelloScene>`, so `with_picking()` turns on a CPU hit index built as the scene is drawn rather than allocating anything in the rasteriser. `VelloScene` itself ignores `pick_id`.
 
 Two output paths share one scene:
 
-- **`Renderer::render_to_buffer`** — the headless path. Renders into the backend-owned display `HeadlessTarget`, copies it back to CPU, and writes into the caller's RGBA8 slab. Display + pick texture-→-buffer copies share a single submit.
-- **`WgpuRenderer::render_to_texture`** — the windowing path. Renders straight into a host-owned `wgpu::TextureView` (must be `Rgba8Unorm` storage; the host blits to its swap chain). The display `HeadlessTarget` is never allocated on this path. Picking, when enabled, still rasterises and reads back the pick scene through the backend-owned pick target, so `pick_at` keeps working without forcing the display through CPU.
+- **`Renderer::render_to_buffer`** — the headless path. Renders into the backend-owned display `HeadlessTarget`, copies it back to CPU, and writes into the caller's RGBA8 slab.
+- **`WgpuRenderer::render_to_texture`** — the windowing path. Renders straight into a host-owned `wgpu::TextureView` (must be `Rgba8Unorm` storage; the host blits to its swap chain). The display `HeadlessTarget` is never allocated on this path. Picking is unaffected by which path is taken, since the index is built before either.
 
 `VelloRenderer::new()` / `with_picking()` spin up a private wgpu device. `with_device(&Device, &Queue)` / `with_device_and_picking(&Device, &Queue)` share an existing host device so the rendered texture is on the same device as the host's surface.
 
@@ -21,12 +21,9 @@ Two output paths share one scene:
 - **Vello unpremultiplies on output.** Its fine shader writes straight alpha into the target texture, and our readback is a plain row-by-row memcpy, so both output paths hand out un-premultiplied RGBA8. This is vello's behavior, not ours — re-check it on every vello bump; `tests/alpha_format.rs` fails loudly if it flips.
 - **Readback honours wgpu's 256-byte row alignment** (`COPY_BYTES_PER_ROW_ALIGNMENT`). The readback buffer has padded rows; the copy-out strips padding into the caller's tight RGBA8 buffer.
 - **GPU drain pattern after `queue.submit`** — `device.poll(PollType::wait_indefinitely())` then await `map_async` via a `futures_intrusive` oneshot. Non-obvious; preserve this sequence.
-- **Pick scene composition normalises blend.** Inside `push_layer` the pick scene uses `NORMAL` blend with `alpha = 1.0` so encoded ids don't fade toward the no-hit sentinel through alpha attenuation. Display scene keeps the caller's `BlendMode` and `alpha`.
-- **Pick scene AA: `AaConfig::Area`** with `base_color` transparent — same AA the display scene uses; matches `AaSupport::area_only()` at renderer init.
-- **One submit per render.** Display and pick texture-→-buffer copies share a single command buffer / submit / poll round-trip; don't fan them out.
-- **Draw budget is a hard cap, not a soft one.** Vello sizes its `bin_data` buffer to a fixed `1 << 18` words and stores the scene's draw-info stream at its front; `RenderConfig::new` subtracts the stream length from that size, so an over-long stream underflows and panics before any GPU work is queued (and a panic raised inside winit's macOS draw callback aborts rather than unwinds). `MAX_DRAW_INFO_WORDS` mirrors the buffer size and both render entry points reject an over-budget scene — display *and* pick — with `BackendError::SceneTooLarge`. Solid brushes cost one word per fill / stroke, so ~262k flat-coloured objects; gradients and images cost more. Re-check the constant against `vello_encoding::BufferSizes::new` on every vello bump.
+- **Draw budget is a hard cap, not a soft one.** Vello sizes its `bin_data` buffer to a fixed `1 << 18` words and stores the scene's draw-info stream at its front; `RenderConfig::new` subtracts the stream length from that size, so an over-long stream underflows and panics before any GPU work is queued (and a panic raised inside winit's macOS draw callback aborts rather than unwinds). `MAX_DRAW_INFO_WORDS` mirrors the buffer size and both render entry points reject an over-budget scene with `BackendError::SceneTooLarge`. Solid brushes cost one word per fill / stroke, so ~262k flat-coloured objects; gradients and images cost more. Re-check the constant against `vello_encoding::BufferSizes::new` on every vello bump.
 - **Bump-buffer exhaustion fails silently and blanks the frame.** Flatten, path-count and coarse bump-allocate from fixed buffers — `lines` / `tile` / `seg_counts` / `segments` at `1 << 21` each, `ptcl` at `1 << 23`. When one runs out the stage sets a bit in `bump.failed`, `path_tiling_setup` writes `ptcl[0] = ~0u`, `coarse` returns early and `fine` skips every tile, leaving the target texture untouched — an all-zero image, which presents as a black window rather than partial output. `Renderer::render_to_texture` reads the bump counters back only under vello's `debug_layers` feature, so nothing surfaces this by default; to diagnose it, enable `debug_layers` + `bump_estimate` on the vello dep and call the deprecated `render_to_texture_async`, which returns the `BumpAllocators`. `seg_counts` (line-segment × tile intersections) binds first for dense mark geoms — measured ~20 per 7px circle and ~42 per 28px circle, so a 14px-diameter scatter blanks around 76k marks. It tracks mark count × mark perimeter in device pixels, so DPI moves it; overlap lands in `ptcl` instead, which has far more headroom.
-- **Minimum pick stroke width.** Hairline strokes (< `MIN_PICK_STROKE_WIDTH = 2.0` px) are widened in the pick scene so sub-pixel strokes remain hittable even when visually invisible.
+- **This backend's picking used to be the wrong one.** It cannot disable antialiasing, so an id buffer's edge pixels were a coverage blend of the two marks either side — two overlapping circles yielded 28 ids that were never drawn. The failure went away along with the pick pass itself: the index tests geometry, so every id it reports is one that was drawn.
 
 ## Dependency version quirks
 
@@ -40,5 +37,5 @@ Linebender / wgpu move fast and broke surface between recent versions. Notes for
 
 ## Files
 
-- `mod.rs` — `VelloScene`, `VelloRenderer`, `HeadlessTarget`, the pick scene rasterisation path.
+- `mod.rs` — `VelloScene`, `VelloRenderer`, `HeadlessTarget`.
 - `../convert.rs` — the enum-mapping layer: `FillRule`, `BlendMode`, `Compose`, `Mix`, `Sampling` → peniko's native types.

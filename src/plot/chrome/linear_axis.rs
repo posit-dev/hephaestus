@@ -22,6 +22,7 @@ use crate::path::Path;
 use crate::pick::PickId;
 use crate::plot::chrome::text::{ChromeRun, RichChrome};
 use crate::plot::geom::resolve::build_stroke_for_pattern;
+use crate::plot::pick::{item_scope, part_scope, PlotPart};
 use crate::plot::theme::{LineElement, RectElement, ResolvedAxis, Theme};
 use crate::scene::SceneBuilder;
 use crate::stroke::{Cap, Join, Stroke};
@@ -243,6 +244,13 @@ impl AxisChromeStyle {
 ///
 /// `minors` carries `(break_index, frac)` per minor tick, indexed against
 /// the scale's minor-break list the same way [`AxisTick::break_index`] is.
+///
+/// Pushes a pick scope per piece — line, tick, label — so a hit names which
+/// part of the rail it landed on. Every caller gets that: the cartesian axis,
+/// the polar radius axis, and both colorbar rails all come through here. The
+/// parts are the `Axis*` ones whatever the caller, because it is literally
+/// the same rail; the frame *enclosing* this call is what says whether it
+/// belongs to an axis or a legend.
 /// One major tick on an axis rail.
 ///
 /// `break_index` addresses the scale's own break list, **not** the position
@@ -313,12 +321,18 @@ pub(crate) fn draw_linear_axis_at(
 
     // Baseline.
     if let Some(brush) = &style.line_brush {
+        scene.push_pick_scope(&part_scope(PlotPart::AxisLine));
         stroke_line(scene, &style.line_stroke, brush, start, end);
+        scene.pop_pick_scope();
     }
 
     // Minor ticks first so a major drawn at the same frac wins.
     if let Some(brush) = &style.minor_brush {
-        for &(_break_index, frac) in minors {
+        // The part frame is hoisted out of the loop: every minor tick is the
+        // same part, and one group per tick would nest the SVG output two
+        // deep for nothing.
+        scene.push_pick_scope(&part_scope(PlotPart::AxisMinorTick));
+        for &(break_index, frac) in minors {
             if !frac.is_finite() || !(0.0..=1.0).contains(&frac) {
                 continue;
             }
@@ -327,8 +341,11 @@ pub(crate) fn draw_linear_axis_at(
                 pos.x + style.minor_tick_length_px * tx,
                 pos.y + style.minor_tick_length_px * ty,
             );
+            scene.push_pick_scope(&item_scope(break_index as u32));
             stroke_line(scene, &style.minor_stroke, brush, pos, tick_end);
+            scene.pop_pick_scope();
         }
+        scene.pop_pick_scope();
     }
 
     // Major ticks + labels.
@@ -342,8 +359,13 @@ pub(crate) fn draw_linear_axis_at(
             pos.x + style.tick_length_px * tx,
             pos.y + style.tick_length_px * ty,
         );
+        let item = item_scope(tick.break_index as u32);
         if let Some(tick_brush) = &style.tick_brush {
+            scene.push_pick_scope(&part_scope(PlotPart::AxisTick));
+            scene.push_pick_scope(&item);
             stroke_line(scene, &style.tick_stroke, tick_brush, pos, tick_end);
+            scene.pop_pick_scope();
+            scene.pop_pick_scope();
         }
 
         if style.draw_labels {
@@ -365,6 +387,8 @@ pub(crate) fn draw_linear_axis_at(
                 outward_tick_end.x + style.gap_px * outward_tx,
                 outward_tick_end.y + style.gap_px * outward_ty,
             );
+            scene.push_pick_scope(&part_scope(PlotPart::AxisTickLabel));
+            scene.push_pick_scope(&item);
             draw_axis_label(
                 scene,
                 label,
@@ -378,6 +402,8 @@ pub(crate) fn draw_linear_axis_at(
                 },
                 dpi,
             );
+            scene.pop_pick_scope();
+            scene.pop_pick_scope();
         }
     }
 }

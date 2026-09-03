@@ -111,7 +111,9 @@ impl WebGlHost {
     /// Always `None` unless [`WindowConfig::picking`] was enabled. Answers
     /// from a CPU-side index, so calling it per pointer event is cheap.
     pub fn pick_at(&self, x: f64, y: f64) -> Option<u32> {
-        self.renderer.pick_at(crate::geometry::Point::new(x, y))
+        self.renderer
+            .pick_index()?
+            .pick_at(crate::geometry::Point::new(x, y))
     }
 
     /// The hit index for the last drawn frame, for hits carrying their scope

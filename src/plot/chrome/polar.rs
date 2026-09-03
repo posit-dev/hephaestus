@@ -18,6 +18,7 @@ use crate::plot::chrome::linear_axis::{
     AxisLabelAt,
 };
 use crate::plot::chrome::text::ChromeRun;
+use crate::plot::pick::{item_scope, part_scope, PlotPart};
 use crate::plot::projection::PolarProjection;
 use crate::plot::scale::Scale;
 use crate::plot::theme::{HAlign, Theme};
@@ -172,7 +173,13 @@ pub fn draw_angular_axis(
     let style = chrome_style.text_style.clone();
 
     // Minor ticks first so majors paint on top if they coincide.
-    for v in scale.minor_breaks(DEFAULT_BREAK_COUNT) {
+    // `enumerate` before the guards, so the ordinal addresses the scale's own
+    // break list — see the note in `chrome::axis::draw`.
+    for (break_index, v) in scale
+        .minor_breaks(DEFAULT_BREAK_COUNT)
+        .into_iter()
+        .enumerate()
+    {
         if matches!(v, Value::Null) {
             continue;
         }
@@ -194,6 +201,8 @@ pub fn draw_angular_axis(
             on_ring.y + minor_tick_px * ry,
         );
         if let Some(minor_brush) = chrome_style.minor_brush.as_ref() {
+            scene.push_pick_scope(&part_scope(PlotPart::AxisMinorTick));
+            scene.push_pick_scope(&item_scope(break_index as u32));
             scene.stroke(
                 &chrome_style.minor_stroke,
                 Affine::IDENTITY,
@@ -202,10 +211,12 @@ pub fn draw_angular_axis(
                 &segment(on_ring, tick_end),
                 PickId::Skip,
             );
+            scene.pop_pick_scope();
+            scene.pop_pick_scope();
         }
     }
 
-    for v in &scale.breaks(DEFAULT_BREAK_COUNT) {
+    for (break_index, v) in scale.breaks(DEFAULT_BREAK_COUNT).iter().enumerate() {
         if matches!(v, Value::Null) {
             continue;
         }
@@ -223,9 +234,12 @@ pub fn draw_angular_axis(
         let on_ring = PolarProjection::polar_point(Point::new(g.cx, g.cy), ring_r, theta);
         let (rx, ry) = (tick_sign * theta.cos(), -tick_sign * theta.sin());
         let tick_end = Point::new(on_ring.x + tick_px * rx, on_ring.y + tick_px * ry);
+        let item = item_scope(break_index as u32);
         if let (Some(tick_brush), tick_stroke) =
             (chrome_style.tick_brush.as_ref(), &chrome_style.tick_stroke)
         {
+            scene.push_pick_scope(&part_scope(PlotPart::AxisTick));
+            scene.push_pick_scope(&item);
             scene.stroke(
                 tick_stroke,
                 Affine::IDENTITY,
@@ -234,12 +248,16 @@ pub fn draw_angular_axis(
                 &segment(on_ring, tick_end),
                 PickId::Skip,
             );
+            scene.pop_pick_scope();
+            scene.pop_pick_scope();
         }
         let anchor = Point::new(
             tick_end.x + label_gap_px * rx,
             tick_end.y + label_gap_px * ry,
         );
         let text = scale.format(v, &theme.locale);
+        scene.push_pick_scope(&part_scope(PlotPart::AxisTickLabel));
+        scene.push_pick_scope(&item);
         draw_axis_label(
             scene,
             &text,
@@ -253,6 +271,8 @@ pub fn draw_angular_axis(
             },
             dpi,
         );
+        scene.pop_pick_scope();
+        scene.pop_pick_scope();
     }
 
     if let Some(title_text) = title {

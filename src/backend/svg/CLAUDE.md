@@ -103,7 +103,23 @@ Two things `document/images.rs` gets wrong that this does not, and which are wor
 
 Off by default — file export is the common case and the attributes are pure weight there. When on, `PickId::Id(n)` becomes `data-pick-id="n"`, `Block` becomes `"0"`, and **`Skip` becomes `pointer-events="none"`**. That last row is what makes the feature correct rather than decorative: it reproduces "items beneath remain hittable through this primitive" under `elementFromPoint`, without which a `Skip` gridline over a mark swallows the hit.
 
-Ids are emitted unmasked. `pick.rs` documents 24-bit truncation, but that is an artifact of packing into a texture's RGB channels, and reproducing a texture encoding's limits in a text format would be cargo-culting.
+Pick **scopes** ride the same flag, as `<g data-pick-kind="…">` with
+`data-pick-name` and `data-pick-index` when the scope carries them. They are
+the same feature from a consumer's side, and they are the larger part of what
+makes the output *editable*: a designer opening the file selects "the bottom
+axis" or "this tick label" as a group, rather than a flat soup of paths. A
+real plot emits `region → axis → part → item` nesting straight out of
+`plot/chrome/`.
+
+**The two group stacks must stay tagged apart.** `push_layer` and
+`push_pick_scope` both emit `<g>`, but they are independent stacks — a scope
+can open inside a layer and close outside it. `SvgScene` tracks
+`Vec<GroupKind>` rather than a depth counter, and a pop whose kind does not
+match the innermost group is refused and noted as `SvgWarning::UnbalancedScopes`
+instead of emitting `</g>` against the wrong element. Sharing one counter
+produces malformed XML, which
+`tests/svg.rs::interleaved_layers_and_scopes_do_not_produce_malformed_xml`
+would catch.
 
 ## Files
 

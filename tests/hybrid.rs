@@ -10,6 +10,12 @@ use hephaestus::geometry::Point;
 use hephaestus::{Affine, Brush, FillRule, PickId, Rect, Renderer, SceneBuilder};
 use kurbo::Shape;
 
+/// The topmost id at a point. Renderers expose the index rather than
+/// forwarding every query, so a test asks it the same way a host would.
+fn pick(r: &HybridRenderer, p: Point) -> Option<u32> {
+    r.pick_index()?.pick_at(p)
+}
+
 const W: u32 = 100;
 const H: u32 = 100;
 
@@ -185,7 +191,7 @@ fn a_mesh_triangle_rasterises() {
 
     assert_eq!(px(&out, 50, 40)[1], 200, "mesh interior");
     assert_eq!(
-        r.pick_at(Point::new(50.0, 40.0)),
+        pick(&r, Point::new(50.0, 40.0)),
         Some(5),
         "mesh carries its pick id"
     );
@@ -229,7 +235,7 @@ fn an_image_is_uploaded_and_sampled() {
     assert_eq!(px(&out, 75, 25), [0, 255, 0, 255], "top-right");
     assert_eq!(px(&out, 25, 75), [0, 0, 255, 255], "bottom-left");
     assert_eq!(
-        r.pick_at(Point::new(50.0, 50.0)),
+        pick(&r, Point::new(50.0, 50.0)),
         Some(9),
         "image carries its pick id"
     );
@@ -454,8 +460,8 @@ fn picking_survives_the_texture_path() {
     r.render_to_texture(&view, W, H, rgb8(0, 0, 0))
         .expect("texture render");
 
-    assert_eq!(r.pick_at(Point::new(50.0, 50.0)), Some(77));
-    assert_eq!(r.pick_at(Point::new(5.0, 5.0)), None);
+    assert_eq!(pick(&r, Point::new(50.0, 50.0)), Some(77));
+    assert_eq!(pick(&r, Point::new(5.0, 5.0)), None);
 }
 
 /// An isolated wgpu device, standing in for the one a window's swap chain
@@ -695,7 +701,7 @@ fn picking_does_not_change_the_buffered_display() {
     );
     // And the hitmap is still populated, so the split did not cost the pick.
     assert_eq!(
-        r.pick_at(Point::new(44.0, 52.0)),
+        pick(&r, Point::new(44.0, 52.0)),
         Some(2),
         "circle should be hittable"
     );
@@ -1093,12 +1099,12 @@ fn picking_survives_a_bgra_target() {
                 .expect("render");
         }
         assert_eq!(
-            r.pick_at(Point::new(50.0, 50.0)),
+            pick(&r, Point::new(50.0, 50.0)),
             Some(id),
             "id came back wrong on a {format:?} target"
         );
         assert_eq!(
-            r.pick_at(Point::new(5.0, 5.0)),
+            pick(&r, Point::new(5.0, 5.0)),
             None,
             "empty space on {format:?}"
         );
@@ -1118,7 +1124,7 @@ fn a_redraw_replaces_the_previous_index() {
     fill(r.scene(), square, [255, 0, 0], PickId::Id(11));
     r.render_to_buffer(W, H, rgb8(0, 0, 0), &mut out)
         .expect("render");
-    assert_eq!(r.pick_at(Point::new(50.0, 50.0)), Some(11));
+    assert_eq!(pick(&r, Point::new(50.0, 50.0)), Some(11));
 
     r.scene().clear();
     fill(r.scene(), square, [0, 255, 0], PickId::Id(22));
@@ -1126,7 +1132,7 @@ fn a_redraw_replaces_the_previous_index() {
         .expect("render");
     assert_eq!(px(&out, 50, 50), [0, 255, 0, 255], "display updated");
     assert_eq!(
-        r.pick_at(Point::new(50.0, 50.0)),
+        pick(&r, Point::new(50.0, 50.0)),
         Some(22),
         "and so did the index"
     );
@@ -1145,9 +1151,9 @@ fn a_renderer_without_picking_holds_no_index() {
     );
     r.render_to_buffer(W, H, rgb8(0, 0, 0), &mut out)
         .expect("render");
-    assert!(!r.picks());
     assert!(r.pick_index().is_none());
-    assert_eq!(r.pick_at(Point::new(50.0, 50.0)), None);
+    assert!(r.pick_index().is_none());
+    assert_eq!(pick(&r, Point::new(50.0, 50.0)), None);
 }
 
 // ─── Color glyphs ───────────────────────────────────────────────────────────
@@ -1283,7 +1289,7 @@ fn a_bitmap_color_glyph_picks_as_one_id() {
     let mut ids: Vec<u32> = Vec::new();
     for y in 0..H {
         for x in 0..W {
-            if let Some(id) = r.pick_at(Point::new(f64::from(x), f64::from(y))) {
+            if let Some(id) = pick(&r, Point::new(f64::from(x), f64::from(y))) {
                 if !ids.contains(&id) {
                     ids.push(id);
                 }

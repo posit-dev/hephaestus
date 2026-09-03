@@ -16,7 +16,7 @@ use crate::geometry::Affine;
 use crate::mesh::Mesh;
 
 use crate::path::{FillRule, Path};
-use crate::pick::{Hit, PickId, PickIndexScene};
+use crate::pick::{PickId, PickIndexScene};
 use crate::scene::{GlyphRun, SceneBuilder};
 use crate::stroke::Stroke;
 
@@ -253,7 +253,7 @@ impl HeadlessTarget {
 /// scene being built, and per-size headless targets.
 ///
 /// Hit testing is a property of the scene, not of this renderer: the scene is
-/// a [`PickIndexScene`](crate::pick::PickIndexScene), and
+/// a [`crate::pick::PickIndexScene`], and
 /// [`Self::with_picking`] is what turns its indexing on.
 pub struct VelloRenderer {
     device: wgpu::Device,
@@ -380,42 +380,15 @@ impl VelloRenderer {
         check_draw_budget(self.scene.inner().raw())
     }
 
-    /// Every hit at `p`, topmost first. Answers from the index the scene
-    /// built while it was drawn, so it needs no GPU round-trip and no
-    /// readback — see [`PickIndex::hits_at`](crate::pick::PickIndex::hits_at).
-    pub fn hits_at(&self, p: crate::geometry::Point) -> Vec<Hit<'_>> {
-        self.scene.hits_at(p)
-    }
-
-    /// The topmost authoring id at `p`, or `None` over empty space, an
-    /// occluder, or when this renderer was not built with picking.
-    pub fn pick_at(&self, p: crate::geometry::Point) -> Option<u32> {
-        self.scene.pick_at(p)
-    }
-
-    /// Every hit whose bounds intersect `rect` — rubber-band brushing.
-    pub fn hits_in(&self, rect: crate::geometry::Rect) -> Vec<Hit<'_>> {
-        self.scene.hits_in(rect)
-    }
-
-    /// Every hit entirely inside `rect` — a selection marquee.
-    pub fn hits_within(&self, rect: crate::geometry::Rect) -> Vec<Hit<'_>> {
-        self.scene.hits_within(rect)
-    }
-
-    /// Lasso selection.
-    pub fn hits_in_path(&self, path: &Path, rule: FillRule) -> Vec<Hit<'_>> {
-        self.scene.hits_in_path(path, rule)
-    }
-
-    /// The hit index the scene built. `None` when picking is off.
+    /// The hit index the scene built while it was drawn, or `None` when this
+    /// renderer was not built with picking.
+    ///
+    /// The only pick method here, deliberately: a renderer's part in hit
+    /// testing is owning the scene that recorded the index, so every query
+    /// lives on [`PickIndex`](crate::pick::PickIndex) rather than being
+    /// forwarded through two more layers of the same names.
     pub fn pick_index(&self) -> Option<&crate::pick::PickIndex> {
         self.scene.indexes().then(|| self.scene.index())
-    }
-
-    /// Whether this renderer's scene records a hit index.
-    pub fn picks(&self) -> bool {
-        self.scene.indexes()
     }
 }
 

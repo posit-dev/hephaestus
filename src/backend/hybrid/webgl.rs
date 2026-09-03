@@ -31,8 +31,7 @@ use super::{dimension, image_key, recorded_images, HybridScene, Writer};
 use crate::backend::BackendError;
 use crate::color::Color;
 use crate::geometry::Affine;
-use crate::path::{FillRule, Path};
-use crate::pick::{Hit, PickIndexScene};
+use crate::pick::PickIndexScene;
 
 /// Hephaestus WebGL2 renderer: owns the canvas's GL context, the recorded
 /// scene, and the sparse-strip scenes it replays into.
@@ -98,39 +97,15 @@ impl HybridWebGlRenderer {
         (self.width, self.height)
     }
 
-    /// Every hit at `p`, topmost first.
-    pub fn hits_at(&self, p: crate::geometry::Point) -> Vec<Hit<'_>> {
-        self.scene.hits_at(p)
-    }
-
-    /// The topmost authoring id at `p`.
-    pub fn pick_at(&self, p: crate::geometry::Point) -> Option<u32> {
-        self.scene.pick_at(p)
-    }
-
-    /// Every hit whose bounds intersect `rect` — rubber-band brushing.
-    pub fn hits_in(&self, rect: crate::geometry::Rect) -> Vec<Hit<'_>> {
-        self.scene.hits_in(rect)
-    }
-
-    /// Every hit entirely inside `rect` — a selection marquee.
-    pub fn hits_within(&self, rect: crate::geometry::Rect) -> Vec<Hit<'_>> {
-        self.scene.hits_within(rect)
-    }
-
-    /// Lasso selection.
-    pub fn hits_in_path(&self, path: &Path, rule: FillRule) -> Vec<Hit<'_>> {
-        self.scene.hits_in_path(path, rule)
-    }
-
-    /// The hit index the scene built. `None` when picking is off.
+    /// The hit index the scene built while it was drawn, or `None` when this
+    /// renderer was not built with picking.
+    ///
+    /// The only pick method here, deliberately: a renderer's part in hit
+    /// testing is owning the scene that recorded the index, so every query
+    /// lives on [`PickIndex`](crate::pick::PickIndex) rather than being
+    /// forwarded through two more layers of the same names.
     pub fn pick_index(&self) -> Option<&crate::pick::PickIndex> {
         self.scene.indexes().then(|| self.scene.index())
-    }
-
-    /// Whether this renderer's scene records a hit index.
-    pub fn picks(&self) -> bool {
-        self.scene.indexes()
     }
 
     /// Draw the recorded scene onto the canvas.

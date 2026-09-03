@@ -52,12 +52,6 @@ impl<S: SceneBuilder> PickIndexScene<S> {
         self.enabled
     }
 
-    /// Turn indexing on or off. Takes effect from the next [`Self::clear`];
-    /// the index keeps answering from what it already holds until then.
-    pub fn set_indexing(&mut self, enabled: bool) {
-        self.enabled = enabled;
-    }
-
     /// Borrow the wrapped scene.
     pub fn inner(&self) -> &S {
         &self.inner

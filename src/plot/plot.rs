@@ -1694,6 +1694,16 @@ impl Plot {
         let resolve_scale =
             |name: &str| -> Option<&Scale> { overlay.get(name).or_else(|| registry.get(name)) };
         for axis in &self.axes {
+            // Region and axis frames wrap every axis whatever its placement.
+            // A cartesian axis sits in its anatomical slot; a polar one is
+            // drawn inside the panel, so it is the `axis` frame rather than
+            // the region that tells the two apart.
+            let region = match axis.placement() {
+                AxisPlacement::Cartesian(side) => cartesian_axis_slot(side),
+                _ => Slot::Panel,
+            };
+            scene.push_pick_scope(&crate::plot::pick::region_scope(region));
+            scene.push_pick_scope(&crate::plot::pick::axis_scope(axis.id(), axis.scale_name()));
             match axis.placement() {
                 AxisPlacement::Cartesian(side) => {
                     if let Some(scale_name) = axis.scale_name() {
@@ -1762,6 +1772,8 @@ impl Plot {
                     }
                 }
             }
+            scene.pop_pick_scope();
+            scene.pop_pick_scope();
         }
     }
 
@@ -1780,7 +1792,9 @@ impl Plot {
             let Some(rect) = layout.get(&self.patch_id, strip_slot(side)) else {
                 continue;
             };
+            scene.push_pick_scope(&crate::plot::pick::region_scope(strip_slot(side)));
             draw_strip(scene, text, rect, side, theme, dpi, &self.images);
+            scene.pop_pick_scope();
         }
     }
 
@@ -1861,6 +1875,7 @@ impl Plot {
                 continue;
             }
             if let Some(rect) = layout.get(&self.patch_id, slot) {
+                scene.push_pick_scope(&crate::plot::pick::region_scope(slot));
                 crate::plot::chrome::legend::render_legend_stack(
                     &group,
                     side,
@@ -1872,6 +1887,7 @@ impl Plot {
                     dpi,
                     theme,
                 );
+                scene.pop_pick_scope();
             }
         }
 
@@ -1897,6 +1913,9 @@ impl Plot {
                 }
                 let slot_rect =
                     crate::plot::chrome::legend::resolve_anchor(panel, anchor, inset_px, (w, h));
+                // An in-panel legend reserves no chrome band, so its region
+                // is the panel it overlays rather than a legend slot.
+                scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Panel));
                 crate::plot::chrome::legend::render_legend_stack(
                     &group,
                     crate::scales::chrome::LegendSide::Right,
@@ -1908,6 +1927,7 @@ impl Plot {
                     dpi,
                     theme,
                 );
+                scene.pop_pick_scope();
             }
         }
 
@@ -1931,6 +1951,10 @@ impl Plot {
             ) else {
                 continue;
             };
+            scene.push_pick_scope(&crate::plot::pick::region_scope(slot));
+            scene.push_pick_scope(&crate::plot::pick::part_scope(
+                crate::plot::pick::text_slot_part(slot),
+            ));
             draw_text_element_in_rect(
                 scene,
                 text,
@@ -1943,6 +1967,8 @@ impl Plot {
                 Some(&theme.rich_text),
                 &self.images,
             );
+            scene.pop_pick_scope();
+            scene.pop_pick_scope();
         }
 
         // Axis title slots — sourced from `Axis::title` on each
@@ -1985,6 +2011,14 @@ impl Plot {
                 TitleLocation::Outside => {
                     let slot = cartesian_axis_title_slot(side);
                     if let Some(rect) = layout.get(&self.patch_id, slot) {
+                        scene.push_pick_scope(&crate::plot::pick::region_scope(slot));
+                        scene.push_pick_scope(&crate::plot::pick::axis_scope(
+                            axis.id(),
+                            axis.scale_name(),
+                        ));
+                        scene.push_pick_scope(&crate::plot::pick::part_scope(
+                            crate::plot::pick::PlotPart::AxisTitle,
+                        ));
                         if markdown {
                             let fill_col = color.resolve(&theme.palette);
                             draw_axis_title_markdown(
@@ -2011,12 +2045,25 @@ impl Plot {
                                 angle,
                             );
                         }
+                        scene.pop_pick_scope();
+                        scene.pop_pick_scope();
+                        scene.pop_pick_scope();
                     }
                 }
                 TitleLocation::Inside => {
                     let Some(panel) = layout.get(&self.patch_id, Slot::Panel) else {
                         continue;
                     };
+                    // An inside title reserves no chrome band, so its region
+                    // is the panel it sits against rather than a title slot.
+                    scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Panel));
+                    scene.push_pick_scope(&crate::plot::pick::axis_scope(
+                        axis.id(),
+                        axis.scale_name(),
+                    ));
+                    scene.push_pick_scope(&crate::plot::pick::part_scope(
+                        crate::plot::pick::PlotPart::AxisTitle,
+                    ));
                     // Resolve the angle so the strip dims and the
                     // draw helper see a concrete rotation.
                     let baseline_deg: f32 = match side {
@@ -2095,6 +2142,9 @@ impl Plot {
                         Some(&theme.rich_text),
                         &self.images,
                     );
+                    scene.pop_pick_scope();
+                    scene.pop_pick_scope();
+                    scene.pop_pick_scope();
                 }
             }
         }

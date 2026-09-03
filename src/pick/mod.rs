@@ -7,8 +7,8 @@
 //! rectangle and lasso queries afterwards — on the CPU, with no second
 //! rasterisation and nothing read back from a GPU.
 //!
-//! Ids are caller-managed and span the full `u32` range; `0` is reserved as
-//! the no-hit sentinel, which is what [`PickId::Block`] encodes.
+//! Ids are caller-managed and span the full `u32` range with nothing reserved.
+//! Occlusion is [`PickId::Block`], a variant rather than a sentinel value.
 //!
 //! # Beyond ids: scopes
 //!
@@ -61,19 +61,12 @@ pub enum PickId {
     /// hide what is under it without being interactive itself. Region queries
     /// are unaffected: a marquee is a spatial query, not a ray.
     Block,
-    /// Carry the given id. `Id(0)` is treated identically to [`Self::Block`],
-    /// `0` being the no-hit sentinel; every other `u32` is reported as given.
+    /// Carry the given id — any `u32`, `0` included.
+    ///
+    /// There is no reserved value: occlusion is [`Self::Block`], a variant of
+    /// its own, rather than a magic number. `0` was special only while ids
+    /// were packed into a texture, where an uncovered pixel decoded to it.
     Id(u32),
-}
-
-/// Resolve a [`PickId`] to the raw id it reports, or `None` if the call
-/// should not be indexed at all.
-pub fn raw_id(pick: PickId) -> Option<u32> {
-    match pick {
-        PickId::Skip => None,
-        PickId::Block => Some(0),
-        PickId::Id(n) => Some(n),
-    }
 }
 
 #[cfg(test)]
@@ -81,26 +74,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn raw_id_omits_skip_and_maps_block_to_zero() {
-        assert_eq!(raw_id(PickId::Skip), None);
-        assert_eq!(raw_id(PickId::Block), Some(0));
-        assert_eq!(raw_id(PickId::Id(7)), Some(7));
-        // `Id(0)` and `Block` are the same request: occlude, report nothing.
-        assert_eq!(raw_id(PickId::Id(0)), raw_id(PickId::Block));
-    }
-
-    #[test]
-    fn ids_span_the_whole_u32_range() {
-        // Nothing packs an id into colour channels any more, so there is no
-        // width to truncate to.
-        assert_eq!(raw_id(PickId::Id(0x0100_0001)), Some(0x0100_0001));
-        assert_eq!(raw_id(PickId::Id(u32::MAX)), Some(u32::MAX));
-        assert_eq!(raw_id(PickId::Id(0x0100_0000)), Some(0x0100_0000));
+    fn no_id_value_is_reserved() {
+        // Nothing packs an id into colour channels any more: there is no
+        // width to truncate to and no sentinel to avoid.
+        for n in [0, 1, 0x0100_0000, 0x0100_0001, u32::MAX] {
+            assert_eq!(PickId::Id(n), PickId::Id(n));
+        }
+        // Occlusion is its own variant, not a value of `Id`.
+        assert_ne!(PickId::Id(0), PickId::Block);
     }
 
     #[test]
     fn default_pick_id_carries_no_id() {
         assert_eq!(PickId::default(), PickId::Skip);
-        assert_eq!(raw_id(PickId::default()), None);
     }
 }

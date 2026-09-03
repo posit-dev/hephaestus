@@ -62,10 +62,11 @@ pub struct Hit<'a> {
 }
 
 impl Hit<'_> {
-    /// The authoring id, if this hit carries one.
+    /// The authoring id, if this hit carries one. `None` for chrome, which
+    /// is a target by virtue of its scope, and for an occluder.
     pub fn id(&self) -> Option<u32> {
         match self.pick_id {
-            PickId::Id(n) if n != 0 => Some(n),
+            PickId::Id(n) => Some(n),
             _ => None,
         }
     }

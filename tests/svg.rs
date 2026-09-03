@@ -13,7 +13,7 @@ use hephaestus::brush::{Brush, Gradient};
 use hephaestus::color::Color;
 use hephaestus::geometry::{Affine, Point, Rect, Shape, Size};
 use hephaestus::path::{FillRule, Path};
-use hephaestus::pick::PickId;
+use hephaestus::pick::{PickId, PickScope};
 use hephaestus::scene::SceneBuilder;
 use hephaestus::stroke::Stroke;
 use hephaestus::style_vocab::{FontFeatureSetting, FontVariationSetting, HAlign, Palette};
@@ -780,6 +780,95 @@ fn warnings_are_reported_once_however_often_they_recur() {
 }
 
 // ─── Picking ────────────────────────────────────────────────────────────────
+
+#[test]
+fn pick_scopes_become_groups_when_picking_is_on() {
+    let draw = |s: &mut SvgScene| {
+        s.push_pick_scope(&PickScope::group("plot").with_name("a").with_index(0));
+        s.push_pick_scope(&PickScope::target("part").with_name("axis_tick_label"));
+        s.push_pick_scope(&PickScope::target("item").with_index(3));
+        s.fill(
+            FillRule::NonZero,
+            Affine::IDENTITY,
+            &black(),
+            None,
+            &rect_path(Rect::new(10.0, 10.0, 90.0, 60.0)),
+            PickId::Skip,
+        );
+        s.pop_pick_scope();
+        s.pop_pick_scope();
+        s.pop_pick_scope();
+    };
+
+    // Gated on the same flag as `data-pick-id`: they are one feature from a
+    // consumer's side.
+    let mut off = scene();
+    draw(&mut off);
+    let svg = encode_svg(&off);
+    assert!(!svg.contains("data-pick-kind"), "{svg}");
+
+    let mut on = SvgScene::with_config(Size::new(W, H), 96.0, SvgConfig::new().pick_ids(true));
+    draw(&mut on);
+    let svg = encode_svg(&on);
+    assert!(
+        svg.contains(r#"<g data-pick-kind="plot" data-pick-name="a" data-pick-index="0">"#),
+        "{svg}"
+    );
+    assert!(
+        svg.contains(r#"<g data-pick-kind="part" data-pick-name="axis_tick_label">"#),
+        "{svg}"
+    );
+    assert!(
+        svg.contains(r#"<g data-pick-kind="item" data-pick-index="3">"#),
+        "{svg}"
+    );
+    // Balanced: as many closers as openers, and the document is well formed.
+    assert_eq!(
+        svg.matches("<g ").count(),
+        svg.matches("</g>").count(),
+        "{svg}"
+    );
+}
+
+/// Layers and scopes are independent stacks, so an author can interleave
+/// them. Sharing one counter would emit `</g>` against the wrong element.
+#[test]
+fn interleaved_layers_and_scopes_do_not_produce_malformed_xml() {
+    let mut s = SvgScene::with_config(Size::new(W, H), 96.0, SvgConfig::new().pick_ids(true));
+    s.push_layer(
+        Default::default(),
+        1.0,
+        Affine::IDENTITY,
+        &rect_path(Rect::new(0.0, 0.0, 100.0, 100.0)),
+    );
+    s.push_pick_scope(&PickScope::target("part").with_name("grid_major"));
+    s.fill(
+        FillRule::NonZero,
+        Affine::IDENTITY,
+        &black(),
+        None,
+        &rect_path(Rect::new(10.0, 10.0, 20.0, 20.0)),
+        PickId::Skip,
+    );
+    // Closed out of order on purpose.
+    s.pop_layer();
+    s.pop_pick_scope();
+
+    let warnings: Vec<SvgWarning> = s.warnings().to_vec();
+    let svg = encode_svg(&s);
+    // The mismatched pop is refused and reported rather than corrupting the
+    // tree; the writer closes whatever is still open at the end.
+    assert!(
+        warnings.contains(&SvgWarning::UnbalancedLayers)
+            || warnings.contains(&SvgWarning::UnbalancedScopes),
+        "expected an unbalanced-group warning, got {warnings:?}"
+    );
+    assert_eq!(
+        svg.matches("<g").count(),
+        svg.matches("</g>").count(),
+        "tags must still balance: {svg}"
+    );
+}
 
 #[test]
 fn picking_attributes_are_off_by_default_and_complete_when_on() {

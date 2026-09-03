@@ -16,7 +16,7 @@ The two levels are layered, not parallel. The low-level surface must remain inde
 `SceneBuilder` (in `scene/`) and `Renderer` (in `backend/`) are split intentionally:
 
 - `SceneBuilder` is the authoring surface. Pure CPU, infallible, no persistent "current transform / current brush" state.
-- `Renderer` owns backend resources (GPU device, pipelines, readback buffer) and rasterises a built scene. Fallible, resource-owning.
+- `Renderer` owns backend resources (GPU device, pipelines, readback buffer) and rasterises a built scene. Fallible, resource-owning. Its `Scene` is a `PickIndexScene`, so hit testing rides on the scene rather than on the backend.
 
 This split lets recording and vector backends (SVG, PDF) implement `SceneBuilder` without satisfying GPU concerns, and mirrors Vello's own `Scene` / `Renderer` split so wrapping is zero-cost.
 
@@ -47,24 +47,62 @@ When tempted to add a feature only one backend supports: don't. If it's genuinel
 
 ## Picking model
 
-Picking is **opt-in per renderer**, not a CPU-side post-pass. `VelloRenderer::with_picking()` enables it; `VelloRenderer::new()` allocates nothing in the pick path. When enabled, the renderer rasterises a parallel "pick scene" into a second `HeadlessTarget`, reads it back to CPU once per render, and answers point queries via `pick_at(x, y) -> Option<u32>`.
+Picking is a **CPU-side spatial index built while a scene is drawn**, not a second rasterisation. `PickIndexScene<S>` wraps any `SceneBuilder`, forwards every call unchanged, and records each primitive's geometry as it goes past. Nothing is read back from a GPU, and the answer always describes the frame on screen rather than lagging it.
 
-Every drawing primitive on `SceneBuilder` (`fill`, `stroke`, `draw_image`, `draw_glyphs`, `draw_mesh`) carries a `PickId`. `push_layer` / `pop_layer` do **not** take a `PickId`. Authoring code picks one of three:
+It is a property of the **scene**, not of a backend: every renderer's `Renderer::Scene` is a `PickIndexScene`, so a vector backend or a build with no renderer at all hit-tests the same way a GPU one does. `with_picking()` turns indexing on; `new()` leaves it off, because filling the index costs CPU per draw call whether or not anything is queried.
 
-- `PickId::Skip` — don't record into the hitmap. Items beneath remain hittable through this primitive. Default for decorative chrome (gridlines, axis ticks, background fills).
-- `PickId::Block` — record with id 0. Occludes whatever is beneath in the hitmap but is itself reported as "no hit". Use for opaque panels that should block picks without being interactive.
-- `PickId::Id(n)` — record with the given id. `n` is a 24-bit caller-managed value (typically a row / item index). Ids above `0xFF_FFFF` are truncated; `Id(0)` is treated identically to `Block`.
+### The two things a primitive carries
 
-Encoding lives in `pick.rs` (authoritative): ids pack into the RGB channels of an `Rgba8Unorm` pick texture with alpha forced to 255, which round-trips cleanly through default SrcOver compositing without per-draw blend-mode plumbing. `decode` tests alpha before the payload: an uncovered pixel comes back alpha 0 with arbitrary colour channels, and reading those as an id reports phantom hits on empty space (low byte values decode to low ids, so the phantoms cluster on whichever item was numbered first). Partial coverage over *empty space* is fine — the rasteriser unpremultiplies, so a mark's antialiased fringe still carries its exact id.
+**A `PickId`** — the authoring layer's handle for what a call draws. Every drawing primitive on `SceneBuilder` (`fill`, `stroke`, `draw_image`, `draw_glyphs`, `draw_mesh`) takes one; `push_layer` / `pop_layer` do not.
 
-**Conflated ids where picked content overlaps — backend-dependent.** The compute-shader backend (`backend/vello/`) cannot disable antialiasing, so a mark's edge pixels are a coverage blend. Where that edge falls on other picked content — overlapping marks, or a mark over a `PickId::Block` fill — the blend mixes two ids into a third plausible one at full alpha, indistinguishable from a real hit. Two overlapping circles yield 28 ids that were never drawn. Keeping chrome on `PickId::Skip` (the default, and what `plot/` does) avoids it by leaving marks compositing over nothing. The sparse-strips backend (`backend/hybrid/`) computes coverage on the CPU and rasterises the pick pass with binary coverage, so it does not have this limitation at all. Documented on `crate::pick`.
+- `PickId::Skip` — no authoring id. See the indexing rule below for whether it is recorded.
+- `PickId::Block` — occlude without reporting. A point query stops here and returns nothing, so an opaque panel can hide what is under it without being interactive. Region queries are unaffected: a marquee is a spatial query, not a ray.
+- `PickId::Id(n)` — the given id, across the **full `u32` range** with nothing reserved. Occlusion is `Block`, a variant rather than a magic value; `0` was special only while ids were packed into a texture. The caller owns the namespace; nothing allocates ids.
 
-**Alpha-insensitive picking — every backend.** Picking ignores display alpha. A semi-transparent layer or image fully occludes picks of content beneath it, even though that content remains visible in the rasterised image. This follows from compositing ids with SrcOver, which is our encoding choice rather than any rasteriser's behaviour, so no backend escapes it. Documented on `crate::pick` and on each renderer's `pick_at`.
+**A `PickScope` stack** — the logical tree the drawing sits in, pushed and popped like a layer but with no visual effect and no clip. The stack in effect at a draw is that primitive's ancestor chain, so **the scope stack is the bubble path**. This is what makes chrome pickable: chrome has no id of its own, and carving a range out of a namespace the caller owns was never safe.
 
-Backend semantics:
+### The indexing rule
 
-- **Recording backend (`scene::recording::RecordingScene`)** stores `PickId` in each `Op` faithfully. Future SVG / PDF emitters may surface it or ignore it — both are valid.
-- **Non-rasterising backends** are free to ignore `pick_id` entirely. The trait parameter is unconditional; its effect is backend-defined.
+A primitive is recorded when:
+
+```
+pick_id != Skip   OR   the innermost scope's mode is Target
+```
+
+`ScopeMode::Group` is the default, so the safe behaviour is what you get by omission: a dense geom with no `pick_id` channel emits `Skip`, sits only in `Group` frames, and is **not recorded at all** — no entry, no leaf box, nothing to test. `ScopeMode::Target` is emitted only by `plot::pick`'s `part_scope` / `item_scope`, so chrome opts in structurally rather than at ~90 individual call sites. Measured on a two-plot composition: 500 marks without a `pick_id` channel contribute 0 entries; the 26 that exist are all chrome.
+
+### Layering
+
+`crate::pick` is chart-agnostic — a `PickScope` carries a `&'static str` kind plus an optional name and index, and nothing down there knows what an axis is. The vocabulary lives in `plot::pick` (`PlotPart`, the scope constructors, the typed `PlotPath` view), the same split `composition` already uses between `Slot::name` and the `Region` trait. The grammar, with only `region` and `part` always present:
+
+```
+composition → plot? → region(Slot) → [axis|legend|geom]? → part(PlotPart) → item(u32)?
+```
+
+`plot` is absent for composition-level chrome, so a hit on the figure title reports `PlotPath::plot() == None`.
+
+### Queries
+
+`PickIndex::hits_at(p)` returns every hit, topmost first, each carrying its scope chain — all-hits costs the same as topmost-only, since the tree descent is the cost and refinement is noise. `hits_in` / `hits_within` are rubber-band brushing (`hits_within` is the exact one: bounds inside a rect implies geometry inside it); `hits_in_path` is a lasso, centre-based because for an arbitrary polygon bbox containment implies nothing.
+
+A renderer exposes **one** pick method, `pick_index()`. Its part in hit testing is owning the scene that recorded the index, so every query lives on `PickIndex` rather than being forwarded through two more layers of the same names.
+
+### What it costs
+
+Filling the index during a draw, and building the R-tree lazily on the first query after a frame. Measured at 100k marks, 900×560: **+7 ms** when marks share a marker path under a per-mark transform (what `PointGeom` does, so interning collapses the geometry to one copy), **+19 ms** when every mark's path is distinct; then **5 ms** once for the tree, and **~2.7 µs** per warm query. A frame nobody queries never builds a tree.
+
+### Known limits
+
+- **Dashed strokes are hittable along their gaps.** A hit target follows the path, not the dash pattern.
+- **Glyph runs pick as layout boxes, not ink.** `skrifa` is optional and `pick` is unconditional, so real outlines are unreachable from a core module; the box is synthesized from `font_size`. Leading and side bearings are hittable, which is what a text target should be — but a glyph-backed marker shape is correspondingly looser than its outline.
+- **Stroke ends and joins are round** whatever the cap and join say. Sub-pixel to a few pixels, and on the generous side.
+- **There is no canvas.** A mark drawn partly outside the frame is hittable at coordinates outside it: the index answers about geometry, not about a framebuffer.
+
+### Backend semantics
+
+- **`RecordingScene`** stores both `PickId` and the scope ops faithfully. `draw_ops()` skips the scope bookkeeping, for a test asserting what got *drawn*; `scope_at(i)` reads the stack in effect at an op.
+- **Rasterising backends ignore `pick_id`.** The index sits above them, so a rasteriser has nothing to do with it.
+- **SVG surfaces both** — `data-pick-id` on primitives and `<g data-pick-kind=…>` for scopes, behind the one `SvgConfig::pick_ids` flag. PDF accepts and ignores.
 
 ## Core types — wrapping kurbo + peniko
 
@@ -80,6 +118,7 @@ Folders (each with its own CLAUDE.md):
 - `backend/` — `Renderer` trait, error type, and backend implementations.
 - `layout/` — grid layout solver. Recursive grids, fr / auto tracks, `respect()`, `Measure` protocol.
 - `composition/` — patchwork-style plot composition. 13-col × 16-row anatomical grid; chrome alignment across nested compositions via `Extent::TrackOf`.
+- `pick/` — hit testing: `PickId`, `PickScope`, and the CPU spatial index behind them. Depends on nothing above `scene/`, which is what lets any backend — or none — answer a query.
 - `primitives/` — compound 2D primitives: path constructors (rect / circle / wedge / polyline / polygon / arc), composable vertex transforms (clip / offset / round corners), arc-length sampling, ribbon tessellation.
 - `plot/` — high-level plot API: `Plot`, `PlotComposition` orchestrator, key-based diff for identity-preserving animation. Geoms in `plot/geom/`; axis / legend rendering in `plot/chrome/`. Scales and values themselves live in [`crate::scales`] (see below).
 - `scales/` — leaf module: `Value`, `DataColumn`, `Scale`, scale types, transforms, break / tick algorithms. Backend-agnostic and plot-agnostic; nothing inside imports from `src/plot/`, `src/scene/`, etc. Intended to be lifted into its own crate once the API settles. Hephaestus's own `Scale` bundle, `ScaleRegistry` and the ggplot-style constructors live in `plot/scale/` (which also re-exports `crate::scales::*`, so `hephaestus::plot::scale::*` reaches both); `plot/value.rs` is a pure re-export shim over `crate::scales::value`.
@@ -98,7 +137,6 @@ Single-file modules (no CLAUDE.md, one-line descriptions here):
 - `linetype.rs` — the named `solid` / `dashed` / `dotted` / `dashdot` constructors plus `draw_linetype_with_markers`, the arc-length walk that stamps marker shapes along a polyline. At the crate root rather than under `plot/geom/` because rich-text block borders express their strokes as linetypes too, and `text/` must not depend on `plot/`; `plot::geom::linetype` re-exports it. The `LinetypeStep` enum itself lives in `style_vocab.rs` — it's shared vocabulary like `Color`, so `scales` can carry a column of dash patterns without depending on the renderer that walks them.
 - `mesh.rs` — `Mesh`: flat 2D triangle list with per-vertex colour. Used by `primitives::ribbon` and consumed by `SceneBuilder::draw_mesh`.
 - `path.rs` — `Path` (kurbo `BezPath` wrapper) and `FillRule` (intersection enum).
-- `pick.rs` — `PickId` and the authoritative encoding into `Rgba8Unorm` RGB.
 - `png.rs` — aliases for the PNG entry points in `image/` (`png` feature).
 - `shape.rs` — `Shape` / `ShapeRegistry` / `ShapeStyle`: named glyphs / paths for scatterplot markers and line endpoint terminators.
 - `stroke.rs` — re-exports kurbo `Stroke`, `Cap`, `Join`. Stroke alignment and variable-width strokes are not in scope.

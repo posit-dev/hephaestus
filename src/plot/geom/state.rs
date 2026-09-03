@@ -269,8 +269,7 @@ pub fn validate_channel_lengths(channels: &HashMap<String, Channel>, n: usize, g
 /// deferred to per-row draw resolution (the output depends on draw-time
 /// scale state and can't be checked here).
 ///
-/// `0` is permitted — it maps to [`PickId::Block`](crate::pick::PickId)
-/// per the user-controlled pick-id contract.
+/// `0` is permitted and ordinary: no id value is reserved.
 pub fn validate_pick_id_channel(channels: &HashMap<String, Channel>, geom_label: &str) {
     let ch = match channels.get("pick_id") {
         Some(c) => c,

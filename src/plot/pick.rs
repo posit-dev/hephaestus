@@ -40,7 +40,7 @@ pub mod kind {
     pub const LEGEND: &str = "legend";
     /// One geom, numbered by its `GeomId`.
     pub const GEOM: &str = "geom";
-    /// A distinguishable piece of chrome — see [`PlotPart`].
+    /// A distinguishable piece of chrome — see [`PlotPart`](super::PlotPart).
     pub const PART: &str = "part";
     /// An ordinal within a part: a break index, a legend row, a key.
     pub const ITEM: &str = "item";
@@ -77,8 +77,10 @@ pub enum PlotPart {
     LegendKeyFrame,
     LegendKey,
     LegendLabel,
+    /// The gradient ramp itself. A colorbar's tick rail is drawn by the same
+    /// code as any axis and reports the `Axis*` parts; the enclosing
+    /// `legend` frame is what says it belongs to a legend.
     ColorbarBar,
-    ColorbarTick,
     // Free text.
     Title,
     Subtitle,
@@ -109,7 +111,6 @@ impl PlotPart {
             PlotPart::LegendKey => "legend_key",
             PlotPart::LegendLabel => "legend_label",
             PlotPart::ColorbarBar => "colorbar_bar",
-            PlotPart::ColorbarTick => "colorbar_tick",
             PlotPart::Title => "title",
             PlotPart::Subtitle => "subtitle",
             PlotPart::Caption => "caption",
@@ -138,7 +139,6 @@ impl PlotPart {
             "legend_key" => PlotPart::LegendKey,
             "legend_label" => PlotPart::LegendLabel,
             "colorbar_bar" => PlotPart::ColorbarBar,
-            "colorbar_tick" => PlotPart::ColorbarTick,
             "title" => PlotPart::Title,
             "subtitle" => PlotPart::Subtitle,
             "caption" => PlotPart::Caption,
@@ -147,7 +147,7 @@ impl PlotPart {
     }
 
     /// Every part, in declaration order.
-    pub const ALL: [PlotPart; 23] = [
+    pub const ALL: [PlotPart; 22] = [
         PlotPart::PlotBackground,
         PlotPart::PanelBackground,
         PlotPart::GridMajor,
@@ -167,7 +167,6 @@ impl PlotPart {
         PlotPart::LegendKey,
         PlotPart::LegendLabel,
         PlotPart::ColorbarBar,
-        PlotPart::ColorbarTick,
         PlotPart::Title,
         PlotPart::Subtitle,
         PlotPart::Caption,
@@ -345,6 +344,19 @@ impl<'a> PlotPath<'a> {
     /// Ordinal within the part: break index, legend row, key index.
     pub fn item(&self) -> Option<u32> {
         self.0.find(kind::ITEM).and_then(|s| s.index())
+    }
+}
+
+/// The part a free-text anatomical slot draws.
+///
+/// Title, subtitle and caption are the same shape of thing at plot and
+/// composition level, so both draw loops route through here rather than
+/// each carrying its own match.
+pub fn text_slot_part(slot: Slot) -> PlotPart {
+    match slot {
+        Slot::Subtitle => PlotPart::Subtitle,
+        Slot::Caption => PlotPart::Caption,
+        _ => PlotPart::Title,
     }
 }
 

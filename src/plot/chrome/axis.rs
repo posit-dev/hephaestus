@@ -791,10 +791,14 @@ mod tests {
             &Theme::default(),
             &crate::image_registry::no_images(),
         );
-        assert!(
-            scene.ops.is_empty(),
-            "expected no ops for empty breaks; got {}",
-            scene.ops.len()
+        // `draw_ops` rather than `ops`: the assertion is about what got
+        // drawn, and pushing a pick scope changes the op list without
+        // changing the picture.
+        assert_eq!(
+            scene.draw_ops().count(),
+            0,
+            "expected nothing drawn for empty breaks; got {:?}",
+            scene.ops
         );
     }
 

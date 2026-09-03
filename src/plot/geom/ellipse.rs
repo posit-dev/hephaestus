@@ -726,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn pick_id_zero_maps_to_block() {
+    fn pick_id_zero_is_an_ordinary_id() {
         let g = EllipseGeom::builder()
             .set("x", vec![0.5_f64])
             .set("y", vec![0.5_f64])
@@ -742,16 +742,18 @@ mod tests {
             &mut scene,
             &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
         );
-        let has_block = scene.ops.iter().any(|op| {
+        // `0` was the no-hit sentinel only while ids were packed into a
+        // texture's colour channels. It is now just an id.
+        let has_zero = scene.ops.iter().any(|op| {
             matches!(
                 op,
                 Op::Fill {
-                    pick_id: crate::pick::PickId::Block,
+                    pick_id: crate::pick::PickId::Id(0),
                     ..
                 }
             )
         });
-        assert!(has_block);
+        assert!(has_zero);
     }
 
     #[test]

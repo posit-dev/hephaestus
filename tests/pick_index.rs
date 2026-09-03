@@ -80,6 +80,28 @@ fn block_occludes_what_is_under_it() {
 }
 
 #[test]
+fn no_id_value_is_reserved_and_block_is_the_only_occluder() {
+    // `Id(0)` is an ordinary id. It was the no-hit sentinel only while ids
+    // were packed into a texture's colour channels.
+    let mut s = scene();
+    fill_rect(&mut s, Rect::new(0.0, 0.0, 100.0, 100.0), PickId::Id(7));
+    fill_rect(&mut s, Rect::new(40.0, 40.0, 60.0, 60.0), PickId::Id(0));
+    assert_eq!(s.pick_at(Point::new(50.0, 50.0)), Some(0), "0 is an id");
+    assert_eq!(
+        s.hits_at(Point::new(50.0, 50.0)).len(),
+        2,
+        "and occludes nothing"
+    );
+
+    // `Block` is the variant that occludes, and it still does.
+    let mut s = scene();
+    fill_rect(&mut s, Rect::new(0.0, 0.0, 100.0, 100.0), PickId::Id(7));
+    fill_rect(&mut s, Rect::new(40.0, 40.0, 60.0, 60.0), PickId::Block);
+    assert_eq!(s.pick_at(Point::new(50.0, 50.0)), None);
+    assert!(s.hits_at(Point::new(50.0, 50.0)).is_empty());
+}
+
+#[test]
 fn skip_is_absent_rather_than_transparent() {
     let mut s = scene();
     fill_rect(&mut s, Rect::new(0.0, 0.0, 100.0, 100.0), PickId::Id(7));
