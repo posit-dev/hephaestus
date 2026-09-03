@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.3.0
 
 ### Added
 
@@ -15,23 +15,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`Slot::from_name` and `Slot::ALL`** — the reverse of `Slot::name`, so a region name recovered from a hit round-trips back into `CompositionLayout::get`.
 - **`Plot::index_in_patch` and `Axis::id`** — a plot's position within its patch's attach list, and the handle an axis was attached under. `(patch_id, index_in_patch)` is the pair `update_plot_at` already addresses plots by.
 - **`RecordingScene::draw_ops` and `scope_at`** — the ops that draw something, and the pick-scope stack in effect at an op.
-
-### Changed
-
-- **Picking is a CPU spatial index built while a scene is drawn, not a second rasterization.** Every renderer's `Renderer::Scene` is a `PickIndexScene`, so hit testing rides on the scene and a vector backend or a renderer-free build answers the same way a GPU one does. `with_picking` and `pick_at` keep their names; `pick_at` takes a `Point` and no longer lags the frame it describes. At 100k marks the cost falls from 59 ms to ~7 ms on the sparse-strips backend, and no GPU readback happens at all.
-- **`PickId::Id` spans the full `u32` range with nothing reserved.** Both the 24-bit cap and `Id(0)`'s equivalence to `Block` were artifacts of packing ids into a texture's color channels, where an uncovered pixel decoded to zero. `MAX_PICK_ID`, the build-time panic above `0xFF_FFFF` and `pick::raw_id` are gone, and a `pick_id` channel of row indices no longer has to start at 1. Occlusion is `PickId::Block` alone.
-- **`PickId::Skip` means "no authoring id" rather than "not pickable".** A primitive is indexed when its id is not `Skip` *or* its innermost pick scope is a target — which is how chrome participates without a `PickId` argument at every chrome call site. A geom with no `pick_id` channel is still recorded nowhere.
-- **SVG emits `<g data-pick-kind=…>` for pick scopes** under the existing `SvgConfig::pick_ids` flag, so an exported plot groups by axis, part and item rather than arriving as a flat list of paths.
-- **A dashed stroke is hittable along its gaps, a glyph run picks as its layout box, and stroke caps and joins hit as round.** The index tests geometry rather than rasterized coverage; the differences are sub-pixel to a few pixels and on the generous side.
-
-### Removed
-
-- **The GPU hitmap.** `hitmap`, `try_finish_pick`, `render_to_texture_deferring_pick`, `set_refresh_pick` and `refreshes_pick` on both wgpu renderers; `WindowConfig::pick_interval`; `pick::id_to_color` and `pick::decode`. The pick pass they served no longer exists, and lazy tree construction subsumes the throttle: a window redrawing faster than it is queried builds nothing.
-
-## 0.3.0
-
-### Added
-
 - **PDF export, behind the `pdf` feature.** `hephaestus::pdf::write_pdf` / `write_pdf_to` / `encode_pdf` over `PdfScene`, which implements `SceneBuilder` and not `Renderer`, so `PlotComposition::render` feeds it unchanged. Where `svg` aims at editable output this aims at a fixed one, so every glyph a plot draws is embedded — as a subset TrueType synthesized from the outlines actually used, which is a few kB rather than the megabyte face and covers CFF/OTF sources, variable-font instances and `ttcf` collections in one path. Text stays selectable and searchable through a `/ToUnicode` CMap; markdown links become `/Link` annotations; a filled-and-stroked mark is one `B` operator; gradients are `ShadingType 2` / `3` patterns with a non-zero radial focal radius expressed natively; a mesh is a native `ShadingType 4` Gouraud shading rather than one fill per triangle; a gradient or mesh whose alpha varies across it — a confidence band that fades, say — is carried by a luminosity soft mask rather than flattened to one opacity; a translucent or blended layer is a real transparency group; and color emoji render, both COLR paint graphs and bitmap strikes. Whatever PDF cannot express is reported by `PdfScene::warnings`. Adds only `skrifa` and `flate2`, both already in the tree, so `--no-default-features --features document-read,pdf` builds with no renderer on rustc 1.86; a *bitmap* color glyph additionally needs `png`.
 - **`primitives::RibbonOptions::seam_bleed` and `primitives::ribbon_band_mesh_with_bleed`** — control the overlap ribbon tessellation gives adjacent quads to hide the antialiased seam between independent fills. Both default to the existing values; `0.0` is for a consumer that paints the mesh as one object, where there is no seam and the overlap is distortion.
 - **SVG export, behind the `svg` feature.** `hephaestus::svg::write_svg` / `write_svg_to` / `encode_svg` over `SvgScene`, which implements `SceneBuilder` and not `Renderer`, so `PlotComposition::render` feeds it unchanged. Labels are `<text>`: markdown spans become `<tspan>`s, `[text](url)` an `<a href>`, underline and strikethrough `text-decoration-line`, and a run is placed by one anchor plus `textLength`. A filled-and-stroked mark is one `<path>`, a wrapped label one `<text>`. The face request — family, size, weight, style, `font-stretch`, letter spacing, OpenType features and variable-font axes — is named on the root and inherited, with only the spans that differ naming their own; `@import` covers families resolved through `fetch_google_font`, and `SvgConfig::embed_fonts` inlines faces as `@font-face`. Whatever SVG cannot express is reported by `SvgScene::warnings`. Adds only `skrifa`, so `--no-default-features --features document-read,svg` builds with no renderer on rustc 1.86; embedding a raster image needs `png`.
@@ -62,6 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Picking is a CPU spatial index built while a scene is drawn, not a second rasterization.** Every renderer's `Renderer::Scene` is a `PickIndexScene`, so hit testing rides on the scene and a vector backend or a renderer-free build answers the same way a GPU one does. `with_picking` and `pick_at` keep their names; `pick_at` takes a `Point` and no longer lags the frame it describes. At 100k marks the cost falls from 59 ms to ~7 ms on the sparse-strips backend, and no GPU readback happens at all.
+- **`PickId::Id` spans the full `u32` range with nothing reserved.** Both the 24-bit cap and `Id(0)`'s equivalence to `Block` were artifacts of packing ids into a texture's color channels, where an uncovered pixel decoded to zero. `MAX_PICK_ID`, the build-time panic above `0xFF_FFFF` and `pick::raw_id` are gone, and a `pick_id` channel of row indices no longer has to start at 1. Occlusion is `PickId::Block` alone.
+- **`PickId::Skip` means "no authoring id" rather than "not pickable".** A primitive is indexed when its id is not `Skip` *or* its innermost pick scope is a target — which is how chrome participates without a `PickId` argument at every chrome call site. A geom with no `pick_id` channel is still recorded nowhere.
+- **SVG emits `<g data-pick-kind=…>` for pick scopes** under the existing `SvgConfig::pick_ids` flag, so an exported plot groups by axis, part and item rather than arriving as a flat list of paths.
+- **A dashed stroke is hittable along its gaps, a glyph run picks as its layout box, and stroke caps and joins hit as round.** The index tests geometry rather than rasterized coverage; the differences are sub-pixel to a few pixels and on the generous side.
 - **Chrome layers against the data by what it is.** Legends and titles draw over the geoms, always. A plot's frame — panel outline, axes, facet strips — follows `Plot::is_clipped`: over the geoms when they are clipped, so a mark cut against the panel outline doesn't leave its cut edge lying half across that outline, and under them when they are not, so a mark meant to cross the boundary reads as continuous rather than sliced. Panel background and grid stay under the geoms either way. `Plot::draw_chrome_into` is replaced by `draw_frame_into` + `draw_labels_into`, the two halves the orchestrator phases separately, with `Plot::draw_into` drawing a whole plot in the right order for stand-alone callers; `draw_panel_chrome_into` no longer strokes the outline.
 - **Plot document format major 2, and most future additions no longer move it.** Every named aggregate the format carries is length-prefixed, so a reader decodes the fields it knows and skips what a newer writer appended: a trailing field is now a minor bump. Measured cost on the four-panel test document, 6915 → 7090 bytes. **Breaking:** a major-1 document does not load.
 - **An unknown chunk is skipped only if its tag says it may be.** A chunk tag's initial letter carries criticality, as PNG's does — uppercase is refused when unknown, lowercase is skipped — so a section that mattered can never be silently dropped. `FONT` / `SHPS` / `IMGS` became `font` / `shps` / `imgs`, being the three whose absence was already tolerated.
@@ -88,6 +76,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`registerFont` takes the font bytes by value**, dropping a second copy of half a megabyte of boot-path font. The JS-facing signature is unchanged.
 - **The document reader's intern tables clone in O(1).** `ReadTables` holds its three tables behind an `Arc`, so `read_composition`'s eight per-chunk clones are refcount bumps.
 - **`tests/image_geom.rs` is registered as a `[[test]]`**, so it carries `required-features` and no longer breaks an `--all-targets` build without `vello`, including the `msrv-document` CI job. The CI feature loop crosses the document directions with the image codec.
+
+### Removed
+
+- **The GPU hitmap.** `hitmap`, `try_finish_pick`, `render_to_texture_deferring_pick`, `set_refresh_pick` and `refreshes_pick` on both wgpu renderers; `WindowConfig::pick_interval`; `pick::id_to_color` and `pick::decode`. The pick pass they served no longer exists, and lazy tree construction subsumes the throttle: a window redrawing faster than it is queried builds nothing.
 
 ### Fixed
 
