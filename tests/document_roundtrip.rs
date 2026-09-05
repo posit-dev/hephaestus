@@ -30,7 +30,7 @@ use hephaestus::document::{
     read_composition, read_hints, write_composition, ReadContext, WriteOptions,
 };
 use hephaestus::geometry::Size;
-use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
+use hephaestus::plot::chrome::axis::{Axis, AxisPlacement, PolarRing};
 use hephaestus::plot::theme::Theme;
 use hephaestus::plot::{
     scale, ImageGeom, ImageRegistry, LineGeom, Plot, PlotComposition, PointGeom, Projection,
@@ -171,6 +171,17 @@ fn build() -> PlotComposition {
             .set("fill", MARK_COLORS[3])
             .build(),
     );
+    // Polar placements, which only validate against a polar
+    // projection — the reader has to restore the projection before it
+    // attaches an axis.
+    polar.add_axis(Axis::rail(
+        "cat",
+        AxisPlacement::PolarAngular(PolarRing::Outer),
+    ));
+    polar.add_axis(Axis::rail(
+        "value",
+        AxisPlacement::PolarRadius { theta_frac: 0.0 },
+    ));
 
     PlotComposition::new(&comp())
         .theme(Theme::minimal())

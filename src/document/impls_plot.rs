@@ -566,14 +566,23 @@ pub(crate) fn decode_plot(
             plot.set_strip(side, text);
         }
 
-        for axis in Vec::<Axis>::decode(r)? {
-            plot.add_axis(axis);
+        // An axis is validated against the projection, which follows
+        // it on the wire, so all three are read before any is applied.
+        let axes = Vec::<Axis>::decode(r)?;
+        let legends = Vec::<Legend>::decode(r)?;
+        plot = plot.projection(Projection::decode(r)?);
+
+        for axis in axes {
+            plot.try_add_axis(axis)
+                .map_err(|e| DocumentError::Invalid {
+                    what: "axis placement",
+                    why: e.to_string(),
+                })?;
         }
-        for legend in Vec::<Legend>::decode(r)? {
+        for legend in legends {
             plot.add_legend(legend);
         }
 
-        plot = plot.projection(Projection::decode(r)?);
         plot = plot.clip(bool::decode(r)?);
         plot = plot.track_identity(bool::decode(r)?);
         if let Some(ratio) = Option::<f64>::decode(r)? {
