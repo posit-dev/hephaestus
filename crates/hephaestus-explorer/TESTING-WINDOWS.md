@@ -45,6 +45,11 @@ cargo run --example document_save --features document-write
 ## 1. Does the app build and run?
 
 ```powershell
+cd crates\hephaestus-explorer
+cargo build  --release --target x86_64-pc-windows-msvc
+```
+
+```powershell
 cd crates\hephaestus-viewer
 cargo run --release -- ..\..\examples\document.hep
 ```
@@ -62,9 +67,22 @@ Worth a minute each: drag another `.hep` onto the window; **Ctrl+O**,
 **Ctrl+E**, **Ctrl+W**, **Ctrl+R**; drag the window edge and watch whether the
 plot re-lays-out rather than stretching.
 
+<!-- 
+Ctrl+O, Ctrl+E, Ctrl+W, Ctrl+R  shortcuts doesn't work, but menu options seem to work fine.
+Resizing works well, invert button switches between light/dark mode.
+Plot opened up in dark mode, matching system settings
+-->
+
 > On Windows a second document opens a **second window**, not a tab. That is
 > expected — window tabs are a macOS feature, and a drawn tab strip for Windows
 > is a known gap.
+
+<!-- 
+At this point files aren't associated with the executable yet, so there
+isn't really a convenient way to open a second document yet.
+Terminal is blocked  untill window is closed.
+Might be instruction shortcoming rather than actual shortcoming.
+-->
 
 ---
 
@@ -77,6 +95,10 @@ node ui\verify.mjs
 13 checks, all should pass. This is platform-independent, so a failure here
 means something drifted rather than something Windows-specific.
 
+<!-- 
+All 13 checks pass
+-->
+
 ---
 
 ## 3. ⭐ Measure the IPC transport — the one number that is a guess
@@ -87,18 +109,52 @@ benchmark (~200 ms per 10 MB, tauri#11915) that nobody here has reproduced.**
 The whole PNG-encoding fallback exists because of that number. If it is wrong,
 a default should change.
 
-```powershell
-cd crates\hephaestus-viewer
+<!-- 
+Per earlier instructions we're still in crates\hephaestus-viewer
+First cargo run opens .hep as before
+We don't need --release versions, they don't print the numbers. Only debug versions print the numbers.
+-->
 
+```powershell
 # the default on Windows: PNG-encoded frames
 $env:HEPHAESTUS_VIEWER_TRACE=1
-cargo run --release -- ..\..\examples\document.hep
+cargo run -- ..\..\examples\document.hep
 
 # then the same thing with raw pixels, in a fresh shell
 $env:HEPHAESTUS_VIEWER_TRACE=1
 $env:HEPHAESTUS_VIEWER_ENCODING="raw"
-cargo run --release -- ..\..\examples\document.hep
+cargo run  -- ..\..\examples\document.hep
 ```
+
+<!-- 
+First situation:
+frame tab=1 seq=1 1100x702 @96dpi PngFast 114539 bytes in 908.3ms
+frame tab=1 seq=2 1100x701 @96dpi draft PngFast 49550 bytes in 196.4ms
+frame tab=1 seq=3 999x580 @96dpi draft PngFast 44418 bytes in 172.6ms
+frame tab=1 seq=4 884x494 @96dpi draft PngFast 39729 bytes in 154.8ms
+frame tab=1 seq=5 883x493 @96dpi draft PngFast 39729 bytes in 79.5ms
+frame tab=1 seq=6 883x493 @96dpi PngFast 91107 bytes in 286.0ms
+frame tab=1 seq=7 2560x1311 @96dpi draft PngFast 82706 bytes in 473.2ms
+frame tab=1 seq=8 2560x1311 @96dpi PngFast 209331 bytes in 1409.8ms
+
+Second situation:
+frame tab=1 seq=1 1100x702 @96dpi RawRgba 3088832 bytes in 651.3ms
+frame tab=1 seq=2 1100x701 @96dpi draft RawRgba 772232 bytes in 122.6ms
+frame tab=1 seq=3 982x590 @96dpi draft RawRgba 579412 bytes in 116.2ms
+frame tab=1 seq=4 782x422 @96dpi draft RawRgba 330036 bytes in 109.4ms
+frame tab=1 seq=5 781x422 @96dpi draft RawRgba 330036 bytes in 36.3ms
+frame tab=1 seq=6 781x422 @96dpi RawRgba 1318360 bytes in 132.5ms
+frame tab=1 seq=7 782x422 @96dpi draft RawRgba 330036 bytes in 113.7ms
+frame tab=1 seq=8 942x426 @96dpi draft RawRgba 401324 bytes in 115.4ms
+frame tab=1 seq=9 1577x410 @96dpi draft RawRgba 647012 bytes in 117.1ms
+frame tab=1 seq=10 1803x369 @96dpi draft RawRgba 667512 bytes in 111.9ms
+frame tab=1 seq=11 1822x363 @96dpi draft RawRgba 663240 bytes in 109.6ms
+frame tab=1 seq=12 1822x363 @96dpi RawRgba 2645576 bytes in 139.8ms
+frame tab=1 seq=13 1821x363 @96dpi draft RawRgba 663240 bytes in 109.7ms
+frame tab=1 seq=14 1821x363 @96dpi RawRgba 2644124 bytes in 139.2ms
+frame tab=1 seq=15 2560x1311 @96dpi draft RawRgba 3358752 bytes in 153.5ms
+frame tab=1 seq=16 2560x1311 @96dpi RawRgba 13424672 bytes in 250.8ms
+-->
 
 Each frame prints a line like:
 
@@ -122,6 +178,11 @@ For reference, measured on an M-series Mac at 2200×1308: raw 11.5 MB in
 
 ## 4. Does the shell-extension DLL build?
 
+<!-- 
+I had to build this before the viewer due to some build script dependency.
+But yes, it builds
+-->
+
 ```powershell
 cd crates\hephaestus-explorer
 cargo build --release
@@ -141,6 +202,10 @@ You should see `DllGetClassObject`, `DllCanUnloadNow`, `DllRegisterServer`
 and `DllUnregisterServer`. **If any are missing, stop** — nothing later can
 work, and the fix is a `.def` file or `#[used]`/`dllexport` handling.
 
+<!-- 
+dumpbin wasn't on PATH, but yes these 4 Dll thingies are reported
+-->
+
 ---
 
 ## 5. Does rendering work on this machine at all?
@@ -155,6 +220,11 @@ cargo run --release -- -s 512 -i ..\..\examples\document.hep -o $env:TEMP\t.png
 ```
 
 Open `%TEMP%\t.png`. It should be the plot, 512 px on its longer edge.
+
+
+<!-- 
+It created a 512px x 239px t.png
+-->
 
 - **This fails** → the problem is `vello-hybrid` on this machine (no D3D12
   adapter?), not the shell extensions. Report the error; everything below will
@@ -172,6 +242,11 @@ Open `%TEMP%\t.png`. It should be the plot, 512 px on its longer edge.
 cd crates\hephaestus-explorer
 regsvr32 target\release\hephaestus_explorer.dll
 ```
+
+<!-- 
+Succeeds when 'Run as administrator'-opening powershell
+-->
+
 
 A success dialog means the DLL loaded and `DllRegisterServer` returned `S_OK`.
 An error dialog names the failure.
@@ -191,6 +266,13 @@ common reason a correct extension appears to do nothing:
 taskkill /f /im explorer.exe; Start-Process explorer.exe
 Remove-Item "$env:LocalAppData\Microsoft\Windows\Explorer\thumbcache_*.db" -Force -ErrorAction SilentlyContinue
 ```
+
+<!-- 
+When using medium-sized icons or larger, the document.hep file in the examples folder shows the plot as icon.
+This behaviour is the same as the .png files.
+Unlike the .png files, it does not show up in the 'Preview pane' in windows explorer if that is turned on.
+I was today years old when I learned about the Preview pane, so I wouldn't worry about it 
+-->
 
 ---
 
@@ -228,6 +310,22 @@ repositioning and tick counts changing, not a picture being stretched. This is
 the only preview in the project that reflows, so it is worth looking at
 closely.
 
+<!-- 
+I do see [hephaestus]-prefixed stuff in the debugviewer, like this:
+
+[hephaestus] DllGetClassObject: creating a factory for Thumbnail 
+[hephaestus] DllGetClassObject: creating a factory for Thumbnail 
+[hephaestus] thumbnail: initialized with 10553 bytes 
+[hephaestus] thumbnail: rendering at 1280px 
+[hephaestus] thumbnail: 1280x597 
+[hephaestus] thumbnail: initialized with 10553 bytes 
+[hephaestus] thumbnail: rendering at 1280px 
+[hephaestus] thumbnail: 1280x597 
+
+Thumbnails seem to work as expected. 
+Preview pane says 'This file can't be previewed', so I think that doesn't work.
+-->
+
 While you are there: does a fast drag of the divider feel laggy? There is
 deliberately no debounce on re-render, and whether one is needed is an open
 question.
@@ -241,6 +339,10 @@ question.
 | `initialized with N bytes` then nothing | rendering failed inside the surrogate — almost certainly the GPU |
 | `no GPU adapter` | confirms it; see `CLAUDE.md` for the `Windows.Data.Pdf` alternative |
 
+<!-- 
+I'm not seeing `dllhost.exe` in task manager, but do see `prevhost.exe`
+-->
+
 ---
 
 ## 9. The installer, last
@@ -251,7 +353,6 @@ Only once the pieces work by hand:
 cd crates\hephaestus-viewer
 .\package-windows.ps1
 ```
-
 Then install the NSIS package from `target\release\bundle\nsis\`, and check
 the extensions registered themselves without `regsvr32` being run by hand —
 `packaging\installer-hooks.nsh` should have done it. Uninstall and confirm they
@@ -259,6 +360,11 @@ are removed.
 
 Note the installer will not be Authenticode-signed, so SmartScreen will warn.
 That is expected and unrelated.
+
+<!-- 
+Had to run line below:
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+-->
 
 ---
 
@@ -274,6 +380,10 @@ Even a partial run is useful. Most valuable first:
 4. Anything about the *app* (steps 1–2) that felt wrong, especially around
    window management, since Windows gets separate windows where macOS gets
    tabs.
+
+<!-- 
+Preview pane didn't work, but else looks good
+-->
 
 Do not spend time trying to fix the shell extensions. Report where it stops;
 the failure modes are enumerated in `CLAUDE.md` under "What to check first"

@@ -109,6 +109,7 @@ pub fn run() {
         // window is created here and bound to its document before its own
         // scripts run, so there is nobody to race. Only reachable in a bundled
         // build.
+        #[cfg(target_os = "macos")]
         tauri::RunEvent::Opened { urls } => {
             let paths = urls
                 .iter()
