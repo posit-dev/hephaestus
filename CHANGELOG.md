@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A frame requested while the window is occluded is no longer lost.** The swap chain reports Timeout/Occluded/Outdated and the frame was silently dropped, and macOS shows its cached backing store when the window is uncovered without asking for a redraw — so nothing appeared until a resize. The driver now marks the frame stale and retries on `Focused(true)` and `CursorMoved`, the events that plausibly accompany the window becoming visible (winit 0.30's `Occluded` is iOS-only, so there is no direct signal on desktop).
 - **`PickId::Block` no longer collides with the mark whose id is `0` in SVG output.** It emits `data-pick-block` rather than `data-pick-id="0"`; the id space is the full `u32` with nothing reserved.
 - **Chrome is hit-testable in SVG output.** A `PickId::Skip` primitive inside a `ScopeMode::Target` scope keeps its pointer events instead of unconditionally taking `pointer-events="none"`, which had left every axis label, tick and title unreachable under `elementFromPoint` while the CPU pick index answered for the same scene.
 

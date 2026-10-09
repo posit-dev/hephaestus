@@ -37,6 +37,7 @@ pub(crate) fn run<A: WindowApp>(config: WindowConfig, app: A) -> Result<(), Wind
         state: None,
         cursor: None,
         error: None,
+        stale: false,
     };
     event_loop
         .run_app(&mut driver)
@@ -93,6 +94,7 @@ impl<T: Send + 'static> WindowHandle<T> {
                 state: None,
                 cursor: None,
                 error: None,
+                stale: false,
             },
             _msg: PhantomData,
         };
@@ -151,6 +153,11 @@ struct Driver<A: WindowApp> {
     state: Option<State>,
     cursor: Option<Point>,
     error: Option<WindowError>,
+    // A requested frame that could not be presented (occluded, outdated) and
+    // was dropped. macOS shows the cached backing store when the window is
+    // uncovered without asking for a redraw, so the driver must retry itself
+    // on the next event that plausibly accompanies visibility.
+    stale: bool,
 }
 
 impl<A: WindowApp> Driver<A> {
@@ -228,7 +235,12 @@ impl<A: WindowApp> Driver<A> {
         let background = self.config.background;
         let renderer = &mut state.renderer;
         let window = &state.window;
-        state.surface.draw_frame(
+        // `false` means the swap chain had no drawable to hand out — the
+        // window is occluded or mid-resize — so the drawn frame was dropped.
+        // Retried from `on_window_event` once the user can plausibly see the
+        // window again; requesting a redraw right here would busy-loop
+        // against a still-occluded window under `ControlFlow::Wait`.
+        self.stale = !state.surface.draw_frame(
             |view| {
                 renderer
                     .render_to_texture(view, width, height, background)
@@ -342,6 +354,13 @@ impl<A: WindowApp> Driver<A> {
             }
 
             WindowEvent::CursorMoved { position, .. } => {
+                if self.stale {
+                    // Moving the cursor over the window means it is visible;
+                    // retry the dropped frame.
+                    if let Some(state) = self.state.as_ref() {
+                        state.window.request_redraw();
+                    }
+                }
                 let point = Point::new(position.x, position.y);
                 self.cursor = Some(point);
                 self.dispatch(event_loop, Event::CursorMoved { position: point });
@@ -363,6 +382,17 @@ impl<A: WindowApp> Driver<A> {
 
             WindowEvent::CloseRequested => {
                 self.dispatch(event_loop, Event::CloseRequested);
+            }
+
+            // Clicking the window to look at it is the other event that
+            // plausibly accompanies the window becoming visible again after
+            // a dropped frame. winit 0.30's `WindowEvent::Occluded` is
+            // iOS-only, so there is no direct visibility signal to hook on
+            // desktop.
+            WindowEvent::Focused(true) if self.stale => {
+                if let Some(state) = self.state.as_ref() {
+                    state.window.request_redraw();
+                }
             }
 
             _ => {}
