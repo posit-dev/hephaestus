@@ -5,6 +5,8 @@
 //! [`Event`]. The rest of [`crate::window`] is backend-agnostic.
 
 use std::cell::Cell;
+#[cfg(not(target_arch = "wasm32"))]
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use winit::application::ApplicationHandler;
@@ -12,12 +14,14 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 #[cfg(not(target_arch = "wasm32"))]
-use winit::event_loop::{ControlFlow, EventLoop};
+use winit::event_loop::{ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
 use crate::geometry::{Point, Size};
 use crate::window::renderer::HostRenderer;
 use crate::window::surface::WindowSurface;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::window::MessageApp;
 use crate::window::BASE_DPI;
 use crate::window::{Event, EventCtx, Frame, MouseButton, WindowApp, WindowConfig, WindowError};
 
@@ -41,6 +45,95 @@ pub(crate) fn run<A: WindowApp>(config: WindowConfig, app: A) -> Result<(), Wind
     match driver.error {
         Some(error) => Err(error),
         None => Ok(()),
+    }
+}
+
+// Same desktop-only gate as `run`: wasm has no worker threads to message
+// from, and `EventLoopProxy` here is the desktop import.
+#[cfg(not(target_arch = "wasm32"))]
+/// An event loop prepared for cross-thread messages, before the app runs.
+///
+/// winit requires the [`EventLoopProxy`] to come from the event loop before
+/// `run_app` consumes it, and `run` blocks on the main thread until the
+/// window closes. The handle splits the two: build it, hand [`Self::sender`]
+/// clones to worker threads, then call [`Self::run`] on the main thread.
+pub struct WindowHandle<T: Send + 'static> {
+    event_loop: EventLoop<T>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send + 'static> WindowHandle<T> {
+    /// Create the event loop and its user-event channel.
+    ///
+    /// Must be called on the main thread, like everything else that touches
+    /// the platform event loop.
+    pub fn new() -> Result<Self, WindowError> {
+        let event_loop = EventLoop::with_user_event()
+            .build()
+            .map_err(|e| WindowError::EventLoop(e.to_string()))?;
+        event_loop.set_control_flow(ControlFlow::Wait);
+        Ok(Self { event_loop })
+    }
+
+    /// A sender half of the message channel, cheap to clone and `Send`.
+    pub fn sender(&self) -> WindowSender<T> {
+        WindowSender {
+            proxy: self.event_loop.create_proxy(),
+        }
+    }
+
+    /// Open the window and pump events until the app exits or something fails.
+    ///
+    /// Blocks the calling thread, which must be the main thread.
+    pub fn run<A: MessageApp<T>>(self, config: WindowConfig, app: A) -> Result<(), WindowError> {
+        let mut driver = MsgDriver {
+            driver: Driver {
+                config,
+                app,
+                state: None,
+                cursor: None,
+                error: None,
+            },
+            _msg: PhantomData,
+        };
+        self.event_loop
+            .run_app(&mut driver)
+            .map_err(|e| WindowError::EventLoop(e.to_string()))?;
+
+        match driver.driver.error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Sends messages to a running window from any thread.
+///
+/// Sending wakes the event loop out of `ControlFlow::Wait`; the app receives
+/// the message through [`MessageApp::message`] and a redraw is requested
+/// afterwards, so a worker thread can push new data and see it drawn without
+/// any further coordination.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct WindowSender<T: 'static> {
+    proxy: EventLoopProxy<T>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: 'static> Clone for WindowSender<T> {
+    fn clone(&self) -> Self {
+        Self {
+            proxy: self.proxy.clone(),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send + 'static> WindowSender<T> {
+    /// Queue a message for the window. Fails if the event loop has exited.
+    pub fn send(&self, message: T) -> Result<(), WindowError> {
+        self.proxy
+            .send_event(message)
+            .map_err(|e| WindowError::EventLoop(e.to_string()))
     }
 }
 
@@ -150,8 +243,13 @@ impl<A: WindowApp> Driver<A> {
         Ok(())
     }
 
-    /// Hand one translated event to the app, honouring an exit request.
-    fn dispatch(&mut self, event_loop: &ActiveEventLoop, event: Event) {
+    /// Build an `EventCtx`, run the callback against the app, then honour the
+    /// redraw and exit requests it made.
+    fn with_ctx(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        f: impl FnOnce(&mut A, &mut EventCtx<'_>),
+    ) {
         let Some(state) = self.state.as_ref() else {
             return;
         };
@@ -166,13 +264,18 @@ impl<A: WindowApp> Driver<A> {
             dpi: state.dpi,
             exit: &mut exit,
         };
-        self.app.event(&mut ctx, event);
+        f(&mut self.app, &mut ctx);
         if redraw.get() {
             state.window.request_redraw();
         }
         if exit {
             event_loop.exit();
         }
+    }
+
+    /// Hand one translated event to the app, honouring an exit request.
+    fn dispatch(&mut self, event_loop: &ActiveEventLoop, event: Event) {
+        self.with_ctx(event_loop, |app, ctx| app.event(ctx, event));
     }
 
     /// Record the failure and unwind the loop; `run` surfaces it to the caller.
@@ -182,8 +285,8 @@ impl<A: WindowApp> Driver<A> {
     }
 }
 
-impl<A: WindowApp> ApplicationHandler for Driver<A> {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+impl<A: WindowApp> Driver<A> {
+    fn on_resumed(&mut self, event_loop: &ActiveEventLoop) {
         // Resume can fire more than once; the window is built on the first.
         if self.state.is_some() {
             return;
@@ -194,7 +297,7 @@ impl<A: WindowApp> ApplicationHandler for Driver<A> {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn on_window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::Resized(physical) => {
                 let Some(state) = self.state.as_mut() else {
@@ -266,13 +369,62 @@ impl<A: WindowApp> ApplicationHandler for Driver<A> {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn on_about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if !self.config.continuous_redraw {
             return;
         }
         if let Some(state) = self.state.as_ref() {
             state.window.request_redraw();
         }
+    }
+}
+
+impl<A: WindowApp> ApplicationHandler for Driver<A> {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.on_resumed(event_loop);
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        self.on_window_event(event_loop, id, event);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.on_about_to_wait(event_loop);
+    }
+}
+
+/// The same driver, with a user-event channel layered on top.
+///
+/// Kept as a separate type rather than a generic parameter on [`Driver`] so
+/// the plain `ApplicationHandler` impl above stays non-generic: two impls of
+/// the same trait with overlapping type parameters would not compile.
+#[cfg(not(target_arch = "wasm32"))]
+struct MsgDriver<A: WindowApp, T> {
+    driver: Driver<A>,
+    _msg: PhantomData<fn() -> T>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send + 'static, A: MessageApp<T>> ApplicationHandler<T> for MsgDriver<A, T> {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.driver.on_resumed(event_loop);
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        self.driver.on_window_event(event_loop, id, event);
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, message: T) {
+        // A message invalidates whatever is on screen, so redraw whether or
+        // not the handler asked: it usually has nothing else to key off.
+        self.driver.with_ctx(event_loop, |app, ctx| {
+            app.message(ctx, message);
+            ctx.request_redraw();
+        });
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.driver.on_about_to_wait(event_loop);
     }
 }
 
