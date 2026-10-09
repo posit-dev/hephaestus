@@ -9,11 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cross-thread messages for the window event loop.** `window::WindowHandle::<T>::new()` prepares the event loop and hands out `WindowSender<T>` clones before `run` blocks on the main thread; a worker thread's `send` wakes the loop and reaches the app through the new `MessageApp<T>::message` callback, with a redraw requested afterwards. `run()`, `WindowApp` and `Event` are untouched — the callback is a separate trait so `Event` stays purely platform-originated.
 - **A wasm client that ships no rasterizer, published to npm as `hephaestus-svg-wasm`.** `crates/hephaestus-svg-wasm` reads the same `.hep` documents as `hephaestus-wasm` and emits SVG markup for the page to place, so a resize replaces the markup and re-solves the layout rather than redrawing a canvas: no WebGPU, no WebGL2 context, no device pixel ratio, and 2.41 MB against the canvas client's 3.11 MB. Hit testing is `elementFromPoint` over the backend's `data-pick-id` / `data-pick-kind` attributes, with no index built in wasm. The cost is one DOM element per mark, so a dense plot still belongs on a canvas.
 - **`examples/document_svg.rs`** — document in, SVG out, with no renderer in the build, which is both a figure export and the markup a page can serve while the client boots.
 
 ### Fixed
 
+- **A frame requested while the window is occluded is no longer lost.** The swap chain reports Timeout/Occluded/Outdated and the frame was silently dropped, and macOS shows its cached backing store when the window is uncovered without asking for a redraw — so nothing appeared until a resize. The driver now marks the frame stale and retries on `Focused(true)` and `CursorMoved`, the events that plausibly accompany the window becoming visible (winit 0.30's `Occluded` is iOS-only, so there is no direct signal on desktop).
 - **`PickId::Block` no longer collides with the mark whose id is `0` in SVG output.** It emits `data-pick-block` rather than `data-pick-id="0"`; the id space is the full `u32` with nothing reserved.
 - **Chrome is hit-testable in SVG output.** A `PickId::Skip` primitive inside a `ScopeMode::Target` scope keeps its pointer events instead of unconditionally taking `pointer-events="none"`, which had left every axis label, tick and title unreachable under `elementFromPoint` while the CPU pick index answered for the same scene.
 
