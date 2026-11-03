@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Composition-level chrome stays glued to an aspect-locked plot.** A polar plot (or any `Patch::aspect` lock) shrinks its panel via the solver's respect coupling, but the slack stayed trapped inside the facets sub-grid, centred there, while the composition's own legend ring and title bands were laid out against the un-shrunk outer block — on a wide canvas a composition-level legend drifted onto the bare canvas, away from the patch background it belongs to. The sub-grid's slack now escapes upward: the parent caps the spanned fr tracks at the child's solved content size, redistributes the freed space to uncapped fr siblings (as flat locked-plus-flex layouts already did), and centres the whole block — facets plus composition chrome — as one unit. Fixes #47.
 - **`PickId::Block` no longer collides with the mark whose id is `0` in SVG output.** It emits `data-pick-block` rather than `data-pick-id="0"`; the id space is the full `u32` with nothing reserved.
 - **Chrome is hit-testable in SVG output.** A `PickId::Skip` primitive inside a `ScopeMode::Target` scope keeps its pointer events instead of unconditionally taking `pointer-events="none"`, which had left every axis label, tick and title unreachable under `elementFromPoint` while the CPU pick index answered for the same scene.
 
