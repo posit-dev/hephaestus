@@ -263,12 +263,22 @@ pub fn log_pretty_breaks(min: f64, max: f64, n_target: usize, base: f64) -> Vec<
 
     // For wide spans, just powers of base. For narrow spans, expand with
     // 1 / 2 / 5 sub-decade stops. Threshold is loose; tweakable.
-    let mults: &[f64] = if n_decades > 4.0 {
+    let all: &[f64] = if n_decades > 4.0 {
         &[1.0]
     } else if n_decades > 1.5 || n_target <= 5 {
         &[1.0, 2.0, 5.0]
     } else {
         &[1.0, 2.0, 3.0, 5.0, 7.0]
+    };
+    // The 1-2-5 scheme is calibrated for base 10: multipliers ≥ base fall
+    // into the next decade and near-collide with its low ticks (e.g. 5·e^d
+    // vs 2·e^(d+1)). Keep only multipliers strictly below the base; for
+    // base e this leaves [1, 2], for base 2 just [1].
+    let filtered: Vec<f64> = all.iter().copied().filter(|&m| m < base).collect();
+    let mults: &[f64] = if filtered.is_empty() {
+        &[1.0]
+    } else {
+        &filtered
     };
 
     let lo_decade = log_min.floor() as i32;
@@ -317,22 +327,29 @@ fn symlog_branch_floor(hi: f64, n_target: usize, base: f64) -> f64 {
 }
 
 /// Geometric minor breaks between consecutive powers of `base`. Emits
-/// `k * base^d` for `k ∈ {2, 3, …, ⌊base⌋ - 1}` and each integer decade
-/// `d` overlapping `[min, max]`. The canonical log-axis "subticks
-/// between decades" look.
+/// `m * base^d` for each multiplier `m` and integer decade `d` overlapping
+/// `[min, max]`. The canonical log-axis "subticks between decades" look.
 ///
-/// For base = 10 this produces `2, 3, 4, 5, 6, 7, 8, 9` between each
-/// pair of decade powers.
+/// The multipliers are the integers strictly below `base` (for base 10:
+/// `2, 3, …, 9`; for base e: just `2`). When no integer fits — e.g.
+/// base 2 — the geometric midpoint `√base · base^d = base^(d+½)` is used
+/// instead, which sits visually centered on a log axis.
 pub fn log_minor_breaks(min: f64, max: f64, base: f64) -> Vec<f64> {
     if !min.is_finite() || !max.is_finite() || min <= 0.0 || max <= 0.0 || min >= max || base <= 1.0
     {
         return Vec::new();
     }
-    let base_int = base.round() as i32;
-    if base_int < 3 {
-        // base = 2 has no integer multipliers in (1, base) — no minors.
-        return Vec::new();
-    }
+    // Integer multiples of base^d strictly inside the decade. Comparing
+    // against `base` directly (not its rounded value) keeps non-integer
+    // bases correct: base e yields only 2, base 2.4 still yields 2.
+    let mults: Vec<f64> = (2..).map(|k| k as f64).take_while(|&k| k < base).collect();
+    // No integer fits (e.g. base 2): use the geometric midpoint instead.
+    let mults = if mults.is_empty() {
+        vec![base.sqrt()]
+    } else {
+        mults
+    };
+
     let log_min = min.log(base);
     let log_max = max.log(base);
     let lo_decade = log_min.floor() as i32;
@@ -341,8 +358,8 @@ pub fn log_minor_breaks(min: f64, max: f64, base: f64) -> Vec<f64> {
     let mut result = Vec::new();
     for d in lo_decade..=hi_decade {
         let base_d = base.powi(d);
-        for k in 2..base_int {
-            let v = k as f64 * base_d;
+        for &m in &mults {
+            let v = m * base_d;
             if v >= min && v <= max {
                 result.push(v);
             }
@@ -1572,9 +1589,56 @@ mod tests {
     }
 
     #[test]
-    fn log2_minor_empty_no_integer_multipliers_in_band() {
-        // base 2 has no integers in (1, 2) so log_minor_breaks is empty.
-        assert!(log_minor_breaks(1.0, 8.0, 2.0).is_empty());
+    fn log2_minor_geometric_midpoints() {
+        // base 2 has no integers in (1, 2), so minors fall back to the
+        // geometric midpoint √2·2^d, visually centered on a log axis.
+        let m = log_minor_breaks(1.0, 8.0, 2.0);
+        let sqrt2 = 2f64.sqrt();
+        assert_eq!(m.len(), 3, "{m:?}");
+        for (got, want) in m.iter().zip([sqrt2, 2.0 * sqrt2, 4.0 * sqrt2]) {
+            assert!((got - want).abs() < 1e-12, "{got} != {want}");
+        }
+    }
+
+    #[test]
+    fn log_e_minor_only_double_per_decade() {
+        // 2 is the only integer strictly below e, so one minor per decade.
+        let e = std::f64::consts::E;
+        let m = log_minor_breaks(1.0, e.powi(3), e);
+        for d in 0..3 {
+            let want = 2.0 * e.powi(d);
+            assert!(
+                m.iter().any(|&v| (v - want).abs() < 1e-9),
+                "{m:?} missing {want}"
+            );
+        }
+        assert_eq!(m.len(), 3, "{m:?}");
+    }
+
+    #[test]
+    fn log_minor_non_integer_base_uses_actual_base_not_rounded() {
+        // 2 < 2.4, so one minor per decade — rounding to 2 would drop it.
+        let m = log_minor_breaks(1.0, 2.4f64.powi(2), 2.4);
+        assert!(
+            m.iter().any(|&v| (v - 2.0).abs() < 1e-12),
+            "{m:?} missing 2"
+        );
+    }
+
+    #[test]
+    fn log_e_pretty_excludes_multipliers_above_base() {
+        // The 1-2-5 scheme is base-10-specific; for base e the 5 would
+        // land in the next decade near 2·e^(d+1). Only [1, 2] survive.
+        let e = std::f64::consts::E;
+        let b = log_pretty_breaks(1.0, e.powi(3), 6, e);
+        for v in &b {
+            let frac = v.log(e).fract();
+            let on_power = frac.abs() < 1e-9;
+            let on_double = (v / e.powi(v.log(e).floor() as i32) - 2.0).abs() < 1e-9;
+            assert!(on_power || on_double, "unexpected break {v} in {b:?}");
+        }
+        assert!(b.iter().any(|&v| (v - 1.0).abs() < 1e-9));
+        assert!(b.iter().any(|&v| (v - 2.0).abs() < 1e-9));
     }
 
     // ── sqrt_breaks ──
