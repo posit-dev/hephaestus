@@ -1,6 +1,6 @@
-# src/scene/CLAUDE.md
+# src/scene/AGENTS.md
 
-The authoring surface every backend has to satisfy. See `src/CLAUDE.md` for the two-trait split (`SceneBuilder` vs `Renderer`) and the picking model overview.
+The authoring surface every backend has to satisfy. See `src/AGENTS.md` for the two-trait split (`SceneBuilder` vs `Renderer`) and the picking model overview.
 
 ## What this module does
 
@@ -22,7 +22,7 @@ The trait deliberately consumes already-positioned glyphs — shaping and line-b
 ## Conventions
 
 - **Adding a method on `SceneBuilder` requires adding an `Op` variant in `recording.rs`.** The recording backend is exhaustive over the trait surface; that exhaustiveness is what validates the trait shape (if recording is awkward, the trait is wrong) and what lets future SVG / PDF emitters be one `match` over `Op`. Skipping this step breaks the recording backend and downstream emitters.
-- **Picking ids carry through every primitive.** Authoring code chooses `PickId::Skip` (no authoring id), `PickId::Block` (occlude without reporting), or `PickId::Id(n)`. See `src/CLAUDE.md` for the model.
+- **Picking ids carry through every primitive.** Authoring code chooses `PickId::Skip` (no authoring id), `PickId::Block` (occlude without reporting), or `PickId::Id(n)`. See `src/AGENTS.md` for the model.
 - **`push_layer` does not take a `PickId`, and `push_pick_scope` is not a layer.** The two stacks are orthogonal: a scope has no visual effect and imposes no clip, and the two need not nest with one another. A backend that emits groups for both — SVG does — has to tag them, or an interleaved pair closes the wrong element.
 - **The two scope methods have default no-op bodies, and they are the only ones that do.** Deliberate: three of the five real implementors want exactly a no-op, it keeps the trait non-breaking for a downstream implementor, and — unlike every other method here — ignoring it still produces a correct *picture*. The intersection-of-backends rule is about visual capabilities, and a scope has none.
 - **`draw_mesh` shares one `pick_id` across the whole mesh.** Picking does not distinguish individual triangles. No backend currently has a native indexed-mesh primitive — each backend decomposes the mesh into its own draw ops (e.g. one fill with a per-triangle linear-gradient brush in Vello).

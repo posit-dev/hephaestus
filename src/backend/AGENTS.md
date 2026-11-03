@@ -1,6 +1,6 @@
-# src/backend/CLAUDE.md
+# src/backend/AGENTS.md
 
-The `Renderer` trait, the error type, and the backend implementations themselves. See `src/CLAUDE.md` for the rationale behind splitting `SceneBuilder` and `Renderer` into two traits and the intersection-of-backends rule that governs what backends have to support.
+The `Renderer` trait, the error type, and the backend implementations themselves. See `src/AGENTS.md` for the rationale behind splitting `SceneBuilder` and `Renderer` into two traits and the intersection-of-backends rule that governs what backends have to support.
 
 ## What this module does
 
@@ -38,8 +38,8 @@ A `Renderer` owns backend resources (GPU device, pipelines, readback buffer) and
 ## Cross-references
 
 - `scene/` — the `SceneBuilder` trait every backend implements.
-- `backend/vello/` — the compute-shader backend. See its own `CLAUDE.md` for the wgpu / vello / pollster quirks.
-- `backend/hybrid/` — the sparse-strips backend: coverage on the CPU, and no draw-count ceiling. See its own `CLAUDE.md`.
-- `backend/svg/` — the vector backend: emits markup, implements `SceneBuilder` only, and needs no GPU. See its own `CLAUDE.md`.
-- `backend/pdf/` — the fixed vector backend: emits a PDF file with every glyph embedded, so it looks the same on a machine with none of the fonts. Implements `SceneBuilder` only, needs no GPU, and is the one backend that does not use `backend/mesh.rs`. See its own `CLAUDE.md`.
+- `backend/vello/` — the compute-shader backend. See its own `AGENTS.md` for the wgpu / vello / pollster quirks.
+- `backend/hybrid/` — the sparse-strips backend: coverage on the CPU, and no draw-count ceiling. See its own `AGENTS.md`.
+- `backend/svg/` — the vector backend: emits markup, implements `SceneBuilder` only, and needs no GPU. See its own `AGENTS.md`.
+- `backend/pdf/` — the fixed vector backend: emits a PDF file with every glyph embedded, so it looks the same on a machine with none of the fonts. Implements `SceneBuilder` only, needs no GPU, and is the one backend that does not use `backend/mesh.rs`. See its own `AGENTS.md`.
 - `backend/href.rs` — the link-destination allow-list `svg` and `pdf` share.

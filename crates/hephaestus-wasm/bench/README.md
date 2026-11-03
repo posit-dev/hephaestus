@@ -91,7 +91,7 @@ live frame **hash identically** — `3b34049104d8` appearing twice is the swap,
 and it is invisible in the composited output as well as in the buffer.
 
 `185 ms` is also the honest cold-boot figure for the `webgl` build, which the
-crate had never had: the ~400 ms in `CLAUDE.md` was the `wgpu-backend` path,
+crate had never had: the ~400 ms in `AGENTS.md` was the `wgpu-backend` path,
 where vello compiles ~24 compute pipelines.
 
 The screencast is the only ground truth for when a plot appears, because **a
@@ -128,7 +128,7 @@ work is a webview, where resources go through a service worker — so whether th
 wasm arrives as `application/wasm`, whether the transport compresses it, and
 whether V8's wasm code cache survives across page loads are all open. The last
 one decides whether renders 2..N are cheap or pay the full ~185 ms. See
-"Embedding: the producer's side" in `../CLAUDE.md` for what to probe and why.
+"Embedding: the producer's side" in `../AGENTS.md` for what to probe and why.
 
 ## Traps worth knowing before measuring anything here
 

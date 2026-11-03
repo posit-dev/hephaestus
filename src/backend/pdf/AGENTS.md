@@ -1,6 +1,6 @@
-# src/backend/pdf/CLAUDE.md
+# src/backend/pdf/AGENTS.md
 
-The fixed vector backend: a `SceneBuilder` that emits a PDF file. See `src/backend/CLAUDE.md` for the backend conventions this one departs from, `src/CLAUDE.md` for the two-trait split that makes the departure legal, and `src/backend/svg/CLAUDE.md` for the sibling that inverts this one's premise.
+The fixed vector backend: a `SceneBuilder` that emits a PDF file. See `src/backend/AGENTS.md` for the backend conventions this one departs from, `src/AGENTS.md` for the two-trait split that makes the departure legal, and `src/backend/svg/AGENTS.md` for the sibling that inverts this one's premise.
 
 ## What this module does
 

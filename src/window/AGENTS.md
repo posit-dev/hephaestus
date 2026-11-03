@@ -1,4 +1,4 @@
-# src/window/CLAUDE.md
+# src/window/AGENTS.md
 
 Live presentation, behind the off-by-default `window` and `canvas` features. This is the in-crate host for `WgpuRenderer` — the counterpart to writing an RGBA8 buffer to a file.
 

@@ -1,4 +1,4 @@
-# crates/hephaestus-wasm/CLAUDE.md
+# crates/hephaestus-wasm/AGENTS.md
 
 ## Two backends, chosen at build time
 
@@ -807,7 +807,7 @@ this wrong.
 
 What the boundary now costs is much less than it did. Within a major, a record
 grows at its tail and an ancillary chunk is skippable, so most format additions
-no longer move the number at all — see `src/document/CLAUDE.md` for which
+no longer move the number at all — see `src/document/AGENTS.md` for which
 changes are minor and which are not. A reader also refuses an unknown
 **critical** chunk rather than skipping it, so a client too old for a document
 says so instead of drawing a plot that quietly differs. `ReadDocument`
@@ -864,9 +864,9 @@ in "Startup cost, and how to hide it".
 
 ## Cross-references
 
-- `src/window/CLAUDE.md` — `CanvasHost`, the frame path, and why the host is
+- `src/window/AGENTS.md` — `CanvasHost`, the frame path, and why the host is
   a handle rather than a driver.
-- `src/document/CLAUDE.md` — what a document carries, and the font reasoning
+- `src/document/AGENTS.md` — what a document carries, and the font reasoning
   this crate is the consumer for.
 - `bench/README.md` — the startup measurements above, how to reproduce them,
   and the traps (`strip = true` anonymises wasm frames; discard the first run

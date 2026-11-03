@@ -231,7 +231,7 @@ fn shading_dict(kind: u8, coords: &str, stops: &[(f32, Color)], ramp: Ramp) -> S
 /// the coordinate system in force when `gs` runs, so that pins the
 /// group's space to default user space, and it is what keeps the mask
 /// clear of the page-sized buffer a renderer composites it in. See the
-/// module CLAUDE.md.
+/// module AGENTS.md.
 pub(crate) fn alpha_mask(
     gray: &str,
     matrix: Affine,

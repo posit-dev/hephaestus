@@ -1,6 +1,6 @@
-# src/document/CLAUDE.md
+# src/document/AGENTS.md
 
-Capture a `PlotComposition` to bytes and rebuild it elsewhere. See `src/CLAUDE.md` for where this sits relative to the two API levels.
+Capture a `PlotComposition` to bytes and rebuild it elsewhere. See `src/AGENTS.md` for where this sits relative to the two API levels.
 
 ## What this module does
 

@@ -1,4 +1,4 @@
-# src/pick/CLAUDE.md
+# src/pick/AGENTS.md
 
 Hit testing: what a drawing records about itself, and how a point, rectangle
 or lasso is answered against it.
@@ -16,7 +16,7 @@ Nothing here knows what a chart is. A [`PickScope`] carries a `&'static str`
 kind plus an optional name and index; the vocabulary that gives those meaning
 lives in `plot::pick`. That split is deliberate and matches the one
 `composition` already uses between `Slot::name` and the `Region` trait — see
-the layering rule in `src/CLAUDE.md`.
+the layering rule in `src/AGENTS.md`.
 
 ## Files
 
@@ -86,9 +86,9 @@ the layering rule in `src/CLAUDE.md`.
 
 ## Cross-references
 
-- `src/CLAUDE.md` — the authoritative picking model: the indexing rule, the
+- `src/AGENTS.md` — the authoritative picking model: the indexing rule, the
   scope grammar, what it costs, and the known limits.
 - `src/plot/pick.rs` — the chart vocabulary: `PlotPart`, the scope
   constructors, and the typed `PlotPath` view a consumer reads a hit through.
-- `src/backend/svg/CLAUDE.md` — the one backend that surfaces both `PickId`
+- `src/backend/svg/AGENTS.md` — the one backend that surfaces both `PickId`
   and scopes, as `data-pick-id` and `<g data-pick-kind=…>`.

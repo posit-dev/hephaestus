@@ -1,4 +1,4 @@
-# src/image/CLAUDE.md
+# src/image/AGENTS.md
 
 Raster readers and writers. One cargo feature per format, one codec each, nothing else.
 
@@ -78,9 +78,9 @@ Every writer takes the same thing: RGBA8, **straight (un-premultiplied) alpha**,
 5. Add the feature to the `any(..)` gate on `pub mod image;` in `src/lib.rs`. That gate is also why `from_rgba8` is not reachable with no format feature at all — a build that decodes nothing constructs a `brush::Image` directly.
 6. Unit tests in the writer: container magic bytes, `encode_*` and `write_*` agreeing byte-for-byte, wrong-length rejection with an untouched sink, an `encode_* → decode_*` pixel round-trip, a fewer-than-four-channel file widening to opaque RGBA, garbage bytes reported as `InvalidData` rather than panicking, a dpi read back out of the file, a `None` declaring no resolution, and an unusable dpi still producing a decodable file.
 7. Add a `#[cfg(feature = "<format>")]` case to `tests/image_writers.rs` so real rendered pixels go through it.
-8. Register it: the per-feature loop in `.github/workflows/check.yml`, the README feature table, the root `CLAUDE.md` feature list, `CHANGELOG.md`, and `examples/image_formats.rs`.
+8. Register it: the per-feature loop in `.github/workflows/check.yml`, the README feature table, the root `AGENTS.md` feature list, `CHANGELOG.md`, and `examples/image_formats.rs`.
 
 ## Cross-references
 
-- `src/backend/CLAUDE.md` — the straight-alpha output convention and the de-padded readback these writers depend on.
+- `src/backend/AGENTS.md` — the straight-alpha output convention and the de-padded readback these writers depend on.
 - `tests/alpha_format.rs` — pins that convention; if it fails, every writer here is producing wrong pixels.

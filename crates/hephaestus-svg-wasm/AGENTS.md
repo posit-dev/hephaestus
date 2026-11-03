@@ -1,4 +1,4 @@
-# crates/hephaestus-svg-wasm/CLAUDE.md
+# crates/hephaestus-svg-wasm/AGENTS.md
 
 The wasm SVG client: a page loads this, points it at a container element and a
 `.hep` document, and gets a plot that reflows on resize and follows
@@ -43,7 +43,7 @@ harfrust stay, and shaping is not optional even when the browser does the
 drawing. The size is a reason to prefer this client, not the reason it exists.
 
 **The reason it exists is everything it does not have to do.** Each of these is
-a section of `../hephaestus-wasm/CLAUDE.md` with no counterpart here:
+a section of `../hephaestus-wasm/AGENTS.md` with no counterpart here:
 
 - **No GPU requirement.** `isSupported()` has no analogue — there is no adapter
   to probe and no context to be refused. A page cannot fail to show a plot
@@ -121,7 +121,7 @@ That last row is the one to understand. Chrome draws with `PickId::Skip` inside
 the backend used to do unconditionally — left every axis label, tick and title
 unhittable in a page while the CPU index happily answered for the same scene.
 `SvgScene` now tracks the scope modes and reproduces the indexing rule from
-`src/CLAUDE.md`.
+`src/AGENTS.md`.
 
 The consequence for the JS API is that **a hit has two independent halves**,
 which is why `PlotView.pick` returns both:
@@ -140,7 +140,7 @@ callers want one.
 ## Fonts: registered twice, and both halves matter
 
 A browser enumerates **no** system fonts, so everything in
-`../hephaestus-wasm/CLAUDE.md`'s font section applies here unchanged: register
+`../hephaestus-wasm/AGENTS.md`'s font section applies here unchanged: register
 before the first view, exactly one file per (weight, style), WOFF2 is what a
 CDN serves and is unwrapped by `wuff`, a generic family is an indirection and
 not a name.
@@ -234,7 +234,7 @@ against each: `Cargo.toml`, `crates/hephaestus-wasm/Cargo.toml` and this one.
 They are in lockstep deliberately, since both clients are views onto this crate
 rather than things with their own release cycles. It does mean a release is now
 three independent publishes and a third of one is a reachable state; see the
-root `CLAUDE.md`.
+root `AGENTS.md`.
 
 The `npm-svg` job needs a **one-time trusted-publisher registration** on npm for
 the `hephaestus-svg-wasm` package naming `release.yml`, plus an `npm-svg`
@@ -297,11 +297,11 @@ only costs the streaming path rather than changing the boot being demonstrated.
 
 ## Cross-references
 
-- `../../src/backend/svg/CLAUDE.md` — the backend: why text is `textLength`,
+- `../../src/backend/svg/AGENTS.md` — the backend: why text is `textLength`,
   what degrades, and the picking attributes in detail.
-- `../../src/document/CLAUDE.md` — what a document carries, and the font
+- `../../src/document/AGENTS.md` — what a document carries, and the font
   reasoning both clients are consumers for.
-- `../hephaestus-wasm/CLAUDE.md` — the canvas client. Its font, distribution
+- `../hephaestus-wasm/AGENTS.md` — the canvas client. Its font, distribution
   and document sections apply here almost unchanged; its GPU, placeholder and
   synchronous-resize sections are the ones this client deletes.
 - `../../examples/document_svg.rs` — the same pipeline natively, and the

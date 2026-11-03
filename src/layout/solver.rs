@@ -64,11 +64,12 @@ pub(super) fn solve(root: &GridNode, viewport: Size, dpi: f64) -> Layout {
 
     let has_refs = tree_has_track_refs(root);
     let has_respect_auto = tree_has_respect_with_auto_rows(root);
+    let has_nested_respect = tree_has_nested_respect(root, true);
 
     let mut widths = PassResults::default();
     let mut heights = PassResults::default();
 
-    let needs_iteration = !seeds.is_empty() || has_refs || has_respect_auto;
+    let needs_iteration = !seeds.is_empty() || has_refs || has_respect_auto || has_nested_respect;
     let iter_cap = if needs_iteration { MAX_ITER } else { 1 };
 
     for iter in 0..iter_cap.max(1) {
@@ -118,13 +119,13 @@ pub(super) fn solve(root: &GridNode, viewport: Size, dpi: f64) -> Layout {
             );
         }
 
-        if seeds.is_empty() && !has_refs && !has_respect_auto {
+        if seeds.is_empty() && !has_refs && !has_respect_auto && !has_nested_respect {
             widths = new_widths;
             heights = new_heights;
             break;
         }
 
-        let needs_stability_check = has_refs || has_respect_auto;
+        let needs_stability_check = has_refs || has_respect_auto || has_nested_respect;
         let stable = !needs_stability_check
             || (results_match(&widths, &new_widths) && results_match(&heights, &new_heights));
 
@@ -179,6 +180,8 @@ impl Band {
 /// are written once against this view and instantiated for [`Horizontal`]
 /// (columns) and [`Vertical`] (rows).
 trait AxisView {
+    /// Which axis this view resolves, for side-table lookups.
+    const AXIS: Axis;
     /// The grid's tracks along this axis.
     fn tracks(node: &GridNode) -> &[Track];
     /// The gap between adjacent tracks on this axis.
@@ -205,6 +208,7 @@ struct Horizontal;
 struct Vertical;
 
 impl AxisView for Horizontal {
+    const AXIS: Axis = Axis::Width;
     fn tracks(node: &GridNode) -> &[Track] {
         &node.cols
     }
@@ -238,6 +242,7 @@ impl AxisView for Horizontal {
 }
 
 impl AxisView for Vertical {
+    const AXIS: Axis = Axis::Height;
     fn tracks(node: &GridNode) -> &[Track] {
         &node.rows
     }
@@ -412,6 +417,19 @@ impl Resolved<'_> {
         self.heights?.tracks(idx)?.sizes.get(row).copied()
     }
 
+    /// Previous iteration's content size and allotted band for the grid
+    /// at `idx` on `axis`: the summed track sizes plus gaps, and the
+    /// band the grid was given before centering. `None` on iteration 0.
+    fn prev_content_and_band(&self, idx: NodeIdx, axis: Axis) -> Option<(f64, f64)> {
+        let band = match axis {
+            Axis::Width => self.widths?.tracks(idx)?,
+            Axis::Height => self.heights?.tracks(idx)?,
+        };
+        let total =
+            band.sizes.iter().sum::<f64>() + saturating_gap_total(band.sizes.len(), band.gap);
+        Some((total, band.band.size()))
+    }
+
     /// Look up the summed track size for a `TrackOf` reference. Returns
     /// `None` if the referenced grid hasn't been resolved yet (e.g.,
     /// iteration 0) — the caller treats this as 0.
@@ -539,6 +557,11 @@ struct TrackBand {
     gap: f64,
     /// Interval the grid occupies on this axis.
     span: Band,
+    /// Interval the grid was allotted on this axis, before its tracks
+    /// were centered within it. `band.size() - sum(sizes) - gaps` is the
+    /// slack respect left unclaimed inside the grid; the parent's
+    /// next-iteration Fr caps read it to shrink the child's band.
+    band: Band,
     /// Pixel size of one fr unit — the respected scale when `respect()` is
     /// active on this grid, otherwise the plain share of the free space.
     /// The height pass re-clamps `respect()` against the width pass's value.
@@ -569,6 +592,97 @@ impl PassResults {
 }
 
 // ─── Track resolution ────────────────────────────────────────────────────────
+
+/// Per-track Fr caps donated by child grids whose own respect left slack
+/// trapped inside their band on the previous iteration.
+///
+/// A respected sub-grid that cannot fill its allotted band centres its
+/// tracks within it — without this hook the slack would stay stranded at
+/// the child's level, and the parent's own chrome (e.g. a composition-
+/// level legend column) would be laid out against the un-shrunk band,
+/// detaching it from the child's content. The cap shrinks the spanned
+/// Fr tracks so the child's band matches its solved content size; the
+/// parent then centres the whole block — child plus the parent's chrome
+/// — as one unit, the way R `grid` centres a respected gtable in its
+/// viewport.
+///
+/// Only child grids carrying their own respect on this axis can strand
+/// slack, so only they donate. On iteration 0 there is no previous
+/// solution and every cap is `None`, reproducing the pre-fix layout;
+/// iteration 1 applies the caps and the stability check confirms.
+fn fr_caps_from_children<A: AxisView>(
+    node: &GridNode,
+    idx: NodeIdx,
+    nodes: &NodeMap,
+    auto: &[f64],
+    avail: f64,
+    dpi: f64,
+    resolved: &Resolved,
+) -> Vec<Option<f64>> {
+    let tracks = A::tracks(node);
+    let mut caps = vec![None; tracks.len()];
+    for (slot, (placement, child)) in node.children.iter().enumerate() {
+        let Node::Grid(g) = child else {
+            continue;
+        };
+        let child_respects = !matches!(g.respect, crate::layout::Respect::None);
+        if !child_respects {
+            continue;
+        }
+        let child_idx = nodes.child(idx, slot);
+        let Some((content, _band)) = resolved.prev_content_and_band(child_idx, A::AXIS) else {
+            continue;
+        };
+        // Cap unconditionally at the child's content size. When the
+        // child fills its band (its own unrespected fr tracks absorbed
+        // everything) the cap equals the tracks' natural fr share and
+        // never binds; conditioning the cap on observed slack instead
+        // oscillates, because applying the cap erases the slack it was
+        // computed from and the next iteration would lift it again.
+        let start = A::placement_start(placement).saturating_sub(1) as usize;
+        let end = (start + A::placement_span(placement).max(1) as usize).min(tracks.len());
+        if start >= end {
+            continue;
+        }
+        // The spanned tracks should sum to the child's content size.
+        // Fixed and Auto parts are already known this pass; the Fr
+        // remainder splits across the spanned Fr tracks by weight.
+        let mut non_fr = 0.0;
+        let mut fr_weight = 0.0;
+        for (i, t) in tracks.iter().enumerate().take(end).skip(start) {
+            match t {
+                Track::Fixed(l) => non_fr += length_to_px(l, dpi, avail, resolved),
+                Track::Auto => non_fr += auto.get(i).copied().unwrap_or(0.0),
+                Track::Fr(f) => fr_weight += *f,
+            }
+        }
+        if fr_weight <= 0.0 {
+            continue;
+        }
+        let fr_target = (content - non_fr).max(0.0);
+        for (i, t) in tracks.iter().enumerate().take(end).skip(start) {
+            if let Track::Fr(f) = t {
+                let cap = fr_target * *f / fr_weight;
+                caps[i] = Some(caps[i].map_or(cap, |prev: f64| prev.min(cap)));
+            }
+        }
+    }
+    caps
+}
+
+/// True when any *nested* grid in the tree carries a respect policy.
+/// Root's own respect doesn't need iteration — its slack has no parent
+/// to escape to — but a nested grid's respect means its parent may need
+/// a second pass to apply the Fr caps from [`fr_caps_from_children`].
+fn tree_has_nested_respect(node: &GridNode, is_root: bool) -> bool {
+    if !is_root && !matches!(node.respect, crate::layout::Respect::None) {
+        return true;
+    }
+    node.children.iter().any(|(_, child)| match child {
+        Node::Grid(g) => tree_has_nested_respect(g, false),
+        Node::Cell(_) => false,
+    })
+}
 
 /// The cross axis's contribution to `respect()`'s clamp.
 struct CrossRespect {
@@ -614,11 +728,15 @@ impl AxisSolution {
 ///
 /// `auto` supplies the already-measured size of each `Track::Auto` (zero
 /// elsewhere); `cross` supplies the other axis's numbers so `respect()` can
-/// clamp both axes to a shared per-fr scale.
+/// clamp both axes to a shared per-fr scale. `caps` carries the per-track
+/// Fr caps donated by child grids whose own respect left slack trapped
+/// inside their band on the previous iteration (empty when there are
+/// none); see [`fr_caps_from_children`].
 fn resolve_tracks<A: AxisView>(
     node: &GridNode,
     avail: f64,
     auto: &[f64],
+    caps: &[Option<f64>],
     cross: CrossRespect,
     dpi: f64,
     resolved: &Resolved,
@@ -680,11 +798,13 @@ fn resolve_tracks<A: AxisView>(
         0.0
     };
 
-    let sizes: Vec<f64> = tracks
+    // Fr sizes, before child-donated caps. Respected tracks keep their
+    // aspect-pinned scale throughout — they are neither capped nor
+    // recipients of redistributed slack.
+    let mut fr_sizes: Vec<f64> = tracks
         .iter()
         .enumerate()
         .map(|(i, t)| match t {
-            Track::Fixed(l) => length_to_px(l, dpi, avail, resolved),
             Track::Fr(f) => {
                 let scale = if respect_active && A::respected(node, i) {
                     resp_scale
@@ -693,6 +813,78 @@ fn resolve_tracks<A: AxisView>(
                 };
                 *f * scale
             }
+            _ => 0.0,
+        })
+        .collect();
+
+    // Apply the caps child grids donated from their trapped respect
+    // slack. A capped track shrinks to the child's content size; the
+    // freed space redistributes to uncapped, unrespected fr siblings by
+    // weight (matching how flat layouts already hand slack to flex
+    // siblings), or stays unclaimed — and becomes this grid's centering
+    // slack — when every fr track is capped or respected. Iterate:
+    // redistribution can push a sibling over its own cap.
+    for _ in 0..tracks.len() {
+        let mut pool = 0.0;
+        let mut newly_capped = false;
+        for (i, t) in tracks.iter().enumerate() {
+            if !matches!(t, Track::Fr(_)) || (respect_active && A::respected(node, i)) {
+                continue;
+            }
+            if let Some(cap) = caps.get(i).copied().flatten() {
+                if fr_sizes[i] > cap {
+                    pool += fr_sizes[i] - cap.max(0.0);
+                    fr_sizes[i] = cap.max(0.0);
+                    newly_capped = true;
+                }
+            }
+        }
+        if pool <= 1e-9 {
+            break;
+        }
+        let weight: f64 = tracks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| match t {
+                Track::Fr(f)
+                    if caps
+                        .get(i)
+                        .copied()
+                        .flatten()
+                        .is_none_or(|c| fr_sizes[i] < c)
+                        && !(respect_active && A::respected(node, i)) =>
+                {
+                    *f
+                }
+                _ => 0.0,
+            })
+            .sum();
+        if weight <= 0.0 {
+            break;
+        }
+        for (i, t) in tracks.iter().enumerate() {
+            if let Track::Fr(f) = t {
+                let is_capped = caps
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|c| fr_sizes[i] >= c);
+                if !is_capped && !(respect_active && A::respected(node, i)) {
+                    fr_sizes[i] += pool * *f / weight;
+                }
+            }
+        }
+        if !newly_capped {
+            break;
+        }
+    }
+
+    let sizes: Vec<f64> = tracks
+        .iter()
+        .enumerate()
+        .map(|(i, t)| match t {
+            Track::Fixed(l) => length_to_px(l, dpi, avail, resolved),
+            Track::Fr(_) => fr_sizes[i],
             Track::Auto => auto[i],
         })
         .collect();
@@ -911,10 +1103,14 @@ fn width_pass_grid(
             _ => 0.0,
         })
         .collect();
+    // The provisional pass only estimates the cross-axis per-fr for
+    // respect's clamp; child caps don't feed it (they don't change the
+    // free space, only which tracks claim it).
     let provisional = resolve_tracks::<Vertical>(
         node,
         avail_h,
         &prev_rows,
+        &[],
         CrossRespect::INACTIVE,
         dpi,
         resolved,
@@ -932,13 +1128,15 @@ fn width_pass_grid(
     };
 
     let auto = walk.auto_tracks(node, idx);
-    let solution = resolve_tracks::<Horizontal>(node, avail_w, &auto, cross, dpi, resolved);
+    let caps = fr_caps_from_children::<Horizontal>(node, idx, nodes, &auto, avail_w, dpi, resolved);
+    let solution = resolve_tracks::<Horizontal>(node, avail_w, &auto, &caps, cross, dpi, resolved);
     let span = solution.span(x.start, avail_w);
 
     out.grids[idx] = Some(TrackBand {
         sizes: solution.sizes.clone(),
         gap: solution.gap,
         span,
+        band: x,
         per_fr: solution.per_fr,
     });
 
@@ -997,13 +1195,15 @@ fn height_pass_grid(
     };
 
     let auto = walk.auto_tracks(node, idx);
-    let solution = resolve_tracks::<Vertical>(node, avail, &auto, cross, dpi, resolved);
+    let caps = fr_caps_from_children::<Vertical>(node, idx, nodes, &auto, avail, dpi, resolved);
+    let solution = resolve_tracks::<Vertical>(node, avail, &auto, &caps, cross, dpi, resolved);
     let span = solution.span(y.start, avail);
 
     out.grids[idx] = Some(TrackBand {
         sizes: solution.sizes.clone(),
         gap: solution.gap,
         span,
+        band: y,
         per_fr: solution.per_fr,
     });
 

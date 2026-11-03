@@ -10,7 +10,7 @@
 //! paper, a print pipeline or an archive. Nothing may depend on what
 //! the reader has installed, so the glyphs a plot draws are embedded,
 //! always — as a synthesized subset font a few kB in size rather than
-//! the megabyte face they came from. See `CLAUDE.md` beside this file
+//! the megabyte face they came from. See `AGENTS.md` beside this file
 //! for the design, and `font.rs` for why the font is synthesized rather
 //! than sliced out of the original.
 //!

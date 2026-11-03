@@ -133,6 +133,66 @@ pub fn transform_inverse(v: f64, kind: TransformKind) -> f64 {
     }
 }
 
+/// Expand a continuous domain by `mult` (a proportion of the span) plus
+/// `add` (an absolute amount), applied in **transformed** space and
+/// mapped back through the inverse.
+///
+/// Expanding before transforming breaks down for the log family: data
+/// spanning decades pads the lower bound past zero, and clipping it back
+/// to the transform's domain pins it at the smallest positive float —
+/// a 3-decade axis becomes a 311-decade one (ggsql#512). Padding the
+/// transformed range instead keeps the result inside the allowed domain
+/// by construction, so the pad reads as a proportion of the visible
+/// (log-space) span, matching what a reader sees on the axis.
+///
+/// - `mult` / `add` are in transformed units: `add = 0.1` on a `Log10`
+///   scale adds a tenth of a decade at each end.
+/// - A degenerate (zero-width) range is padded as if it spanned 1
+///   transformed unit.
+/// - If the transformed endpoints are non-finite (e.g. `min <= 0` on a
+///   log scale) no expansion is possible; the input range is returned
+///   unchanged. Filtering out-of-domain data is the caller's job.
+///
+/// Symmetric shorthand for [`expand_range_transformed_selective`].
+pub fn expand_range_transformed(
+    min: f64,
+    max: f64,
+    mult: f64,
+    add: f64,
+    kind: TransformKind,
+) -> (f64, f64) {
+    expand_range_transformed_selective(min, max, (mult, mult), (add, add), kind)
+}
+
+/// [`expand_range_transformed`] with per-end expansion: `mult` / `add`
+/// are `(lower, upper)` pairs applied to the low and high end of the
+/// transformed range respectively. Pass `0.0` for an end that should
+/// stay put — e.g. `(0.0, 0.05)` keeps a bar chart's baseline fixed
+/// while padding only the data end, the ggplot2
+/// `expansion(mult = c(0, 0.05))` idiom.
+pub fn expand_range_transformed_selective(
+    min: f64,
+    max: f64,
+    mult: (f64, f64),
+    add: (f64, f64),
+    kind: TransformKind,
+) -> (f64, f64) {
+    let (lo, hi) = if min <= max { (min, max) } else { (max, min) };
+    let t_lo = transform_forward(lo, kind);
+    let t_hi = transform_forward(hi, kind);
+    if !t_lo.is_finite() || !t_hi.is_finite() {
+        return (lo, hi);
+    }
+    let span = t_hi - t_lo;
+    let span = if span > 0.0 { span } else { 1.0 };
+    let new_lo = t_lo - mult.0 * span - add.0;
+    let new_hi = t_hi + mult.1 * span + add.1;
+    (
+        transform_inverse(new_lo, kind),
+        transform_inverse(new_hi, kind),
+    )
+}
+
 /// The numeric domain on which this transform is defined.
 pub fn transform_allowed_domain(kind: TransformKind) -> (f64, f64) {
     match kind {
@@ -298,6 +358,92 @@ mod tests {
         let (lo, hi) = transform_allowed_domain(TransformKind::Asinh);
         assert_eq!(lo, f64::NEG_INFINITY);
         assert_eq!(hi, f64::INFINITY);
+    }
+
+    #[test]
+    fn expand_identity_matches_linear_padding() {
+        // Identity transform: transformed space is data space.
+        let (lo, hi) = expand_range_transformed(0.0, 100.0, 0.05, 0.0, TransformKind::Identity);
+        approx(lo, -5.0, 1e-12);
+        approx(hi, 105.0, 1e-12);
+    }
+
+    #[test]
+    fn expand_log10_pads_decades_not_data() {
+        // ggsql#512: data 1..1000 with a 5% pad must not collapse the
+        // lower bound to f64::MIN_POSITIVE. In log10 space the range is
+        // [0, 3], so a 5% pad is 0.15 of a decade at each end.
+        let (lo, hi) = expand_range_transformed(1.0, 1000.0, 0.05, 0.0, TransformKind::Log10);
+        approx(lo, 10f64.powf(-0.15), 1e-9);
+        approx(hi, 10f64.powf(3.15), 1e-6);
+        assert!(lo > 0.0);
+    }
+
+    #[test]
+    fn expand_log10_with_additive_pad() {
+        // add is in transformed units: 0.1 of a decade per end.
+        let (lo, hi) = expand_range_transformed(1.0, 100.0, 0.0, 0.1, TransformKind::Log10);
+        approx(lo, 10f64.powf(-0.1), 1e-9);
+        approx(hi, 10f64.powf(2.1), 1e-6);
+    }
+
+    #[test]
+    fn expand_sqrt_stays_on_valid_branch() {
+        // sqrt domain [0, 100] → transformed [0, 10]; 5% pad inverts to
+        // 0.25, not a negative lower bound.
+        let (lo, hi) = expand_range_transformed(0.0, 100.0, 0.05, 0.0, TransformKind::Sqrt);
+        approx(lo, 0.25, 1e-9);
+        approx(hi, 110.25, 1e-6);
+    }
+
+    #[test]
+    fn expand_degenerate_range_uses_unit_span() {
+        // Zero-width range pads as if it spanned 1 transformed unit.
+        let (lo, hi) = expand_range_transformed(10.0, 10.0, 0.05, 0.0, TransformKind::Log10);
+        approx(lo, 10f64.powf(0.95), 1e-6);
+        approx(hi, 10f64.powf(1.05), 1e-6);
+    }
+
+    #[test]
+    fn expand_out_of_domain_input_returns_unchanged() {
+        // min <= 0 on a log scale: forward is non-finite, nothing to pad.
+        let (lo, hi) = expand_range_transformed(-5.0, 100.0, 0.05, 0.0, TransformKind::Log10);
+        assert_eq!((lo, hi), (-5.0, 100.0));
+    }
+
+    #[test]
+    fn expand_swaps_descending_endpoints() {
+        let (lo, hi) = expand_range_transformed(100.0, 0.0, 0.05, 0.0, TransformKind::Identity);
+        approx(lo, -5.0, 1e-12);
+        approx(hi, 105.0, 1e-12);
+    }
+
+    #[test]
+    fn expand_selective_pads_only_the_upper_end() {
+        // The bar-chart idiom: baseline stays, data end gets the pad.
+        let (lo, hi) = expand_range_transformed_selective(
+            0.0,
+            100.0,
+            (0.0, 0.05),
+            (0.0, 0.0),
+            TransformKind::Identity,
+        );
+        approx(lo, 0.0, 1e-12);
+        approx(hi, 105.0, 1e-12);
+    }
+
+    #[test]
+    fn expand_selective_per_end_on_log10() {
+        // Lower end padded by a tenth of a decade, upper end fixed.
+        let (lo, hi) = expand_range_transformed_selective(
+            1.0,
+            1000.0,
+            (0.0, 0.0),
+            (0.1, 0.0),
+            TransformKind::Log10,
+        );
+        approx(lo, 10f64.powf(-0.1), 1e-9);
+        approx(hi, 1000.0, 1e-9);
     }
 
     #[test]

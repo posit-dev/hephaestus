@@ -179,7 +179,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libfontconfig1-dev
 
-      # One direction at a time, for the reason `src/document/CLAUDE.md` gives:
+      # One direction at a time, for the reason `src/document/AGENTS.md` gives:
       # a helper reachable from only one half still passes both other builds.
       - name: cargo check, one document feature at a time
         run: |

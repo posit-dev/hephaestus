@@ -1,6 +1,6 @@
-# src/backend/svg/CLAUDE.md
+# src/backend/svg/AGENTS.md
 
-The vector backend: a `SceneBuilder` that emits SVG text. See `src/backend/CLAUDE.md` for the backend conventions this one deliberately departs from, and `src/CLAUDE.md` for the two-trait split that makes the departure legal.
+The vector backend: a `SceneBuilder` that emits SVG text. See `src/backend/AGENTS.md` for the backend conventions this one deliberately departs from, and `src/AGENTS.md` for the two-trait split that makes the departure legal.
 
 ## What this module does
 
@@ -62,7 +62,7 @@ Each is reported through `SvgScene::warnings()`, deduplicated by variant, and ea
 
 ### Why `Compose` is not expressible, which is *not* "filters are out of scope"
 
-`src/CLAUDE.md` puts filter effects outside the **authoring surface**. That says nothing about what this emitter may use internally — `<filter>` is entirely available here, the same way the vello backend is free to use compute shaders nobody authors against.
+`src/AGENTS.md` puts filter effects outside the **authoring surface**. That says nothing about what this emitter may use internally — `<filter>` is entirely available here, the same way the vello backend is free to use compute shaders nobody authors against.
 
 The actual blocker is narrower: **an SVG filter cannot see its backdrop.** `feComposite` and `feBlend` combine two *filter inputs*, and `push_layer` needs to composite against what was already painted beneath. SVG 1.1 specified `BackgroundImage` / `BackgroundAlpha` for exactly this, no implementation ever shipped them, and Filter Effects 1 removed them.
 
@@ -103,7 +103,7 @@ Two things `document/images.rs` gets wrong that this does not, and which are wor
 
 Off by default — file export is the common case and the attributes are pure weight there. When on, `PickId::Id(n)` becomes `data-pick-id="n"`, `Block` becomes `data-pick-block=""`, and **`Skip` becomes `pointer-events="none"`**. `Block` gets an attribute of its own rather than a reserved id because the id space is the full `u32` with nothing set aside — spelling it `data-pick-id="0"` would make it indistinguishable from the ordinary mark whose id is `0`. That last row is what makes the feature correct rather than decorative: it reproduces "items beneath remain hittable through this primitive" under `elementFromPoint`, without which a `Skip` gridline over a mark swallows the hit.
 
-**`Skip` opts out only inside a `Group` scope**, which is the indexing rule from `src/CLAUDE.md` restated in markup. A primitive drawn inside a `ScopeMode::Target` frame *is* the target whatever its `PickId` — that is how chrome participates without an id of its own — so it keeps pointer events and reports through the enclosing `<g data-pick-kind>` rather than through an id it does not have. Writing `pointer-events="none"` there would make every axis label, tick and title unhittable in a page, while the CPU index answered for the same scene. `SvgScene` therefore tracks a `scope_modes` stack beside `groups`: the two are separate because `groups` interleaves layers with scopes and this rule asks for the innermost *scope*, whatever layers sit between.
+**`Skip` opts out only inside a `Group` scope**, which is the indexing rule from `src/AGENTS.md` restated in markup. A primitive drawn inside a `ScopeMode::Target` frame *is* the target whatever its `PickId` — that is how chrome participates without an id of its own — so it keeps pointer events and reports through the enclosing `<g data-pick-kind>` rather than through an id it does not have. Writing `pointer-events="none"` there would make every axis label, tick and title unhittable in a page, while the CPU index answered for the same scene. `SvgScene` therefore tracks a `scope_modes` stack beside `groups`: the two are separate because `groups` interleaves layers with scopes and this rule asks for the innermost *scope*, whatever layers sit between.
 
 Pick **scopes** ride the same flag, as `<g data-pick-kind="…">` with
 `data-pick-name` and `data-pick-index` when the scope carries them. They are

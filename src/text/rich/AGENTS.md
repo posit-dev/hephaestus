@@ -1,4 +1,4 @@
-# src/text/rich/CLAUDE.md
+# src/text/rich/AGENTS.md
 
 Marquee-flavoured rich text: markdown source in, positioned glyph runs and block paints out. Lives alongside the rest of `src/text/`.
 
@@ -143,7 +143,7 @@ Two layers:
 
 **Chrome divides on whether the slot wraps.** A slot the solver re-breaks — the title band, axis titles, strip labels — can't be keyed across frames, because its key would have to include a width it doesn't know at construction and two slots sharing that key would fight over one run's break state. The per-run memo still covers the solver's repeated probing there.
 
-Every *unwrapped* slot is cached: break labels, legend and colorbar titles, polar labels, legend text swatches. They shape at natural width and never re-break, so `RichTextWidth::Natural` is the whole of their width key. `plot::chrome::text` owns that cache and hands out `ChromeRun`s from it; see `src/plot/CLAUDE.md` for why it's thread-local rather than owned by a `Plot`.
+Every *unwrapped* slot is cached: break labels, legend and colorbar titles, polar labels, legend text swatches. They shape at natural width and never re-break, so `RichTextWidth::Natural` is the whole of their width key. `plot::chrome::text` owns that cache and hands out `ChromeRun`s from it; see `src/plot/AGENTS.md` for why it's thread-local rather than owned by a `Plot`.
 
 ## Images
 
@@ -215,9 +215,9 @@ measured off the glyphs alone would clip a picture taller than its line.
 
 ## Cross-references
 
-- `src/text/CLAUDE.md` — the plain-text surface this layers alongside; `shape_common.rs` holds what the two share.
-- `src/CLAUDE.md` — crate architecture, including `style_vocab` and `linetype`.
+- `src/text/AGENTS.md` — the plain-text surface this layers alongside; `shape_common.rs` holds what the two share.
+- `src/AGENTS.md` — crate architecture, including `style_vocab` and `linetype`.
 - `src/plot/plot.rs` — `draw_text_element_in_rect` and `measure_for_element` route chrome slots through this module when a `TextElement` opts into markdown.
 - `src/plot/geom/text.rs` — `TextGeom`'s `"markdown"` channel.
 - `src/plot/chrome/text.rs` — `ChromeRun` / `RichChrome`, the unwrapped-chrome path and its cache.
-- `src/plot/theme/CLAUDE.md` — `Theme::rich_text` is the default sheet every markdown-enabled slot resolves through.
+- `src/plot/theme/AGENTS.md` — `Theme::rich_text` is the default sheet every markdown-enabled slot resolves through.

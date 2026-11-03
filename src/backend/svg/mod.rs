@@ -418,7 +418,7 @@ impl SvgScene {
 
     /// Whether a primitive drawn here belongs to the scope around it.
     ///
-    /// The indexing rule in `src/CLAUDE.md`, applied to markup: inside a
+    /// The indexing rule in `src/AGENTS.md`, applied to markup: inside a
     /// [`ScopeMode::Target`] frame a [`PickId::Skip`] primitive *is* the
     /// target, which is how chrome participates without an id of its own.
     fn innermost_scope_targets(&self) -> bool {

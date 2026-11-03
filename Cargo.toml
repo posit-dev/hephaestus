@@ -26,7 +26,7 @@ keywords = ["visualization", "plotting", "graphics", "renderer", "vello"]
 categories = ["graphics", "visualization", "rendering::engine"]
 # Agent-orientation docs and CI config: useful in the repo, noise in the
 # published tarball. `PLAN.md` is gitignored and would never ship anyway.
-exclude = ["CLAUDE.md", "src/**/CLAUDE.md", ".github/", "PLAN.md"]
+exclude = ["AGENTS.md", "src/**/AGENTS.md", ".github/", "PLAN.md"]
 
 # docs.rs builds default features only unless told otherwise, which would
 # hide the `google-fonts`, `geom-*` and datetime-interop items entirely.

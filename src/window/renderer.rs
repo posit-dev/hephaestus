@@ -6,7 +6,7 @@
 //!
 //! Selection is an enum rather than a trait object because `Renderer`'s
 //! associated scene type makes it awkward as one; the scene is handed out as
-//! `&mut dyn SceneBuilder`, which is object-safe. See `backend/CLAUDE.md`.
+//! `&mut dyn SceneBuilder`, which is object-safe. See `backend/AGENTS.md`.
 
 use crate::backend::{BackendError, Renderer as _, WgpuRenderer as _};
 use crate::color::Color;

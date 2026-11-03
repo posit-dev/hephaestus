@@ -34,7 +34,9 @@
 //!   - Band-width queries: [`discrete_band_width`],
 //!     [`binned_band_width`], [`binned_band_width_at`].
 //!   - Transform dispatch: [`transform_forward`], [`transform_inverse`],
-//!     [`transform_allowed_domain`].
+//!     [`transform_allowed_domain`]; [`expand_range_transformed`] pads a
+//!     continuous domain in transformed space so a log scale's expansion
+//!     can't escape the transform's domain.
 //!   - Tick selection: [`extended_breaks`] (Wilkinson), [`linear_breaks`],
 //!     [`log_pretty_breaks`], [`log_minor_breaks`], [`sqrt_breaks`],
 //!     [`symlog_breaks`], [`symlog_minor_breaks`],
@@ -106,6 +108,7 @@ pub use scale_type::{
     wrap_temporal_value, ScaleTypeKind, TemporalUnit,
 };
 pub use transform::{
-    transform_allowed_domain, transform_forward, transform_inverse, Transform, TransformKind,
+    expand_range_transformed, expand_range_transformed_selective, transform_allowed_domain,
+    transform_forward, transform_inverse, Transform, TransformKind,
 };
 pub use value::{DataColumn, Date, DateTime, Duration, LinetypeStep, Time, Value};

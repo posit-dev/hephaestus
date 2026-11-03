@@ -963,3 +963,65 @@ fn track_of_unknown_id_is_zero() {
     let r = layout.rect(CellId(2)).unwrap();
     approx_eq(r.x1 - r.x0, 0.0, 0.5, "unknown reference → 0 px");
 }
+
+#[test]
+fn nested_respect_slack_escapes_to_parent() {
+    // Regression test for the detached-composition-legend bug: a
+    // respect-locked sub-grid in a 400×100 viewport solves to 100×100.
+    // Before the fix, the parent's fr track kept the full 350 px share
+    // and the sub-grid centered inside it, so the fixed legend column
+    // stayed glued to the viewport's right edge — detached from the
+    // sub-grid's content. Now the sub-grid's slack escapes upward: the
+    // parent's fr track shrinks to the sub-grid's content size, the
+    // legend column slides up against it, and the whole block centers.
+    let mut sub = Grid::new([Track::Fr(1.0)], [Track::Fr(1.0)]).respect();
+    sub.place_mut(Placement::at(1, 1), Grid::cell().id(CellId(1)));
+
+    let mut root = Grid::new(
+        [Track::Fr(1.0), Track::Fixed(Extent::px(50.0))],
+        [Track::Fr(1.0)],
+    );
+    root.place_mut(Placement::at(1, 1), sub);
+    root.place_mut(Placement::at(1, 2), Grid::cell().id(CellId(2)));
+
+    let layout = root.solve(Size::new(400.0, 100.0), 96.0);
+
+    // Content block is 100 + 50 = 150 wide, centered: x in [125, 275].
+    let content = layout.rect(CellId(1)).unwrap();
+    approx_eq(content.x0, 125.0, 0.5, "sub-grid left edge");
+    approx_eq(content.x1, 225.0, 0.5, "sub-grid right edge");
+    approx_eq(content.y1 - content.y0, 100.0, 0.5, "sub-grid height");
+
+    let legend = layout.rect(CellId(2)).unwrap();
+    approx_eq(legend.x0, 225.0, 0.5, "legend abuts the shrunken sub-grid");
+    approx_eq(legend.x1, 275.0, 0.5, "legend right edge");
+}
+
+#[test]
+fn nested_respect_slack_feeds_uncapped_fr_sibling() {
+    // Same setup, but the parent has a second, flex fr track beside the
+    // respected sub-grid. The escaped slack redistributes to the flex
+    // sibling rather than centering — matching how flat layouts already
+    // hand a locked cell's slack to its flex siblings.
+    let mut sub = Grid::new([Track::Fr(1.0)], [Track::Fr(1.0)]).respect();
+    sub.place_mut(Placement::at(1, 1), Grid::cell().id(CellId(1)));
+
+    let mut root = Grid::new(
+        [Track::Fr(1.0), Track::Fr(1.0)],
+        [Track::Fr(1.0)],
+    );
+    root.place_mut(Placement::at(1, 1), sub);
+    root.place_mut(Placement::at(1, 2), Grid::cell().id(CellId(2)));
+
+    let layout = root.solve(Size::new(400.0, 100.0), 96.0);
+
+    // Sub-grid locks at 100×100; the flex sibling takes the remaining
+    // 300. Nothing centers — the flex track claims the slack.
+    let content = layout.rect(CellId(1)).unwrap();
+    approx_eq(content.x0, 0.0, 0.5, "sub-grid left edge");
+    approx_eq(content.x1, 100.0, 0.5, "sub-grid right edge");
+
+    let flex = layout.rect(CellId(2)).unwrap();
+    approx_eq(flex.x0, 100.0, 0.5, "flex sibling starts after sub-grid");
+    approx_eq(flex.x1, 400.0, 0.5, "flex sibling absorbs the slack");
+}

@@ -1,4 +1,4 @@
-# src/backend/hybrid/CLAUDE.md
+# src/backend/hybrid/AGENTS.md
 
 Vello Hybrid backend: records draws against a `RecordingScene`, replays them into a `vello_hybrid::Scene` once the frame size is known, and rasterises through a wgpu render pipeline.
 
@@ -53,7 +53,7 @@ Three things to read off it:
   scene is drawn, so both backends pay the same ~19 ms and neither rasterises
   anything twice. The rows above are the pathological case for it (every mark
   a distinct path); a shared marker path interns to ~7 ms. See the picking
-  model in `src/CLAUDE.md`.
+  model in `src/AGENTS.md`.
 - **Recording is a real but minor tax** — about 13 ms of the 100k frame once the
   shared path-building is subtracted. Writing straight into the rasteriser's
   scene would recover it, at the cost of needing the frame size before the
