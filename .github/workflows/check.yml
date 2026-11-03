@@ -437,6 +437,14 @@ jobs:
       # The fixture `verify-dist.mjs` renders end to end. Unlike the canvas
       # client, this one can draw with no DOM and no GPU, so a document that
       # fails to render fails the build here rather than on a page.
+      # The fixture is a native build of the crate with default features,
+      # so it needs the same system fontconfig as the other native jobs
+      # (fontique's fontconfig-sys build script probes for it).
+      - name: Install fontconfig
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev
+
       - name: build the document fixture
         run: |
           cargo run --example document_save --features document-write

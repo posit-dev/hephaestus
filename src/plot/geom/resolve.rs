@@ -11,8 +11,9 @@
 //! output, an `"x"` column of dates can flow through a continuous scale
 //! to a `[0, 1]` panel fraction, etc.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::brush::Brush;
 use crate::color::{Color, ColorSpace};
@@ -20,7 +21,7 @@ use crate::geometry::{Affine, Point, Vec2};
 use crate::linetype::{draw_linetype_with_markers, emit_marker_shape};
 use crate::path::Path;
 use crate::pick::PickId;
-use crate::plot::scale::Scale;
+use crate::plot::scale::{InputRange, Scale, ScaleTypeKind};
 use crate::plot::value::{LinetypeStep, Value};
 use crate::primitives::PolylineSampler;
 use crate::scene::SceneBuilder;
@@ -85,33 +86,112 @@ pub(crate) fn offset_px(ch: Option<&Channel>, scale: Option<&Scale>, row: usize,
 /// (numeric or temporal); other variants return `NaN` so the caller
 /// skips the row. Without a scale, the band offset is ignored — "band"
 /// is a scale-defined concept.
-pub(crate) fn resolve_position(raw: Value, scale: Option<&Scale>, band_offset: f64) -> f64 {
+pub(crate) fn resolve_position(raw: &Value, scale: Option<&Scale>, band_offset: f64) -> f64 {
     let mapped = match scale {
-        Some(s) => s.map_with_offset(&raw, band_offset),
-        None => raw,
+        Some(s) => s.map_with_offset(raw, band_offset),
+        None => return raw.as_number().unwrap_or(f64::NAN),
     };
     mapped.as_number().unwrap_or(f64::NAN)
+}
+
+/// A position scale prepared once per draw, so the per-row map skips
+/// work that depends only on the scale. A continuous or temporal
+/// scale's map transforms the two fixed domain endpoints on every
+/// call; here they are transformed once up front, leaving one forward
+/// transform (the row's own value) per row. Every other scale family
+/// delegates to [`resolve_position`] unchanged, as does a continuous
+/// scale with an output range set (its interpolation is not a plain
+/// fraction).
+pub(crate) struct PositionMap<'a> {
+    scale: Option<&'a Scale>,
+    /// Transformed `(domain_min, domain_max)` when the fast path
+    /// applies; `None` → delegate.
+    endpoints: Option<(f64, f64)>,
+}
+
+impl<'a> PositionMap<'a> {
+    /// Prepare `scale` for per-row mapping. Costs two transform
+    /// evaluations for a continuous scale, nothing otherwise.
+    pub(crate) fn new(scale: Option<&'a Scale>) -> Self {
+        let endpoints = match scale {
+            Some(s)
+                if matches!(
+                    s.scale_type_kind(),
+                    ScaleTypeKind::Continuous | ScaleTypeKind::Temporal(_)
+                ) && s.output_range().is_none() =>
+            {
+                match s.input_range() {
+                    Some(InputRange::Continuous { min, max }) => {
+                        Some((s.transform().forward(*min), s.transform().forward(*max)))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        Self { scale, endpoints }
+    }
+
+    /// Project a row's raw `Value` to a `[0, 1]` panel fraction — the
+    /// same result as [`resolve_position`]. The band offset is a no-op
+    /// on the fast path: a continuous scale's band width is 0.
+    pub(crate) fn map(&self, raw: &Value, band_offset: f64) -> f64 {
+        let Some(s) = self.scale else {
+            return raw.as_number().unwrap_or(f64::NAN);
+        };
+        if let Some((dmin_t, dmax_t)) = self.endpoints {
+            let Some(v) = raw.as_number() else {
+                return f64::NAN;
+            };
+            let v_t = s.transform().forward(v);
+            let t = if dmax_t == dmin_t {
+                0.0
+            } else {
+                (v_t - dmin_t) / (dmax_t - dmin_t)
+            };
+            return s.direction().apply_fraction(t);
+        }
+        s.map_with_offset(raw, band_offset)
+            .as_number()
+            .unwrap_or(f64::NAN)
+    }
+}
+
+/// True when the channel can resolve to different values across rows —
+/// i.e. it is data-driven. Constant and unset channels are
+/// loop-invariant, so a draw loop can resolve them once up front (at
+/// row 0) instead of per row.
+pub(crate) fn channel_varies_per_row(channel: Option<&Channel>) -> bool {
+    matches!(channel, Some(Channel::Data(_) | Channel::RawData(_)))
 }
 
 /// Read the raw `Value` at row `i` from a channel and run it through an
 /// optional scale. Returns `None` if `channel` itself is `None` (channel
 /// unset) — distinct from the scale producing `Value::Null`.
 ///
+/// Constant channels lend their stored value rather than cloning it, so
+/// resolving an unscaled constant is allocation-free; data columns and
+/// scale-mapped values arrive owned.
+///
 /// `Channel::Raw*` variants bypass the scale: the wrapped value flows
 /// through as-is, regardless of whether a scale is bound to the
 /// channel name. This lets callers draw with pre-computed output-unit
 /// values (panel fractions, colors, pt sizes) on a plot whose
 /// channels otherwise use scales.
-fn resolve_value(channel: Option<&Channel>, scale: Option<&Scale>, i: usize) -> Option<Value> {
+fn resolve_value<'a>(
+    channel: Option<&'a Channel>,
+    scale: Option<&Scale>,
+    i: usize,
+) -> Option<Cow<'a, Value>> {
     let (raw, bypass_scale) = match channel? {
-        Channel::Constant(v) => (v.clone(), false),
-        Channel::Data(col) => (col.get(i), false),
-        Channel::RawConstant(v) => (v.clone(), true),
-        Channel::RawData(col) => (col.get(i), true),
+        Channel::Constant(v) => (Cow::Borrowed(v), false),
+        Channel::Data(col) => (Cow::Owned(col.get(i)), false),
+        Channel::RawConstant(v) => (Cow::Borrowed(v), true),
+        Channel::RawData(col) => (Cow::Owned(col.get(i)), true),
     };
     Some(match (bypass_scale, scale) {
         (true, _) | (false, None) => raw,
-        (false, Some(s)) => s.map(&raw),
+        (false, Some(s)) => Cow::Owned(s.map(&raw)),
     })
 }
 
@@ -136,18 +216,17 @@ pub(crate) fn channel_color_space(scale: Option<&Scale>) -> ColorSpace {
 }
 
 /// Like [`resolve_color_channel`] but falls back to a theme-provided
-/// default when the channel resolves to `None`. The fallback is an
-/// `Option<&ThemeColor>` so the geom can pass
-/// `ctx.theme.geom.<geom>.fill.as_ref()` directly — `None` keeps the
-/// pre-theme "channel-or-nothing" semantic.
+/// default when the channel resolves to `None`. The fallback arrives
+/// pre-resolved — the theme colour is loop-invariant, so callers
+/// resolve `ThemeColor` against the palette once before the row loop
+/// rather than on every row with an unbound channel.
 pub(crate) fn resolve_color_channel_or_theme(
     channel: Option<&Channel>,
     scale: Option<&Scale>,
     i: usize,
-    theme_default: Option<&crate::plot::theme::ThemeColor>,
-    palette: &crate::plot::theme::Palette,
+    theme_default: Option<Color>,
 ) -> Option<Color> {
-    resolve_color_channel(channel, scale, i).or_else(|| theme_default.map(|tc| tc.resolve(palette)))
+    resolve_color_channel(channel, scale, i).or(theme_default)
 }
 
 /// Resolve an optional numeric channel. Returns `None` when the channel
@@ -182,7 +261,7 @@ pub(crate) fn channel_varies_across(
     for &i in rows {
         let v = resolve_value(Some(channel), scale, i);
         match (&first, &v) {
-            (None, Some(_)) => first = v,
+            (None, Some(v)) => first = Some(v.clone().into_owned()),
             (Some(a), Some(b)) if !a.key_eq(b) => return true,
             _ => {}
         }
@@ -212,8 +291,8 @@ pub(crate) fn resolve_bool_channel_or(
     i: usize,
     default: bool,
 ) -> bool {
-    match resolve_value(channel, scale, i) {
-        Some(Value::Bool(b)) => b,
+    match resolve_value(channel, scale, i).as_deref() {
+        Some(Value::Bool(b)) => *b,
         _ => default,
     }
 }
@@ -232,32 +311,44 @@ pub(crate) fn resolve_angle_channel(
 
 /// Resolve a linetype channel to a `LinetypeStep` pattern. Falls back
 /// to solid (empty array) when the channel is unset or the resolved
-/// value isn't a `Value::Linetype`.
+/// value isn't a `Value::Linetype`. The solid fallback is a shared
+/// allocation, so an unbound linetype channel costs an `Arc` clone per
+/// row rather than a fresh empty array.
 pub(crate) fn resolve_linetype_channel(
     channel: Option<&Channel>,
     scale: Option<&Scale>,
     i: usize,
 ) -> Arc<[LinetypeStep]> {
-    match resolve_value(channel, scale, i) {
-        Some(Value::Linetype(p)) => p,
-        _ => Arc::from(Vec::<LinetypeStep>::new()),
+    /// The shared solid (empty) pattern.
+    static SOLID: OnceLock<Arc<[LinetypeStep]>> = OnceLock::new();
+    match resolve_value(channel, scale, i).as_deref() {
+        Some(Value::Linetype(p)) => p.clone(),
+        _ => SOLID
+            .get_or_init(|| Arc::from(Vec::<LinetypeStep>::new()))
+            .clone(),
     }
 }
 
 /// Resolve a string channel with a fallback default. Used by
-/// shape-name lookups; returns a freshly-allocated `String` for
-/// matched names. The fallback accepts any `&str` so callers can
-/// pass either a `'static` literal or a runtime-owned string
-/// (e.g. `&theme.geom.point.shape`).
-pub(crate) fn resolve_str_channel_or(
-    channel: Option<&Channel>,
+/// shape-name lookups. Borrows whenever possible — a constant channel
+/// or the fallback costs no allocation; only a data-driven string
+/// column allocates, since its values arrive owned.
+pub(crate) fn resolve_str_channel_or<'a>(
+    channel: Option<&'a Channel>,
     scale: Option<&Scale>,
     i: usize,
-    default: &str,
-) -> String {
-    match resolve_value(channel, scale, i).and_then(|v| v.as_str().map(str::to_owned)) {
-        Some(s) => s,
-        None => default.to_string(),
+    default: &'a str,
+) -> Cow<'a, str> {
+    match resolve_value(channel, scale, i) {
+        Some(Cow::Borrowed(v)) => match v.as_str() {
+            Some(s) => Cow::Borrowed(s),
+            None => Cow::Borrowed(default),
+        },
+        Some(Cow::Owned(v)) => match v.as_str() {
+            Some(s) => Cow::Owned(s.to_owned()),
+            None => Cow::Borrowed(default),
+        },
+        None => Cow::Borrowed(default),
     }
 }
 
@@ -729,23 +820,23 @@ mod tests {
 
     #[test]
     fn resolve_position_without_a_scale_passes_the_raw_number_through() {
-        assert_eq!(resolve_position(Value::Number(0.25), None, 0.0), 0.25);
+        assert_eq!(resolve_position(&Value::Number(0.25), None, 0.0), 0.25);
         // Temporal variants project to their canonical f64.
-        assert_eq!(resolve_position(Value::Date(7), None, 0.0), 7.0);
+        assert_eq!(resolve_position(&Value::Date(7), None, 0.0), 7.0);
     }
 
     #[test]
     fn resolve_position_without_a_scale_ignores_the_band_offset() {
         // "Band" is defined by a scale; with none bound there is nothing
         // for the offset to be a fraction of.
-        assert_eq!(resolve_position(Value::Number(0.25), None, 0.5), 0.25);
+        assert_eq!(resolve_position(&Value::Number(0.25), None, 0.5), 0.25);
     }
 
     #[test]
     fn resolve_position_maps_through_a_bound_scale() {
         let s = scale::continuous(0.0..=10.0);
-        assert_eq!(resolve_position(Value::Number(5.0), Some(&s), 0.0), 0.5);
-        assert_eq!(resolve_position(Value::Number(0.0), Some(&s), 0.0), 0.0);
+        assert_eq!(resolve_position(&Value::Number(5.0), Some(&s), 0.0), 0.5);
+        assert_eq!(resolve_position(&Value::Number(0.0), Some(&s), 0.0), 0.0);
     }
 
     #[test]
@@ -753,21 +844,61 @@ mod tests {
         let s = scale::discrete([cat("a"), cat("b")]);
         // Band centre of "a" is 0.25 over two bands; a +0.5 band offset
         // walks half a band width (0.5) further along.
-        assert_eq!(resolve_position(cat("a"), Some(&s), 0.0), 0.25);
-        assert_eq!(resolve_position(cat("a"), Some(&s), 0.5), 0.5);
+        assert_eq!(resolve_position(&cat("a"), Some(&s), 0.0), 0.25);
+        assert_eq!(resolve_position(&cat("a"), Some(&s), 0.5), 0.5);
     }
 
     #[test]
     fn resolve_position_is_nan_for_unmappable_input() {
         // No scale, non-numeric value.
-        assert!(resolve_position(cat("nope"), None, 0.0).is_nan());
+        assert!(resolve_position(&cat("nope"), None, 0.0).is_nan());
         // Scale bound, but the value is outside the domain the scale can
         // map (a category absent from a discrete domain maps to Null).
         let s = scale::discrete([cat("a")]);
-        assert!(resolve_position(cat("zzz"), Some(&s), 0.0).is_nan());
+        assert!(resolve_position(&cat("zzz"), Some(&s), 0.0).is_nan());
         // Scale bound, value has no numeric projection.
         let c = scale::continuous(0.0..=1.0);
-        assert!(resolve_position(cat("a"), Some(&c), 0.0).is_nan());
+        assert!(resolve_position(&cat("a"), Some(&c), 0.0).is_nan());
+    }
+
+    // ── PositionMap ────────────────────────────────────────────────
+
+    /// The prepared map must agree with `resolve_position` across the
+    /// scale families: fast-path continuous (identity and transformed,
+    /// both directions), delegating discrete, and no scale at all.
+    #[test]
+    fn position_map_agrees_with_resolve_position() {
+        let cases: Vec<Option<Scale>> = vec![
+            None,
+            Some(scale::continuous(0.0..=10.0)),
+            Some(
+                scale::continuous(1.0..=1000.0)
+                    .with_transform(crate::plot::scale::TransformKind::Log10),
+            ),
+            Some(scale::continuous(0.0..=10.0).with_direction(Direction::Reversed)),
+            Some(scale::discrete([cat("a"), cat("b"), cat("c")])),
+        ];
+        let inputs = [
+            Value::Number(0.0),
+            Value::Number(5.0),
+            Value::Number(10.0),
+            cat("a"),
+            cat("zzz"),
+            Value::Null,
+        ];
+        for s in &cases {
+            let pm = PositionMap::new(s.as_ref());
+            for v in &inputs {
+                for band in [0.0, 0.5] {
+                    let expected = resolve_position(v, s.as_ref(), band);
+                    let got = pm.map(v, band);
+                    assert!(
+                        got == expected || (got.is_nan() && expected.is_nan()),
+                        "{s:?} / {v:?} / band {band}: {got} != {expected}"
+                    );
+                }
+            }
+        }
     }
 
     // ── resolve_color_channel ──────────────────────────────────────

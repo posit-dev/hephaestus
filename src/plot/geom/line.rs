@@ -84,7 +84,7 @@ use super::project::{project_and_densify, PathOptions, PathVertex, VertexAttrs};
 use super::resolve::{
     channel_color_space, channel_varies_across, offset_px, override_alpha, pt_to_px,
     resolve_angle_channel, resolve_color_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position, ChannelBind,
+    resolve_number_channel_or, resolve_pick_id, ChannelBind, PositionMap,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
@@ -427,6 +427,11 @@ fn draw_one_mark(
         outline_sc,
     } = dc;
 
+    // Prepared position scales: transform constants resolved once per
+    // mark rather than once per row.
+    let x_pos = PositionMap::new(x_scale);
+    let y_pos = PositionMap::new(y_scale);
+
     // ── Per-mark channel resolution (first row of mark). ──
     //
     // The whole stroke / linetype / cap / endpoint-clip /
@@ -510,8 +515,8 @@ fn draw_one_mark(
             });
             PathVertex {
                 frac: [
-                    resolve_position(x_col.get(i), x_scale, x_band),
-                    resolve_position(y_col.get(i), y_scale, y_band),
+                    x_pos.map(&x_col.get(i), x_band),
+                    y_pos.map(&y_col.get(i), y_band),
                 ],
                 offset_px: (
                     offset_px(x_offset_ch, x_offset_scale, i, ctx.dpi),

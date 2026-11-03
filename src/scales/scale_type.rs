@@ -371,8 +371,21 @@ pub fn discrete_map(
         Some(InputRange::Discrete(d)) => d,
         _ => return Value::Null,
     };
-    let n = domain.len();
-    let idx = match domain.iter().position(|d| d.key_eq(input)) {
+    let idx = domain.iter().position(|d| d.key_eq(input));
+    discrete_map_at(idx, domain.len(), output_range, direction)
+}
+
+/// [`discrete_map`] with the domain scan already done: `idx` is the
+/// input's position in the domain (`None` = not found → `Value::Null`)
+/// and `n` the domain length. Callers with a cached value→index map
+/// (e.g. `Scale`) skip the O(|domain|) scan per lookup.
+pub fn discrete_map_at(
+    idx: Option<usize>,
+    n: usize,
+    output_range: Option<&OutputRange>,
+    direction: Direction,
+) -> Value {
+    let idx = match idx {
         Some(i) => i,
         None => return Value::Null,
     };
@@ -428,8 +441,21 @@ pub fn ordinal_map(
         Some(InputRange::Discrete(d)) => d,
         _ => return Value::Null,
     };
-    let n = domain.len();
-    let idx = match domain.iter().position(|d| d.key_eq(input)) {
+    let idx = domain.iter().position(|d| d.key_eq(input));
+    ordinal_map_at(idx, domain.len(), output_range, color_space, direction)
+}
+
+/// [`ordinal_map`] with the domain scan already done, in the same
+/// split as [`discrete_map_at`]. An empty domain (`n == 0`) maps to
+/// `Value::Null` regardless of `idx`.
+pub fn ordinal_map_at(
+    idx: Option<usize>,
+    n: usize,
+    output_range: Option<&OutputRange>,
+    color_space: ColorSpace,
+    direction: Direction,
+) -> Value {
+    let idx = match idx {
         Some(i) => i,
         None => return Value::Null,
     };

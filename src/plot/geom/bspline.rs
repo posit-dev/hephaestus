@@ -100,8 +100,7 @@ use super::outline::{
 use super::resolve::{
     apply_per_row_offsets, channel_color_space, channel_varies_across, override_alpha, pt_to_px,
     resolve_angle_channel, resolve_color_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position, resolve_str_channel_or,
-    ChannelBind,
+    resolve_number_channel_or, resolve_pick_id, resolve_str_channel_or, ChannelBind, PositionMap,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
@@ -414,6 +413,11 @@ fn draw_one_bspline_mark(
         outline_sc,
     } = dc;
 
+    // Prepared position scales: transform constants resolved once per
+    // mark rather than once per row.
+    let x_pos = PositionMap::new(x_scale);
+    let y_pos = PositionMap::new(y_scale);
+
     // ── Per-mark channel resolution (first row of mark). ──
     //
     // The whole stroke / linetype / cap / endpoint-clip /
@@ -450,7 +454,7 @@ fn draw_one_bspline_mark(
         i0,
         "domain",
     )
-    .as_str()
+    .as_ref()
     {
         "panel" => InterpolationSpace::Panel,
         _ => InterpolationSpace::Domain,
@@ -466,8 +470,8 @@ fn draw_one_bspline_mark(
     for &i in &mark.rows {
         let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
         let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
-        let xf = resolve_position(x_col.get(i), x_scale, x_band);
-        let yf = resolve_position(y_col.get(i), y_scale, y_band);
+        let xf = x_pos.map(&x_col.get(i), x_band);
+        let yf = y_pos.map(&y_col.get(i), y_band);
         if !xf.is_finite() || !yf.is_finite() {
             continue;
         }

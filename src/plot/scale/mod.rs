@@ -31,13 +31,14 @@ use crate::scales::Locale;
 pub use crate::scales::{
     binned_band_width, binned_band_width_at, binned_breaks, binned_map, binned_map_break, breaks,
     chrome, continuous_breaks, continuous_map, continuous_minor_breaks, discrete_band_width,
-    discrete_breaks, discrete_map, extended_breaks, identity_map, input, linear_breaks,
-    linear_minor_breaks_between, log_minor_breaks, log_pretty_breaks, ordinal_map, output,
-    scale_type, sqrt_breaks, symlog_breaks, symlog_minor_breaks, temporal_breaks,
-    temporal_breaks_with_interval, temporal_minor_breaks, temporal_minor_breaks_with_interval,
-    transform, transform_allowed_domain, transform_forward, transform_inverse, value,
-    wrap_temporal_value, AxisSide, CalendarUnit, Direction, InputRange, LegendSide, OutputRange,
-    ScaleTypeKind, TemporalInterval, TemporalUnit, Transform, TransformKind, DEFAULT_BREAK_COUNT,
+    discrete_breaks, discrete_map, discrete_map_at, extended_breaks, identity_map, input,
+    linear_breaks, linear_minor_breaks_between, log_minor_breaks, log_pretty_breaks, ordinal_map,
+    ordinal_map_at, output, scale_type, sqrt_breaks, symlog_breaks, symlog_minor_breaks,
+    temporal_breaks, temporal_breaks_with_interval, temporal_minor_breaks,
+    temporal_minor_breaks_with_interval, transform, transform_allowed_domain, transform_forward,
+    transform_inverse, value, wrap_temporal_value, AxisSide, CalendarUnit, Direction, InputRange,
+    LegendSide, OutputRange, ScaleTypeKind, TemporalInterval, TemporalUnit, Transform,
+    TransformKind, DEFAULT_BREAK_COUNT,
 };
 
 /// Tick-label formatter closure stored on a [`Scale`]. Receives a break
@@ -275,6 +276,13 @@ pub struct Scale {
     /// A `Mutex` rather than a `RefCell` so `Scale` stays `Sync`; the
     /// lock is uncontended and far cheaper than the search it skips.
     breaks_cache: Mutex<Option<(u64, usize, Vec<Value>)>>,
+    /// Lazily-built value→index map over a discrete domain, keyed on
+    /// the generation it was computed at. [`ScaleTypeKind::Discrete`]
+    /// and [`ScaleTypeKind::Ordinal`] map by scanning the domain for a
+    /// `key_eq` match, which is O(|domain|) per row; the cache makes
+    /// the steady-state lookup O(1). Same `Mutex` rationale as
+    /// `breaks_cache`.
+    discrete_index: Mutex<Option<(u64, std::collections::HashMap<u64, usize>)>>,
 }
 
 impl Clone for Scale {
@@ -294,6 +302,7 @@ impl Clone for Scale {
             formatter: self.formatter.clone(),
             generation: self.generation,
             breaks_cache: Mutex::new(None),
+            discrete_index: Mutex::new(None),
         }
     }
 }
@@ -315,6 +324,7 @@ impl Scale {
             formatter: FormatterSlot::Default,
             generation: 0,
             breaks_cache: Mutex::new(None),
+            discrete_index: Mutex::new(None),
         }
     }
 
@@ -801,19 +811,33 @@ impl Scale {
                 self.color_space,
                 self.direction,
             ),
-            ScaleTypeKind::Discrete => discrete_map(
-                input,
-                self.input_range.as_ref(),
-                self.output_range.as_ref(),
-                self.direction,
-            ),
-            ScaleTypeKind::Ordinal => ordinal_map(
-                input,
-                self.input_range.as_ref(),
-                self.output_range.as_ref(),
-                self.color_space,
-                self.direction,
-            ),
+            ScaleTypeKind::Discrete => {
+                let domain = match self.input_range.as_ref() {
+                    Some(InputRange::Discrete(d)) => d,
+                    _ => return Value::Null,
+                };
+                let idx = self.discrete_domain_index(domain, input);
+                discrete_map_at(
+                    idx,
+                    domain.len(),
+                    self.output_range.as_ref(),
+                    self.direction,
+                )
+            }
+            ScaleTypeKind::Ordinal => {
+                let domain = match self.input_range.as_ref() {
+                    Some(InputRange::Discrete(d)) => d,
+                    _ => return Value::Null,
+                };
+                let idx = self.discrete_domain_index(domain, input);
+                ordinal_map_at(
+                    idx,
+                    domain.len(),
+                    self.output_range.as_ref(),
+                    self.color_space,
+                    self.direction,
+                )
+            }
             ScaleTypeKind::Binned => binned_map(
                 input,
                 self.input_range.as_ref(),
@@ -823,6 +847,51 @@ impl Scale {
                 self.direction,
             ),
             ScaleTypeKind::Identity => identity_map(input),
+        }
+    }
+
+    /// The input's position in a discrete domain, via the cached
+    /// hash→index map (built on first use, rebuilt once per generation).
+    /// Identical result to `domain.iter().position(...)`: a hash hit is
+    /// confirmed with `key_eq`, and anything else — an unknown value or
+    /// a vanishingly unlikely hash collision — falls back to the scan.
+    fn discrete_domain_index(&self, domain: &[Value], input: &Value) -> Option<usize> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+
+        /// Domain size at which the cached hash map starts paying for
+        /// its lock + hashing: below it the leftmost-match scan is
+        /// already faster, and both are O(small).
+        const SCAN_THRESHOLD: usize = 16;
+        if domain.len() <= SCAN_THRESHOLD {
+            return domain.iter().position(|d| d.key_eq(input));
+        }
+
+        let hash_of = |v: &Value| {
+            let mut h = DefaultHasher::new();
+            v.key_hash(&mut h);
+            h.finish()
+        };
+        let mut cache = self.discrete_index.lock().unwrap();
+        let stale = match &*cache {
+            Some((gen, _)) => *gen != self.generation,
+            None => true,
+        };
+        if stale {
+            let mut map = std::collections::HashMap::with_capacity(domain.len());
+            for (idx, d) in domain.iter().enumerate() {
+                // First entry wins on duplicate domain values, matching
+                // the scan's leftmost-match result.
+                map.entry(hash_of(d)).or_insert(idx);
+            }
+            *cache = Some((self.generation, map));
+        }
+        let Some((_, map)) = &*cache else {
+            unreachable!("cache populated above")
+        };
+        match map.get(&hash_of(input)) {
+            Some(&idx) if domain[idx].key_eq(input) => Some(idx),
+            _ => domain.iter().position(|d| d.key_eq(input)),
         }
     }
 
@@ -1515,6 +1584,42 @@ impl ScaleRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A domain past the scan threshold maps through the cached
+    /// hash→index path; assert it agrees with the scan's answers.
+    #[test]
+    fn discrete_map_with_a_large_domain_matches_the_scan() {
+        let domain: Vec<Value> = (0..200).map(|i| Value::from(format!("cat-{i}"))).collect();
+        let s = Scale::new(ScaleTypeKind::Discrete).domain_discrete(domain.clone());
+        let n = domain.len() as f64;
+        for (idx, v) in domain.iter().enumerate() {
+            let expected = Value::Number((idx as f64 + 0.5) / n);
+            assert!(s.map(v).key_eq(&expected), "domain entry {idx}");
+        }
+        // Unknown values map to Null, and keep doing so on repeat
+        // lookups (a miss must not poison the cache).
+        assert!(s.map(&Value::from("nope")).is_null());
+        assert!(s.map(&Value::from("nope")).is_null());
+    }
+
+    /// Mutating the domain bumps the generation, so the cached index
+    /// rebuilds instead of answering from the old domain.
+    #[test]
+    fn discrete_index_cache_rebuilds_after_a_domain_replace() {
+        let mut s = Scale::new(ScaleTypeKind::Discrete)
+            .domain_discrete((0..200).map(|i| Value::from(format!("cat-{i}"))));
+        assert!(s
+            .map(&Value::from("cat-7"))
+            .key_eq(&Value::Number(7.5 / 200.0)));
+        // Same size, shifted membership: a stale cache would answer
+        // from the old positions.
+        s.set_domain_discrete((0..200).map(|i| Value::from(format!("new-{i}"))).collect());
+        assert!(s.map(&Value::from("cat-7")).is_null());
+        assert!(s
+            .map(&Value::from("new-7"))
+            .key_eq(&Value::Number(7.5 / 200.0)));
+    }
+
     #[test]
     fn the_default_formatter_ignores_the_locale() {
         // A `Locale` is a tag, so there is nothing for the built-in

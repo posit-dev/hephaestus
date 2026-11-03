@@ -59,14 +59,14 @@ use crate::plot::value::DataColumn;
 use crate::primitives::{polygon_ribbon_full, CornerRounding, RibbonOptions};
 use crate::scene::SceneBuilder;
 
+use super::marks::group_rows_by_key;
 use super::outline::{draw_polygon_fill_and_stroke, expand_polygons, PolygonSpec};
 use super::project::{project_and_densify_one, PathOptions, PathVertex, VertexAttrs};
 use super::resolve::{
     channel_color_space, channel_varies_across, offset_px, override_alpha, pt_to_px,
     resolve_angle_channel, resolve_cap_channel, resolve_color_channel,
     resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
-    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
-    ChannelBind,
+    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, ChannelBind, PositionMap,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
@@ -146,45 +146,16 @@ impl PolygonGeom {
 /// Bucket rows first by mark (key value), then within each mark bucket
 /// by ring value. Order is first-appearance order at both levels.
 fn build_marks_from_columns(keys: &DataColumn, ring_ch: Option<&Channel>) -> Vec<PolygonMarkSlot> {
-    let n = keys.len();
-    // First pass: collect row indices per mark in first-appearance order.
-    struct MarkBucket {
-        first_row: usize,
-        rows: Vec<usize>,
-    }
-    let mut marks: Vec<MarkBucket> = Vec::new();
-    for i in 0..n {
-        let key_i = keys.get(i);
-        let mut found = false;
-        for bucket in marks.iter_mut() {
-            if keys.get(bucket.first_row).key_eq(&key_i) {
-                bucket.rows.push(i);
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            marks.push(MarkBucket {
-                first_row: i,
-                rows: vec![i],
-            });
-        }
-    }
-
-    // Second pass: within each mark, bucket rows by ring value.
     let ring_data = match ring_ch {
         Some(Channel::Data(col)) | Some(Channel::RawData(col)) => Some(col),
         _ => None, // unset OR constant → all rows in one ring
     };
-
-    marks
+    let rows: Vec<usize> = (0..keys.len()).collect();
+    group_rows_by_key(keys, &rows)
         .into_iter()
-        .map(|bucket| {
-            let rings = bucket_rows_by_ring(&bucket.rows, ring_data);
-            PolygonMarkSlot {
-                first_row: bucket.first_row,
-                rings,
-            }
+        .map(|(first_row, rows)| PolygonMarkSlot {
+            first_row,
+            rings: bucket_rows_by_ring(&rows, ring_data),
         })
         .collect()
 }
@@ -192,34 +163,13 @@ fn build_marks_from_columns(keys: &DataColumn, ring_ch: Option<&Channel>) -> Vec
 /// Bucket a mark's rows by ring value, in first-appearance order.
 /// When `ring_col` is None, returns a single ring containing all rows.
 fn bucket_rows_by_ring(rows: &[usize], ring_col: Option<&DataColumn>) -> Vec<Vec<usize>> {
-    let col = match ring_col {
-        None => return vec![rows.to_vec()],
-        Some(c) => c,
-    };
-    // Local "first row index of each ring value" tracker.
-    struct RingBucket {
-        first_row: usize,
-        rows: Vec<usize>,
+    match ring_col {
+        None => vec![rows.to_vec()],
+        Some(col) => group_rows_by_key(col, rows)
+            .into_iter()
+            .map(|(_, rows)| rows)
+            .collect(),
     }
-    let mut buckets: Vec<RingBucket> = Vec::new();
-    for &i in rows {
-        let r_i = col.get(i);
-        let mut found = false;
-        for b in buckets.iter_mut() {
-            if col.get(b.first_row).key_eq(&r_i) {
-                b.rows.push(i);
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            buckets.push(RingBucket {
-                first_row: i,
-                rows: vec![i],
-            });
-        }
-    }
-    buckets.into_iter().map(|b| b.rows).collect()
 }
 
 // ─── BuildableGeom impl ──────────────────────────────────────────────────────
@@ -501,6 +451,11 @@ fn draw_one_polygon_mark(
         },
     } = dc;
 
+    // Prepared position scales: transform constants resolved once per
+    // mark rather than once per row.
+    let x_pos = PositionMap::new(x_scale);
+    let y_pos = PositionMap::new(y_scale);
+
     let i0 = mark.first_row;
 
     let fill_color = override_alpha(
@@ -508,8 +463,12 @@ fn draw_one_polygon_mark(
             fill_ch,
             fill_scale,
             i0,
-            ctx.theme.geom.polygon.fill.as_ref(),
-            &ctx.theme.palette,
+            ctx.theme
+                .geom
+                .polygon
+                .fill
+                .as_ref()
+                .map(|tc| tc.resolve(&ctx.theme.palette)),
         ),
         resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i0),
     );
@@ -518,8 +477,12 @@ fn draw_one_polygon_mark(
             stroke_ch,
             stroke_scale,
             i0,
-            ctx.theme.geom.polygon.stroke.as_ref(),
-            &ctx.theme.palette,
+            ctx.theme
+                .geom
+                .polygon
+                .stroke
+                .as_ref()
+                .map(|tc| tc.resolve(&ctx.theme.palette)),
         ),
         resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i0),
     );
@@ -606,8 +569,8 @@ fn draw_one_polygon_mark(
             });
             PathVertex {
                 frac: [
-                    resolve_position(x_col.get(i), x_scale, x_band),
-                    resolve_position(y_col.get(i), y_scale, y_band),
+                    x_pos.map(&x_col.get(i), x_band),
+                    y_pos.map(&y_col.get(i), y_band),
                 ],
                 offset_px: (
                     offset_px(x_offset_ch, x_offset_scale, i, ctx.dpi),
