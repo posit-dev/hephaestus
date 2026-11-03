@@ -1,7 +1,7 @@
 //! Theming system — configurable visuals for every chrome surface and
 //! geom default in the plot layer.
 //!
-//! See `src/plot/theme/CLAUDE.md` for the module's role and the design
+//! See `src/plot/theme/AGENTS.md` for the module's role and the design
 //! choices behind it. Briefly:
 //!
 //! - The top-level [`Theme`] is carried by `PlotComposition` (as an

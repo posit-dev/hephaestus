@@ -1,4 +1,4 @@
-# src/scales/CLAUDE.md
+# src/scales/AGENTS.md
 
 Scales — value mappers. Map a domain `Value` to a visual output (panel fraction, colour, pt size, dash pattern).
 

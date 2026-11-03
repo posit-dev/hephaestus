@@ -1,4 +1,4 @@
-# src/text/CLAUDE.md
+# src/text/AGENTS.md
 
 Text shaping / layout backed by `parley`. The committed text stack for chrome rendering and the text geoms.
 
@@ -16,7 +16,7 @@ Line justification is expressed with `crate::style_vocab::HAlign` — the same f
 
 ## Submodules
 
-- **`rich/`** — marquee-flavoured markdown: parse → reduce → shape → draw, with its own style-sheet and length vocabulary. See `src/text/rich/CLAUDE.md`.
+- **`rich/`** — marquee-flavoured markdown: parse → reduce → shape → draw, with its own style-sheet and length vocabulary. See `src/text/rich/AGENTS.md`.
 - **`shape_common.rs`** — the parley pieces both the plain and rich paths use: `push_style_defaults` (every `TextStyle` property, including features and variations), the generic-family translation, `glyphs_of_run`, and the underline / strikethrough emitters — `rule_spans` resolves a run's decorations to baseline-relative centrelines, which `emit_decoration_rect` paints as rectangles and a curve-walking caller strokes along its path. Anything both paths need goes here rather than being written twice; the rich path shares these free functions, it does not wrap `TextRun`.
 
 ## Host-supplied shaper (optional extension)

@@ -13,7 +13,7 @@
 //! geoms. The outline is [`draw_panel_outline`], drawn in its own pass
 //! because which side of the geoms it belongs on depends on whether
 //! they are clipped — see the draw-order convention in
-//! `src/plot/CLAUDE.md`.
+//! `src/plot/AGENTS.md`.
 //!
 //! The projection contributes the geometry — what the outline path
 //! looks like, what a "grid line" is for each channel — via the

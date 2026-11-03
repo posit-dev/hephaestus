@@ -1,6 +1,6 @@
-# src/CLAUDE.md
+# src/AGENTS.md
 
-Architectural rules and module map for everything under `src/`. Repo-level commands and project pitch live in the top-level `CLAUDE.md`; module-specific details live in each subfolder's `CLAUDE.md`.
+Architectural rules and module map for everything under `src/`. Repo-level commands and project pitch live in the top-level `AGENTS.md`; module-specific details live in each subfolder's `AGENTS.md`.
 
 ## API levels
 
@@ -112,7 +112,7 @@ Where the intersection is narrower than peniko's full surface, we define our own
 
 ## Module map
 
-Folders (each with its own CLAUDE.md):
+Folders (each with its own AGENTS.md):
 
 - `scene/` — `SceneBuilder` trait, glyph types, recording backend.
 - `backend/` — `Renderer` trait, error type, and backend implementations.
@@ -125,9 +125,9 @@ Folders (each with its own CLAUDE.md):
 - `document/` — plot documents behind `document-read` / `document-write`: capture a `PlotComposition` to bytes and rebuild it elsewhere, carrying configuration rather than pixels so the reader re-solves layout at its own size. The two exceptions are opt-in payloads: font files, and the raster images a plot names — from an `ImageGeom`'s channel or a markdown image tag, including ones the writer read off disk. Marker shapes are carried as configuration — a custom one is a few Bézier subpaths, and a glyph-backed one travels as its source text. Depends on `plot/`, `scales/` and the style vocabulary; nothing depends on it.
 - `image/` — raster readers and writers (PNG / JPEG / TIFF / WebP), one cargo feature per format. Reading normalises whatever the file holds to the buffer contract the writers enforce and hands back a `brush::Image`, which is what `SceneBuilder::draw_image` and `plot::ImageGeom` consume.
 - `window/` — live window presentation behind the `window` feature: the `WindowApp` trait, the winit event loop, and the surface blit that puts a rendered frame on screen. Depends on `backend/` (it is a host for `WgpuRenderer`) and on nothing above it.
-- `text/` — parley-backed text shaping and layout. A host crate may swap in its own shaper behind the `TextRun` / `draw_text` surface, but the parley path is the committed default. `text/rich/` layers marquee-flavoured markdown on top of it (see `src/text/rich/CLAUDE.md`).
+- `text/` — parley-backed text shaping and layout. A host crate may swap in its own shaper behind the `TextRun` / `draw_text` surface, but the parley path is the committed default. `text/rich/` layers marquee-flavoured markdown on top of it (see `src/text/rich/AGENTS.md`).
 
-Single-file modules (no CLAUDE.md, one-line descriptions here):
+Single-file modules (no AGENTS.md, one-line descriptions here):
 
 - `blend.rs` — `BlendMode` / `Compose` / `Mix` enums (intersection of Vello + Blend2D).
 - `brush.rs` — `Brush`, `Image`, `Sampling` (Nearest / Bilinear).

@@ -1,4 +1,4 @@
-# src/primitives/CLAUDE.md
+# src/primitives/AGENTS.md
 
 Compound 2D primitives — path constructors, composable vertex transforms, arc-length sampling, ribbon tessellation. Sits at the boundary between the low-level scene API and the high-level plot geoms.
 

@@ -1,4 +1,4 @@
-# src/plot/theme/CLAUDE.md
+# src/plot/theme/AGENTS.md
 
 The theming system for the high-level plot API. Defines visuals for every chrome surface (plot / panel / axes / legends / strips) and every geom's per-channel defaults, all resolved through one cascade with one set of concrete fallbacks.
 

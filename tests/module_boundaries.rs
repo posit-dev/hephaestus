@@ -1,6 +1,6 @@
 //! Source-level guards for boundaries the type system can't express.
 //!
-//! Both rules below are stated in `src/CLAUDE.md` and were being
+//! Both rules below are stated in `src/AGENTS.md` and were being
 //! violated in dozens of places before they were checked mechanically.
 
 use std::fs;

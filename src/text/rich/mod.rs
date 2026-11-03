@@ -49,7 +49,7 @@
 //! alignment vocabulary, gradient backgrounds, and explicit control
 //! over underline / strikethrough metrics are unimplemented.
 //!
-//! See `src/text/rich/CLAUDE.md` for the full architectural note.
+//! See `src/text/rich/AGENTS.md` for the full architectural note.
 
 pub mod anchor;
 pub mod block;

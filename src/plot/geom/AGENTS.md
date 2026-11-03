@@ -1,4 +1,4 @@
-# src/plot/geom/CLAUDE.md
+# src/plot/geom/AGENTS.md
 
 Vectorised drawing primitives — geoms. Consume per-channel data + a `Scale` registry and emit `SceneBuilder` calls.
 

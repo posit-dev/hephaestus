@@ -50,7 +50,7 @@ pub enum Track {
     /// Fractional share of remaining space (CSS `fr` / R grid's "null" unit).
     Fr(f64),
     /// Size to fit content via the [`Track::Auto`] min-broadcast protocol;
-    /// see the `Layout` section of `CLAUDE.md`.
+    /// see the `Layout` section of `AGENTS.md`.
     Auto,
 }
 

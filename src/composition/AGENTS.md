@@ -1,4 +1,4 @@
-# src/composition/CLAUDE.md
+# src/composition/AGENTS.md
 
 Patchwork-style plot composition. Stacks on top of `layout/`: every plot is the same anatomical grid, composed plots automatically align by anatomical position.
 
@@ -37,7 +37,7 @@ All slot positions are 1-indexed to match `Placement`.
 
 ## Unified hoist + `Extent::TrackOf` chrome mirroring
 
-When a composition is nested inside another composition's cell, the build pipeline emits **forward sizers** in the outer block pointing at the sub-grid's inner border-block chrome tracks via `Extent::TrackOf(sub_id, axis, track, span)`. Simultaneously, **back sizers** in the sub-grid point at the parent's outer chrome tracks. The layout solver iterates over `TrackOf` references using fixed-point arithmetic (see `layout/CLAUDE.md` on iteration), converging the Auto tracks at both sides of the boundary to their pointwise maximum in two or three iterations per nesting level.
+When a composition is nested inside another composition's cell, the build pipeline emits **forward sizers** in the outer block pointing at the sub-grid's inner border-block chrome tracks via `Extent::TrackOf(sub_id, axis, track, span)`. Simultaneously, **back sizers** in the sub-grid point at the parent's outer chrome tracks. The layout solver iterates over `TrackOf` references using fixed-point arithmetic (see `layout/AGENTS.md` on iteration), converging the Auto tracks at both sides of the boundary to their pointwise maximum in two or three iterations per nesting level.
 
 The effect: inner-composition chrome (axis titles on facet borders, etc.) couples to outer-composition canonical chrome positions, enabling shared Title rows / cols across nested compositions without the caller threading the alignment by hand.
 
@@ -57,5 +57,5 @@ The effect: inner-composition chrome (axis titles on facet borders, etc.) couple
 ## Cross-references
 
 - `layout/` — the underlying solver. `Extent::TrackOf` (defined in `layout/`) is the mechanism that makes chrome mirroring work across nesting. The fixed-point iteration loop in `layout/solver.rs` is what converges them.
-- `plot::composition` (`src/plot/composition.rs`) — the high-level **orchestrator** that owns a `Composition` template, the scale registry, and attached plots. It rebuilds the composition on every render with each plot's chrome wired into named slots, and wires its own composition-level chrome (title / axis titles / legends) into the slots described above. See `src/plot/CLAUDE.md` for the "why are there two composition modules" answer.
+- `plot::composition` (`src/plot/composition.rs`) — the high-level **orchestrator** that owns a `Composition` template, the scale registry, and attached plots. It rebuilds the composition on every render with each plot's chrome wired into named slots, and wires its own composition-level chrome (title / axis titles / legends) into the slots described above. See `src/plot/AGENTS.md` for the "why are there two composition modules" answer.
 - `text/` — `TextRun` implements `Measure` and drops directly into a `Patch::slot(Slot::Title, Cell::measured(run))`.

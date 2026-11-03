@@ -1,4 +1,4 @@
-# src/plot/CLAUDE.md
+# src/plot/AGENTS.md
 
 The high-level plot API: typed columnar data, named scales, geoms that consume them, and the `PlotComposition` orchestrator that wires the whole thing into the layout from `composition/`. Layered on top of the low-level `SceneBuilder` surface.
 
@@ -12,17 +12,17 @@ For tests and one-off renders, `Plot` is independently usable with a hand-built 
 
 ## Subdirectories
 
-- **`geom/`** — vectorised drawing primitives (`PointGeom`, `LineGeom`, `PolygonGeom`, `RectGeom`, `EllipseGeom`, `SegmentGeom`, `WedgeGeom`, `ImageGeom`, plus `TextGeom` / `TextFitGeom` / `TextPathGeom`). See `src/plot/geom/CLAUDE.md`.
+- **`geom/`** — vectorised drawing primitives (`PointGeom`, `LineGeom`, `PolygonGeom`, `RectGeom`, `EllipseGeom`, `SegmentGeom`, `WedgeGeom`, `ImageGeom`, plus `TextGeom` / `TextFitGeom` / `TextPathGeom`). See `src/plot/geom/AGENTS.md`.
 - **`chrome/`** — axis and legend rendering. The scale layer (in `crate::scales`) defines what to draw; this module draws it against `SceneBuilder`.
 
 ## Scale bundle and re-export shims
 
 - **`scale/`** — hephaestus's own `Scale` bundle, `ScaleRegistry`, and the ggplot-style constructors (`scale::continuous(...)`, `scale::binned(...)`, …) in `scale/constructors.rs`. Hephaestus-only: none of it ships in the lift-ready scales crate. The module also re-exports `crate::scales::*`, so `crate::plot::scale::*` resolves both the bundle and the underlying enums / free functions.
-  - **Reversal is one flag, uniform across families.** `with_direction(Direction::Reversed)` / `set_direction` mirror the normalised fraction (or the domain index) before the output range is consulted, so the same flag flips a position axis, a palette and a colorbar's ramp. It is not expressed as a backwards domain — see the `Direction` convention in `src/scales/CLAUDE.md` for why, and for what it means for breaks, band offsets and legend order.
+  - **Reversal is one flag, uniform across families.** `with_direction(Direction::Reversed)` / `set_direction` mirror the normalised fraction (or the domain index) before the output range is consulted, so the same flag flips a position axis, a palette and a colorbar's ramp. It is not expressed as a backwards domain — see the `Direction` convention in `src/scales/AGENTS.md` for why, and for what it means for breaks, band offsets and legend order.
   - **Break control is symmetric across majors and minors.** `BreaksSpec` (`with_breaks` / `with_breaks_labeled` / `with_interval` / `with_temporal_interval`) pins majors; `MinorBreaksSpec` (`with_minor_breaks` / `with_minor_count` / `with_minor_interval` / `with_minor_temporal_interval`) pins minors. The two are independent — pinned majors still get automatic minors and vice versa — and a spec whose variant doesn't fit the scale type falls back to the automatic algorithm rather than panicking. Automatic minors do follow a pinned major *interval* where the majors define what there is to subdivide: on a temporal scale, `with_temporal_interval` drives the minors through `derive_minor_interval`, so quarterly majors get monthly minors regardless of the tick target. Interval-derived minors skip positions that already carry a major, matching what the automatic algorithms do (log minors skip the decade powers, calendar minors skip the aligned major).
 - **`value.rs`** — pure re-export of `crate::scales::value::*`.
 
-The algorithms `Scale` delegates to live in [`crate::scales`]; see `src/scales/CLAUDE.md`.
+The algorithms `Scale` delegates to live in [`crate::scales`]; see `src/scales/AGENTS.md`.
 
 ## Core types (this folder, not in subdirectories)
 

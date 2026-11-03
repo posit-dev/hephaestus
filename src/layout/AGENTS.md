@@ -1,4 +1,4 @@
-# src/layout/CLAUDE.md
+# src/layout/AGENTS.md
 
 Grid-only, zero-dependency layout solver. Compose n×m grids recursively, solve to a flat `HashMap<CellId, Rect>`.
 

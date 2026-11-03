@@ -1,4 +1,4 @@
-# src/backend/vello/CLAUDE.md
+# src/backend/vello/AGENTS.md
 
 Vello backend: implements `SceneBuilder` against a `vello::Scene` and `Renderer` against an `wgpu` device that rasterises headlessly to an RGBA8 buffer.
 
