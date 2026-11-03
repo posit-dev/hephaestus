@@ -510,8 +510,8 @@ fn draw_one_mark(
             });
             PathVertex {
                 frac: [
-                    resolve_position(x_col.get(i), x_scale, x_band),
-                    resolve_position(y_col.get(i), y_scale, y_band),
+                    resolve_position(&x_col.get(i), x_scale, x_band),
+                    resolve_position(&y_col.get(i), y_scale, y_band),
                 ],
                 offset_px: (
                     offset_px(x_offset_ch, x_offset_scale, i, ctx.dpi),

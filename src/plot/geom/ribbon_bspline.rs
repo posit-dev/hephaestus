@@ -502,8 +502,12 @@ fn draw_one_ribbon_bspline_mark(
             fill.ch,
             fill.scale,
             i0,
-            ctx.theme.geom.ribbon_bspline.fill.as_ref(),
-            &ctx.theme.palette,
+            ctx.theme
+                .geom
+                .ribbon_bspline
+                .fill
+                .as_ref()
+                .map(|tc| tc.resolve(&ctx.theme.palette)),
         ),
         resolve_number_channel(fill_opacity.ch, fill_opacity.scale, i0),
     );
@@ -536,7 +540,7 @@ fn draw_one_ribbon_bspline_mark(
         resolve_number_channel_or(degree_ch, degree_scale, i0, DEFAULT_DEGREE as f64) as usize;
     let interp_mode_str =
         resolve_str_channel_or(interpolation_ch, interpolation_scale, i0, "domain");
-    let interpolation_mode = match interp_mode_str.as_str() {
+    let interpolation_mode = match interp_mode_str.as_ref() {
         "panel" => InterpolationSpace::Panel,
         _ => InterpolationSpace::Domain,
     };
@@ -552,8 +556,8 @@ fn draw_one_ribbon_bspline_mark(
         let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
         let x2_band = resolve_number_channel_or(x2_band_ch, x2_band_scale, i, 0.0);
         let y2_band = resolve_number_channel_or(y2_band_ch, y2_band_scale, i, 0.0);
-        let x_frac = resolve_position(x_col.get(i), x_scale, x_band);
-        let y_frac = resolve_position(y_col.get(i), y_scale, y_band);
+        let x_frac = resolve_position(&x_col.get(i), x_scale, x_band);
+        let y_frac = resolve_position(&y_col.get(i), y_scale, y_band);
         if !x_frac.is_finite() || !y_frac.is_finite() {
             continue;
         }

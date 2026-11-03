@@ -419,6 +419,22 @@ impl Geom for TextPathGeom {
         let angle_ch = channels.get("angle");
         let pick_id_ch = channels.get("pick_id");
 
+        // Loop-invariant theme colour fallbacks.
+        let fill_theme = ctx
+            .theme
+            .geom
+            .text_path
+            .fill
+            .as_ref()
+            .map(|tc| tc.resolve(&ctx.theme.palette));
+        let text_stroke_theme = ctx
+            .theme
+            .geom
+            .text_path
+            .text_stroke
+            .as_ref()
+            .map(|tc| tc.resolve(&ctx.theme.palette));
+
         for mark in marks.iter() {
             let i0 = mark.first_row;
 
@@ -469,8 +485,7 @@ impl Geom for TextPathGeom {
                 text_stroke_ch,
                 text_stroke_scale,
                 i0,
-                ctx.theme.geom.text_path.text_stroke.as_ref(),
-                &ctx.theme.palette,
+                text_stroke_theme,
             );
             let text_linewidth_pt = resolve_number_channel_or(
                 text_linewidth_ch,
@@ -491,13 +506,7 @@ impl Geom for TextPathGeom {
             };
 
             let fill_color = override_alpha(
-                resolve_color_channel_or_theme(
-                    fill_ch,
-                    fill_scale,
-                    i0,
-                    ctx.theme.geom.text_path.fill.as_ref(),
-                    &ctx.theme.palette,
-                ),
+                resolve_color_channel_or_theme(fill_ch, fill_scale, i0, fill_theme),
                 resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i0),
             )
             .unwrap_or_else(default_fill);
@@ -521,8 +530,8 @@ impl Geom for TextPathGeom {
             for &i in &mark.rows {
                 let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
                 let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
-                let x_frac = resolve_position(x_col.get(i), x_scale, x_band);
-                let y_frac = resolve_position(y_col.get(i), y_scale, y_band);
+                let x_frac = resolve_position(&x_col.get(i), x_scale, x_band);
+                let y_frac = resolve_position(&y_col.get(i), y_scale, y_band);
                 if !x_frac.is_finite() || !y_frac.is_finite() {
                     continue;
                 }

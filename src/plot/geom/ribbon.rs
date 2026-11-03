@@ -474,8 +474,12 @@ fn draw_one_ribbon_mark(
             fill.ch,
             fill.scale,
             i0,
-            ctx.theme.geom.ribbon.fill.as_ref(),
-            &ctx.theme.palette,
+            ctx.theme
+                .geom
+                .ribbon
+                .fill
+                .as_ref()
+                .map(|tc| tc.resolve(&ctx.theme.palette)),
         ),
         resolve_number_channel(fill_opacity.ch, fill_opacity.scale, i0),
     );
@@ -540,8 +544,8 @@ fn draw_one_ribbon_mark(
         let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
         let x2_band = resolve_number_channel_or(x2_band_ch, x2_band_scale, i, 0.0);
         let y2_band = resolve_number_channel_or(y2_band_ch, y2_band_scale, i, 0.0);
-        let x_frac = resolve_position(x_col.get(i), x_scale, x_band);
-        let y_frac = resolve_position(y_col.get(i), y_scale, y_band);
+        let x_frac = resolve_position(&x_col.get(i), x_scale, x_band);
+        let y_frac = resolve_position(&y_col.get(i), y_scale, y_band);
         if !x_frac.is_finite() || !y_frac.is_finite() {
             continue;
         }
@@ -1056,7 +1060,7 @@ fn resolve_optional_position(
         Channel::RawConstant(_) | Channel::RawData(_) => None,
         _ => scale_bound,
     };
-    let f = resolve_position(value, scale, band);
+    let f = resolve_position(&value, scale, band);
     if f.is_finite() {
         Some(f)
     } else {

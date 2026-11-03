@@ -450,7 +450,7 @@ fn draw_one_bspline_mark(
         i0,
         "domain",
     )
-    .as_str()
+    .as_ref()
     {
         "panel" => InterpolationSpace::Panel,
         _ => InterpolationSpace::Domain,
@@ -466,8 +466,8 @@ fn draw_one_bspline_mark(
     for &i in &mark.rows {
         let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
         let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
-        let xf = resolve_position(x_col.get(i), x_scale, x_band);
-        let yf = resolve_position(y_col.get(i), y_scale, y_band);
+        let xf = resolve_position(&x_col.get(i), x_scale, x_band);
+        let yf = resolve_position(&y_col.get(i), y_scale, y_band);
         if !xf.is_finite() || !yf.is_finite() {
             continue;
         }

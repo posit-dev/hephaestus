@@ -456,6 +456,22 @@ impl Geom for TextFitGeom {
         let angle_ch = channels.get("angle");
         let pick_id_ch = channels.get("pick_id");
 
+        // Loop-invariant theme colour fallbacks.
+        let fill_theme = ctx
+            .theme
+            .geom
+            .text_fit
+            .fill
+            .as_ref()
+            .map(|tc| tc.resolve(&ctx.theme.palette));
+        let text_stroke_theme = ctx
+            .theme
+            .geom
+            .text_fit
+            .text_stroke
+            .as_ref()
+            .map(|tc| tc.resolve(&ctx.theme.palette));
+
         for i in 0..n {
             // ── Resolve text. ──
             let text = match resolve_str_channel(text_ch, text_scale, i) {
@@ -468,10 +484,10 @@ impl Geom for TextFitGeom {
             let x2_band = resolve_number_channel_or(x2_band_ch, x2_band_scale, i, 0.0);
             let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
             let y2_band = resolve_number_channel_or(y2_band_ch, y2_band_scale, i, 0.0);
-            let x_frac = resolve_position(x_col.get(i), x_scale, x_band);
-            let x2_frac = resolve_position(x2_col.get(i), x2_scale, x2_band);
-            let y_frac = resolve_position(y_col.get(i), y_scale, y_band);
-            let y2_frac = resolve_position(y2_col.get(i), y2_scale, y2_band);
+            let x_frac = resolve_position(&x_col.get(i), x_scale, x_band);
+            let x2_frac = resolve_position(&x2_col.get(i), x2_scale, x2_band);
+            let y_frac = resolve_position(&y_col.get(i), y_scale, y_band);
+            let y2_frac = resolve_position(&y2_col.get(i), y2_scale, y2_band);
             if !x_frac.is_finite()
                 || !x2_frac.is_finite()
                 || !y_frac.is_finite()
@@ -569,13 +585,7 @@ impl Geom for TextFitGeom {
                 ctx.theme.geom.text_fit.markdown,
             );
             let fill_color = override_alpha(
-                resolve_color_channel_or_theme(
-                    fill_ch,
-                    fill_scale,
-                    i,
-                    ctx.theme.geom.text_fit.fill.as_ref(),
-                    &ctx.theme.palette,
-                ),
+                resolve_color_channel_or_theme(fill_ch, fill_scale, i, fill_theme),
                 resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i),
             )
             .unwrap_or_else(default_fill);
@@ -583,8 +593,7 @@ impl Geom for TextFitGeom {
                 text_stroke_ch,
                 text_stroke_scale,
                 i,
-                ctx.theme.geom.text_fit.text_stroke.as_ref(),
-                &ctx.theme.palette,
+                text_stroke_theme,
             );
             let text_linewidth_pt = resolve_number_channel_or(
                 text_linewidth_ch,

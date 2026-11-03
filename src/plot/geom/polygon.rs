@@ -508,8 +508,12 @@ fn draw_one_polygon_mark(
             fill_ch,
             fill_scale,
             i0,
-            ctx.theme.geom.polygon.fill.as_ref(),
-            &ctx.theme.palette,
+            ctx.theme
+                .geom
+                .polygon
+                .fill
+                .as_ref()
+                .map(|tc| tc.resolve(&ctx.theme.palette)),
         ),
         resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i0),
     );
@@ -518,8 +522,12 @@ fn draw_one_polygon_mark(
             stroke_ch,
             stroke_scale,
             i0,
-            ctx.theme.geom.polygon.stroke.as_ref(),
-            &ctx.theme.palette,
+            ctx.theme
+                .geom
+                .polygon
+                .stroke
+                .as_ref()
+                .map(|tc| tc.resolve(&ctx.theme.palette)),
         ),
         resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i0),
     );
@@ -606,8 +614,8 @@ fn draw_one_polygon_mark(
             });
             PathVertex {
                 frac: [
-                    resolve_position(x_col.get(i), x_scale, x_band),
-                    resolve_position(y_col.get(i), y_scale, y_band),
+                    resolve_position(&x_col.get(i), x_scale, x_band),
+                    resolve_position(&y_col.get(i), y_scale, y_band),
                 ],
                 offset_px: (
                     offset_px(x_offset_ch, x_offset_scale, i, ctx.dpi),

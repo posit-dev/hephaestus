@@ -67,10 +67,10 @@ use crate::primitives::{polygon as polygon_path, rect as rect_path, rounded_rect
 use crate::scene::SceneBuilder;
 
 use super::resolve::{
-    draw_stroke_with_linetype, override_alpha, pt_to_px, resolve_angle_channel,
-    resolve_cap_channel, resolve_color_channel_or_theme, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
-    resolve_position,
+    channel_varies_per_row, draw_stroke_with_linetype, override_alpha, pt_to_px,
+    resolve_angle_channel, resolve_cap_channel, resolve_color_channel_or_theme,
+    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, resolve_position,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
@@ -246,6 +246,29 @@ impl Geom for RectGeom {
         let expand_ch = channels.get("expand");
         let angle_ch = channels.get("angle");
 
+        // Loop-invariant resolves: theme fallbacks, and the linetype /
+        // cap / join whenever their channels aren't data-driven.
+        let fill_theme = ctx
+            .theme
+            .geom
+            .rect
+            .fill
+            .as_ref()
+            .map(|tc| tc.resolve(&ctx.theme.palette));
+        let stroke_theme = ctx
+            .theme
+            .geom
+            .rect
+            .stroke
+            .as_ref()
+            .map(|tc| tc.resolve(&ctx.theme.palette));
+        let fixed_linetype = (!channel_varies_per_row(linetype_ch))
+            .then(|| resolve_linetype_channel(linetype_ch, linetype_scale, 0));
+        let fixed_cap = (!channel_varies_per_row(cap_ch))
+            .then(|| resolve_cap_channel(cap_ch, cap_scale, 0, ctx.theme.geom.rect.cap));
+        let fixed_join = (!channel_varies_per_row(join_ch))
+            .then(|| resolve_join_channel(join_ch, join_scale, 0, ctx.theme.geom.rect.join));
+
         for i in 0..n {
             // ── Resolve the four corner positions. ──
             let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, DEFAULT_X_BAND);
@@ -253,10 +276,10 @@ impl Geom for RectGeom {
             let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, DEFAULT_Y_BAND);
             let y2_band = resolve_number_channel_or(y2_band_ch, y2_band_scale, i, DEFAULT_Y2_BAND);
 
-            let x_frac = resolve_position(x_col.get(i), x_scale, x_band);
-            let x2_frac = resolve_position(x2_col.get(i), x2_scale, x2_band);
-            let y_frac = resolve_position(y_col.get(i), y_scale, y_band);
-            let y2_frac = resolve_position(y2_col.get(i), y2_scale, y2_band);
+            let x_frac = resolve_position(&x_col.get(i), x_scale, x_band);
+            let x2_frac = resolve_position(&x2_col.get(i), x2_scale, x2_band);
+            let y_frac = resolve_position(&y_col.get(i), y_scale, y_band);
+            let y2_frac = resolve_position(&y2_col.get(i), y2_scale, y2_band);
             if !x_frac.is_finite()
                 || !x2_frac.is_finite()
                 || !y_frac.is_finite()
@@ -327,23 +350,11 @@ impl Geom for RectGeom {
 
             // ── Resolve styling. ──
             let fill_color = override_alpha(
-                resolve_color_channel_or_theme(
-                    fill_ch,
-                    fill_scale,
-                    i,
-                    ctx.theme.geom.rect.fill.as_ref(),
-                    &ctx.theme.palette,
-                ),
+                resolve_color_channel_or_theme(fill_ch, fill_scale, i, fill_theme),
                 resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i),
             );
             let stroke_color = override_alpha(
-                resolve_color_channel_or_theme(
-                    stroke_ch,
-                    stroke_scale,
-                    i,
-                    ctx.theme.geom.rect.stroke.as_ref(),
-                    &ctx.theme.palette,
-                ),
+                resolve_color_channel_or_theme(stroke_ch, stroke_scale, i, stroke_theme),
                 resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i),
             );
             let linewidth_pt = resolve_number_channel_or(
@@ -356,11 +367,17 @@ impl Geom for RectGeom {
             let corner_radius_pt =
                 resolve_number_channel_or(corner_radius_ch, corner_radius_scale, i, 0.0);
             let corner_radius_px = pt_to_px(corner_radius_pt, ctx.dpi).max(0.0);
-            let dash_pattern_pt = resolve_linetype_channel(linetype_ch, linetype_scale, i);
+            let dash_pattern_pt = fixed_linetype
+                .clone()
+                .unwrap_or_else(|| resolve_linetype_channel(linetype_ch, linetype_scale, i));
             let dash_offset_pt =
                 resolve_number_channel_or(dash_offset_ch, dash_offset_scale, i, 0.0);
-            let cap = resolve_cap_channel(cap_ch, cap_scale, i, ctx.theme.geom.rect.cap);
-            let join = resolve_join_channel(join_ch, join_scale, i, ctx.theme.geom.rect.join);
+            let cap = fixed_cap.unwrap_or_else(|| {
+                resolve_cap_channel(cap_ch, cap_scale, i, ctx.theme.geom.rect.cap)
+            });
+            let join = fixed_join.unwrap_or_else(|| {
+                resolve_join_channel(join_ch, join_scale, i, ctx.theme.geom.rect.join)
+            });
 
             // ── Build the path. ──
             //

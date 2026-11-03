@@ -1006,10 +1006,7 @@ fn nested_respect_slack_feeds_uncapped_fr_sibling() {
     let mut sub = Grid::new([Track::Fr(1.0)], [Track::Fr(1.0)]).respect();
     sub.place_mut(Placement::at(1, 1), Grid::cell().id(CellId(1)));
 
-    let mut root = Grid::new(
-        [Track::Fr(1.0), Track::Fr(1.0)],
-        [Track::Fr(1.0)],
-    );
+    let mut root = Grid::new([Track::Fr(1.0), Track::Fr(1.0)], [Track::Fr(1.0)]);
     root.place_mut(Placement::at(1, 1), sub);
     root.place_mut(Placement::at(1, 2), Grid::cell().id(CellId(2)));
 

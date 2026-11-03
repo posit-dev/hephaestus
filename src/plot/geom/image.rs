@@ -89,9 +89,9 @@ use crate::primitives::rect as rect_path;
 use crate::scene::SceneBuilder;
 
 use super::resolve::{
-    pt_to_px, resolve_angle_channel, resolve_fit_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position, resolve_sampling_channel,
-    resolve_str_channel_or,
+    channel_varies_per_row, pt_to_px, resolve_angle_channel, resolve_fit_channel,
+    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
+    resolve_sampling_channel, resolve_str_channel_or,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
@@ -293,12 +293,42 @@ impl Geom for ImageGeom {
         let opacity_ch = channels.get("opacity");
         let pick_id_ch = channels.get("pick_id");
 
+        // Loop-invariant resolves: the image, fit and sampling whenever
+        // their channels aren't data-driven. A constant image name that
+        // resolves to nothing skips every row, so the whole draw can bail
+        // up front.
+        let fixed_image = if channel_varies_per_row(image_ch) {
+            None
+        } else {
+            let name = resolve_str_channel_or(image_ch, image_scale, 0, "");
+            match ctx.images.resolve(name.as_ref()) {
+                Some(image) => Some(image),
+                None => return,
+            }
+        };
+        let fixed_fit = (!channel_varies_per_row(fit_ch))
+            .then(|| resolve_fit_channel(fit_ch, fit_scale, 0, ctx.theme.geom.image.fit));
+        let fixed_sampling = (!channel_varies_per_row(sampling_ch)).then(|| {
+            resolve_sampling_channel(
+                sampling_ch,
+                sampling_scale,
+                0,
+                ctx.theme.geom.image.sampling,
+            )
+        });
+
         for i in 0..n {
             // ── The image itself. A name that resolves to nothing draws
             // nothing, matching how PointGeom treats an unknown shape name.
-            let name = resolve_str_channel_or(image_ch, image_scale, i, "");
-            let Some(image) = ctx.images.resolve(&name) else {
-                continue;
+            let image = match &fixed_image {
+                Some(image) => image.clone(),
+                None => {
+                    let name = resolve_str_channel_or(image_ch, image_scale, i, "");
+                    match ctx.images.resolve(name.as_ref()) {
+                        Some(image) => image,
+                        None => continue,
+                    }
+                }
             };
             let img_w = f64::from(image.width);
             let img_h = f64::from(image.height);
@@ -309,8 +339,8 @@ impl Geom for ImageGeom {
             // ── Anchor position. ──
             let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, DEFAULT_BAND);
             let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, DEFAULT_BAND);
-            let x_frac = resolve_position(x_col.get(i), x_scale, x_band);
-            let y_frac = resolve_position(y_col.get(i), y_scale, y_band);
+            let x_frac = resolve_position(&x_col.get(i), x_scale, x_band);
+            let y_frac = resolve_position(&y_col.get(i), y_scale, y_band);
             if !x_frac.is_finite() || !y_frac.is_finite() {
                 continue;
             }
@@ -348,7 +378,7 @@ impl Geom for ImageGeom {
                 Some((col, scale)) => {
                     let band =
                         resolve_number_channel_or(x2_band_ch, x2_band_scale, i, DEFAULT_BAND);
-                    let f = resolve_position(col.get(i), scale, band);
+                    let f = resolve_position(&col.get(i), scale, band);
                     if !f.is_finite() {
                         continue;
                     }
@@ -360,7 +390,7 @@ impl Geom for ImageGeom {
                 Some((col, scale)) => {
                     let band =
                         resolve_number_channel_or(y2_band_ch, y2_band_scale, i, DEFAULT_BAND);
-                    let f = resolve_position(col.get(i), scale, band);
+                    let f = resolve_position(&col.get(i), scale, band);
                     if !f.is_finite() {
                         continue;
                     }
@@ -455,7 +485,9 @@ impl Geom for ImageGeom {
             }
 
             // ── Fit the image's pixel space into the target box. ──
-            let fit = resolve_fit_channel(fit_ch, fit_scale, i, ctx.theme.geom.image.fit);
+            let fit = fixed_fit.unwrap_or_else(|| {
+                resolve_fit_channel(fit_ch, fit_scale, i, ctx.theme.geom.image.fit)
+            });
             let fill_x = target.width() / img_w;
             let fill_y = target.height() / img_h;
             let (sx, sy) = match fit {
@@ -489,12 +521,14 @@ impl Geom for ImageGeom {
                 Affine::rotate_about(-angle, centre)
             };
 
-            let sampling = resolve_sampling_channel(
-                sampling_ch,
-                sampling_scale,
-                i,
-                ctx.theme.geom.image.sampling,
-            );
+            let sampling = fixed_sampling.unwrap_or_else(|| {
+                resolve_sampling_channel(
+                    sampling_ch,
+                    sampling_scale,
+                    i,
+                    ctx.theme.geom.image.sampling,
+                )
+            });
             let opacity = resolve_number_channel_or(
                 opacity_ch,
                 opacity_scale,

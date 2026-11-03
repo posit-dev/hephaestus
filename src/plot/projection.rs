@@ -911,8 +911,8 @@ fn resolve_ring(
     use crate::plot::value::Value;
     let mut out = Vec::with_capacity(ring.len());
     for (x, y) in ring {
-        let xf = resolve_position(Value::Number(*x), x_scale, 0.0);
-        let yf = resolve_position(Value::Number(*y), y_scale, 0.0);
+        let xf = resolve_position(&Value::Number(*x), x_scale, 0.0);
+        let yf = resolve_position(&Value::Number(*y), y_scale, 0.0);
         if xf.is_finite() && yf.is_finite() {
             out.push((xf, yf));
         }
