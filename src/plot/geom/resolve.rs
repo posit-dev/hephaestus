@@ -21,7 +21,7 @@ use crate::geometry::{Affine, Point, Vec2};
 use crate::linetype::{draw_linetype_with_markers, emit_marker_shape};
 use crate::path::Path;
 use crate::pick::PickId;
-use crate::plot::scale::Scale;
+use crate::plot::scale::{InputRange, Scale, ScaleTypeKind};
 use crate::plot::value::{LinetypeStep, Value};
 use crate::primitives::PolylineSampler;
 use crate::scene::SceneBuilder;
@@ -92,6 +92,69 @@ pub(crate) fn resolve_position(raw: &Value, scale: Option<&Scale>, band_offset: 
         None => return raw.as_number().unwrap_or(f64::NAN),
     };
     mapped.as_number().unwrap_or(f64::NAN)
+}
+
+/// A position scale prepared once per draw, so the per-row map skips
+/// work that depends only on the scale. A continuous or temporal
+/// scale's map transforms the two fixed domain endpoints on every
+/// call; here they are transformed once up front, leaving one forward
+/// transform (the row's own value) per row. Every other scale family
+/// delegates to [`resolve_position`] unchanged, as does a continuous
+/// scale with an output range set (its interpolation is not a plain
+/// fraction).
+pub(crate) struct PositionMap<'a> {
+    scale: Option<&'a Scale>,
+    /// Transformed `(domain_min, domain_max)` when the fast path
+    /// applies; `None` → delegate.
+    endpoints: Option<(f64, f64)>,
+}
+
+impl<'a> PositionMap<'a> {
+    /// Prepare `scale` for per-row mapping. Costs two transform
+    /// evaluations for a continuous scale, nothing otherwise.
+    pub(crate) fn new(scale: Option<&'a Scale>) -> Self {
+        let endpoints = match scale {
+            Some(s)
+                if matches!(
+                    s.scale_type_kind(),
+                    ScaleTypeKind::Continuous | ScaleTypeKind::Temporal(_)
+                ) && s.output_range().is_none() =>
+            {
+                match s.input_range() {
+                    Some(InputRange::Continuous { min, max }) => {
+                        Some((s.transform().forward(*min), s.transform().forward(*max)))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        Self { scale, endpoints }
+    }
+
+    /// Project a row's raw `Value` to a `[0, 1]` panel fraction — the
+    /// same result as [`resolve_position`]. The band offset is a no-op
+    /// on the fast path: a continuous scale's band width is 0.
+    pub(crate) fn map(&self, raw: &Value, band_offset: f64) -> f64 {
+        let Some(s) = self.scale else {
+            return raw.as_number().unwrap_or(f64::NAN);
+        };
+        if let Some((dmin_t, dmax_t)) = self.endpoints {
+            let Some(v) = raw.as_number() else {
+                return f64::NAN;
+            };
+            let v_t = s.transform().forward(v);
+            let t = if dmax_t == dmin_t {
+                0.0
+            } else {
+                (v_t - dmin_t) / (dmax_t - dmin_t)
+            };
+            return s.direction().apply_fraction(t);
+        }
+        s.map_with_offset(raw, band_offset)
+            .as_number()
+            .unwrap_or(f64::NAN)
+    }
 }
 
 /// True when the channel can resolve to different values across rows —
@@ -796,6 +859,46 @@ mod tests {
         // Scale bound, value has no numeric projection.
         let c = scale::continuous(0.0..=1.0);
         assert!(resolve_position(&cat("a"), Some(&c), 0.0).is_nan());
+    }
+
+    // ── PositionMap ────────────────────────────────────────────────
+
+    /// The prepared map must agree with `resolve_position` across the
+    /// scale families: fast-path continuous (identity and transformed,
+    /// both directions), delegating discrete, and no scale at all.
+    #[test]
+    fn position_map_agrees_with_resolve_position() {
+        let cases: Vec<Option<Scale>> = vec![
+            None,
+            Some(scale::continuous(0.0..=10.0)),
+            Some(
+                scale::continuous(1.0..=1000.0)
+                    .with_transform(crate::plot::scale::TransformKind::Log10),
+            ),
+            Some(scale::continuous(0.0..=10.0).with_direction(Direction::Reversed)),
+            Some(scale::discrete([cat("a"), cat("b"), cat("c")])),
+        ];
+        let inputs = [
+            Value::Number(0.0),
+            Value::Number(5.0),
+            Value::Number(10.0),
+            cat("a"),
+            cat("zzz"),
+            Value::Null,
+        ];
+        for s in &cases {
+            let pm = PositionMap::new(s.as_ref());
+            for v in &inputs {
+                for band in [0.0, 0.5] {
+                    let expected = resolve_position(v, s.as_ref(), band);
+                    let got = pm.map(v, band);
+                    assert!(
+                        got == expected || (got.is_nan() && expected.is_nan()),
+                        "{s:?} / {v:?} / band {band}: {got} != {expected}"
+                    );
+                }
+            }
+        }
     }
 
     // ── resolve_color_channel ──────────────────────────────────────

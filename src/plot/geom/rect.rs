@@ -70,7 +70,7 @@ use super::resolve::{
     channel_varies_per_row, draw_stroke_with_linetype, override_alpha, pt_to_px,
     resolve_angle_channel, resolve_cap_channel, resolve_color_channel_or_theme,
     resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position,
+    resolve_number_channel_or, resolve_pick_id, PositionMap,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
@@ -269,6 +269,11 @@ impl Geom for RectGeom {
         let fixed_join = (!channel_varies_per_row(join_ch))
             .then(|| resolve_join_channel(join_ch, join_scale, 0, ctx.theme.geom.rect.join));
 
+        // Prepared position scales: transform constants resolved once per draw.
+        let x_pos = PositionMap::new(x_scale);
+        let x2_pos = PositionMap::new(x2_scale);
+        let y_pos = PositionMap::new(y_scale);
+        let y2_pos = PositionMap::new(y2_scale);
         for i in 0..n {
             // ── Resolve the four corner positions. ──
             let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, DEFAULT_X_BAND);
@@ -276,10 +281,10 @@ impl Geom for RectGeom {
             let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, DEFAULT_Y_BAND);
             let y2_band = resolve_number_channel_or(y2_band_ch, y2_band_scale, i, DEFAULT_Y2_BAND);
 
-            let x_frac = resolve_position(&x_col.get(i), x_scale, x_band);
-            let x2_frac = resolve_position(&x2_col.get(i), x2_scale, x2_band);
-            let y_frac = resolve_position(&y_col.get(i), y_scale, y_band);
-            let y2_frac = resolve_position(&y2_col.get(i), y2_scale, y2_band);
+            let x_frac = x_pos.map(&x_col.get(i), x_band);
+            let x2_frac = x2_pos.map(&x2_col.get(i), x2_band);
+            let y_frac = y_pos.map(&y_col.get(i), y_band);
+            let y2_frac = y2_pos.map(&y2_col.get(i), y2_band);
             if !x_frac.is_finite()
                 || !x2_frac.is_finite()
                 || !y_frac.is_finite()

@@ -57,8 +57,8 @@ use super::resolve::{
     channel_varies_per_row, override_alpha, pt_to_px, resolve_angle_channel,
     resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel,
     resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
-    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
-    resolve_str_channel_or,
+    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_str_channel_or,
+    PositionMap,
 };
 use super::state::{finalize_state, require_data_column, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
@@ -252,6 +252,8 @@ impl Geom for GeometryGeom {
             tc.map(|tc| tc.resolve(&ctx.theme.palette))
         };
         let fixed = DrawInvariants {
+            x_pos: PositionMap::new(x_scale),
+            y_pos: PositionMap::new(y_scale),
             point_fill_theme: resolve_theme(theme.point.fill.as_ref()),
             point_stroke_theme: resolve_theme(theme.point.stroke.as_ref()),
             line_stroke_theme: resolve_theme(theme.line.stroke.as_ref()),
@@ -379,7 +381,9 @@ impl Geom for GeometryGeom {
 /// colour fallbacks for each geometry kind, and the static-style
 /// channels. A `None` style field means its channel is data-driven and
 /// resolves at each row.
-struct DrawInvariants {
+struct DrawInvariants<'a> {
+    x_pos: PositionMap<'a>,
+    y_pos: PositionMap<'a>,
     point_fill_theme: Option<Color>,
     point_stroke_theme: Option<Color>,
     line_stroke_theme: Option<Color>,
@@ -415,7 +419,7 @@ fn fixed_or_row_str<'a>(
 /// avoiding shared mutable state.
 struct DrawCtx<'a> {
     i: usize,
-    fixed: &'a DrawInvariants,
+    fixed: &'a DrawInvariants<'a>,
     x_band: f64,
     y_band: f64,
     dx_px: f64,
@@ -479,8 +483,8 @@ impl DrawCtx<'_> {
     /// coordinate, with the row's band offsets folded in.
     fn frac(&self, c: Coord) -> [f64; 2] {
         [
-            resolve_position(&Value::Number(c.0), self.x_scale, self.x_band),
-            resolve_position(&Value::Number(c.1), self.y_scale, self.y_band),
+            self.fixed.x_pos.map(&Value::Number(c.0), self.x_band),
+            self.fixed.y_pos.map(&Value::Number(c.1), self.y_band),
         ]
     }
 

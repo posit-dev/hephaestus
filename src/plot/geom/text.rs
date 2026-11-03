@@ -113,7 +113,7 @@ use crate::text::{draw_text, TextRun, TextStyle};
 use super::resolve::{
     band_width_at, override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or,
     resolve_color_channel, resolve_color_channel_or_theme, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_position,
+    resolve_number_channel_or, resolve_pick_id, PositionMap,
 };
 use super::rich::{panel_space_transform, OutlineSheets};
 use super::state::{
@@ -370,6 +370,9 @@ impl Geom for TextGeom {
             .as_ref()
             .map(|tc| tc.resolve(&ctx.theme.palette));
 
+        // Prepared position scales: transform constants resolved once per draw.
+        let x_pos = PositionMap::new(x_scale);
+        let y_pos = PositionMap::new(y_scale);
         for i in 0..n {
             // ── Resolve text string. ──
             let text = match resolve_str_channel(text_ch, text_scale, i) {
@@ -380,8 +383,8 @@ impl Geom for TextGeom {
             // ── Position (anchor in pixel space). ──
             let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
             let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
-            let x_frac = resolve_position(&x_col.get(i), x_scale, x_band);
-            let y_frac = resolve_position(&y_col.get(i), y_scale, y_band);
+            let x_frac = x_pos.map(&x_col.get(i), x_band);
+            let y_frac = y_pos.map(&y_col.get(i), y_band);
             if !x_frac.is_finite() || !y_frac.is_finite() {
                 continue;
             }

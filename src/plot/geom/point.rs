@@ -87,7 +87,7 @@ use std::sync::Arc;
 use super::resolve::{
     band_width_at, channel_varies_per_row, override_alpha, pt_to_px, resolve_angle_channel,
     resolve_color_channel_or_theme, resolve_number_channel, resolve_number_channel_or,
-    resolve_pick_id, resolve_position, resolve_str_channel_or, smallest_nonzero,
+    resolve_pick_id, resolve_str_channel_or, smallest_nonzero, PositionMap,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
@@ -278,14 +278,17 @@ impl Geom for PointGeom {
             )
         });
 
+        // Prepared position scales: transform constants resolved once per draw.
+        let x_pos = PositionMap::new(x_scale);
+        let y_pos = PositionMap::new(y_scale);
         for i in 0..n {
             // ── Position (per row) ──
             let x_raw = x_col.get(i);
             let y_raw = y_col.get(i);
             let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
             let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
-            let px_frac = resolve_position(&x_raw, x_scale, x_band);
-            let py_frac = resolve_position(&y_raw, y_scale, y_band);
+            let px_frac = x_pos.map(&x_raw, x_band);
+            let py_frac = y_pos.map(&y_raw, y_band);
             if !px_frac.is_finite() || !py_frac.is_finite() {
                 continue;
             }

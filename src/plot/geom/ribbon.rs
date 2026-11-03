@@ -94,7 +94,7 @@ use super::outline::{draw_curve_outline, resolve_outline_spec, OutlineChannels, 
 use super::resolve::{
     channel_color_space, channel_varies_across, override_alpha, pt_to_px, resolve_color_channel,
     resolve_color_channel_or_theme, resolve_number_channel, resolve_number_channel_or,
-    resolve_pick_id, resolve_position, ChannelBind,
+    resolve_pick_id, resolve_position, ChannelBind, PositionMap,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
@@ -463,6 +463,11 @@ fn draw_one_ribbon_mark(
         outline_b_scales,
     } = dc;
 
+    // Prepared position scales: transform constants resolved once per
+    // mark rather than once per row.
+    let x_pos = PositionMap::new(x_scale);
+    let y_pos = PositionMap::new(y_scale);
+
     let i0 = mark.first_row;
 
     // Per-mark fill colour at first row, at the per-mark fill
@@ -544,8 +549,8 @@ fn draw_one_ribbon_mark(
         let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
         let x2_band = resolve_number_channel_or(x2_band_ch, x2_band_scale, i, 0.0);
         let y2_band = resolve_number_channel_or(y2_band_ch, y2_band_scale, i, 0.0);
-        let x_frac = resolve_position(&x_col.get(i), x_scale, x_band);
-        let y_frac = resolve_position(&y_col.get(i), y_scale, y_band);
+        let x_frac = x_pos.map(&x_col.get(i), x_band);
+        let y_frac = y_pos.map(&y_col.get(i), y_band);
         if !x_frac.is_finite() || !y_frac.is_finite() {
             continue;
         }

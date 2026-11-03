@@ -65,8 +65,7 @@ use super::resolve::{
     channel_color_space, channel_varies_across, offset_px, override_alpha, pt_to_px,
     resolve_angle_channel, resolve_cap_channel, resolve_color_channel,
     resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
-    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
-    ChannelBind,
+    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, ChannelBind, PositionMap,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
@@ -501,6 +500,11 @@ fn draw_one_polygon_mark(
         },
     } = dc;
 
+    // Prepared position scales: transform constants resolved once per
+    // mark rather than once per row.
+    let x_pos = PositionMap::new(x_scale);
+    let y_pos = PositionMap::new(y_scale);
+
     let i0 = mark.first_row;
 
     let fill_color = override_alpha(
@@ -614,8 +618,8 @@ fn draw_one_polygon_mark(
             });
             PathVertex {
                 frac: [
-                    resolve_position(&x_col.get(i), x_scale, x_band),
-                    resolve_position(&y_col.get(i), y_scale, y_band),
+                    x_pos.map(&x_col.get(i), x_band),
+                    y_pos.map(&y_col.get(i), y_band),
                 ],
                 offset_px: (
                     offset_px(x_offset_ch, x_offset_scale, i, ctx.dpi),

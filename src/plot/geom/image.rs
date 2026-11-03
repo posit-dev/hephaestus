@@ -91,7 +91,7 @@ use crate::scene::SceneBuilder;
 use super::resolve::{
     channel_varies_per_row, pt_to_px, resolve_angle_channel, resolve_fit_channel,
     resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
-    resolve_sampling_channel, resolve_str_channel_or,
+    resolve_sampling_channel, resolve_str_channel_or, PositionMap,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
@@ -317,6 +317,9 @@ impl Geom for ImageGeom {
             )
         });
 
+        // Prepared position scales: transform constants resolved once per draw.
+        let x_pos = PositionMap::new(x_scale);
+        let y_pos = PositionMap::new(y_scale);
         for i in 0..n {
             // ── The image itself. A name that resolves to nothing draws
             // nothing, matching how PointGeom treats an unknown shape name.
@@ -339,8 +342,8 @@ impl Geom for ImageGeom {
             // ── Anchor position. ──
             let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, DEFAULT_BAND);
             let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, DEFAULT_BAND);
-            let x_frac = resolve_position(&x_col.get(i), x_scale, x_band);
-            let y_frac = resolve_position(&y_col.get(i), y_scale, y_band);
+            let x_frac = x_pos.map(&x_col.get(i), x_band);
+            let y_frac = y_pos.map(&y_col.get(i), y_band);
             if !x_frac.is_finite() || !y_frac.is_finite() {
                 continue;
             }
