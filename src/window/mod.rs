@@ -69,6 +69,8 @@ mod surface;
 #[cfg(all(feature = "webgl", target_arch = "wasm32"))]
 mod webgl_host;
 
+#[cfg(all(feature = "window", not(target_arch = "wasm32")))]
+pub use app::{WindowHandle, WindowSender};
 #[cfg(all(feature = "canvas", target_arch = "wasm32"))]
 pub use canvas::CanvasHost;
 pub use event::{Event, MouseButton};
@@ -101,6 +103,20 @@ pub trait WindowApp {
     fn event(&mut self, ctx: &mut EventCtx<'_>, event: Event) {
         let _ = (ctx, event);
     }
+}
+
+/// A [`WindowApp`] that also receives messages from other threads.
+///
+/// Implemented by apps run through [`WindowHandle`], which pairs the window
+/// with a cross-thread channel. Kept as a separate trait rather than a method
+/// on [`WindowApp`] so that `WindowApp` stays non-generic and [`Event`] stays
+/// purely platform-originated.
+pub trait MessageApp<T>: WindowApp {
+    /// React to a message sent through a [`WindowSender`].
+    ///
+    /// Called on the main thread once per message. A redraw is requested
+    /// after each message whether or not the handler asks for one.
+    fn message(&mut self, ctx: &mut EventCtx<'_>, message: T);
 }
 
 /// How finished frames are handed to the compositor.
