@@ -85,9 +85,9 @@ use crate::stroke::Stroke;
 use std::sync::Arc;
 
 use super::resolve::{
-    band_width_at, override_alpha, pt_to_px, resolve_angle_channel, resolve_color_channel_or_theme,
-    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
-    resolve_str_channel_or, smallest_nonzero,
+    band_width_at, channel_varies_per_row, override_alpha, pt_to_px, resolve_angle_channel,
+    resolve_color_channel_or_theme, resolve_number_channel, resolve_number_channel_or,
+    resolve_pick_id, resolve_str_channel_or, smallest_nonzero, PositionMap,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
@@ -241,14 +241,54 @@ impl Geom for PointGeom {
         let angle_ch = channels.get("angle");
         let pick_id_ch = channels.get("pick_id");
 
+        // Loop-invariant resolves: theme fallbacks, and the shape +
+        // linewidth whenever their channels aren't data-driven. A
+        // constant shape name that isn't in the registry skips every
+        // row, so the whole draw can bail up front.
+        let fill_theme = ctx
+            .theme
+            .geom
+            .point
+            .fill
+            .as_ref()
+            .map(|tc| tc.resolve(&ctx.theme.palette));
+        let stroke_theme = ctx
+            .theme
+            .geom
+            .point
+            .stroke
+            .as_ref()
+            .map(|tc| tc.resolve(&ctx.theme.palette));
+        let fixed_shape: Option<&Shape> = if channel_varies_per_row(shape_ch) {
+            None
+        } else {
+            let name =
+                resolve_str_channel_or(shape_ch, shape_scale, 0, &ctx.theme.geom.point.shape);
+            match ctx.shapes.get(name.as_ref()) {
+                Some(s) => Some(s),
+                None => return,
+            }
+        };
+        let fixed_linewidth_pt = (!channel_varies_per_row(linewidth_ch)).then(|| {
+            resolve_number_channel_or(
+                linewidth_ch,
+                linewidth_scale,
+                0,
+                ctx.theme.geom.point.stroke_width_pt,
+            )
+        });
+
+        // Prepared position scales: transform constants resolved once per draw.
+        let x_pos = PositionMap::new(x_scale);
+        let y_pos = PositionMap::new(y_scale);
         for i in 0..n {
             // ── Position (per row) ──
             let x_raw = x_col.get(i);
             let y_raw = y_col.get(i);
             let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
             let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
-            let px_frac = resolve_position(x_raw.clone(), x_scale, x_band);
-            let py_frac = resolve_position(y_raw.clone(), y_scale, y_band);
+            let px_frac = x_pos.map(&x_raw, x_band);
+            let py_frac = y_pos.map(&y_raw, y_band);
             if !px_frac.is_finite() || !py_frac.is_finite() {
                 continue;
             }
@@ -267,46 +307,49 @@ impl Geom for PointGeom {
 
             // ── Channel resolves ──
             let fill_color = override_alpha(
-                resolve_color_channel_or_theme(
-                    fill_ch,
-                    fill_scale,
-                    i,
-                    ctx.theme.geom.point.fill.as_ref(),
-                    &ctx.theme.palette,
-                ),
+                resolve_color_channel_or_theme(fill_ch, fill_scale, i, fill_theme),
                 resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i),
             );
             let stroke_color = override_alpha(
-                resolve_color_channel_or_theme(
-                    stroke_ch,
-                    stroke_scale,
-                    i,
-                    ctx.theme.geom.point.stroke.as_ref(),
-                    &ctx.theme.palette,
-                ),
+                resolve_color_channel_or_theme(stroke_ch, stroke_scale, i, stroke_theme),
                 resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i),
             );
             let size_pt =
                 resolve_number_channel_or(size_ch, size_scale, i, ctx.theme.geom.point.size_pt);
-            let shape_name =
-                resolve_str_channel_or(shape_ch, shape_scale, i, &ctx.theme.geom.point.shape);
 
             // Glyph diameter: pt contribution + band contribution. band_px
             // is the smallest non-zero band width across x and y at the
             // row's centre (matches WedgeGeom's radius_band semantics).
+            // Skipped entirely when the row has no band contribution —
+            // the lookup walks the discrete domain.
             let size_band = resolve_number_channel_or(size_band_ch, size_band_scale, i, 0.0);
-            let x_band_px = band_width_at(x_scale, &x_raw) * panel_w;
-            let y_band_px = band_width_at(y_scale, &y_raw) * panel_h;
-            let band_px = smallest_nonzero(x_band_px, y_band_px);
+            let band_px = if size_band == 0.0 {
+                0.0
+            } else {
+                let x_band_px = band_width_at(x_scale, &x_raw) * panel_w;
+                let y_band_px = band_width_at(y_scale, &y_raw) * panel_h;
+                smallest_nonzero(x_band_px, y_band_px)
+            };
             let size_px = pt_to_px(size_pt, ctx.dpi) + size_band * band_px;
             if !size_px.is_finite() || size_px <= 0.0 {
                 continue;
             }
 
             // ── Shape lookup ──
-            let shape: &Shape = match ctx.shapes.get(&shape_name) {
+            let shape: &Shape = match fixed_shape {
                 Some(s) => s,
-                None => continue,
+                None => {
+                    let shape_name = resolve_str_channel_or(
+                        shape_ch,
+                        shape_scale,
+                        i,
+                        &ctx.theme.geom.point.shape,
+                    );
+                    match ctx.shapes.get(shape_name.as_ref()) {
+                        Some(s) => s,
+                        None => continue,
+                    }
+                }
             };
 
             // Rotation: math CCW from the user (positive = visible
@@ -328,12 +371,14 @@ impl Geom for PointGeom {
             // `size_px` to invert the `Affine::scale(size_px)` on
             // the path — the rendered stroke is then a constant
             // width in output pixels regardless of marker size.
-            let stroke_width_pt = resolve_number_channel_or(
-                linewidth_ch,
-                linewidth_scale,
-                i,
-                ctx.theme.geom.point.stroke_width_pt,
-            );
+            let stroke_width_pt = fixed_linewidth_pt.unwrap_or_else(|| {
+                resolve_number_channel_or(
+                    linewidth_ch,
+                    linewidth_scale,
+                    i,
+                    ctx.theme.geom.point.stroke_width_pt,
+                )
+            });
             let stroke_width_local = pt_to_px(stroke_width_pt, ctx.dpi) / size_px;
             match shape.kind() {
                 ShapeKind::Paths { paths, style } => {

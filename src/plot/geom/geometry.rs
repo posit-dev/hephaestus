@@ -34,15 +34,18 @@
 //! geoms.
 
 use crate::brush::Brush;
+use crate::color::Color;
 use crate::geometry::{Affine, Point};
 use crate::path::FillRule;
 use crate::pick::PickId;
-use crate::plot::value::Value;
+use crate::plot::value::{LinetypeStep, Value};
 use crate::primitives::CornerRounding;
 use crate::scales::geometry::{Coord, Geometry, Polygon as GeoPolygon};
 use crate::scene::{Glyph, GlyphRun, SceneBuilder};
 use crate::shape::{Shape, ShapeKind, ShapeStyle};
-use crate::stroke::Stroke;
+use crate::stroke::{Cap, Join, Stroke};
+use std::borrow::Cow;
+use std::sync::Arc;
 
 use super::outline::{
     draw_curve_outline, draw_polygon_fill_and_stroke, expand_polygons, EndpointMarker, OutlineSpec,
@@ -51,10 +54,11 @@ use super::outline::{
 use super::point::GLYPH_BBOX_REFERENCE;
 use super::project::{project_and_densify_one, PathOptions, PathVertex};
 use super::resolve::{
-    override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or, resolve_cap_channel,
-    resolve_color_channel, resolve_color_channel_or_theme, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
-    resolve_position, resolve_str_channel_or,
+    channel_varies_per_row, override_alpha, pt_to_px, resolve_angle_channel,
+    resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel,
+    resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
+    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_str_channel_or,
+    PositionMap,
 };
 use super::state::{finalize_state, require_data_column, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
@@ -240,6 +244,42 @@ impl Geom for GeometryGeom {
         let start_marker_invert_ch = channels.get("start_marker_invert");
         let end_marker_invert_ch = channels.get("end_marker_invert");
 
+        // Loop-invariant resolves, shared by every row: theme colour
+        // fallbacks, and the static-style channels whenever they aren't
+        // data-driven.
+        let theme = &ctx.theme.geom;
+        let resolve_theme = |tc: Option<&crate::plot::theme::ThemeColor>| {
+            tc.map(|tc| tc.resolve(&ctx.theme.palette))
+        };
+        let fixed = DrawInvariants {
+            x_pos: PositionMap::new(x_scale),
+            y_pos: PositionMap::new(y_scale),
+            point_fill_theme: resolve_theme(theme.point.fill.as_ref()),
+            point_stroke_theme: resolve_theme(theme.point.stroke.as_ref()),
+            line_stroke_theme: resolve_theme(theme.line.stroke.as_ref()),
+            polygon_fill_theme: resolve_theme(theme.polygon.fill.as_ref()),
+            polygon_stroke_theme: resolve_theme(theme.polygon.stroke.as_ref()),
+            linetype: (!channel_varies_per_row(linetype_ch))
+                .then(|| resolve_linetype_channel(linetype_ch, linetype_scale, 0)),
+            line_cap: (!channel_varies_per_row(cap_ch))
+                .then(|| resolve_cap_channel(cap_ch, cap_scale, 0, theme.line.cap)),
+            line_join: (!channel_varies_per_row(join_ch))
+                .then(|| resolve_join_channel(join_ch, join_scale, 0, theme.line.join)),
+            polygon_cap: (!channel_varies_per_row(cap_ch))
+                .then(|| resolve_cap_channel(cap_ch, cap_scale, 0, theme.polygon.cap)),
+            polygon_join: (!channel_varies_per_row(join_ch))
+                .then(|| resolve_join_channel(join_ch, join_scale, 0, theme.polygon.join)),
+            shape_name: (!channel_varies_per_row(shape_ch)).then(|| {
+                resolve_str_channel_or(shape_ch, shape_scale, 0, &theme.point.shape).into_owned()
+            }),
+            start_marker_name: (!channel_varies_per_row(start_marker_ch)).then(|| {
+                resolve_str_channel_or(start_marker_ch, start_marker_scale, 0, "").into_owned()
+            }),
+            end_marker_name: (!channel_varies_per_row(end_marker_ch)).then(|| {
+                resolve_str_channel_or(end_marker_ch, end_marker_scale, 0, "").into_owned()
+            }),
+        };
+
         for i in 0..n {
             let geom = match geom_col.get(i) {
                 Value::Geometry(g) => g,
@@ -272,6 +312,7 @@ impl Geom for GeometryGeom {
                 ctx,
                 DrawCtx {
                     i,
+                    fixed: &fixed,
                     x_band,
                     y_band,
                     dx_px,
@@ -336,11 +377,49 @@ impl Geom for GeometryGeom {
 
 // ─── Per-row dispatch ────────────────────────────────────────────────────────
 
+/// Styling resolved once per draw rather than once per row: the theme
+/// colour fallbacks for each geometry kind, and the static-style
+/// channels. A `None` style field means its channel is data-driven and
+/// resolves at each row.
+struct DrawInvariants<'a> {
+    x_pos: PositionMap<'a>,
+    y_pos: PositionMap<'a>,
+    point_fill_theme: Option<Color>,
+    point_stroke_theme: Option<Color>,
+    line_stroke_theme: Option<Color>,
+    polygon_fill_theme: Option<Color>,
+    polygon_stroke_theme: Option<Color>,
+    linetype: Option<Arc<[LinetypeStep]>>,
+    line_cap: Option<Cap>,
+    line_join: Option<Join>,
+    polygon_cap: Option<Cap>,
+    polygon_join: Option<Join>,
+    shape_name: Option<String>,
+    start_marker_name: Option<String>,
+    end_marker_name: Option<String>,
+}
+
+/// A row's string channel: the draw-wide value when there is one, else
+/// resolved at the row.
+fn fixed_or_row_str<'a>(
+    fixed: &'a Option<String>,
+    channel: Option<&'a Channel>,
+    scale: Option<&crate::plot::scale::Scale>,
+    i: usize,
+    default: &'a str,
+) -> Cow<'a, str> {
+    match fixed {
+        Some(name) => Cow::Borrowed(name.as_str()),
+        None => resolve_str_channel_or(channel, scale, i, default),
+    }
+}
+
 /// Bundle of per-row channel context passed down into `draw_geometry`.
 /// Keeps the dispatch helper free of a long parameter list while still
 /// avoiding shared mutable state.
 struct DrawCtx<'a> {
     i: usize,
+    fixed: &'a DrawInvariants<'a>,
     x_band: f64,
     y_band: f64,
     dx_px: f64,
@@ -404,8 +483,8 @@ impl DrawCtx<'_> {
     /// coordinate, with the row's band offsets folded in.
     fn frac(&self, c: Coord) -> [f64; 2] {
         [
-            resolve_position(Value::Number(c.0), self.x_scale, self.x_band),
-            resolve_position(Value::Number(c.1), self.y_scale, self.y_band),
+            self.fixed.x_pos.map(&Value::Number(c.0), self.x_band),
+            self.fixed.y_pos.map(&Value::Number(c.1), self.y_band),
         ]
     }
 
@@ -503,6 +582,7 @@ fn draw_geometry(
 fn clone_ctx<'a>(dc: &DrawCtx<'a>) -> DrawCtx<'a> {
     DrawCtx {
         i: dc.i,
+        fixed: dc.fixed,
         x_band: dc.x_band,
         y_band: dc.y_band,
         dx_px: dc.dx_px,
@@ -571,13 +651,7 @@ fn draw_point(
     dc: &DrawCtx<'_>,
 ) {
     let fill_color = override_alpha(
-        resolve_color_channel_or_theme(
-            dc.fill_ch,
-            dc.fill_scale,
-            dc.i,
-            ctx.theme.geom.point.fill.as_ref(),
-            &ctx.theme.palette,
-        ),
+        resolve_color_channel_or_theme(dc.fill_ch, dc.fill_scale, dc.i, dc.fixed.point_fill_theme),
         resolve_number_channel(dc.fill_opacity_ch, dc.fill_opacity_scale, dc.i),
     );
     let stroke_color = override_alpha(
@@ -585,8 +659,7 @@ fn draw_point(
             dc.stroke_ch,
             dc.stroke_scale,
             dc.i,
-            ctx.theme.geom.point.stroke.as_ref(),
-            &ctx.theme.palette,
+            dc.fixed.point_stroke_theme,
         ),
         resolve_number_channel(dc.stroke_opacity_ch, dc.stroke_opacity_scale, dc.i),
     );
@@ -601,13 +674,14 @@ fn draw_point(
     if !size_px.is_finite() || size_px <= 0.0 {
         return;
     }
-    let shape_name = resolve_str_channel_or(
+    let shape_name = fixed_or_row_str(
+        &dc.fixed.shape_name,
         dc.shape_ch,
         dc.shape_scale,
         dc.i,
         &ctx.theme.geom.point.shape,
     );
-    let shape: &Shape = match ctx.shapes.get(&shape_name) {
+    let shape: &Shape = match ctx.shapes.get(shape_name.as_ref()) {
         Some(s) => s,
         None => return,
     };
@@ -710,8 +784,7 @@ fn draw_lines(
             dc.stroke_ch,
             dc.stroke_scale,
             dc.i,
-            ctx.theme.geom.line.stroke.as_ref(),
-            &ctx.theme.palette,
+            dc.fixed.line_stroke_theme,
         ),
         resolve_number_channel(dc.stroke_opacity_ch, dc.stroke_opacity_scale, dc.i),
     );
@@ -726,9 +799,17 @@ fn draw_lines(
     if !linewidth_px.is_finite() || linewidth_px <= 0.0 {
         return;
     }
-    let cap = resolve_cap_channel(dc.cap_ch, dc.cap_scale, dc.i, ctx.theme.geom.line.cap);
-    let join = resolve_join_channel(dc.join_ch, dc.join_scale, dc.i, ctx.theme.geom.line.join);
-    let dash_pattern_pt = resolve_linetype_channel(dc.linetype_ch, dc.linetype_scale, dc.i);
+    let cap = dc.fixed.line_cap.unwrap_or_else(|| {
+        resolve_cap_channel(dc.cap_ch, dc.cap_scale, dc.i, ctx.theme.geom.line.cap)
+    });
+    let join = dc.fixed.line_join.unwrap_or_else(|| {
+        resolve_join_channel(dc.join_ch, dc.join_scale, dc.i, ctx.theme.geom.line.join)
+    });
+    let dash_pattern_pt = dc
+        .fixed
+        .linetype
+        .clone()
+        .unwrap_or_else(|| resolve_linetype_channel(dc.linetype_ch, dc.linetype_scale, dc.i));
     let dash_offset_pt =
         resolve_number_channel_or(dc.dash_offset_ch, dc.dash_offset_scale, dc.i, 0.0);
     let corner_radius_pt =
@@ -753,8 +834,20 @@ fn draw_lines(
 
     // Endpoint markers + endpoint clip — per-row resolution shared
     // across every line in this row's geometry.
-    let start_name = resolve_str_channel_or(dc.start_marker_ch, dc.start_marker_scale, dc.i, "");
-    let end_name = resolve_str_channel_or(dc.end_marker_ch, dc.end_marker_scale, dc.i, "");
+    let start_name = fixed_or_row_str(
+        &dc.fixed.start_marker_name,
+        dc.start_marker_ch,
+        dc.start_marker_scale,
+        dc.i,
+        "",
+    );
+    let end_name = fixed_or_row_str(
+        &dc.fixed.end_marker_name,
+        dc.end_marker_ch,
+        dc.end_marker_scale,
+        dc.i,
+        "",
+    );
     let default_marker_size_pt = 3.0 * linewidth_pt;
     let start_marker_size_pt = resolve_number_channel_or(
         dc.start_marker_size_ch,
@@ -812,13 +905,13 @@ fn draw_lines(
             user_clip_start_pt,
             user_clip_end_pt,
             start_marker: EndpointMarker {
-                name: start_name.clone(),
+                name: start_name.to_string(),
                 size_pt: start_marker_size_pt,
                 fill: start_marker_fill,
                 invert: start_invert,
             },
             end_marker: EndpointMarker {
-                name: end_name.clone(),
+                name: end_name.to_string(),
                 size_pt: end_marker_size_pt,
                 fill: end_marker_fill,
                 invert: end_invert,
@@ -851,8 +944,7 @@ fn draw_polygons(
             dc.fill_ch,
             dc.fill_scale,
             dc.i,
-            ctx.theme.geom.polygon.fill.as_ref(),
-            &ctx.theme.palette,
+            dc.fixed.polygon_fill_theme,
         ),
         resolve_number_channel(dc.fill_opacity_ch, dc.fill_opacity_scale, dc.i),
     );
@@ -861,8 +953,7 @@ fn draw_polygons(
             dc.stroke_ch,
             dc.stroke_scale,
             dc.i,
-            ctx.theme.geom.polygon.stroke.as_ref(),
-            &ctx.theme.palette,
+            dc.fixed.polygon_stroke_theme,
         ),
         resolve_number_channel(dc.stroke_opacity_ch, dc.stroke_opacity_scale, dc.i),
     );
@@ -927,9 +1018,17 @@ fn draw_polygons(
         dc.i,
         ctx.theme.geom.polygon.linewidth_pt,
     );
-    let cap = resolve_cap_channel(dc.cap_ch, dc.cap_scale, dc.i, ctx.theme.geom.polygon.cap);
-    let join = resolve_join_channel(dc.join_ch, dc.join_scale, dc.i, ctx.theme.geom.polygon.join);
-    let dash_pattern_pt = resolve_linetype_channel(dc.linetype_ch, dc.linetype_scale, dc.i);
+    let cap = dc.fixed.polygon_cap.unwrap_or_else(|| {
+        resolve_cap_channel(dc.cap_ch, dc.cap_scale, dc.i, ctx.theme.geom.polygon.cap)
+    });
+    let join = dc.fixed.polygon_join.unwrap_or_else(|| {
+        resolve_join_channel(dc.join_ch, dc.join_scale, dc.i, ctx.theme.geom.polygon.join)
+    });
+    let dash_pattern_pt = dc
+        .fixed
+        .linetype
+        .clone()
+        .unwrap_or_else(|| resolve_linetype_channel(dc.linetype_ch, dc.linetype_scale, dc.i));
     let dash_offset_pt =
         resolve_number_channel_or(dc.dash_offset_ch, dc.dash_offset_scale, dc.i, 0.0);
     let corner_rounding = (corner_radius_px > 0.0).then_some(CornerRounding {

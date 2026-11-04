@@ -19,31 +19,52 @@ pub(crate) struct MarkSlot {
     pub(crate) rows: Vec<usize>,
 }
 
+/// Group `rows` by their key value in `col`, one bucket per unique
+/// value in first-appearance order, each bucket's rows in source order.
+/// Returns `(first_row, rows)` pairs; `first_row` doubles as the
+/// bucket's equality representative.
+///
+/// O(rows) via a hash → bucket-index map, using the same
+/// `key_hash_at` / `key_eq_at` equality as the diff machinery. The
+/// bucket-list scan this replaces was quadratic in the number of
+/// distinct keys.
+pub(crate) fn group_rows_by_key(col: &DataColumn, rows: &[usize]) -> Vec<(usize, Vec<usize>)> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::collections::HashMap;
+    use std::hash::Hasher;
+
+    let mut buckets: Vec<(usize, Vec<usize>)> = Vec::new();
+    let mut index: HashMap<u64, usize> = HashMap::new();
+    for &i in rows {
+        let mut h = DefaultHasher::new();
+        col.key_hash_at(i, &mut h);
+        let hash = h.finish();
+        let bucket = match index.get(&hash) {
+            Some(&b) if col.key_eq_at(i, col, buckets[b].0) => b,
+            // Unseen key, or a hash collision between different keys:
+            // find the right bucket by equality, else start a new one.
+            _ => match buckets.iter().position(|b| col.key_eq_at(i, col, b.0)) {
+                Some(b) => b,
+                None => {
+                    index.entry(hash).or_insert(buckets.len());
+                    buckets.push((i, Vec::new()));
+                    buckets.len() - 1
+                }
+            },
+        };
+        buckets[bucket].1.push(i);
+    }
+    buckets
+}
+
 /// Walk `col` and produce one [`MarkSlot`] per unique key value, in
 /// first-appearance order. Each slot's `rows` are in source order.
 pub(crate) fn build_marks_from_column(col: &DataColumn) -> Vec<MarkSlot> {
-    let n = col.len();
-    let mut order: Vec<MarkSlot> = Vec::new();
-    // For small mark counts (typical: K << N) a linear scan over `order`
-    // is cheaper than maintaining a HashMap.
-    for i in 0..n {
-        let key_i = col.get(i);
-        let mut found = false;
-        for slot in order.iter_mut() {
-            if col.get(slot.first_row).key_eq(&key_i) {
-                slot.rows.push(i);
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            order.push(MarkSlot {
-                first_row: i,
-                rows: vec![i],
-            });
-        }
-    }
-    order
+    let rows: Vec<usize> = (0..col.len()).collect();
+    group_rows_by_key(col, &rows)
+        .into_iter()
+        .map(|(first_row, rows)| MarkSlot { first_row, rows })
+        .collect()
 }
 
 /// Walk a [`Keys`] value, falling back to "every row is its own mark"

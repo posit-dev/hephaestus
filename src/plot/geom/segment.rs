@@ -31,14 +31,15 @@ use crate::primitives::{
     clip_polyline, polyline as polyline_path, segment as segment_path, EndClip, PolylineOptions,
 };
 use crate::scene::SceneBuilder;
+use std::borrow::Cow;
 
 use super::resolve::{
-    auto_endpoint_clip_pt, draw_stroke_with_linetype, emit_endpoint_marker,
+    auto_endpoint_clip_pt, channel_varies_per_row, draw_stroke_with_linetype, emit_endpoint_marker,
     endpoint_marker_outline_px, endpoint_outward, override_alpha, pt_to_px, resolve_angle_channel,
     resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel,
     resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
-    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_position,
-    resolve_str_channel_or,
+    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_str_channel_or,
+    PositionMap,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
@@ -224,15 +225,36 @@ impl Geom for SegmentGeom {
         let start_marker_invert_scale = ctx.scale_for("start_marker_invert");
         let end_marker_invert_scale = ctx.scale_for("end_marker_invert");
 
+        // Loop-invariant resolves: the theme stroke fallback, and the
+        // linetype / cap / join / marker names whenever their channels
+        // aren't data-driven.
+        let stroke_theme = ctx
+            .theme
+            .geom
+            .segment
+            .stroke
+            .as_ref()
+            .map(|tc| tc.resolve(&ctx.theme.palette));
+        let fixed_linetype = (!channel_varies_per_row(linetype_ch))
+            .then(|| resolve_linetype_channel(linetype_ch, linetype_scale, 0));
+        let fixed_cap = (!channel_varies_per_row(cap_ch))
+            .then(|| resolve_cap_channel(cap_ch, cap_scale, 0, ctx.theme.geom.segment.cap));
+        let fixed_join = (!channel_varies_per_row(join_ch))
+            .then(|| resolve_join_channel(join_ch, join_scale, 0, ctx.theme.geom.segment.join));
+        let fixed_start_name = (!channel_varies_per_row(start_marker_ch)).then(|| {
+            resolve_str_channel_or(start_marker_ch, start_marker_scale, 0, "").into_owned()
+        });
+        let fixed_end_name = (!channel_varies_per_row(end_marker_ch))
+            .then(|| resolve_str_channel_or(end_marker_ch, end_marker_scale, 0, "").into_owned());
+
+        // Prepared position scales: transform constants resolved once per draw.
+        let x_pos = PositionMap::new(x_scale);
+        let x2_pos = PositionMap::new(x2_scale);
+        let y_pos = PositionMap::new(y_scale);
+        let y2_pos = PositionMap::new(y2_scale);
         for i in 0..n {
             let stroke_color = override_alpha(
-                resolve_color_channel_or_theme(
-                    stroke_ch,
-                    stroke_scale,
-                    i,
-                    ctx.theme.geom.segment.stroke.as_ref(),
-                    &ctx.theme.palette,
-                ),
+                resolve_color_channel_or_theme(stroke_ch, stroke_scale, i, stroke_theme),
                 resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i),
             );
             let stroke_color = match stroke_color {
@@ -245,10 +267,10 @@ impl Geom for SegmentGeom {
             let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
             let y2_band = resolve_number_channel_or(y2_band_ch, y2_band_scale, i, 0.0);
 
-            let x_frac = resolve_position(x_col.get(i), x_scale, x_band);
-            let x2_frac = resolve_position(x2_col.get(i), x2_scale, x2_band);
-            let y_frac = resolve_position(y_col.get(i), y_scale, y_band);
-            let y2_frac = resolve_position(y2_col.get(i), y2_scale, y2_band);
+            let x_frac = x_pos.map(&x_col.get(i), x_band);
+            let x2_frac = x2_pos.map(&x2_col.get(i), x2_band);
+            let y_frac = y_pos.map(&y_col.get(i), y_band);
+            let y2_frac = y2_pos.map(&y2_col.get(i), y2_band);
             if !x_frac.is_finite()
                 || !x2_frac.is_finite()
                 || !y_frac.is_finite()
@@ -290,16 +312,28 @@ impl Geom for SegmentGeom {
                 continue;
             }
 
-            let dash_pattern_pt = resolve_linetype_channel(linetype_ch, linetype_scale, i);
+            let dash_pattern_pt = fixed_linetype
+                .clone()
+                .unwrap_or_else(|| resolve_linetype_channel(linetype_ch, linetype_scale, i));
             let dash_offset_pt =
                 resolve_number_channel_or(dash_offset_ch, dash_offset_scale, i, 0.0);
-            let cap = resolve_cap_channel(cap_ch, cap_scale, i, ctx.theme.geom.segment.cap);
-            let join = resolve_join_channel(join_ch, join_scale, i, ctx.theme.geom.segment.join);
+            let cap = fixed_cap.unwrap_or_else(|| {
+                resolve_cap_channel(cap_ch, cap_scale, i, ctx.theme.geom.segment.cap)
+            });
+            let join = fixed_join.unwrap_or_else(|| {
+                resolve_join_channel(join_ch, join_scale, i, ctx.theme.geom.segment.join)
+            });
 
             // Endpoint-marker constants. Resolved BEFORE the clip
             // calc so the auto-clip contribution can fold in below.
-            let start_name = resolve_str_channel_or(start_marker_ch, start_marker_scale, i, "");
-            let end_name = resolve_str_channel_or(end_marker_ch, end_marker_scale, i, "");
+            let start_name = match &fixed_start_name {
+                Some(n) => Cow::Borrowed(n.as_str()),
+                None => resolve_str_channel_or(start_marker_ch, start_marker_scale, i, ""),
+            };
+            let end_name = match &fixed_end_name {
+                Some(n) => Cow::Borrowed(n.as_str()),
+                None => resolve_str_channel_or(end_marker_ch, end_marker_scale, i, ""),
+            };
             let default_marker_size_pt = 3.0 * linewidth_pt;
             let start_marker_size_pt = resolve_number_channel_or(
                 start_marker_size_ch,

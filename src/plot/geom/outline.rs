@@ -216,8 +216,7 @@ pub(crate) fn resolve_outline_spec(
             ch.stroke,
             sc.stroke,
             i0,
-            defaults.stroke,
-            &ctx.theme.palette,
+            defaults.stroke.map(|tc| tc.resolve(&ctx.theme.palette)),
         ),
         resolve_number_channel(ch.stroke_opacity, sc.stroke_opacity, i0),
     )?;
@@ -231,8 +230,9 @@ pub(crate) fn resolve_outline_spec(
     let user_clip_end_pt = resolve_number_channel_or(ch.clip_end, sc.clip_end, i0, 0.0);
 
     let default_marker_size_pt = 3.0 * linewidth_pt;
-    let start_marker_name = resolve_str_channel_or(ch.start_marker, sc.start_marker, i0, "");
-    let end_marker_name = resolve_str_channel_or(ch.end_marker, sc.end_marker, i0, "");
+    let start_marker_name =
+        resolve_str_channel_or(ch.start_marker, sc.start_marker, i0, "").into_owned();
+    let end_marker_name = resolve_str_channel_or(ch.end_marker, sc.end_marker, i0, "").into_owned();
     let start_marker_size_pt = resolve_number_channel_or(
         ch.start_marker_size,
         sc.start_marker_size,

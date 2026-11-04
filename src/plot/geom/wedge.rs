@@ -87,10 +87,10 @@ use crate::primitives::{
 use crate::scene::SceneBuilder;
 
 use super::resolve::{
-    band_width_at, draw_stroke_with_linetype, override_alpha, pt_to_px, resolve_angle_channel,
-    resolve_cap_channel, resolve_color_channel_or_theme, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
-    resolve_position, smallest_nonzero,
+    band_width_at, channel_varies_per_row, draw_stroke_with_linetype, override_alpha, pt_to_px,
+    resolve_angle_channel, resolve_cap_channel, resolve_color_channel_or_theme,
+    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, smallest_nonzero, PositionMap,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
@@ -262,11 +262,37 @@ impl Geom for WedgeGeom {
         let corner_max_angle_ch = channels.get("corner_max_angle");
         let angle_ch = channels.get("angle");
 
+        // Loop-invariant resolves: theme fallbacks, and the linetype /
+        // cap / join whenever their channels aren't data-driven.
+        let fill_theme = ctx
+            .theme
+            .geom
+            .wedge
+            .fill
+            .as_ref()
+            .map(|tc| tc.resolve(&ctx.theme.palette));
+        let stroke_theme = ctx
+            .theme
+            .geom
+            .wedge
+            .stroke
+            .as_ref()
+            .map(|tc| tc.resolve(&ctx.theme.palette));
+        let fixed_linetype = (!channel_varies_per_row(linetype_ch))
+            .then(|| resolve_linetype_channel(linetype_ch, linetype_scale, 0));
+        let fixed_cap = (!channel_varies_per_row(cap_ch))
+            .then(|| resolve_cap_channel(cap_ch, cap_scale, 0, ctx.theme.geom.wedge.cap));
+        let fixed_join = (!channel_varies_per_row(join_ch))
+            .then(|| resolve_join_channel(join_ch, join_scale, 0, ctx.theme.geom.wedge.join));
+
+        // Prepared position scales: transform constants resolved once per draw.
+        let x_pos = PositionMap::new(x_scale);
+        let y_pos = PositionMap::new(y_scale);
         for i in 0..n {
             let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
             let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
-            let x_frac = resolve_position(x_col.get(i), x_scale, x_band);
-            let y_frac = resolve_position(y_col.get(i), y_scale, y_band);
+            let x_frac = x_pos.map(&x_col.get(i), x_band);
+            let y_frac = y_pos.map(&y_col.get(i), y_band);
             if !x_frac.is_finite() || !y_frac.is_finite() {
                 continue;
             }
@@ -327,23 +353,11 @@ impl Geom for WedgeGeom {
 
             // ── Resolve styling. ──
             let fill_color = override_alpha(
-                resolve_color_channel_or_theme(
-                    fill_ch,
-                    fill_scale,
-                    i,
-                    ctx.theme.geom.wedge.fill.as_ref(),
-                    &ctx.theme.palette,
-                ),
+                resolve_color_channel_or_theme(fill_ch, fill_scale, i, fill_theme),
                 resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i),
             );
             let stroke_color = override_alpha(
-                resolve_color_channel_or_theme(
-                    stroke_ch,
-                    stroke_scale,
-                    i,
-                    ctx.theme.geom.wedge.stroke.as_ref(),
-                    &ctx.theme.palette,
-                ),
+                resolve_color_channel_or_theme(stroke_ch, stroke_scale, i, stroke_theme),
                 resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i),
             );
             if fill_color.is_none() && stroke_color.is_none() {
@@ -448,11 +462,17 @@ impl Geom for WedgeGeom {
                     ctx.theme.geom.wedge.linewidth_pt,
                 );
                 let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
-                let dash_pattern_pt = resolve_linetype_channel(linetype_ch, linetype_scale, i);
+                let dash_pattern_pt = fixed_linetype
+                    .clone()
+                    .unwrap_or_else(|| resolve_linetype_channel(linetype_ch, linetype_scale, i));
                 let dash_offset_pt =
                     resolve_number_channel_or(dash_offset_ch, dash_offset_scale, i, 0.0);
-                let cap = resolve_cap_channel(cap_ch, cap_scale, i, ctx.theme.geom.wedge.cap);
-                let join = resolve_join_channel(join_ch, join_scale, i, ctx.theme.geom.wedge.join);
+                let cap = fixed_cap.unwrap_or_else(|| {
+                    resolve_cap_channel(cap_ch, cap_scale, i, ctx.theme.geom.wedge.cap)
+                });
+                let join = fixed_join.unwrap_or_else(|| {
+                    resolve_join_channel(join_ch, join_scale, i, ctx.theme.geom.wedge.join)
+                });
                 draw_stroke_with_linetype(
                     scene,
                     &path,

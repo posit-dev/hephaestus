@@ -4141,9 +4141,7 @@ dependencies = [
 
 [[package]]
 name = "zygos"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc73096db19202985f3fa2451d26ae1a7cfbdb2704739f81b266c285ce2881fe"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "jiff",
