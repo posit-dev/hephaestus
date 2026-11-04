@@ -201,7 +201,8 @@ See `crates/hephaestus-wasm/AGENTS.md` for the npm side in detail.
 - **`src/backend/svg/AGENTS.md`** — the vector backend: why text is `textLength` rather than per-glyph positions, and what degrades.
 - **`src/backend/pdf/AGENTS.md`** — the fixed vector backend: why the embedded font is synthesized rather than sliced, the pattern-matrix trap, and why this is the first backend that draws a mesh correctly.
 - **`src/AGENTS.md`** — code architecture: API levels, two-trait split, intersection-of-backends rule, picking model, module map.
-- **Per-module `AGENTS.md` files** under `src/scene/`, `src/backend/`, `src/backend/vello/`, `src/backend/hybrid/`, `src/layout/`, `src/composition/`, `src/document/`, `src/primitives/`, `src/plot/`, `src/plot/geom/`, `src/plot/theme/`, `src/scales/`, `src/image/`, `src/text/`, `src/text/rich/`, `src/window/`.
+- **Per-module `AGENTS.md` files** under `src/scene/`, `src/backend/`, `src/backend/vello/`, `src/backend/hybrid/`, `src/layout/`, `src/composition/`, `src/document/`, `src/primitives/`, `src/plot/`, `src/plot/geom/`, `src/plot/theme/`, `src/image/`, `src/text/`, `src/text/rich/`, `src/window/`.
+- **`../zygos/AGENTS.md`** — the scales crate (path dependency, re-exported here as `crate::scales` and `crate::color`): scale primitives, break algorithms, and the color types.
 - **`crates/hephaestus-wasm/AGENTS.md`** — the wasm render client: the Rust/JS split, why WebGPU is required, and why fonts are the thing that surprises people.
 - **`crates/hephaestus-svg-wasm/AGENTS.md`** — the wasm SVG client: the same documents with no rasteriser, what dropping it deletes, why picking is the DOM, and the one font trap that is this client's alone.
 

@@ -126,21 +126,21 @@ window = ["dep:winit"]
 # Only `wasm32` compiles the host itself — `wgpu::SurfaceTarget::Canvas`
 # exists solely there — so on any other target the gate is inert.
 canvas = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys"]
-# Optional datetime-library interop: `From` impls between our temporal
-# newtypes (`Date` / `DateTime` / `Time` / `Duration`) and the matching
-# types in the named library. All three default off — pick whichever
-# matches your downstream code's choice (or none, and convert by hand).
-# See `src/scales/interop_*.rs`.
-chrono = ["dep:chrono"]
-time = ["dep:time"]
-jiff = ["dep:jiff"]
+# Optional datetime-library interop on the scales layer: `From` impls
+# between its temporal newtypes (`Date` / `DateTime` / `Time` / `Duration`)
+# and the matching types in the named library. All three default off —
+# pick whichever matches your downstream code's choice (or none, and
+# convert by hand). Forwarded to `zygos`, where the impls live.
+chrono = ["zygos/chrono"]
+time = ["zygos/time"]
+jiff = ["zygos/jiff"]
 # Spatial-geometry parsers for `crate::scales::Geometry`. Each gate
 # enables one input format; all three are hand-rolled with no extra deps,
 # so toggling them affects only what `Geometry::from_*` constructors
-# compile.
-geom-wkt = []
-geom-wkb = []
-geom-geojson = []
+# compile. Forwarded to `zygos`, where the parsers live.
+geom-wkt = ["zygos/geom-wkt"]
+geom-wkb = ["zygos/geom-wkb"]
+geom-geojson = ["zygos/geom-geojson"]
 # Plot documents: capture a `PlotComposition` to a self-contained binary
 # file and rebuild it elsewhere. Split by direction because a wasm
 # consumer only ever reads — `document-read` halves the codec it
@@ -184,6 +184,11 @@ pdf = ["dep:skrifa", "dep:flate2"]
 kurbo = "0.13"
 peniko = "0.6"
 thiserror = "2"
+# Scale primitives and the color types: values, ranges, transforms, break
+# algorithms, and colorspace-aware interpolation. Re-exported as
+# `hephaestus::scales` and `hephaestus::color`; the `geom-*` and datetime
+# feature gates above forward to it.
+zygos = "0.1"
 
 # vello + wgpu are pulled in with default-features disabled so each platform
 # only compiles the one GPU backend it actually uses. The shared baseline is
@@ -257,11 +262,6 @@ clipper2-rust = "1.1"
 # Google Fonts auto-lookup — feature-gated; pulled in by `google-fonts`.
 ureq = { version = "2", optional = true, default-features = false, features = ["tls"] }
 directories = { version = "5", optional = true }
-
-# Optional datetime-library interop (one of three feature gates).
-chrono = { version = "0.4", default-features = false, optional = true }
-time = { version = "0.3", default-features = false, optional = true }
-jiff = { version = "0.2", default-features = false, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 wgpu = { version = "29", optional = true, default-features = false, features = ["metal"] }

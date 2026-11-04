@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Changed
+
+- **The scales module is its own crate, `zygos`, beside this repository.** Everything that was `src/scales/` — values, ranges, transforms, scale-type kinds, break algorithms, and the `geom-*` / datetime-interop feature gates — plus the color types (`Color`, `ColorSpace`, `lerp_color` and friends, per #16) now lives in the `zygos` path dependency, so ggsql can depend on the same code. `hephaestus::scales::*` and `hephaestus::color::*` keep working as re-exports, and the `chrono` / `time` / `jiff` / `geom-*` features forward to it, so downstream code sees no breakage. The `LinetypeStep` enum moved with it and is re-exported through `style_vocab` as before.
+
 ### Added
 
 - **`scales::expand_range_transformed` / `expand_range_transformed_selective`** — pads a continuous domain by a multiplicative-plus-additive expansion *in transformed space* (symmetric, or per-end for idioms like ggplot2's `expansion(mult = c(0, 0.05))`) and maps it back through the inverse, so a log scale's 5% pad is a proportion of the visible decade span and can never cross the transform's domain boundary. This is the fix for the ggsql#512 failure mode, where expanding in linear data space pushed the padded bound past zero and clipping pinned it at `f64::MIN_POSITIVE`, turning a 3-decade axis into a 311-decade one; ggsql can call this instead of its own expand-then-clip path.
