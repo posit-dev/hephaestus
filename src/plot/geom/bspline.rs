@@ -516,7 +516,7 @@ fn draw_one_bspline_mark(
     let linewidth_varies = channel_varies_across(linewidth_ch, linewidth_scale, &mark.rows);
     let stroke_varies = channel_varies_across(stroke_ch, stroke_scale, &mark.rows)
         || channel_varies_across(stroke_opacity_ch, stroke_opacity_scale, &mark.rows);
-    let ribbon_mode = spec.dash_pattern_pt.is_empty() && (linewidth_varies || stroke_varies);
+    let ribbon_mode = spec.dash_pattern.is_empty() && (linewidth_varies || stroke_varies);
 
     // A non-positive width means "nothing to stroke" only when a
     // single width governs the whole mark. In ribbon mode each sample

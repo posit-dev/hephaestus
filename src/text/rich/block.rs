@@ -52,12 +52,12 @@ pub struct BlockBorder {
     /// side with width `0.0` is skipped at draw time.
     pub widths_px: [f32; 4],
     /// Optional dash / marker pattern from
-    /// [`crate::text::rich::StyleDelta::border_type`], carried in pt
-    /// (raw form). The draw pass routes marker-free patterns through
-    /// kurbo's `with_dashes` fast path and marker-bearing patterns
-    /// through `draw_linetype_with_markers`
+    /// [`crate::text::rich::StyleDelta::border_type`], in line-width
+    /// units (raw form). The draw pass routes marker-free patterns
+    /// through kurbo's `with_dashes` fast path and marker-bearing
+    /// patterns through `draw_linetype_with_markers`
     /// (per-polyline chain). `None` = solid stroke.
-    pub linetype_pt: Option<std::sync::Arc<[crate::scales::value::LinetypeStep]>>,
+    pub linetype: Option<std::sync::Arc<[crate::scales::value::LinetypeStep]>>,
 }
 
 impl BlockBorder {
@@ -207,11 +207,11 @@ fn border_for(
     if widths_px.iter().all(|&w| w <= 0.0) {
         return None;
     }
-    let linetype_pt = dash_pattern.map(|steps| std::sync::Arc::from(steps.to_vec()));
+    let linetype = dash_pattern.map(|steps| std::sync::Arc::from(steps.to_vec()));
     Some(BlockBorder {
         color: c.resolve(palette),
         widths_px,
-        linetype_pt,
+        linetype,
     })
 }
 

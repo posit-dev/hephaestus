@@ -13,7 +13,9 @@
 pub mod backend;
 pub mod blend;
 pub mod brush;
-pub mod color;
+// The color types live in `zygos` alongside the scales that interpolate
+// them; re-exported so `hephaestus::color` keeps naming them.
+pub use zygos::color;
 pub mod composition;
 #[cfg(any(feature = "document-read", feature = "document-write"))]
 pub mod document;
@@ -28,7 +30,10 @@ pub mod path;
 pub mod pick;
 pub mod plot;
 pub mod primitives;
-pub mod scales;
+// Scale primitives (values, ranges, transforms, break algorithms) are
+// their own crate, shared with other consumers; re-exported so
+// `hephaestus::scales` keeps working.
+pub use zygos as scales;
 pub mod scene;
 pub mod shape;
 pub mod stroke;

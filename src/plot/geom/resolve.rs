@@ -429,21 +429,18 @@ pub(crate) fn resolve_join_channel(
 
 /// Build a kurbo [`Stroke`] from the resolved per-mark channels.
 ///
-/// `pattern` is the resolved `LinetypeStep` slice. When the pattern
-/// contains [`LinetypeStep::Marker`] entries, the markers are silently
-/// treated as `Gap(linewidth_pt)` here — LineGeom is the only geom
+/// `pattern` is the resolved `LinetypeStep` slice, in line-width
+/// units: each `Dash` / `Gap` length multiplies `width_px`. When the
+/// pattern contains [`LinetypeStep::Marker`] entries, the markers are
+/// silently treated as `Gap(1.0)` here — LineGeom is the only geom
 /// that **also** stamps the marker shapes; other stroked geoms use
 /// the dashing portion only via this helper. Empty pattern → solid.
-///
-/// `linewidth_pt` is used both for the stroke width (after pt→px
-/// conversion) and as the arc-length contribution per `Marker` step.
 pub(crate) fn build_stroke_for_pattern(
     width_px: f64,
     cap: Cap,
     join: Join,
     pattern: &[LinetypeStep],
     offset_pt: f64,
-    linewidth_pt: f64,
     dpi: f64,
 ) -> Stroke {
     let mut s = Stroke::new(width_px).with_caps(cap).with_join(join);
@@ -451,8 +448,8 @@ pub(crate) fn build_stroke_for_pattern(
         let pattern_px: Vec<f64> = pattern
             .iter()
             .map(|step| match step {
-                LinetypeStep::Dash(p) | LinetypeStep::Gap(p) => pt_to_px(*p, dpi),
-                LinetypeStep::Marker(_) => pt_to_px(linewidth_pt, dpi),
+                LinetypeStep::Dash(p) | LinetypeStep::Gap(p) => *p * width_px,
+                LinetypeStep::Marker(_) => width_px,
             })
             .collect();
         let offset_px = pt_to_px(offset_pt, dpi);
@@ -600,10 +597,9 @@ pub(crate) fn draw_stroke_with_linetype(
     stroke_color: Color,
     marker_fill: Color,
     linewidth_px: f64,
-    linewidth_pt: f64,
     cap: Cap,
     join: Join,
-    dash_pattern_pt: &[LinetypeStep],
+    dash_pattern: &[LinetypeStep],
     dash_offset_pt: f64,
     xform: Affine,
     pick: PickId,
@@ -614,16 +610,9 @@ pub(crate) fn draw_stroke_with_linetype(
     if !linewidth_px.is_finite() || linewidth_px <= 0.0 {
         return;
     }
-    if super::linetype::is_marker_free(dash_pattern_pt) {
-        let stroke_spec = build_stroke_for_pattern(
-            linewidth_px,
-            cap,
-            join,
-            dash_pattern_pt,
-            dash_offset_pt,
-            linewidth_pt,
-            dpi,
-        );
+    if super::linetype::is_marker_free(dash_pattern) {
+        let stroke_spec =
+            build_stroke_for_pattern(linewidth_px, cap, join, dash_pattern, dash_offset_pt, dpi);
         scene.stroke(
             &stroke_spec,
             xform,
@@ -644,7 +633,7 @@ pub(crate) fn draw_stroke_with_linetype(
     draw_linetype_with_markers(
         scene,
         &samplers,
-        dash_pattern_pt,
+        dash_pattern,
         dash_offset_px,
         linewidth_px,
         marker_fill,

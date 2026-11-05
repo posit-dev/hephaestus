@@ -372,7 +372,7 @@ impl Geom for RectGeom {
             let corner_radius_pt =
                 resolve_number_channel_or(corner_radius_ch, corner_radius_scale, i, 0.0);
             let corner_radius_px = pt_to_px(corner_radius_pt, ctx.dpi).max(0.0);
-            let dash_pattern_pt = fixed_linetype
+            let dash_pattern = fixed_linetype
                 .clone()
                 .unwrap_or_else(|| resolve_linetype_channel(linetype_ch, linetype_scale, i));
             let dash_offset_pt =
@@ -467,10 +467,9 @@ impl Geom for RectGeom {
                     sc,
                     sc,
                     linewidth_px,
-                    linewidth_pt,
                     cap,
                     join,
-                    &dash_pattern_pt,
+                    &dash_pattern,
                     dash_offset_pt,
                     xform,
                     pick,

@@ -952,7 +952,7 @@ fn dashed_border_carries_dash_pattern_through() {
         .find_map(|p| p.border.as_ref())
         .expect("expected a border on the paragraph");
     let pattern = border
-        .linetype_pt
+        .linetype
         .as_ref()
         .expect("border_type should produce a linetype pattern");
     // Two entries (dash + gap), both positive.

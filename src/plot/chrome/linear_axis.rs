@@ -30,8 +30,9 @@ use crate::text::TextStyle;
 
 /// Build a kurbo [`Stroke`] from a themed [`LineElement`] at `dpi`,
 /// honoring linewidth, linetype (dash pattern), cap, and join.
-/// Width and dash lengths are pt; converted to px via the standard
-/// `pt * dpi / 72` factor. Width resolves against 1.0 pt parent
+/// Width is pt, converted to px via the standard `pt * dpi / 72`
+/// factor; dash lengths are multiples of that width (see
+/// `crate::linetype`). Width resolves against 1.0 pt parent
 /// (the `theme.line` root width default). Any `None` field falls
 /// through to `line_concrete_defaults()`.
 pub(crate) fn stroke_from_line_element(el: &LineElement, dpi: f64) -> Stroke {
@@ -50,7 +51,7 @@ pub(crate) fn stroke_from_line_element(el: &LineElement, dpi: f64) -> Stroke {
         .clone()
         .or(defaults.linetype)
         .expect("line linetype default");
-    build_stroke_for_pattern(width_px, cap, join, &linetype, 0.0, width_pt, dpi)
+    build_stroke_for_pattern(width_px, cap, join, &linetype, 0.0, dpi)
 }
 
 /// Build a kurbo [`Stroke`] from a themed [`RectElement`]'s border
@@ -72,15 +73,7 @@ pub(crate) fn stroke_from_rect_border(el: &RectElement, dpi: f64) -> Stroke {
         .clone()
         .or(defaults.linetype)
         .expect("rect linetype default");
-    build_stroke_for_pattern(
-        width_px,
-        Cap::Butt,
-        Join::Miter,
-        &linetype,
-        0.0,
-        width_pt,
-        dpi,
-    )
+    build_stroke_for_pattern(width_px, Cap::Butt, Join::Miter, &linetype, 0.0, dpi)
 }
 
 // Default measurements are the same constants the theme's concrete
