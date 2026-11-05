@@ -22,6 +22,7 @@ use crate::color::{Color, ColorSpace};
 #[cfg(test)]
 use crate::scales::value::DataColumn;
 use crate::scales::value::{LinetypeStep, Value};
+use crate::scales::Closed;
 use crate::scales::Locale;
 
 // The scales-layer surface, re-exported so `crate::plot::scale::*`
@@ -838,6 +839,9 @@ impl Scale {
                     self.direction,
                 )
             }
+            // Bins are `[e_i, e_{i+1})` with a closed top edge on the
+            // last bin — `Closed::Left`; there is no scale-level knob
+            // for the right-closed convention.
             ScaleTypeKind::Binned => binned_map(
                 input,
                 self.input_range.as_ref(),
@@ -845,6 +849,7 @@ impl Scale {
                 self.output_range.as_ref(),
                 self.color_space,
                 self.direction,
+                Closed::Left,
             ),
             ScaleTypeKind::Identity => identity_map(input),
         }
@@ -1223,9 +1228,12 @@ impl Scale {
     /// specific bin's width. Used by [`Self::map_with_offset`].
     pub fn band_width_at(&self, input: &Value) -> f64 {
         match self.scale_type {
-            ScaleTypeKind::Binned => {
-                binned_band_width_at(input, self.input_range.as_ref(), self.bins.as_deref())
-            }
+            ScaleTypeKind::Binned => binned_band_width_at(
+                input,
+                self.input_range.as_ref(),
+                self.bins.as_deref(),
+                Closed::Left,
+            ),
             _ => self.band_width(),
         }
     }
