@@ -464,7 +464,7 @@ fn draw_one_mark(
     let linewidth_varies = channel_varies_across(linewidth_ch, linewidth_scale, &mark.rows);
     let stroke_varies = channel_varies_across(stroke_ch, stroke_scale, &mark.rows)
         || channel_varies_across(stroke_opacity_ch, stroke_opacity_scale, &mark.rows);
-    let ribbon_mode = spec.dash_pattern_pt.is_empty()
+    let ribbon_mode = spec.dash_pattern.is_empty()
         && corner_radius_pt == 0.0
         && (linewidth_varies || stroke_varies);
     let stroke_space = channel_color_space(stroke_scale);
@@ -987,7 +987,9 @@ mod tests {
             if let Op::Stroke { stroke, .. } = op {
                 let dashes = &stroke.dash_pattern;
                 assert!(!dashes.is_empty(), "expected dashes set");
-                let expected_a = 8.0 * 96.0 / 72.0;
+                // dashed() = [6, 4] line-width units on the 1.0 pt
+                // default linewidth.
+                let expected_a = 6.0 * 96.0 / 72.0;
                 let expected_b = 4.0 * 96.0 / 72.0;
                 assert!((dashes[0] - expected_a).abs() < 1e-9);
                 assert!((dashes[1] - expected_b).abs() < 1e-9);
@@ -1073,7 +1075,8 @@ mod tests {
             .collect();
         assert_eq!(dash_patterns.len(), 2);
         assert!(dash_patterns[0].is_empty());
-        let expected_a = 8.0 * 96.0 / 72.0;
+        // dashed() = [6, 4] line-width units on the 1.0 pt default.
+        let expected_a = 6.0 * 96.0 / 72.0;
         let expected_b = 4.0 * 96.0 / 72.0;
         assert!((dash_patterns[1][0] - expected_a).abs() < 1e-9);
         assert!((dash_patterns[1][1] - expected_b).abs() < 1e-9);
@@ -1237,11 +1240,11 @@ mod tests {
 
     #[test]
     fn linetype_marker_consumes_linewidth_of_arc() {
-        // With linewidth = 4 pt and gap = 5 pt at 96 dpi:
+        // With linewidth = 4 pt and gap = 5 units at 96 dpi:
         //   linewidth_px = 4 * 96/72 ≈ 5.333
-        //   gap_px       = 5 * 96/72 ≈ 6.667
-        //   period_px ≈ 12.0
-        // Markers should be ~12 px apart (center-to-center) along the
+        //   gap_px       = 5 * linewidth_px ≈ 26.667
+        //   period_px    = 32.0
+        // Markers should be 32 px apart (center-to-center) along the
         // line — measured between consecutive fill ops' translation
         // components.
         let mut g = LineGeom::builder()
@@ -1266,8 +1269,8 @@ mod tests {
             })
             .collect();
         assert!(translations.len() >= 3);
-        // The period should match `(linewidth + gap) * 96/72`.
-        let expected_period = (4.0 + 5.0) * 96.0 / 72.0;
+        // The period is (1 + 5) units × the linewidth.
+        let expected_period = 6.0 * 4.0 * 96.0 / 72.0;
         for w in translations.windows(2) {
             let delta = w[1] - w[0];
             assert!(

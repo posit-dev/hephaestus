@@ -222,7 +222,7 @@ pub(crate) fn resolve_outline_spec(
     )?;
     let linewidth_pt =
         resolve_number_channel_or(ch.linewidth, sc.linewidth, i0, defaults.linewidth_pt);
-    let dash_pattern_pt = resolve_linetype_channel(ch.linetype, sc.linetype, i0);
+    let dash_pattern = resolve_linetype_channel(ch.linetype, sc.linetype, i0);
     let dash_offset_pt = resolve_number_channel_or(ch.dash_offset, sc.dash_offset, i0, 0.0);
     let cap = resolve_cap_channel(ch.cap, sc.cap, i0, defaults.cap);
     let join = resolve_join_channel(ch.join, sc.join, i0, defaults.join);
@@ -255,7 +255,7 @@ pub(crate) fn resolve_outline_spec(
     Some(OutlineSpec {
         stroke_color,
         linewidth_pt,
-        dash_pattern_pt,
+        dash_pattern,
         dash_offset_pt,
         cap,
         join,
@@ -293,8 +293,10 @@ pub(crate) struct OutlineSpec {
     pub stroke_color: Color,
     /// Stroke width in pt. Pixel conversion happens inside the helper.
     pub linewidth_pt: f64,
-    /// Dash pattern (`LinetypeStep` sequence). Empty = solid.
-    pub dash_pattern_pt: Arc<[LinetypeStep]>,
+    /// Dash pattern (`LinetypeStep` sequence), in multiples of
+    /// `linewidth_pt` — resolved against the mark's own width at draw
+    /// time. Empty = solid.
+    pub dash_pattern: Arc<[LinetypeStep]>,
     /// Phase shift along the dash pattern in pt.
     pub dash_offset_pt: f64,
     /// Stroke end style.
@@ -370,8 +372,10 @@ pub(crate) struct PolygonSpec {
     /// Width in pt of the closed stroke. Pixel conversion happens in
     /// the helper.
     pub linewidth_pt: f64,
-    /// Dash pattern (`LinetypeStep` sequence). Empty = solid.
-    pub dash_pattern_pt: Arc<[LinetypeStep]>,
+    /// Dash pattern (`LinetypeStep` sequence), in multiples of
+    /// `linewidth_pt` — resolved against the mark's own width at draw
+    /// time. Empty = solid.
+    pub dash_pattern: Arc<[LinetypeStep]>,
     /// Phase shift along the dash pattern in pt.
     pub dash_offset_pt: f64,
     /// Stroke end style (only meaningful for dashed open segments
@@ -456,10 +460,9 @@ pub(crate) fn draw_polygon_fill_and_stroke(
             sc,
             spec.marker_fill,
             linewidth_px,
-            spec.linewidth_pt,
             spec.cap,
             spec.join,
-            &spec.dash_pattern_pt,
+            &spec.dash_pattern,
             spec.dash_offset_pt,
             spec.xform,
             spec.pick,
@@ -615,10 +618,9 @@ pub(crate) fn draw_curve_outline(
         spec.stroke_color,
         spec.marker_fill,
         linewidth_px,
-        spec.linewidth_pt,
         spec.cap,
         spec.join,
-        &spec.dash_pattern_pt,
+        &spec.dash_pattern,
         spec.dash_offset_pt,
         xform,
         spec.pick,
@@ -882,7 +884,7 @@ mod tests {
         // Marker interiors default to the curve's own stroke colour.
         assert_eq!(spec.marker_fill, ctx.theme.palette.ink);
         assert!(spec.start_marker.name.is_empty());
-        assert!(spec.dash_pattern_pt.is_empty(), "unset linetype is solid");
+        assert!(spec.dash_pattern.is_empty(), "unset linetype is solid");
     }
 
     #[test]

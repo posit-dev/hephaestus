@@ -188,9 +188,7 @@ thiserror = "2"
 # algorithms, and colorspace-aware interpolation. Re-exported as
 # `hephaestus::scales` and `hephaestus::color`; the `geom-*` and datetime
 # feature gates above forward to it.
-# Path while 0.1.1 (discrete_map_at / ordinal_map_at) is unpublished;
-# drop the `path` key once zygos 0.1.1 is on crates.io.
-zygos = { path = "../zygos", version = "0.1.1" }
+zygos = "0.2"
 
 # vello + wgpu are pulled in with default-features disabled so each platform
 # only compiles the one GPU backend it actually uses. The shared baseline is

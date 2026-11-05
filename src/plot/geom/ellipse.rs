@@ -338,7 +338,7 @@ impl Geom for EllipseGeom {
                     ctx.theme.geom.ellipse.linewidth_pt,
                 );
                 let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
-                let dash_pattern_pt = fixed_linetype
+                let dash_pattern = fixed_linetype
                     .clone()
                     .unwrap_or_else(|| resolve_linetype_channel(linetype_ch, linetype_scale, i));
                 let dash_offset_pt =
@@ -356,10 +356,9 @@ impl Geom for EllipseGeom {
                     sc,
                     sc,
                     linewidth_px,
-                    linewidth_pt,
                     cap,
                     join,
-                    &dash_pattern_pt,
+                    &dash_pattern,
                     dash_offset_pt,
                     xform,
                     pick,

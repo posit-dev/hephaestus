@@ -509,13 +509,13 @@ fn draw_one_polygon_mark(
     // solid linetype + no `expand` + no corner rounding, since
     // those produce non-polyline outputs that don't fit the
     // ribbon primitive. The fill emission is unaffected.
-    let dash_pattern_pt = resolve_linetype_channel(linetype_ch, linetype_scale, i0);
+    let dash_pattern = resolve_linetype_channel(linetype_ch, linetype_scale, i0);
     let all_rows: Vec<usize> = mark.rings.iter().flatten().copied().collect();
     let linewidth_varies = channel_varies_across(linewidth_ch, linewidth_scale, &all_rows);
     let stroke_varies = channel_varies_across(stroke_ch, stroke_scale, &all_rows)
         || channel_varies_across(stroke_opacity_ch, stroke_opacity_scale, &all_rows);
     let ribbon_mode = stroke_color.is_some()
-        && dash_pattern_pt.is_empty()
+        && dash_pattern.is_empty()
         && expand_pt == 0.0
         && corner_radius_pt == 0.0
         && (linewidth_varies || stroke_varies);
@@ -639,7 +639,7 @@ fn draw_one_polygon_mark(
         fill_color,
         stroke_color: if ribbon_mode { None } else { stroke_color },
         linewidth_pt,
-        dash_pattern_pt: dash_pattern_pt.clone(),
+        dash_pattern: dash_pattern.clone(),
         dash_offset_pt,
         cap,
         join,
@@ -1280,11 +1280,11 @@ mod tests {
             );
         }
 
-        // Distributed walk: period = linewidth_px + gap_px ≈ 12 px;
-        // perimeter = 400 px → round(400/12) = 33 markers.
+        // Distributed walk: period = (1 + 5) units × linewidth_px =
+        // 32 px; perimeter = 400 px → round(400/32) = 13 markers.
         assert_eq!(
             fill_colors.len() - 1,
-            33,
+            13,
             "got {} markers around perimeter",
             fill_colors.len() - 1
         );

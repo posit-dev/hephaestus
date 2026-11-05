@@ -43,8 +43,12 @@ pub(crate) const VERSION_MAJOR: u16 = 2;
 ///
 /// Only the writer names it: a reader accepts any minor, which is what
 /// makes such a change additive.
+///
+/// Minor 1 marks no encoding change; it flags that `LinetypeStep`
+/// values are stored in line-width units. Minor-0 documents carry the
+/// same values in pt, so a reader that cares can tell the two apart.
 #[cfg(feature = "document-write")]
-pub(crate) const VERSION_MINOR: u16 = 0;
+pub(crate) const VERSION_MINOR: u16 = 1;
 
 /// Container-level flags. Every bit is reserved; a reader refuses any it
 /// doesn't know, since a set bit means the body is encoded in a way it

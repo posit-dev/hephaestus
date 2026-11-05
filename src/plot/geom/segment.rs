@@ -312,7 +312,7 @@ impl Geom for SegmentGeom {
                 continue;
             }
 
-            let dash_pattern_pt = fixed_linetype
+            let dash_pattern = fixed_linetype
                 .clone()
                 .unwrap_or_else(|| resolve_linetype_channel(linetype_ch, linetype_scale, i));
             let dash_offset_pt =
@@ -473,10 +473,9 @@ impl Geom for SegmentGeom {
                 stroke_color,
                 marker_fill,
                 linewidth_px,
-                linewidth_pt,
                 cap,
                 join,
-                &dash_pattern_pt,
+                &dash_pattern,
                 dash_offset_pt,
                 xform,
                 pick,

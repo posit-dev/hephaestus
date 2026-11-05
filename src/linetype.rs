@@ -8,25 +8,28 @@
 //! odd-indexed entries are `Gap` (unconditional advance without
 //! drawing). Empty array = solid (no dashing, no markers).
 //!
-//! The pt values resolve to px at draw time using the active dpi (`px
-//! = pt * dpi / 72.0`), matching the same convention used for
-//! `linewidth` and point `size`, so dash and marker proportions stay
-//! stable across resolutions. Markers are sized to the resolved
-//! `linewidth` pt of arc length, so they don't eat into the
-//! surrounding gaps.
+//! Step lengths are multiples of the stroked line's width (the ggplot2
+//! convention): `Dash(6.0)` on a 2pt line draws a 12pt segment. The
+//! pattern resolves against the stroke's own width at draw time, so a
+//! pattern's proportions follow the line it's applied to rather than
+//! being fixed at authoring time. A `Marker` step occupies one unit —
+//! one line width — of arc length, so it doesn't eat into the
+//! surrounding gaps. This matches the units `zygos` defines
+//! [`LinetypeStep`] in and its named-pattern tables
+//! (`zygos::patterns::linetype`) carry.
 //!
 //! ```
 //! use hephaestus::linetype::{self, dash, gap, marker, pattern};
 //!
 //! assert!(linetype::solid().is_empty());
-//! let dashed = linetype::dashed();   // [Dash(8), Gap(4)]
-//! let dotted = linetype::dotted();   // [Dash(2), Gap(3)]
-//! let dashdot = linetype::dashdot(); // [Dash(8), Gap(3), Dash(2), Gap(3)]
+//! let dashed = linetype::dashed();   // [Dash(6), Gap(4)]
+//! let dotted = linetype::dotted();   // [Dash(1), Gap(2)]
+//! let dashdot = linetype::dashdot(); // [Dash(1), Gap(2), Dash(6), Gap(2)]
 //! assert_eq!(dashed.len(), 2);
 //! assert_eq!(dashdot.len(), 4);
 //!
-//! // Mixed marker + dash pattern: 5pt dash, 3pt gap, circle marker,
-//! // 5pt gap, repeat.
+//! // Mixed marker + dash pattern: 5-unit dash, 3-unit gap, circle
+//! // marker, 5-unit gap, repeat.
 //! let mixed = pattern([dash(5.0), gap(3.0), marker("circle"), gap(5.0)]);
 //! assert!(!linetype::is_marker_free(&mixed));
 //! ```
@@ -76,19 +79,19 @@ fn pt_to_px(pt: f64, dpi: f64) -> f64 {
     pt * dpi / 72.0
 }
 
-/// Stroke a segment of `length_pt` pt along the line.
-pub fn dash(length_pt: f64) -> LinetypeStep {
-    LinetypeStep::Dash(length_pt)
+/// Stroke a segment `length` line-widths long along the line.
+pub fn dash(length: f64) -> LinetypeStep {
+    LinetypeStep::Dash(length)
 }
 
-/// Advance the cursor by `length_pt` pt without drawing.
-pub fn gap(length_pt: f64) -> LinetypeStep {
-    LinetypeStep::Gap(length_pt)
+/// Advance the cursor by `length` line-widths without drawing.
+pub fn gap(length: f64) -> LinetypeStep {
+    LinetypeStep::Gap(length)
 }
 
 /// Stamp the named shape at the current cursor (rotated to the local
-/// tangent). The marker is sized to the resolved `linewidth` pt of arc
-/// length so subsequent gaps measure clear space.
+/// tangent). The marker occupies one line width of arc length so
+/// subsequent gaps measure clear space.
 pub fn marker(name: impl Into<Arc<str>>) -> LinetypeStep {
     LinetypeStep::Marker(name.into())
 }
@@ -118,15 +121,17 @@ pub fn is_marker_free(pattern: &[LinetypeStep]) -> bool {
 }
 
 /// Project a marker-free pattern to the flat `[dash, gap, dash, gap,
-/// ...]` f64 slice that [`Stroke::with_dashes`](crate::stroke::Stroke) expects. Panics if
-/// the pattern contains markers (call [`is_marker_free`] first) or if
-/// the alternation is malformed (use [`pattern`] / [`validate_pattern`]
-/// to construct).
-pub fn to_kurbo_dashes(pattern: &[LinetypeStep]) -> Option<Vec<f64>> {
+/// ...]` f64 slice that [`Stroke::with_dashes`](crate::stroke::Stroke)
+/// expects, scaling each step by `linewidth` — pass it in the unit the
+/// dash slice should come out in (pt, px), since step lengths are
+/// multiples of the line width. Returns `None` if the pattern contains
+/// markers (call [`is_marker_free`] first) or if the alternation is
+/// malformed (use [`pattern`] / [`validate_pattern`] to construct).
+pub fn to_kurbo_dashes(pattern: &[LinetypeStep], linewidth: f64) -> Option<Vec<f64>> {
     pattern
         .iter()
         .map(|step| match step {
-            LinetypeStep::Dash(l) | LinetypeStep::Gap(l) => Some(*l),
+            LinetypeStep::Dash(l) | LinetypeStep::Gap(l) => Some(*l * linewidth),
             // A marker stamps a shape rather than advancing a dash, so
             // the pattern has no stroke-dash equivalent; the caller
             // walks it with `draw_linetype_with_markers` instead.
@@ -135,15 +140,16 @@ pub fn to_kurbo_dashes(pattern: &[LinetypeStep]) -> Option<Vec<f64>> {
         .collect()
 }
 
-/// Replace every `Marker(_)` in `pattern` with `Gap(linewidth_pt)`,
-/// preserving the marker's arc-length contribution while skipping the
-/// stamp. Used by non-LineGeom geoms to render the dashing portion of
-/// a marker-bearing linetype while ignoring the markers themselves.
-pub fn strip_markers(pattern: &[LinetypeStep], linewidth_pt: f64) -> Arc<[LinetypeStep]> {
+/// Replace every `Marker(_)` in `pattern` with `Gap(1.0)` — one line
+/// width, the marker's arc-length contribution — preserving the
+/// pattern's rhythm while skipping the stamp. Used by non-LineGeom
+/// geoms to render the dashing portion of a marker-bearing linetype
+/// while ignoring the markers themselves.
+pub fn strip_markers(pattern: &[LinetypeStep]) -> Arc<[LinetypeStep]> {
     let mapped: Vec<LinetypeStep> = pattern
         .iter()
         .map(|step| match step {
-            LinetypeStep::Marker(_) => LinetypeStep::Gap(linewidth_pt),
+            LinetypeStep::Marker(_) => LinetypeStep::Gap(1.0),
             other => other.clone(),
         })
         .collect();
@@ -220,25 +226,28 @@ pub fn solid() -> Arc<[LinetypeStep]> {
     Arc::from(Vec::<LinetypeStep>::new())
 }
 
-/// `[Dash(8), Gap(4)]`.
+/// `[Dash(6), Gap(4)]` — the shared table from
+/// `zygos::patterns::linetype`.
 pub fn dashed() -> Arc<[LinetypeStep]> {
-    pattern([dash(8.0), gap(4.0)])
+    Arc::from(zygos::patterns::linetype::DASHED)
 }
 
-/// `[Dash(2), Gap(3)]`.
+/// `[Dash(1), Gap(2)]` — the shared table from
+/// `zygos::patterns::linetype`.
 pub fn dotted() -> Arc<[LinetypeStep]> {
-    pattern([dash(2.0), gap(3.0)])
+    Arc::from(zygos::patterns::linetype::DOTTED)
 }
 
-/// `[Dash(8), Gap(3), Dash(2), Gap(3)]`.
+/// `[Dash(1), Gap(2), Dash(6), Gap(2)]` — the shared table from
+/// `zygos::patterns::linetype`.
 pub fn dashdot() -> Arc<[LinetypeStep]> {
-    pattern([dash(8.0), gap(3.0), dash(2.0), gap(3.0)])
+    Arc::from(zygos::patterns::linetype::DOTDASH)
 }
 
 /// Walk one or more [`PolylineSampler`]s through a linetype pattern,
 /// emitting `scene.stroke` for each `Dash` segment and
 /// `scene.fill` / `scene.stroke` for each `Marker` stamp. Advances the
-/// arc-length cursor by Dash / Marker (= `linewidth_px`) / Gap as the
+/// arc-length cursor by Dash / Marker (= one line width) / Gap as the
 /// pattern dictates; the pattern loops when the cursor wraps.
 ///
 /// **Mode**:
@@ -264,7 +273,7 @@ pub fn dashdot() -> Arc<[LinetypeStep]> {
 pub(crate) fn draw_linetype_with_markers(
     scene: &mut dyn SceneBuilder,
     samplers: &[PolylineSampler],
-    pattern_pt: &[LinetypeStep],
+    pattern: &[LinetypeStep],
     dash_offset_px: f64,
     linewidth_px: f64,
     marker_fill: Color,
@@ -278,7 +287,7 @@ pub(crate) fn draw_linetype_with_markers(
     distribute: bool,
 ) {
     debug_assert!(
-        !pattern_pt.is_empty(),
+        !pattern.is_empty(),
         "draw_linetype_with_markers: empty pattern"
     );
 
@@ -291,7 +300,7 @@ pub(crate) fn draw_linetype_with_markers(
         // Resolve a per-sampler pattern: when `distribute` is set,
         // scale gaps to fit `total` exactly; otherwise use the pattern
         // as-is.
-        let pattern_px = resolve_pattern_px(pattern_pt, linewidth_px, dpi, total, distribute);
+        let pattern_px = resolve_pattern_px(pattern, linewidth_px, total, distribute);
 
         let n_steps = pattern_px.len();
         let mut cursor = if distribute { 0.0 } else { -dash_offset_px };
@@ -377,23 +386,23 @@ enum ResolvedStep {
     Gap(f64),
 }
 
-/// Convert a pattern from pt → px, optionally distributing gaps so an
-/// integer number of pattern runs fits `total_px` exactly.
+/// Convert a pattern from line-width units → px, optionally
+/// distributing gaps so an integer number of pattern runs fits
+/// `total_px` exactly.
 fn resolve_pattern_px(
-    pattern_pt: &[LinetypeStep],
+    pattern: &[LinetypeStep],
     linewidth_px: f64,
-    dpi: f64,
     total_px: f64,
     distribute: bool,
 ) -> Vec<ResolvedStep> {
     // Pre-compute fixed and gap contributions per pattern run.
     let mut fixed_px = 0.0;
     let mut gap_px = 0.0;
-    for step in pattern_pt {
+    for step in pattern {
         match step {
-            LinetypeStep::Dash(p) => fixed_px += pt_to_px(*p, dpi),
+            LinetypeStep::Dash(p) => fixed_px += *p * linewidth_px,
             LinetypeStep::Marker(_) => fixed_px += linewidth_px,
-            LinetypeStep::Gap(p) => gap_px += pt_to_px(*p, dpi),
+            LinetypeStep::Gap(p) => gap_px += *p * linewidth_px,
         }
     }
     let period_px = fixed_px + gap_px;
@@ -411,12 +420,12 @@ fn resolve_pattern_px(
         1.0
     };
 
-    pattern_pt
+    pattern
         .iter()
         .map(|step| match step {
-            LinetypeStep::Dash(p) => ResolvedStep::Dash(pt_to_px(*p, dpi)),
+            LinetypeStep::Dash(p) => ResolvedStep::Dash(*p * linewidth_px),
             LinetypeStep::Marker(name) => ResolvedStep::Marker(name.clone()),
-            LinetypeStep::Gap(p) => ResolvedStep::Gap(pt_to_px(*p, dpi) * gap_scale),
+            LinetypeStep::Gap(p) => ResolvedStep::Gap(*p * linewidth_px * gap_scale),
         })
         .collect()
 }
@@ -576,7 +585,7 @@ mod tests {
     #[test]
     fn dashed_canonical_values() {
         let p = dashed();
-        assert!(matches!(p[0], LinetypeStep::Dash(d) if (d - 8.0).abs() < 1e-12));
+        assert!(matches!(p[0], LinetypeStep::Dash(d) if (d - 6.0).abs() < 1e-12));
         assert!(matches!(p[1], LinetypeStep::Gap(g) if (g - 4.0).abs() < 1e-12));
     }
 
@@ -584,10 +593,10 @@ mod tests {
     fn dashdot_canonical_values() {
         let p = dashdot();
         assert_eq!(p.len(), 4);
-        assert!(matches!(p[0], LinetypeStep::Dash(d) if (d - 8.0).abs() < 1e-12));
-        assert!(matches!(p[1], LinetypeStep::Gap(g) if (g - 3.0).abs() < 1e-12));
-        assert!(matches!(p[2], LinetypeStep::Dash(d) if (d - 2.0).abs() < 1e-12));
-        assert!(matches!(p[3], LinetypeStep::Gap(g) if (g - 3.0).abs() < 1e-12));
+        assert!(matches!(p[0], LinetypeStep::Dash(d) if (d - 1.0).abs() < 1e-12));
+        assert!(matches!(p[1], LinetypeStep::Gap(g) if (g - 2.0).abs() < 1e-12));
+        assert!(matches!(p[2], LinetypeStep::Dash(d) if (d - 6.0).abs() < 1e-12));
+        assert!(matches!(p[3], LinetypeStep::Gap(g) if (g - 2.0).abs() < 1e-12));
     }
 
     #[test]
@@ -663,9 +672,9 @@ mod tests {
     }
 
     #[test]
-    fn to_kurbo_dashes_round_trip() {
+    fn to_kurbo_dashes_scales_by_linewidth() {
         let p = pattern([dash(5.0), gap(3.0)]);
-        assert_eq!(to_kurbo_dashes(&p), Some(vec![5.0, 3.0]));
+        assert_eq!(to_kurbo_dashes(&p, 2.0), Some(vec![10.0, 6.0]));
     }
 
     #[test]
@@ -674,17 +683,17 @@ mod tests {
         // fall back to the arc-length walk rather than get a pattern
         // that silently drops the stamp.
         let p = pattern([marker("circle"), gap(5.0)]);
-        assert_eq!(to_kurbo_dashes(&p), None);
+        assert_eq!(to_kurbo_dashes(&p, 1.0), None);
     }
 
     #[test]
-    fn strip_markers_replaces_with_gap_of_linewidth() {
+    fn strip_markers_replaces_with_gap_of_one_unit() {
         let p = pattern([dash(6.0), gap(2.0), marker("circle"), gap(5.0)]);
-        let stripped = strip_markers(&p, 4.0);
+        let stripped = strip_markers(&p);
         assert_eq!(stripped.len(), 4);
         assert!(matches!(stripped[0], LinetypeStep::Dash(d) if (d - 6.0).abs() < 1e-12));
         assert!(matches!(stripped[1], LinetypeStep::Gap(g) if (g - 2.0).abs() < 1e-12));
-        assert!(matches!(stripped[2], LinetypeStep::Gap(g) if (g - 4.0).abs() < 1e-12));
+        assert!(matches!(stripped[2], LinetypeStep::Gap(g) if (g - 1.0).abs() < 1e-12));
         assert!(matches!(stripped[3], LinetypeStep::Gap(g) if (g - 5.0).abs() < 1e-12));
         assert!(is_marker_free(&stripped));
     }

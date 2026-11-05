@@ -30,7 +30,8 @@ use crate::color::{lerp_color, rgb, Color, ColorSpace};
 // `LinetypeStep` lives in `zygos` so a scale can carry a column of dash
 // patterns; re-exported here because it is style vocabulary like `Color`
 // and because `crate::linetype`'s constructors enforce the
-// dash/marker–gap alternation it describes. See [`crate::linetype`].
+// dash/marker–gap alternation it describes. Step lengths are multiples
+// of the stroked line's width — see [`crate::linetype`].
 pub use zygos::LinetypeStep;
 
 // ─── Length ─────────────────────────────────────────────────────────────────

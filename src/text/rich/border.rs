@@ -54,29 +54,26 @@ pub(crate) fn emit_block_paint(
         // arc length and stamps shape markers along it — the same
         // primitive `LineGeom` uses.
         let has_markers = border
-            .linetype_pt
+            .linetype
             .as_ref()
             .map(|p| !crate::linetype::is_marker_free(p))
             .unwrap_or(false);
-        // Kurbo's `with_dashes` fast path only accepts flat pt-length
-        // slices — no `Marker` steps. Compute the flat slice only for
-        // marker-free patterns; markered patterns route through the
-        // shared `draw_linetype_with_markers` primitive below.
-        let dashes_px: Option<Vec<f64>> = border
-            .linetype_pt
-            .as_ref()
-            .filter(|_| !has_markers)
-            .and_then(|pattern| crate::linetype::to_kurbo_dashes(pattern))
-            .map(|pts| pts.into_iter().map(|pt| pt * dpi / 72.0).collect());
+        // Kurbo's `with_dashes` fast path only accepts flat length
+        // slices — no `Marker` steps. Step lengths are multiples of
+        // the side's own width, so the slice is computed per stroke
+        // width; markered patterns route through the shared
+        // `draw_linetype_with_markers` primitive below.
+        let pattern = border.linetype.as_ref().filter(|_| !has_markers);
         let border_stroke = |w_px: f32| {
             let s = crate::stroke::Stroke::new(w_px as f64)
                 .with_caps(crate::stroke::Cap::Butt)
                 .with_join(crate::stroke::Join::Miter);
-            if let (Some(pattern_px), false) = (dashes_px.as_ref(), has_markers) {
-                s.with_dashes(0.0_f64, pattern_px.clone())
-            } else {
-                s
+            if let Some(pattern) = pattern {
+                if let Some(dashes_px) = crate::linetype::to_kurbo_dashes(pattern, w_px as f64) {
+                    return s.with_dashes(0.0_f64, dashes_px);
+                }
             }
+            s
         };
         if border.is_uniform() {
             let w = border.widths_px[0];
@@ -88,10 +85,7 @@ pub(crate) fn emit_block_paint(
                         &rect,
                         w,
                         border.color,
-                        border
-                            .linetype_pt
-                            .as_ref()
-                            .expect("has_markers implies Some"),
+                        border.linetype.as_ref().expect("has_markers implies Some"),
                         outer,
                         dpi,
                     );
@@ -136,10 +130,7 @@ pub(crate) fn emit_block_paint(
                     crate::linetype::draw_linetype_with_markers(
                         scene,
                         std::slice::from_ref(&sampler),
-                        border
-                            .linetype_pt
-                            .as_ref()
-                            .expect("has_markers implies Some"),
+                        border.linetype.as_ref().expect("has_markers implies Some"),
                         0.0,
                         chain.width as f64,
                         color,
@@ -176,7 +167,7 @@ pub(crate) fn emit_block_paint(
 }
 
 /// Stamp a marker-bearing linetype around the full perimeter of a
-/// uniform-width block border. Used when [`BlockBorder::linetype_pt`]
+/// uniform-width block border. Used when [`BlockBorder::linetype`]
 /// contains at least one [`crate::scales::value::LinetypeStep::Marker`]
 /// step. Builds one closed [`crate::primitives::PolylineSampler`] over
 /// the four corners (wrapping the seam back to the top-left) and
@@ -188,7 +179,7 @@ fn stroke_markered_perimeter(
     rect: &crate::geometry::Rect,
     width_px: f32,
     color: Color,
-    pattern_pt: &[crate::scales::value::LinetypeStep],
+    pattern: &[crate::scales::value::LinetypeStep],
     outer: Affine,
     dpi: f64,
 ) {
@@ -207,7 +198,7 @@ fn stroke_markered_perimeter(
     crate::linetype::draw_linetype_with_markers(
         scene,
         std::slice::from_ref(&sampler),
-        pattern_pt,
+        pattern,
         0.0,
         width_px as f64,
         color,

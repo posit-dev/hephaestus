@@ -262,21 +262,13 @@ fn shape_half_extents(shape: Option<&crate::shape::Shape>) -> (f64, f64) {
 /// as the marks it stands for — including patterns carrying marker
 /// steps, which count as gaps here just as they do for every geom
 /// other than `LineGeom`.
-fn key_stroke(
-    resolved: &ResolvedKey,
-    width_px: f64,
-    linewidth_pt: f64,
-    cap: Cap,
-    join: Join,
-    dpi: f64,
-) -> Stroke {
+fn key_stroke(resolved: &ResolvedKey, width_px: f64, cap: Cap, join: Join, dpi: f64) -> Stroke {
     crate::plot::geom::resolve::build_stroke_for_pattern(
         width_px,
         cap,
         join,
         resolved.linetype.as_deref().unwrap_or(&[]),
         resolved.dash_offset_pt.unwrap_or(0.0),
-        linewidth_pt,
         dpi,
     )
 }
@@ -570,7 +562,7 @@ fn render_line(
     let spec = OutlineSpec {
         stroke_color: color,
         linewidth_pt: lw_pt,
-        dash_pattern_pt: resolved
+        dash_pattern: resolved
             .linetype
             .clone()
             .unwrap_or_else(|| Arc::from(Vec::new())),
@@ -648,7 +640,6 @@ fn render_rect(
         let stroke = key_stroke(
             resolved,
             lw,
-            lw_pt,
             resolved.cap.unwrap_or(geom.rect.cap),
             resolved.join.unwrap_or(geom.rect.join),
             dpi,

@@ -805,7 +805,7 @@ fn draw_lines(
     let join = dc.fixed.line_join.unwrap_or_else(|| {
         resolve_join_channel(dc.join_ch, dc.join_scale, dc.i, ctx.theme.geom.line.join)
     });
-    let dash_pattern_pt = dc
+    let dash_pattern = dc
         .fixed
         .linetype
         .clone()
@@ -897,7 +897,7 @@ fn draw_lines(
         let spec = OutlineSpec {
             stroke_color: sc,
             linewidth_pt,
-            dash_pattern_pt: dash_pattern_pt.clone(),
+            dash_pattern: dash_pattern.clone(),
             dash_offset_pt,
             cap,
             join,
@@ -1024,7 +1024,7 @@ fn draw_polygons(
     let join = dc.fixed.polygon_join.unwrap_or_else(|| {
         resolve_join_channel(dc.join_ch, dc.join_scale, dc.i, ctx.theme.geom.polygon.join)
     });
-    let dash_pattern_pt = dc
+    let dash_pattern = dc
         .fixed
         .linetype
         .clone()
@@ -1048,7 +1048,7 @@ fn draw_polygons(
         fill_color,
         stroke_color,
         linewidth_pt,
-        dash_pattern_pt,
+        dash_pattern,
         dash_offset_pt,
         cap,
         join,
