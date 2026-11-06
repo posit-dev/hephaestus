@@ -357,6 +357,14 @@ name = "line"
 required-features = ["vello", "png"]
 
 [[example]]
+name = "line_dashed_variable"
+required-features = ["vello", "png"]
+
+[[example]]
+name = "polygon_dashed_variable"
+required-features = ["vello", "png"]
+
+[[example]]
 name = "rect"
 required-features = ["vello", "png"]
 
