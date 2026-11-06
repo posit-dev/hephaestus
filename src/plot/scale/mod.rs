@@ -808,6 +808,7 @@ impl Scale {
                 input,
                 self.input_range.as_ref(),
                 self.output_range.as_ref(),
+                &Value::Null,
                 &self.transform,
                 self.color_space,
                 self.direction,
@@ -822,6 +823,7 @@ impl Scale {
                     idx,
                     domain.len(),
                     self.output_range.as_ref(),
+                    &Value::Null,
                     self.direction,
                 )
             }
@@ -835,6 +837,7 @@ impl Scale {
                     idx,
                     domain.len(),
                     self.output_range.as_ref(),
+                    &Value::Null,
                     self.color_space,
                     self.direction,
                 )
@@ -847,6 +850,7 @@ impl Scale {
                 self.input_range.as_ref(),
                 self.bins.as_deref(),
                 self.output_range.as_ref(),
+                &Value::Null,
                 self.color_space,
                 self.direction,
                 Closed::Left,

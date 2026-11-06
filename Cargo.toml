@@ -188,7 +188,7 @@ thiserror = "2"
 # algorithms, and colorspace-aware interpolation. Re-exported as
 # `hephaestus::scales` and `hephaestus::color`; the `geom-*` and datetime
 # feature gates above forward to it.
-zygos = "0.3"
+zygos = "0.4"
 
 # vello + wgpu are pulled in with default-features disabled so each platform
 # only compiles the one GPU backend it actually uses. The shared baseline is
@@ -676,7 +676,3 @@ required-features = ["document", "svg"]
 [[example]]
 name = "backend_perf"
 required-features = ["vello", "vello-hybrid", "png"]
-
-# Track zygos main until a release carries `Value::Relative`; drop before release.
-[patch.crates-io]
-zygos = { git = "https://github.com/posit-dev/zygos.git", branch = "main" }
