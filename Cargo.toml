@@ -561,6 +561,10 @@ name = "long_labels"
 required-features = ["vello", "png"]
 
 [[example]]
+name = "axis_overlap"
+required-features = ["vello", "png"]
+
+[[example]]
 name = "image_formats"
 required-features = ["vello", "png", "jpeg", "tiff", "webp"]
 
