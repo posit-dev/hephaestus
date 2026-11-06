@@ -30,7 +30,7 @@ use crate::color::Color;
 use crate::geometry::Rect;
 use crate::plot::image_registry::ImageRegistry;
 use crate::plot::scale::Scale;
-use crate::plot::value::{DataColumn, Date, DateTime, Duration, Time, Value};
+use crate::plot::value::{DataColumn, Date, DateTime, Duration, Rel, Time, Value};
 use crate::scales::geometry::Geometry;
 use crate::scene::SceneBuilder;
 use crate::shape::ShapeRegistry;
@@ -184,6 +184,7 @@ impl_channel_from_vec!(Time);
 impl_channel_from_vec!(Duration);
 impl_channel_from_vec!(Geometry);
 impl_channel_from_vec!(Arc<Geometry>);
+impl_channel_from_vec!(Rel);
 
 impl From<std::ops::Range<i64>> for Channel {
     fn from(r: std::ops::Range<i64>) -> Self {
@@ -216,6 +217,7 @@ impl_channel_from_scalar!(Time);
 impl_channel_from_scalar!(Duration);
 impl_channel_from_scalar!(Geometry);
 impl_channel_from_scalar!(Arc<Geometry>);
+impl_channel_from_scalar!(Rel);
 
 // ── Raw<T> → Channel ──────────────────────────────────────────────────
 //
@@ -258,6 +260,7 @@ impl_channel_from_raw_vec!(Date);
 impl_channel_from_raw_vec!(DateTime);
 impl_channel_from_raw_vec!(Time);
 impl_channel_from_raw_vec!(Duration);
+impl_channel_from_raw_vec!(Rel);
 
 impl From<Raw<std::ops::Range<i64>>> for Channel {
     fn from(r: Raw<std::ops::Range<i64>>) -> Self {
@@ -288,6 +291,7 @@ impl_channel_from_raw_scalar!(Date);
 impl_channel_from_raw_scalar!(DateTime);
 impl_channel_from_raw_scalar!(Time);
 impl_channel_from_raw_scalar!(Duration);
+impl_channel_from_raw_scalar!(Rel);
 
 // ─── ChannelDecl ─────────────────────────────────────────────────────────────
 
@@ -561,6 +565,7 @@ pub(crate) fn empty_datacolumn_like(col: &DataColumn) -> DataColumn {
         DataColumn::Duration(_) => DataColumn::Duration(Vec::new()),
         DataColumn::Linetype(_) => DataColumn::Linetype(Vec::new()),
         DataColumn::Geometry(_) => DataColumn::Geometry(Vec::new()),
+        DataColumn::Relative(_) => DataColumn::Relative(Vec::new()),
     }
 }
 

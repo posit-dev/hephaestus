@@ -676,3 +676,7 @@ required-features = ["document", "svg"]
 [[example]]
 name = "backend_perf"
 required-features = ["vello", "vello-hybrid", "png"]
+
+# Track zygos main until a release carries `Value::Relative`; drop before release.
+[patch.crates-io]
+zygos = { git = "https://github.com/posit-dev/zygos.git", branch = "main" }

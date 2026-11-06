@@ -28,7 +28,9 @@
 //!   so it stays proportional as the fit scales the text.
 //! - `"underline"`, `"strikethrough"` — booleans.
 //! - `"text_stroke"`, `"text_linewidth"` — per-glyph outline colour and
-//!   thickness in pt, drawn behind the fill.
+//!   thickness in pt, drawn behind the fill. A relative linewidth
+//!   (`rel(f)`) multiplies the maximum font size (the fitted size is
+//!   unknown until after the fit).
 //! - `"markdown"` — boolean; defaults to `theme.geom.text_fit.markdown`.
 //!   When true the label is read as marquee-flavoured markdown and
 //!   shaped through
@@ -55,6 +57,8 @@
 //!   `"bg_linewidth"`, `"bg_corner_radius"`, `"bg_padding"` — optional
 //!   background rect hugging the fitted text block (separate from the
 //!   target rect — the bg rect tracks where the text actually lands).
+//!   A relative `bg_padding` / `bg_corner_radius` (`rel(f)`) multiplies
+//!   the row's fitted font size.
 //! - `"angle"` — rotation in **radians** around the rect centre,
 //!   mathematical CCW. Default `0.0`. Justification is orthogonal to
 //!   rotation (the laid-out block is rotated as a rigid body around
@@ -91,8 +95,8 @@ use crate::text::{draw_text, TextRun, TextStyle};
 
 use super::resolve::{
     override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or,
-    resolve_color_channel, resolve_color_channel_or_theme, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, PositionMap,
+    resolve_color_channel, resolve_color_channel_or_theme, resolve_len_channel_or,
+    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, PositionMap,
 };
 use super::rich::{panel_space_transform, OutlineSheets};
 use super::state::{
@@ -600,10 +604,13 @@ impl Geom for TextFitGeom {
                 i,
                 text_stroke_theme,
             );
-            let text_linewidth_pt = resolve_number_channel_or(
+            // Relative linewidth (`rel(f)`) multiplies the maximum font
+            // size — the fitted size is unknown until after the search.
+            let text_linewidth_pt = resolve_len_channel_or(
                 text_linewidth_ch,
                 text_linewidth_scale,
                 i,
+                max_pt,
                 ctx.theme.geom.text_fit.text_linewidth_pt,
             );
             let row_sheet = if markdown {
@@ -694,7 +701,7 @@ impl Geom for TextFitGeom {
             }
 
             // If no candidate fit, draw at min and clip to the rect.
-            let (run, content_w, content_h, _size_pt, fits) = match best {
+            let (run, content_w, content_h, size_pt, fits) = match best {
                 Some((r, w, h, s)) => (r, w, h, s, true),
                 None => {
                     let (run, w, h) = measure(min_pt_f32);
@@ -750,7 +757,9 @@ impl Geom for TextFitGeom {
 
             // ── Background rect (drawn before glyphs). ──
             if bg_fill.is_some() || bg_stroke.is_some() {
-                let padding_pt = resolve_number_channel_or(bg_padding_ch, bg_padding_scale, i, 0.0);
+                // Relative padding (`rel(f)`) multiplies the fitted font size.
+                let padding_pt =
+                    resolve_len_channel_or(bg_padding_ch, bg_padding_scale, i, size_pt as f64, 0.0);
                 let padding_px = pt_to_px(padding_pt, ctx.dpi);
                 let descender_px = run.last_line_descender();
                 let top_pad_eff = padding_px.max(descender_px);
@@ -761,10 +770,12 @@ impl Geom for TextFitGeom {
                 let bg_top = draw_y - top_pad_eff;
                 let bg_rect = Rect::new(bg_left, bg_top, bg_left + bg_w, bg_top + bg_h);
                 if bg_rect.is_finite() && bg_rect.width() > 0.0 && bg_rect.height() > 0.0 {
-                    let bg_corner_radius_pt = resolve_number_channel_or(
+                    // Relative radius (`rel(f)`) multiplies the fitted font size.
+                    let bg_corner_radius_pt = resolve_len_channel_or(
                         bg_corner_radius_ch,
                         bg_corner_radius_scale,
                         i,
+                        size_pt as f64,
                         0.0,
                     );
                     let bg_corner_radius_px = pt_to_px(bg_corner_radius_pt, ctx.dpi).max(0.0);

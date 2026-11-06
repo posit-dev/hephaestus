@@ -1457,6 +1457,7 @@ fn format_value(v: &Value) -> String {
             }
         }
         Value::Geometry(g) => format!("{g:?}"),
+        Value::Relative(f) => format!("{}×", format_number(*f)),
     }
 }
 

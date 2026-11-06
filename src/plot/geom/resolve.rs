@@ -280,6 +280,24 @@ pub(crate) fn resolve_number_channel_or(
     resolve_number_channel(channel, scale, i).unwrap_or(default)
 }
 
+/// Resolve a length channel that accepts an absolute point size or a
+/// factor of `base` (`Value::Relative`, e.g. `.set("bg_padding",
+/// rel(0.8))`). What `base` is — a resolved font size, a linewidth —
+/// is defined by the consuming channel's docs. Absolute numbers and
+/// the fallback are plain pt; a relative value multiplies `base`.
+pub(crate) fn resolve_len_channel_or(
+    channel: Option<&Channel>,
+    scale: Option<&Scale>,
+    i: usize,
+    base: f64,
+    default: f64,
+) -> f64 {
+    match resolve_value(channel, scale, i).as_deref() {
+        Some(Value::Relative(f)) => base * f,
+        other => other.and_then(Value::as_number).unwrap_or(default),
+    }
+}
+
 /// Resolve a boolean channel with a fallback default. Reads
 /// `Value::Bool`; any other resolved value (including numeric)
 /// falls back to `default` rather than coercing — keeps the channel
@@ -928,6 +946,27 @@ mod tests {
         assert_eq!(resolve_number_channel_or(Some(&text), None, 0, 4.5), 4.5);
         let ok = Channel::Data(DataColumn::F64(vec![1.0, 2.0]));
         assert_eq!(resolve_number_channel_or(Some(&ok), None, 1, 4.5), 2.0);
+    }
+
+    #[test]
+    fn resolve_len_channel_or_multiplies_relative_by_base() {
+        // A relative constant multiplies the caller-supplied base.
+        let rel_ch = Channel::Constant(Value::Relative(0.5));
+        assert_eq!(
+            resolve_len_channel_or(Some(&rel_ch), None, 0, 12.0, 3.0),
+            6.0
+        );
+        // Absolute numbers stay absolute — the base is ignored.
+        let abs_ch = Channel::Constant(Value::Number(4.0));
+        assert_eq!(
+            resolve_len_channel_or(Some(&abs_ch), None, 0, 12.0, 3.0),
+            4.0
+        );
+        // Unset channel falls back to the default.
+        assert_eq!(resolve_len_channel_or(None, None, 0, 12.0, 3.0), 3.0);
+        // A per-row relative column resolves per row.
+        let col = Channel::RawData(DataColumn::Relative(vec![1.0, 2.0]));
+        assert_eq!(resolve_len_channel_or(Some(&col), None, 1, 12.0, 3.0), 24.0);
     }
 
     #[test]

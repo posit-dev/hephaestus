@@ -56,9 +56,9 @@ use super::project::{project_and_densify_one, PathOptions, PathVertex};
 use super::resolve::{
     channel_varies_per_row, override_alpha, pt_to_px, resolve_angle_channel,
     resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel,
-    resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
-    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_str_channel_or,
-    PositionMap,
+    resolve_color_channel_or_theme, resolve_join_channel, resolve_len_channel_or,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
+    resolve_str_channel_or, PositionMap,
 };
 use super::state::{finalize_state, require_data_column, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
@@ -849,16 +849,19 @@ fn draw_lines(
         "",
     );
     let default_marker_size_pt = 3.0 * linewidth_pt;
-    let start_marker_size_pt = resolve_number_channel_or(
+    // A relative marker size (`rel(f)`) multiplies the resolved linewidth.
+    let start_marker_size_pt = resolve_len_channel_or(
         dc.start_marker_size_ch,
         dc.start_marker_size_scale,
         dc.i,
+        linewidth_pt,
         default_marker_size_pt,
     );
-    let end_marker_size_pt = resolve_number_channel_or(
+    let end_marker_size_pt = resolve_len_channel_or(
         dc.end_marker_size_ch,
         dc.end_marker_size_scale,
         dc.i,
+        linewidth_pt,
         default_marker_size_pt,
     );
     let start_marker_fill =
