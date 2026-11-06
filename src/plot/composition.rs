@@ -122,6 +122,20 @@ impl CompositionTemplate {
         }
     }
 
+    /// Collect the ids of every named composition in the tree, this
+    /// one included. Only named compositions are addressable by
+    /// composition chrome.
+    pub(crate) fn collect_composition_ids(&self, out: &mut Vec<String>) {
+        if let Some(id) = &self.id {
+            out.push(id.clone());
+        }
+        for placement in &self.placements {
+            if let ElementTemplate::Composition(nested) = &placement.element {
+                nested.collect_composition_ids(out);
+            }
+        }
+    }
+
     /// Rebuild a `Composition` from this template, wiring each known
     /// patch's chrome via the attached plots and each named
     /// composition's chrome from `ctx`. Per-patch aspect locks
@@ -153,7 +167,9 @@ impl CompositionTemplate {
         // Wired after the placements so the chrome slots land on the
         // canonical wrapping block around the finished facet grid.
         if let Some(chrome) = self.id.as_deref().and_then(|id| ctx.chrome.get(id)) {
-            c = chrome.wire(c, ctx);
+            let effective = chrome.effective_theme(ctx.theme);
+            let theme = effective.as_ref().unwrap_or(ctx.theme);
+            c = chrome.wire(c, &RebuildCtx { theme, ..*ctx });
         }
         c
     }
@@ -458,6 +474,27 @@ pub(crate) struct CompositionChrome {
     /// [`Plot`]: nothing is inferred from the plots' bindings.
     pub(crate) legends: Vec<crate::plot::chrome::legend::Legend>,
     pub(crate) next_legend_id: u32,
+    /// Whether to paint the composition's own [`Slot::Background`]
+    /// band from the theme's `plot_background`. Opt-in per
+    /// composition: the element is `Set` in the default theme, and
+    /// every nesting level painting it unprompted would stack
+    /// backgrounds across the whole tree.
+    pub(crate) background: bool,
+    /// Theme override merged over the composition theme before this
+    /// chrome's bands are measured and drawn — the composition-level
+    /// counterpart to a plot's own override. Applies to this
+    /// composition's chrome only; it does not cascade to nested
+    /// compositions or to the plots inside the facets.
+    pub(crate) theme_override: Option<super::theme::ThemePart>,
+}
+
+impl CompositionChrome {
+    /// Merge this chrome's theme override over `base`, if any. Wire
+    /// and draw must agree on the result — a band measured against the
+    /// base theme but drawn with a larger override font would overflow.
+    fn effective_theme(&self, base: &Theme) -> Option<Theme> {
+        self.theme_override.as_ref().map(|part| base.merge(part))
+    }
 }
 
 impl CompositionChrome {
@@ -474,6 +511,14 @@ impl CompositionChrome {
 
         let theme = ctx.theme;
         let root_pt = crate::plot::chrome::root_text_pt(theme);
+
+        // Background — opt-in via `background_at`. An empty cell so
+        // the solver emits a rect for the band, painted in the draw
+        // phase from the effective theme. Mirrors the per-patch path
+        // in `wire_into_patch`, including the theme's `Blank` veto.
+        if self.background && theme.plot_background.as_set().is_some() {
+            c = c.slot(Slot::Background, Cell::empty());
+        }
 
         // Title / subtitle / caption — `theme.plot_text_align_to`
         // chooses between spanning the whole composition interior and
@@ -537,6 +582,85 @@ impl CompositionChrome {
     /// Read the axis title installed for `side`, if any.
     fn axis_title_at(&self, side: AxisSide) -> Option<&str> {
         self.axis_titles[super::plot::axis_side_index(side)].as_deref()
+    }
+
+    /// Paint the composition's own background band from the theme's
+    /// `plot_background`, behind the facets. Mirrors the per-patch
+    /// painter in [`Plot::draw_patch_background_into`]; the caller has
+    /// already pushed the composition's pick scope.
+    fn draw_background_into(
+        &self,
+        comp_id: &str,
+        scene: &mut dyn SceneBuilder,
+        layout: &CompositionLayout,
+        theme: &Theme,
+        dpi: f64,
+    ) {
+        use crate::composition::Slot;
+
+        let Some(bg_slot) = theme.plot_background.as_set() else {
+            return;
+        };
+        // Cascade through the rect root so partial overrides pick up
+        // theme.rect's border / linewidth fields, as per patch.
+        let bg = bg_slot.cascade(&theme.rect);
+        let defaults = crate::plot::theme::rect_concrete_defaults();
+        let Some(rect) = layout.get(comp_id, Slot::Background) else {
+            return;
+        };
+        if rect.x1 <= rect.x0 || rect.y1 <= rect.y0 {
+            return;
+        }
+        use crate::geometry::Shape as _;
+        let radius_pt = bg
+            .corner_radius
+            .or(defaults.corner_radius)
+            .map(|l| l.resolve(0.0))
+            .unwrap_or(0.0);
+        let radius_px = (radius_pt * dpi / 72.0).max(0.0);
+        let path: crate::path::Path = if radius_px > 0.0 {
+            crate::primitives::rounded_rect(rect, radius_px)
+        } else {
+            rect.to_path(0.0)
+        };
+        scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Background));
+        scene.push_pick_scope(&crate::plot::pick::part_scope(
+            crate::plot::pick::PlotPart::PlotBackground,
+        ));
+        if let Some(fill) = bg.fill {
+            let brush = crate::brush::Brush::Solid(fill.resolve(&theme.palette));
+            scene.fill(
+                crate::path::FillRule::NonZero,
+                crate::geometry::Affine::IDENTITY,
+                &brush,
+                None,
+                &path,
+                crate::pick::PickId::Skip,
+            );
+        }
+        let lw = bg
+            .linewidth_pt
+            .or(defaults.linewidth_pt)
+            .expect("rect linewidth default");
+        let width_pt = lw.resolve(1.0);
+        if width_pt > 0.0 {
+            use crate::stroke::{Cap, Join, Stroke};
+            let stroke = Stroke::new(width_pt * dpi / 72.0)
+                .with_caps(Cap::Butt)
+                .with_join(Join::Miter);
+            let color = bg.color.or(defaults.color).expect("rect color default");
+            let brush = crate::brush::Brush::Solid(color.resolve(&theme.palette));
+            scene.stroke(
+                &stroke,
+                crate::geometry::Affine::IDENTITY,
+                &brush,
+                None,
+                &path,
+                crate::pick::PickId::Skip,
+            );
+        }
+        scene.pop_pick_scope();
+        scene.pop_pick_scope();
     }
 
     /// Render this chrome into the rects solved for `comp_id`.
@@ -695,6 +819,11 @@ pub enum ValidationIssue {
         expected: super::geom::ExpectedOutput,
         found: &'static str,
     },
+    /// Chrome was attached to a composition id that no named
+    /// composition in the tree carries, so it can never resolve a rect
+    /// — an id-targeted chrome call naming a mistyped or detached
+    /// composition.
+    UnknownChromeComposition { composition_id: String },
 }
 
 // ─── PlotComposition ─────────────────────────────────────────────────────────
@@ -720,9 +849,10 @@ pub struct PlotComposition {
     /// patches overlap or an unclipped plot spills — is what the caller
     /// set up rather than whatever the hash seed produced this run.
     pub(crate) plot_order: Vec<String>,
-    /// Composition-level chrome by composition id. The root's entry is
-    /// keyed on `root_id`; the builder / mutator methods on this type
-    /// all target that entry.
+    /// Composition-level chrome by composition id. The unprefixed
+    /// builder / mutator methods target the root's entry, keyed on
+    /// `root_id`; the `_at` / `_for` variants address any named
+    /// composition in the tree.
     pub(crate) chrome: HashMap<String, CompositionChrome>,
     /// Composition ids in first-use order, for the same reason as
     /// [`Self::plot_order`].
@@ -884,11 +1014,18 @@ impl PlotComposition {
 
     /// Borrow the root composition's chrome, creating it on first use.
     fn root_chrome_mut(&mut self) -> &mut CompositionChrome {
+        let id = self.root_id.clone();
+        self.chrome_mut(&id)
+    }
+
+    /// Borrow the chrome of the composition named `id`, creating the
+    /// entry on first use. Flags the layout dirty.
+    fn chrome_mut(&mut self, id: &str) -> &mut CompositionChrome {
         self.layout_dirty = true;
-        if !self.chrome.contains_key(&self.root_id) {
-            self.chrome_order.push(self.root_id.clone());
+        if !self.chrome.contains_key(id) {
+            self.chrome_order.push(id.to_string());
         }
-        self.chrome.entry(self.root_id.clone()).or_default()
+        self.chrome.entry(id.to_string()).or_default()
     }
 
     /// Set the composition's title, rendered in the [`Slot::Title`]
@@ -930,6 +1067,47 @@ impl PlotComposition {
         self.root_chrome_mut().title = None;
     }
 
+    /// Set the title of the composition named `id`, rendered in the
+    /// [`Slot::Title`] slot of the canonical block wrapping that
+    /// composition's facets. Chainable builder form of
+    /// [`Self::set_title_at`].
+    ///
+    /// [`Slot::Title`]: crate::composition::Slot::Title
+    pub fn title_at(mut self, id: &str, s: impl Into<String>) -> Self {
+        self.set_title_at(id, s);
+        self
+    }
+
+    /// Set the subtitle of the composition named `id`, rendered in the
+    /// [`Slot::Subtitle`] slot spanning that composition's facets.
+    ///
+    /// [`Slot::Subtitle`]: crate::composition::Slot::Subtitle
+    pub fn subtitle_at(mut self, id: &str, s: impl Into<String>) -> Self {
+        self.chrome_mut(id).subtitle = Some(s.into());
+        self
+    }
+
+    /// Set the caption of the composition named `id`, rendered in the
+    /// [`Slot::Caption`] slot spanning that composition's facets.
+    ///
+    /// [`Slot::Caption`]: crate::composition::Slot::Caption
+    pub fn caption_at(mut self, id: &str, s: impl Into<String>) -> Self {
+        self.chrome_mut(id).caption = Some(s.into());
+        self
+    }
+
+    /// Replace the title of the composition named `id`. Flags the
+    /// layout dirty.
+    pub fn set_title_at(&mut self, id: &str, s: impl Into<String>) {
+        self.chrome_mut(id).title = Some(s.into());
+    }
+
+    /// Clear the title of the composition named `id`, releasing its
+    /// chrome row. Flags the layout dirty.
+    pub fn clear_title_at(&mut self, id: &str) {
+        self.chrome_mut(id).title = None;
+    }
+
     /// Set a shared axis title on `side` — one label for the whole
     /// facet grid rather than one per plot. Each side holds at most one
     /// title; calling again with the same side replaces it.
@@ -949,11 +1127,33 @@ impl PlotComposition {
         self.root_chrome_mut().axis_titles[idx] = text;
     }
 
-    /// Read the shared axis title for `side`, if any.
-    pub fn axis_title_at(&self, side: AxisSide) -> Option<&str> {
-        self.chrome
-            .get(&self.root_id)
-            .and_then(|c| c.axis_title_at(side))
+    /// Read the root composition's shared axis title for `side`, if
+    /// any.
+    pub fn axis_title_of(&self, side: AxisSide) -> Option<&str> {
+        self.axis_title_for(&self.root_id, side)
+    }
+
+    /// Give the composition named `id` a shared axis title on `side` —
+    /// one label for that composition's whole facet grid rather than
+    /// one per plot. Chainable builder form of
+    /// [`Self::set_axis_title_at`].
+    pub fn axis_title_at(mut self, id: &str, side: AxisSide, text: impl Into<String>) -> Self {
+        self.set_axis_title_at(id, side, Some(text.into()));
+        self
+    }
+
+    /// Install or clear the shared axis title for `side` on the
+    /// composition named `id`. `None` removes it, releasing the slot.
+    /// Flags the layout dirty.
+    pub fn set_axis_title_at(&mut self, id: &str, side: AxisSide, text: Option<String>) {
+        let idx = super::plot::axis_side_index(side);
+        self.chrome_mut(id).axis_titles[idx] = text;
+    }
+
+    /// Read the shared axis title for `side` on the composition named
+    /// `id`, if any.
+    pub fn axis_title_for(&self, id: &str, side: AxisSide) -> Option<&str> {
+        self.chrome.get(id).and_then(|c| c.axis_title_at(side))
     }
 
     /// Attach a legend to the composition, placed in the composition's
@@ -974,7 +1174,26 @@ impl PlotComposition {
         &mut self,
         legend: crate::plot::chrome::legend::Legend,
     ) -> crate::plot::chrome::legend::LegendId {
-        self.push_legend(legend)
+        let id = self.root_id.clone();
+        self.add_legend_at(&id, legend)
+    }
+
+    /// Attach a legend to the composition named `id`, placed in that
+    /// composition's own legend ring so one legend serves every facet
+    /// of it, and return its id.
+    ///
+    /// Panics on [`LegendSide::InPanel`], as [`Self::add_legend`] does.
+    ///
+    /// [`LegendSide::InPanel`]: crate::scales::chrome::LegendSide::InPanel
+    pub fn add_legend_at(
+        &mut self,
+        id: &str,
+        legend: crate::plot::chrome::legend::Legend,
+    ) -> crate::plot::chrome::legend::LegendId {
+        match self.try_add_legend_at(id, legend) {
+            Ok(legend_id) => legend_id,
+            Err(e) => panic!("{e}"),
+        }
     }
 
     /// Attach a composition legend that renders as its own block even
@@ -989,17 +1208,23 @@ impl PlotComposition {
         mut legend: crate::plot::chrome::legend::Legend,
     ) -> crate::plot::chrome::legend::LegendId {
         legend.merge = false;
-        self.push_legend(legend)
+        let id = self.root_id.clone();
+        self.add_legend_at(&id, legend)
     }
 
-    fn push_legend(
+    /// Attach a legend to the composition named `id` that renders as
+    /// its own block even when a compatible legend precedes it, as
+    /// [`Self::add_legend_separate`] does for the root. Panics on
+    /// [`LegendSide::InPanel`].
+    ///
+    /// [`LegendSide::InPanel`]: crate::scales::chrome::LegendSide::InPanel
+    pub fn add_legend_separate_at(
         &mut self,
-        legend: crate::plot::chrome::legend::Legend,
+        id: &str,
+        mut legend: crate::plot::chrome::legend::Legend,
     ) -> crate::plot::chrome::legend::LegendId {
-        match self.try_push_legend(legend) {
-            Ok(id) => id,
-            Err(e) => panic!("{e}"),
-        }
+        legend.merge = false;
+        self.add_legend_at(id, legend)
     }
 
     /// [`Self::add_legend`] / [`Self::add_legend_separate`] without the
@@ -1011,25 +1236,39 @@ impl PlotComposition {
         &mut self,
         legend: crate::plot::chrome::legend::Legend,
     ) -> Result<crate::plot::chrome::legend::LegendId, crate::plot::plot::PlotError> {
-        self.try_push_legend(legend)
+        let id = self.root_id.clone();
+        self.try_add_legend_at(&id, legend)
     }
 
-    fn try_push_legend(
+    /// [`Self::add_legend_at`] / [`Self::add_legend_separate_at`]
+    /// without the panic: reports
+    /// [`PlotError::InPanelLegendUnsupported`] rather than aborting
+    /// when a legend asks for an in-panel anchor.
+    ///
+    /// [`PlotError::InPanelLegendUnsupported`]: crate::plot::plot::PlotError::InPanelLegendUnsupported
+    pub fn try_add_legend_at(
         &mut self,
+        id: &str,
         legend: crate::plot::chrome::legend::Legend,
     ) -> Result<crate::plot::chrome::legend::LegendId, crate::plot::plot::PlotError> {
         reject_in_panel_legend(&legend)?;
-        let chrome = self.root_chrome_mut();
-        let id = crate::plot::chrome::legend::LegendId::new(chrome.next_legend_id);
+        let chrome = self.chrome_mut(id);
+        let legend_id = crate::plot::chrome::legend::LegendId::new(chrome.next_legend_id);
         chrome.next_legend_id += 1;
         chrome.legends.push(legend);
-        Ok(id)
+        Ok(legend_id)
     }
 
     /// Borrow the composition's legends in insertion order.
     pub fn legends(&self) -> &[crate::plot::chrome::legend::Legend] {
+        self.legends_at(&self.root_id)
+    }
+
+    /// Borrow the legends attached to the composition named `id`, in
+    /// insertion order.
+    pub fn legends_at(&self, id: &str) -> &[crate::plot::chrome::legend::Legend] {
         self.chrome
-            .get(&self.root_id)
+            .get(id)
             .map(|c| c.legends.as_slice())
             .unwrap_or(&[])
     }
@@ -1038,6 +1277,68 @@ impl PlotComposition {
     /// layout dirty.
     pub fn clear_legends(&mut self) {
         self.root_chrome_mut().legends.clear();
+    }
+
+    /// Remove every legend attached to the composition named `id`.
+    /// Flags the layout dirty.
+    pub fn clear_legends_at(&mut self, id: &str) {
+        self.chrome_mut(id).legends.clear();
+    }
+
+    /// Merge `part` on top of the composition's theme before measuring
+    /// and drawing the chrome of the composition named `id` — the
+    /// composition-level counterpart to [`Plot::theme_override`].
+    /// Applies to that composition's chrome only; it does not cascade
+    /// to nested compositions or to the plots inside the facets.
+    /// Chainable builder form of [`Self::set_theme_override_at`].
+    pub fn theme_override_at(mut self, id: &str, part: crate::plot::theme::ThemePart) -> Self {
+        self.set_theme_override_at(id, Some(part));
+        self
+    }
+
+    /// Install or clear the theme override for the chrome of the
+    /// composition named `id`. Flags the layout dirty, since an
+    /// override can change a chrome band's measure.
+    pub fn set_theme_override_at(&mut self, id: &str, part: Option<crate::plot::theme::ThemePart>) {
+        self.chrome_mut(id).theme_override = part;
+    }
+
+    /// Borrow the theme override for the chrome of the composition
+    /// named `id`, if any.
+    pub fn theme_override_for(&self, id: &str) -> Option<&crate::plot::theme::ThemePart> {
+        self.chrome.get(id).and_then(|c| c.theme_override.as_ref())
+    }
+
+    /// Paint the root composition's own background band, filled and
+    /// bordered from the theme's `plot_background` and spanning every
+    /// facet. Chainable builder form of [`Self::background_at`].
+    pub fn background(mut self) -> Self {
+        self.root_chrome_mut().background = true;
+        self
+    }
+
+    /// Paint the background band of the composition named `id`, filled
+    /// and bordered from the effective theme's `plot_background` and
+    /// spanning that composition's facets. Opt-in per composition:
+    /// the element is `Set` in the default theme, so every nesting
+    /// level painting it unprompted would stack backgrounds across
+    /// the whole tree. `Element::Blank` in the theme still suppresses
+    /// the band. Flags the layout dirty.
+    pub fn background_at(mut self, id: &str) -> Self {
+        self.chrome_mut(id).background = true;
+        self
+    }
+
+    /// Stop painting the root composition's background band, releasing
+    /// it. Flags the layout dirty.
+    pub fn clear_background(&mut self) {
+        self.root_chrome_mut().background = false;
+    }
+
+    /// Stop painting the background band of the composition named
+    /// `id`, releasing it. Flags the layout dirty.
+    pub fn clear_background_at(&mut self, id: &str) {
+        self.chrome_mut(id).background = false;
     }
 
     /// Replace the registry backing composition-level legend key
@@ -1259,9 +1560,10 @@ impl PlotComposition {
     /// Re-solves the layout when needed; reuses the cached solve
     /// otherwise.
     ///
-    /// Render order: patch backgrounds, panel backgrounds + grids, the
-    /// frames of unclipped plots, geoms, the frames of clipped plots,
-    /// then every plot's labels and the composition's own chrome.
+    /// Render order: composition backgrounds, patch backgrounds, panel
+    /// backgrounds + grids, the frames of unclipped plots, geoms, the
+    /// frames of clipped plots, then every plot's labels and the
+    /// composition's own chrome.
     ///
     /// Legends and titles always sit over the data — they are there to
     /// be read. A plot's frame (panel outline, axes, strips) takes its
@@ -1301,6 +1603,26 @@ impl PlotComposition {
             .last_layout
             .as_ref()
             .expect("layout must be cached by this point");
+
+        // Phase 0: composition backgrounds. Behind everything else,
+        // painted outer-first — the template walk is depth-first — so
+        // a nested grid's background lands over the root's but under
+        // every patch background, geom, and label.
+        let mut comp_ids = Vec::new();
+        self.template.collect_composition_ids(&mut comp_ids);
+        for id in &comp_ids {
+            let Some(chrome) = self.chrome.get(id) else {
+                continue;
+            };
+            if !chrome.background {
+                continue;
+            }
+            let effective = chrome.effective_theme(&self.theme);
+            let theme = effective.as_ref().unwrap_or(&self.theme);
+            scene.push_pick_scope(&crate::plot::pick::composition_scope(id));
+            chrome.draw_background_into(id, scene, layout, theme, dpi);
+            scene.pop_pick_scope();
+        }
 
         // Phase 1: patch backgrounds. Every plot lays down its
         // `Slot::Background` fill from `theme.plot_background`.
@@ -1400,6 +1722,7 @@ impl PlotComposition {
             // Composition chrome has no owning plot, so its path is one
             // frame shorter and `PlotPath::plot` reports `None` for it.
             scene.push_pick_scope(&crate::plot::pick::composition_scope(comp_id));
+            let effective = chrome.effective_theme(&self.theme);
             chrome.draw_into(
                 comp_id,
                 scene,
@@ -1408,7 +1731,7 @@ impl PlotComposition {
                 &self.shapes,
                 &self.images,
                 dpi,
-                &self.theme,
+                effective.as_ref().unwrap_or(&self.theme),
             );
             scene.pop_pick_scope();
         }
@@ -1460,6 +1783,21 @@ impl PlotComposition {
                         }
                     }
                 }
+            }
+        }
+        // Chrome keyed to an id no named composition carries can never
+        // resolve a rect and silently draws nothing.
+        let mut known_ids = Vec::new();
+        self.template.collect_composition_ids(&mut known_ids);
+        for id in self
+            .chrome_order
+            .iter()
+            .filter(|id| self.chrome.contains_key(*id))
+        {
+            if !known_ids.contains(id) {
+                out.push(ValidationIssue::UnknownChromeComposition {
+                    composition_id: id.clone(),
+                });
             }
         }
         out
@@ -2208,7 +2546,7 @@ mod tests {
         assert!(rect.y1 > rect.y0, "axis title row has height");
         assert!(rect.x0 <= a.x0 && rect.x1 >= b.x1, "spans both panels");
         assert_eq!(
-            view.axis_title_at(AxisSide::Bottom),
+            view.axis_title_of(AxisSide::Bottom),
             Some("Displacement (l)")
         );
     }
@@ -2486,5 +2824,243 @@ mod tests {
                     .bind("fill", "cat"),
             );
         assert_eq!(view.validate(), vec![]);
+    }
+
+    fn comp_nested() -> Composition {
+        let inner = crate::composition::grid(
+            1,
+            2,
+            vec![CompPatch::new("c").into(), CompPatch::new("d").into()],
+        )
+        .id("inner");
+        beside(inner, CompPatch::new("a"))
+    }
+
+    fn view_nested() -> PlotComposition {
+        let comp = comp_nested();
+        PlotComposition::new(&comp)
+            .with_plot(crate::plot::Plot::new(&comp, "c"))
+            .with_plot(crate::plot::Plot::new(&comp, "d"))
+            .with_plot(crate::plot::Plot::new(&comp, "a"))
+    }
+
+    #[test]
+    fn nested_composition_title_resolves_its_own_band() {
+        let mut view = view_nested().title_at("inner", "Facets");
+        let mut scene = crate::scene::recording::RecordingScene::default();
+        view.render(&mut scene, Size::new(800.0, 400.0), 96.0);
+
+        let layout = view.last_layout.as_ref().unwrap();
+        let title = layout
+            .get("inner", crate::composition::Slot::Title)
+            .expect("nested composition title rect");
+        let c = layout.get("c", crate::composition::Slot::Panel).unwrap();
+        let d = layout.get("d", crate::composition::Slot::Panel).unwrap();
+        let a = layout.get("a", crate::composition::Slot::Panel).unwrap();
+        assert!(title.y1 > title.y0, "title row has height");
+        assert!(
+            title.x0 <= c.x0 && title.x1 >= d.x1,
+            "spans the nested grid's panels"
+        );
+        assert!(
+            title.x1 < a.x1,
+            "does not span the sibling patch outside the nested grid"
+        );
+    }
+
+    #[test]
+    fn nested_composition_axis_title_and_legend_wire_by_id() {
+        use crate::plot::chrome::legend::{Legend, LegendKeySpec};
+        use crate::scales::chrome::LegendSide;
+
+        let scale = scale::discrete(vec![
+            crate::scales::value::Value::from("a"),
+            crate::scales::value::Value::from("b"),
+        ])
+        .range_colors([
+            crate::color::Color::new([1.0, 0.0, 0.0, 1.0]),
+            crate::color::Color::new([0.0, 0.0, 1.0, 1.0]),
+        ]);
+        let mut view = view_nested().add_scale("cat", scale).axis_title_at(
+            "inner",
+            AxisSide::Bottom,
+            "Shared facets",
+        );
+        view.add_legend_at(
+            "inner",
+            Legend::new("cat")
+                .side(LegendSide::Right)
+                .key(LegendKeySpec::point().scaled("fill", "cat")),
+        );
+        let mut scene = crate::scene::recording::RecordingScene::default();
+        view.render(&mut scene, Size::new(800.0, 400.0), 96.0);
+
+        let layout = view.last_layout.as_ref().unwrap();
+        assert!(layout
+            .get("inner", crate::composition::Slot::AxisBottomTitle)
+            .is_some());
+        assert!(layout
+            .get("inner", crate::composition::Slot::LegendRight)
+            .is_some());
+        assert_eq!(
+            view.axis_title_for("inner", AxisSide::Bottom),
+            Some("Shared facets")
+        );
+        assert_eq!(view.legends_at("inner").len(), 1);
+        // The root's chrome was never touched.
+        assert_eq!(view.axis_title_of(AxisSide::Bottom), None);
+        assert!(view.legends().is_empty());
+    }
+
+    #[test]
+    fn chrome_targeting_an_unknown_composition_is_flagged() {
+        let view = view_nested().title_at("nope", "Lost");
+        let issues = view.validate();
+        assert!(
+            issues.iter().any(|i| matches!(
+                i,
+                ValidationIssue::UnknownChromeComposition { composition_id }
+                    if composition_id == "nope"
+            )),
+            "expected UnknownChromeComposition for `nope`; got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn nested_composition_theme_override_sizes_its_chrome() {
+        use crate::plot::theme::{Element, Length, TextElement, ThemePart};
+
+        let mut plain = view_nested().title_at("inner", "Facets");
+        let mut scene = crate::scene::recording::RecordingScene::default();
+        plain.render(&mut scene, Size::new(800.0, 400.0), 96.0);
+        let plain_band = plain
+            .last_layout
+            .as_ref()
+            .unwrap()
+            .get("inner", crate::composition::Slot::Title)
+            .unwrap();
+
+        let mut styled = view_nested().title_at("inner", "Facets").theme_override_at(
+            "inner",
+            ThemePart {
+                plot_title: Some(Element::Set(TextElement {
+                    size_pt: Some(Length::Abs(48.0)),
+                    ..TextElement::default()
+                })),
+                ..ThemePart::default()
+            },
+        );
+        let mut scene = crate::scene::recording::RecordingScene::default();
+        styled.render(&mut scene, Size::new(800.0, 400.0), 96.0);
+        let styled_band = styled
+            .last_layout
+            .as_ref()
+            .unwrap()
+            .get("inner", crate::composition::Slot::Title)
+            .unwrap();
+
+        assert!(
+            styled_band.y1 - styled_band.y0 > plain_band.y1 - plain_band.y0 + 20.0,
+            "the override's 48pt title should reserve a much taller band: plain {:?} vs styled {:?}",
+            plain_band,
+            styled_band,
+        );
+        // The root's chrome is untouched: it holds no override and no title.
+        assert!(styled.theme_override_for(ROOT_COMPOSITION_ID).is_none());
+        assert!(styled.theme_override_for("inner").is_some());
+    }
+
+    #[test]
+    fn composition_background_reserves_and_paints_its_band() {
+        let mut bare = view_nested();
+        let mut scene_bare = crate::scene::recording::RecordingScene::default();
+        bare.render(&mut scene_bare, Size::new(800.0, 400.0), 96.0);
+
+        let mut backed = view_nested().background_at("inner");
+        let mut scene = crate::scene::recording::RecordingScene::default();
+        backed.render(&mut scene, Size::new(800.0, 400.0), 96.0);
+
+        let layout = backed.last_layout.as_ref().unwrap();
+        let bg = layout
+            .get("inner", crate::composition::Slot::Background)
+            .expect("composition background rect");
+        let c = layout.get("c", crate::composition::Slot::Panel).unwrap();
+        let d = layout.get("d", crate::composition::Slot::Panel).unwrap();
+        assert!(
+            bg.x0 <= c.x0 && bg.x1 >= d.x1 && bg.y0 <= c.y0 && bg.y1 >= c.y1,
+            "the band encloses the nested grid's panels"
+        );
+
+        let fills = |s: &crate::scene::recording::RecordingScene| {
+            s.ops
+                .iter()
+                .filter(|op| matches!(op, crate::scene::recording::Op::Fill { .. }))
+                .count()
+        };
+        assert!(
+            fills(&scene) > fills(&scene_bare),
+            "the composition background should add a fill"
+        );
+
+        // Clearing releases the band again.
+        let mut cleared = view_nested().background_at("inner");
+        cleared.clear_background_at("inner");
+        let mut scene = crate::scene::recording::RecordingScene::default();
+        cleared.render(&mut scene, Size::new(800.0, 400.0), 96.0);
+        assert!(cleared
+            .last_layout
+            .as_ref()
+            .unwrap()
+            .get("inner", crate::composition::Slot::Background)
+            .is_none());
+    }
+
+    #[test]
+    fn nested_background_paints_over_the_roots() {
+        use crate::pick::PickScope;
+        use crate::scene::recording::Op;
+
+        let mut view = view_nested().background().background_at("inner");
+        let mut scene = crate::scene::recording::RecordingScene::default();
+        view.render(&mut scene, Size::new(800.0, 400.0), 96.0);
+
+        // First background-region fill under each composition's scope.
+        // Patch backgrounds also sit under the root's frame (phases
+        // 1-6 share it), so only the first hit per composition
+        // identifies the composition's own band.
+        let mut stack: Vec<&PickScope> = Vec::new();
+        let mut first_fill: HashMap<&str, usize> = HashMap::new();
+        for (i, op) in scene.ops.iter().enumerate() {
+            match op {
+                Op::PushPickScope { scope } => stack.push(scope),
+                Op::PopPickScope => {
+                    stack.pop();
+                }
+                Op::Fill { .. } => {
+                    let in_background = stack
+                        .iter()
+                        .any(|s| s.kind() == "region" && s.name() == Some("background"));
+                    let comp = stack
+                        .iter()
+                        .rev()
+                        .find(|s| s.kind() == "composition")
+                        .and_then(|s| s.name());
+                    if in_background {
+                        if let Some(comp) = comp {
+                            first_fill.entry(comp).or_insert(i);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let root = *first_fill
+            .get(ROOT_COMPOSITION_ID)
+            .expect("root background fill");
+        let inner = *first_fill.get("inner").expect("inner background fill");
+        assert!(
+            root < inner,
+            "the root's background paints before the nested grid's: root op {root}, inner op {inner}"
+        );
     }
 }

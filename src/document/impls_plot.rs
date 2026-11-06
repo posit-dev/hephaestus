@@ -460,6 +460,8 @@ impl_codec! {
         axis_titles,
         legends,
         next_legend_id,
+        theme_override,
+        background,
     }
 }
 
