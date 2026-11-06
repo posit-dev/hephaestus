@@ -299,6 +299,189 @@ pub(crate) fn axis_minor_ticks(scale: &crate::plot::scale::Scale, n: usize) -> V
         .collect()
 }
 
+/// Clearance kept between two surviving labels, px. Added to each
+/// label box on all sides, so neighbours land at least
+/// `2 * LABEL_PAD_PX` apart.
+const LABEL_PAD_PX: f64 = 1.0;
+
+/// One label's ink footprint in screen space, as an oriented box.
+/// All labels on a rail share one rotation, so the boxes are directly
+/// comparable and a separating-axis test on the box's own two axes is
+/// exact — including under rotation, where an axis-aligned bounding
+/// box would report false overlaps.
+struct LabelBox {
+    cx: f64,
+    cy: f64,
+    hw: f64,
+    hh: f64,
+    cos: f64,
+    sin: f64,
+}
+
+impl LabelBox {
+    /// True when the two boxes overlap. Assumes both carry the same
+    /// rotation — the separating axes are `self`'s.
+    fn overlaps(&self, other: &Self) -> bool {
+        let dx = other.cx - self.cx;
+        let dy = other.cy - self.cy;
+        let along = (dx * self.cos + dy * self.sin).abs() <= self.hw + other.hw;
+        let across = (dy * self.cos - dx * self.sin).abs() <= self.hh + other.hh;
+        along && across
+    }
+}
+
+/// Coarsest roughly-even subset of `boxes` that fits without overlap,
+/// as a keep mask. Terminal labels always survive — they carry the
+/// range — even when they overlap each other. Interior labels are
+/// admitted by recursive bisection: try the label nearest the spatial
+/// midpoint of each gap between kept labels, subdivide the gap only
+/// when it lands, and drop the whole gap when it doesn't (squeezing a
+/// label in off-centre would crowd one side). `fracs` are the labels'
+/// positions along the rail, non-decreasing.
+fn bisect_keep(boxes: &[LabelBox], fracs: &[f64]) -> Vec<bool> {
+    let n = boxes.len();
+    let mut keep = vec![false; n];
+    if n == 0 {
+        return keep;
+    }
+    keep[0] = true;
+    if n == 1 {
+        return keep;
+    }
+    keep[n - 1] = true;
+    let mut stack = vec![(0usize, n - 1)];
+    while let Some((lo, hi)) = stack.pop() {
+        if hi - lo < 2 {
+            continue;
+        }
+        let mid = (fracs[lo] + fracs[hi]) * 0.5;
+        let m = (lo + 1..hi)
+            .min_by(|&a, &b| (fracs[a] - mid).abs().total_cmp(&(fracs[b] - mid).abs()))
+            .expect("gap of at least two holds an interior index");
+        let fits = (0..n)
+            .filter(|&i| keep[i])
+            .all(|i| !boxes[m].overlaps(&boxes[i]));
+        if fits {
+            keep[m] = true;
+            stack.push((lo, m));
+            stack.push((m, hi));
+        }
+    }
+    keep
+}
+
+/// Where the label at `pos` sits: the anchor its near edge aligns to,
+/// and the outward direction it extends into. Distinct from the tick
+/// direction when the tick length is negative (the tick grows inward)
+/// — labels still go outward, the user-visible side.
+fn label_anchor(
+    pos: Point,
+    tick_direction: (f64, f64),
+    style: &AxisChromeStyle,
+) -> (Point, (f64, f64)) {
+    let (tx, ty) = tick_direction;
+    let (outward_tx, outward_ty) = if style.tick_length_px < 0.0 {
+        (-tx, -ty)
+    } else {
+        (tx, ty)
+    };
+    let outward_end = if style.tick_length_px < 0.0 {
+        Point::new(
+            pos.x - style.tick_length_px * tx,
+            pos.y - style.tick_length_px * ty,
+        )
+    } else {
+        Point::new(
+            pos.x + style.tick_length_px * tx,
+            pos.y + style.tick_length_px * ty,
+        )
+    };
+    (
+        Point::new(
+            outward_end.x + style.gap_px * outward_tx,
+            outward_end.y + style.gap_px * outward_ty,
+        ),
+        (outward_tx, outward_ty),
+    )
+}
+
+/// Snap a label direction to its alignment quadrant. The dead-band
+/// around the cardinals keeps near-vertical / near-horizontal
+/// directions from jittering their alignment.
+fn snapped_label_dir(direction: (f64, f64)) -> (f64, f64) {
+    const CARDINAL_EPS: f64 = 0.05;
+    let (tx, ty) = direction;
+    let snap = |t: f64| {
+        if t > CARDINAL_EPS {
+            1.0
+        } else if t < -CARDINAL_EPS {
+            -1.0
+        } else {
+            0.0
+        }
+    };
+    (snap(tx), snap(ty))
+}
+
+/// Ink box `tick`'s label would occupy, or `None` for a tick outside
+/// the rail — it draws nothing and is no obstacle. Anchoring mirrors
+/// [`draw_axis_label`]: the box is the shaped run's cap-height band
+/// centred the way the draw pass centres it.
+fn label_box(
+    tick: &AxisTick,
+    start: Point,
+    end: Point,
+    tick_direction: (f64, f64),
+    style: &AxisChromeStyle,
+    dpi: f64,
+) -> Option<LabelBox> {
+    if !tick.frac.is_finite() || !(0.0..=1.0).contains(&tick.frac) {
+        return None;
+    }
+    let pos = lerp(start, end, tick.frac);
+    let (anchor, direction) = label_anchor(pos, tick_direction, style);
+    let run = ChromeRun::shape(&tick.label, &style.text_style, dpi, style.rich.as_ref());
+    let w = run.width();
+    let cap_h = run.cap_height();
+    let (dir_x, dir_y) = snapped_label_dir(direction);
+    Some(LabelBox {
+        cx: anchor.x + dir_x * w * 0.5,
+        cy: anchor.y + dir_y * cap_h * 0.5,
+        hw: w * 0.5 + LABEL_PAD_PX,
+        hh: cap_h * 0.5 + LABEL_PAD_PX,
+        cos: 1.0,
+        sin: 0.0,
+    })
+}
+
+/// Keep mask over `majors`' labels. Ticks outside the rail draw no
+/// label and stay `false`; the rest pass through [`bisect_keep`].
+fn cull_overlapping_labels(
+    majors: &[AxisTick],
+    start: Point,
+    end: Point,
+    tick_direction: (f64, f64),
+    style: &AxisChromeStyle,
+    dpi: f64,
+) -> Vec<bool> {
+    let mut idx = Vec::new();
+    let mut boxes = Vec::new();
+    let mut fracs = Vec::new();
+    for (i, tick) in majors.iter().enumerate() {
+        if let Some(b) = label_box(tick, start, end, tick_direction, style, dpi) {
+            idx.push(i);
+            boxes.push(b);
+            fracs.push(tick.frac);
+        }
+    }
+    let kept = bisect_keep(&boxes, &fracs);
+    let mut keep = vec![false; majors.len()];
+    for (k, &i) in idx.iter().enumerate() {
+        keep[i] = kept[k];
+    }
+    keep
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_linear_axis_at(
     scene: &mut dyn SceneBuilder,
@@ -341,8 +524,16 @@ pub(crate) fn draw_linear_axis_at(
         scene.pop_pick_scope();
     }
 
+    // Tick marks draw for every break; labels draw only where they
+    // fit — culling drops the ones that would overlap a survivor.
+    let label_keep = if style.draw_labels {
+        cull_overlapping_labels(majors, start, end, tick_direction, style, dpi)
+    } else {
+        Vec::new()
+    };
+
     // Major ticks + labels.
-    for tick in majors {
+    for (i, tick) in majors.iter().enumerate() {
         let (frac, label) = (tick.frac, &tick.label);
         if !frac.is_finite() || !(0.0..=1.0).contains(&frac) {
             continue;
@@ -361,25 +552,10 @@ pub(crate) fn draw_linear_axis_at(
             scene.pop_pick_scope();
         }
 
-        if style.draw_labels {
+        if style.draw_labels && label_keep.get(i).copied().unwrap_or(false) {
             // Labels sit on the side the tick extends to, with a
-            // small gap. Distinct from tick direction: if the tick
-            // length is negative (extends inward), labels still go
-            // outward — that's the user-visible side.
-            let outward_tx = if style.tick_length_px < 0.0 { -tx } else { tx };
-            let outward_ty = if style.tick_length_px < 0.0 { -ty } else { ty };
-            let outward_tick_end = if style.tick_length_px < 0.0 {
-                Point::new(
-                    pos.x - style.tick_length_px * tx,
-                    pos.y - style.tick_length_px * ty,
-                )
-            } else {
-                tick_end
-            };
-            let anchor = Point::new(
-                outward_tick_end.x + style.gap_px * outward_tx,
-                outward_tick_end.y + style.gap_px * outward_ty,
-            );
+            // small gap.
+            let (anchor, direction) = label_anchor(pos, tick_direction, style);
             scene.push_pick_scope(&part_scope(PlotPart::AxisTickLabel));
             scene.push_pick_scope(&item);
             draw_axis_label(
@@ -389,10 +565,7 @@ pub(crate) fn draw_linear_axis_at(
                 &style.text_brush,
                 style.text_outline.as_ref(),
                 style.rich.as_ref(),
-                AxisLabelAt {
-                    anchor,
-                    direction: (outward_tx, outward_ty),
-                },
+                AxisLabelAt { anchor, direction },
                 dpi,
             );
             scene.pop_pick_scope();
@@ -455,24 +628,7 @@ pub(crate) fn draw_axis_label(
     let cap_h = run.cap_height();
     let cap_top_offset = baseline - cap_h;
 
-    // Dead-band around the cardinals so near-vertical / near-horizontal
-    // directions don't jitter their alignment quadrant.
-    const CARDINAL_EPS: f64 = 0.05;
-    let (tx, ty) = at.direction;
-    let dir_x = if tx > CARDINAL_EPS {
-        1.0
-    } else if tx < -CARDINAL_EPS {
-        -1.0
-    } else {
-        0.0
-    };
-    let dir_y = if ty > CARDINAL_EPS {
-        1.0
-    } else if ty < -CARDINAL_EPS {
-        -1.0
-    } else {
-        0.0
-    };
+    let (dir_x, dir_y) = snapped_label_dir(at.direction);
 
     // Anchor on the cap-band centre / edges:
     //   dir_y =  0 → cap centre lands on anchor.y
@@ -700,5 +856,210 @@ mod tests {
                 anchor.x
             );
         }
+    }
+
+    // ── overlap culling ──
+
+    fn axis_box(cx: f64, cy: f64, hw: f64, hh: f64) -> LabelBox {
+        LabelBox {
+            cx,
+            cy,
+            hw,
+            hh,
+            cos: 1.0,
+            sin: 0.0,
+        }
+    }
+
+    fn rotated_box(cx: f64, cy: f64, hw: f64, hh: f64, deg: f64) -> LabelBox {
+        let rad = deg.to_radians();
+        LabelBox {
+            cx,
+            cy,
+            hw,
+            hh,
+            cos: rad.cos(),
+            sin: rad.sin(),
+        }
+    }
+
+    #[test]
+    fn axis_aligned_boxes_overlap_only_when_they_touch() {
+        let a = axis_box(0.0, 0.0, 1.0, 0.5);
+        assert!(a.overlaps(&axis_box(1.5, 0.0, 1.0, 0.5)));
+        assert!(!a.overlaps(&axis_box(3.0, 0.0, 1.0, 0.5)));
+        assert!(!a.overlaps(&axis_box(0.0, 2.0, 5.0, 0.5)));
+    }
+
+    #[test]
+    fn rotated_boxes_are_not_judged_by_their_bounding_boxes() {
+        // Long thin labels at 45°: the axis-aligned bounding boxes
+        // overlap well before the labels do, and keep overlapping
+        // after the labels have separated along the text axis.
+        let a = rotated_box(0.0, 0.0, 4.0, 0.5, 45.0);
+        let near = rotated_box(2.2, 2.2, 4.0, 0.5, 45.0);
+        let far = rotated_box(6.0, 6.0, 4.0, 0.5, 45.0);
+        assert!(a.overlaps(&near), "centres 3.1 apart along the text axis");
+        assert!(
+            !a.overlaps(&far),
+            "centres 8.5 apart along the text axis — the AABB still overlaps"
+        );
+    }
+
+    #[test]
+    fn bisection_keeps_an_even_subset() {
+        // Five labels, each wide enough to overlap its neighbour but
+        // not its next-neighbour: the even subset survives.
+        let boxes: Vec<_> = (0..5)
+            .map(|i| axis_box(i as f64 * 10.0, 0.0, 6.0, 1.0))
+            .collect();
+        let fracs: Vec<_> = (0..5).map(|i| i as f64 / 4.0).collect();
+        let keep = bisect_keep(&boxes, &fracs);
+        assert_eq!(keep, vec![true, false, true, false, true]);
+    }
+
+    #[test]
+    fn bisection_keeps_terminal_labels_even_when_they_overlap() {
+        let boxes = vec![axis_box(0.0, 0.0, 10.0, 1.0), axis_box(5.0, 0.0, 10.0, 1.0)];
+        let fracs = vec![0.0, 1.0];
+        assert_eq!(bisect_keep(&boxes, &fracs), vec![true, true]);
+    }
+
+    #[test]
+    fn bisection_prefers_the_spatial_midpoint_over_the_index_midpoint() {
+        // Breaks bunched at the left end: the first interior try is
+        // the break nearest the gap's spatial midpoint (frac 0.5),
+        // not the middle index.
+        let fracs = vec![0.0, 0.1, 0.2, 0.5, 1.0];
+        let boxes: Vec<_> = fracs
+            .iter()
+            .map(|f| axis_box(f * 100.0, 0.0, 1.0, 1.0))
+            .collect();
+        let keep = bisect_keep(&boxes, &fracs);
+        assert!(
+            keep[3],
+            "the label at frac 0.5 is the gap's spatial midpoint"
+        );
+        assert!(keep.iter().all(|&k| k), "nothing overlaps, so all fit");
+    }
+
+    #[test]
+    fn bisection_drops_a_gap_whose_midpoint_fails() {
+        // The midpoint of (0, 1) overlaps the terminal at 0, so the
+        // whole gap is dropped even though no other label exists.
+        let boxes = vec![
+            axis_box(0.0, 0.0, 10.0, 1.0),
+            axis_box(9.0, 0.0, 1.0, 1.0),
+            axis_box(100.0, 0.0, 1.0, 1.0),
+        ];
+        let fracs = vec![0.0, 0.09, 1.0];
+        assert_eq!(bisect_keep(&boxes, &fracs), vec![true, false, true]);
+    }
+
+    /// An axis style resolved from the default theme, the way a
+    /// Bottom x-axis sees it.
+    fn chrome_style() -> (crate::plot::theme::Theme, AxisChromeStyle) {
+        let theme = crate::plot::theme::Theme::default();
+        let resolved = theme.resolved_axis(0, 0);
+        let style = AxisChromeStyle::from_resolved(
+            &resolved,
+            &theme,
+            DPI,
+            crate::plot::chrome::root_text_pt(&theme),
+            &crate::image_registry::no_images(),
+        );
+        (theme, style)
+    }
+
+    fn glyph_run_count(scene: &RecordingScene) -> usize {
+        scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::DrawGlyphs(_)))
+            .count()
+    }
+
+    #[test]
+    fn crowded_labels_are_culled_but_their_ticks_still_draw() {
+        let (_theme, style) = chrome_style();
+        let long: String = "label-".repeat(4);
+        let majors: Vec<AxisTick> = (0..8)
+            .map(|i| AxisTick {
+                break_index: i,
+                frac: i as f64 / 7.0,
+                label: format!("{long}{i}"),
+            })
+            .collect();
+        let mut scene = RecordingScene::default();
+        let start = Point::new(0.0, 0.0);
+        let end = Point::new(400.0, 0.0);
+        draw_linear_axis_at(
+            &mut scene,
+            start,
+            end,
+            (0.0, 1.0),
+            &majors,
+            &[],
+            &style,
+            DPI,
+        );
+        let runs = glyph_run_count(&scene);
+        assert!(
+            runs < majors.len(),
+            "8 labels of ~150px on a 400px rail cannot all fit ({runs} drawn)"
+        );
+        assert!(runs >= 2, "at least the terminal labels survive");
+
+        // Every break keeps its tick mark even when its label drops.
+        let ticks = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .count();
+        assert_eq!(ticks, majors.len());
+
+        // The terminal labels are among the survivors: some glyph
+        // lands in the leftmost and rightmost label footprints.
+        let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
+        for op in &scene.ops {
+            if let Op::DrawGlyphs(run) = op {
+                for g in &run.glyphs {
+                    min_x = min_x.min(g.x as f64);
+                    max_x = max_x.max(g.x as f64);
+                }
+            }
+        }
+        assert!(
+            min_x < 10.0,
+            "first label drawn near the rail start ({min_x})"
+        );
+        assert!(
+            max_x > 390.0,
+            "last label drawn near the rail end ({max_x})"
+        );
+    }
+
+    #[test]
+    fn spaced_labels_all_survive() {
+        let (_theme, style) = chrome_style();
+        let majors: Vec<AxisTick> = (0..4)
+            .map(|i| AxisTick {
+                break_index: i,
+                frac: i as f64 / 3.0,
+                label: i.to_string(),
+            })
+            .collect();
+        let mut scene = RecordingScene::default();
+        draw_linear_axis_at(
+            &mut scene,
+            Point::new(0.0, 0.0),
+            Point::new(400.0, 0.0),
+            (0.0, 1.0),
+            &majors,
+            &[],
+            &style,
+            DPI,
+        );
+        assert_eq!(glyph_run_count(&scene), majors.len());
     }
 }

@@ -147,7 +147,14 @@ fn root_text_size_scales_the_axis_tick_labels() {
         !base.is_empty(),
         "expected tick labels in the default render"
     );
-    assert_eq!(base.len(), scaled.len(), "same labels, different size");
+    // Bigger labels overlap more, so culling may drop some — the
+    // survivor count can shrink but never grow.
+    assert!(
+        scaled.len() <= base.len(),
+        "culling only removes labels: {:?} vs {:?}",
+        base,
+        scaled
+    );
     assert!(
         scaled[0] > base[0] * 1.5,
         "doubling theme.text.size_pt should scale tick labels: {:?} vs {:?}",

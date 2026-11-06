@@ -94,8 +94,8 @@ use crate::scene::SceneBuilder;
 
 use super::marks::{build_marks_from_column, MarkSlot};
 use super::outline::{
-    draw_curve_outline, draw_ribbon_mode_curve, resolve_outline_spec, OutlineChannels,
-    OutlineScales,
+    draw_curve_outline, draw_dashed_ribbon_curve, draw_ribbon_mode_curve, resolve_outline_spec,
+    OutlineChannels, OutlineScales,
 };
 use super::resolve::{
     apply_per_row_offsets, channel_color_space, channel_varies_across, override_alpha, pt_to_px,
@@ -512,11 +512,12 @@ fn draw_one_bspline_mark(
     //
     // Same dispatch as LineGeom (lines 425): per-vertex
     // tessellated mesh when stroke or linewidth varies within
-    // the mark, gated to solid linetype.
+    // the mark. A non-solid linetype is walked dash-by-dash, each
+    // dash its own mesh.
     let linewidth_varies = channel_varies_across(linewidth_ch, linewidth_scale, &mark.rows);
     let stroke_varies = channel_varies_across(stroke_ch, stroke_scale, &mark.rows)
         || channel_varies_across(stroke_opacity_ch, stroke_opacity_scale, &mark.rows);
-    let ribbon_mode = spec.dash_pattern.is_empty() && (linewidth_varies || stroke_varies);
+    let ribbon_mode = linewidth_varies || stroke_varies;
 
     // A non-positive width means "nothing to stroke" only when a
     // single width governs the whole mark. In ribbon mode each sample
@@ -570,17 +571,32 @@ fn draw_one_bspline_mark(
             linewidth_ch,
             linewidth_scale,
         );
-        draw_ribbon_mode_curve(
-            scene,
-            ctx.shapes,
-            ctx.dpi,
-            &sample_points,
-            &ribbon_half_widths,
-            &ribbon_colors,
-            channel_color_space(stroke_scale),
-            &spec,
-            spec.xform,
-        );
+        if spec.dash_pattern.is_empty() {
+            draw_ribbon_mode_curve(
+                scene,
+                ctx.shapes,
+                ctx.dpi,
+                &sample_points,
+                &ribbon_half_widths,
+                &ribbon_colors,
+                channel_color_space(stroke_scale),
+                &spec,
+                spec.xform,
+            );
+        } else {
+            draw_dashed_ribbon_curve(
+                scene,
+                ctx.shapes,
+                ctx.dpi,
+                &sample_points,
+                &ribbon_half_widths,
+                &ribbon_colors,
+                channel_color_space(stroke_scale),
+                &spec,
+                spec.xform,
+                ctx.theme.geom.marker_outline_pt,
+            );
+        }
         return;
     }
 
@@ -1032,6 +1048,43 @@ mod tests {
             moved > 1.0,
             "a quarter-turn should move the start marker; it sat at {upright:?} either way"
         );
+    }
+
+    #[test]
+    fn dashed_linetype_upgrades_to_per_dash_meshes() {
+        // A non-solid linetype with varying linewidth: one ribbon mesh
+        // per dash along the flattened curve, no uniform stroke.
+        let mut g = BSplineGeom::builder()
+            .keys(vec!["A"; 4])
+            .set("x", Raw(vec![0.1_f64, 0.3, 0.7, 0.9]))
+            .set("y", Raw(vec![0.5_f64, 0.8, 0.2, 0.5]))
+            .set("linewidth", vec![4.0_f64, 8.0, 12.0, 6.0])
+            .set("stroke", red())
+            .set(
+                "linetype",
+                crate::plot::value::Value::Linetype(crate::linetype::dashed()),
+            )
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 200.0, 200.0), &shapes, &scales),
+        );
+        let strokes = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Stroke { .. }))
+            .count();
+        let meshes = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::DrawMesh { .. }))
+            .count();
+        assert_eq!(strokes, 0);
+        assert!(meshes >= 2, "several dashes along the curve, got {meshes}");
     }
 
     #[test]

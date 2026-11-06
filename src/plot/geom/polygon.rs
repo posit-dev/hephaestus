@@ -60,7 +60,9 @@ use crate::primitives::{polygon_ribbon_full, CornerRounding, RibbonOptions};
 use crate::scene::SceneBuilder;
 
 use super::marks::group_rows_by_key;
-use super::outline::{draw_polygon_fill_and_stroke, expand_polygons, PolygonSpec};
+use super::outline::{
+    draw_polygon_fill_and_stroke, emit_dashed_ribbon, expand_polygons, PolygonSpec,
+};
 use super::project::{project_and_densify_one, PathOptions, PathVertex, VertexAttrs};
 use super::resolve::{
     channel_color_space, channel_varies_across, offset_px, override_alpha, pt_to_px,
@@ -506,16 +508,17 @@ fn draw_one_polygon_mark(
     // ── Ribbon-mode decision (Phase E.5). Upgrade the outline
     // stroke to a per-vertex tessellated mesh per ring when
     // `linewidth` or `stroke` varies within the mark. Gated to
-    // solid linetype + no `expand` + no corner rounding, since
-    // those produce non-polyline outputs that don't fit the
-    // ribbon primitive. The fill emission is unaffected.
+    // no `expand` + no corner rounding, since those produce
+    // non-polyline outputs that don't fit the ribbon primitive.
+    // A non-solid linetype is walked dash-by-dash around the ring,
+    // each dash its own mesh; the seam at the ring's first vertex
+    // is left visible. The fill emission is unaffected.
     let dash_pattern = resolve_linetype_channel(linetype_ch, linetype_scale, i0);
     let all_rows: Vec<usize> = mark.rings.iter().flatten().copied().collect();
     let linewidth_varies = channel_varies_across(linewidth_ch, linewidth_scale, &all_rows);
     let stroke_varies = channel_varies_across(stroke_ch, stroke_scale, &all_rows)
         || channel_varies_across(stroke_opacity_ch, stroke_opacity_scale, &all_rows);
     let ribbon_mode = stroke_color.is_some()
-        && dash_pattern.is_empty()
         && expand_pt == 0.0
         && corner_radius_pt == 0.0
         && (linewidth_varies || stroke_varies);
@@ -667,8 +670,48 @@ fn draw_one_polygon_mark(
             }
             let widths = &rings_widths[r];
             let colors = &rings_colors[r];
-            let mesh = polygon_ribbon_full(ring, Some(colors), Some(widths), &opts);
-            scene.draw_mesh(&mesh, xform, pick);
+            if dash_pattern.is_empty() {
+                let mesh = polygon_ribbon_full(ring, Some(colors), Some(widths), &opts);
+                scene.draw_mesh(&mesh, xform, pick);
+            } else {
+                // Closed-ring dash walk: the pattern runs around the
+                // perimeter with no gap distribution, so there is a
+                // seam. Start the walk at the thinnest vertex, where
+                // the seam is least visible.
+                let start = widths
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, a), (_, b)| a.total_cmp(b))
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                let mut closed_pts: Vec<Point> = ring[start..].to_vec();
+                closed_pts.extend_from_slice(&ring[..start]);
+                let mut closed_widths: Vec<f64> = widths[start..].to_vec();
+                closed_widths.extend_from_slice(&widths[..start]);
+                let mut closed_colors: Vec<Color> = colors[start..].to_vec();
+                closed_colors.extend_from_slice(&colors[..start]);
+                let mut closed_widths = widths.clone();
+                let mut closed_colors = colors.clone();
+                closed_pts.push(closed_pts[0]);
+                closed_widths.push(closed_widths[0]);
+                closed_colors.push(closed_colors[0]);
+                emit_dashed_ribbon(
+                    scene,
+                    ctx.shapes,
+                    ctx.dpi,
+                    ctx.theme.geom.marker_outline_pt,
+                    &closed_pts,
+                    &closed_widths,
+                    &closed_colors,
+                    stroke_space,
+                    &dash_pattern,
+                    pt_to_px(dash_offset_pt, ctx.dpi),
+                    cap,
+                    join,
+                    xform,
+                    pick,
+                );
+            }
         }
     }
 }
@@ -1419,6 +1462,129 @@ mod tests {
         );
         assert_eq!(stroke_count(&scene), 1);
         assert_eq!(mesh_count(&scene), 0);
+    }
+
+    #[test]
+    fn polygon_dashed_linetype_upgrades_outline_to_per_dash_meshes() {
+        // A non-solid linetype with varying linewidth: the pattern is
+        // walked around the ring, one ribbon mesh per dash, no uniform
+        // stroke.
+        let mut g = PolygonGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 1.0, 1.0, 0.0]))
+            .set("y", Raw(vec![0.0_f64, 0.0, 1.0, 1.0]))
+            .set("fill", red())
+            .set("stroke", red())
+            .set("linewidth", vec![2.0_f64, 6.0, 2.0, 6.0])
+            .set(
+                "linetype",
+                Value::Linetype(crate::plot::geom::linetype::dashed()),
+            )
+            .build();
+        g.rebuild_diff_against_previous();
+        let r = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &r, &scales),
+        );
+        assert_eq!(stroke_count(&scene), 0);
+        assert!(
+            mesh_count(&scene) >= 2,
+            "several dashes around the ring, got {}",
+            mesh_count(&scene)
+        );
+    }
+
+    #[test]
+    fn polygon_dashed_walk_starts_at_the_thinnest_vertex() {
+        // The seam is least visible where the ring is thinnest, so the
+        // walk begins there: the first dash hugs the edge leaving the
+        // thinnest corner. Square vertices in data order: (0,0) bl,
+        // (1,0) br, (1,1) tr, (0,1) tl; the thinnest is vertex 0 at
+        // panel px (0, 100), and the first dash runs along the bottom
+        // edge (y = 100) from it.
+        let mut g = PolygonGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 1.0, 1.0, 0.0]))
+            .set("y", Raw(vec![0.0_f64, 0.0, 1.0, 1.0]))
+            .set("fill", red())
+            .set("stroke", red())
+            .set("linewidth", vec![1.0_f64, 4.0, 8.0, 12.0])
+            .set(
+                "linetype",
+                Value::Linetype(crate::plot::geom::linetype::dashed()),
+            )
+            .build();
+        g.rebuild_diff_against_previous();
+        let r = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &r, &scales),
+        );
+        let first = scene
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::DrawMesh { mesh, .. } => Some(mesh),
+                _ => None,
+            })
+            .expect("a dash mesh");
+        let cx = first.vertices.iter().map(|v| v.x).sum::<f64>() / first.vertices.len() as f64;
+        let cy = first.vertices.iter().map(|v| v.y).sum::<f64>() / first.vertices.len() as f64;
+        assert!(
+            cx < 50.0 && cy > 50.0,
+            "first dash leaves the thinnest corner along the bottom edge: ({cx}, {cy})"
+        );
+    }
+
+    #[test]
+    fn polygon_dashed_marker_pattern_stamps_at_local_width() {
+        // A marker-bearing pattern on a ramping width: stamps size
+        // themselves from the ring's local width, so they grow along
+        // the walk.
+        use crate::plot::geom::linetype;
+        let pat = linetype::pattern([linetype::marker("circle"), linetype::gap(6.0)]);
+        let mut g = PolygonGeom::builder()
+            .set("x", Raw(vec![0.0_f64, 1.0, 1.0, 0.0]))
+            .set("y", Raw(vec![0.0_f64, 0.0, 1.0, 1.0]))
+            .set("fill", red())
+            .set("stroke", red())
+            .set("linewidth", vec![1.0_f64, 4.0, 8.0, 12.0])
+            .set("linetype", Value::Linetype(pat))
+            .build();
+        g.rebuild_diff_against_previous();
+        let r = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &r, &scales),
+        );
+        // First fill is the interior; the rest are marker stamps.
+        let stamp_scales: Vec<f64> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Fill { transform, .. } => Some(transform.determinant().abs().sqrt()),
+                _ => None,
+            })
+            .skip(1)
+            .collect();
+        assert!(
+            stamp_scales.len() >= 2,
+            "several marker stamps, got {stamp_scales:?}"
+        );
+        let min = stamp_scales.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = stamp_scales
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            max > min * 1.5,
+            "stamp scale follows the ring's width ramp: min {min}, max {max}"
+        );
     }
 
     #[test]

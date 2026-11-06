@@ -23,6 +23,7 @@
 use crate::brush::Brush;
 use crate::color::{Color, ColorSpace};
 use crate::geometry::{Affine, Point};
+use crate::linetype::walk_linetype_variable;
 use crate::path::{FillRule, Path};
 use crate::pick::PickId;
 use crate::plot::scale::Scale;
@@ -655,6 +656,117 @@ pub(crate) fn draw_curve_outline(
     }
 }
 
+/// An attributed polyline after endpoint clipping, with the clip radii
+/// (user + marker-driven) that produced it.
+struct ClippedRibbon {
+    /// Clipped vertices.
+    points: Vec<Point>,
+    /// Per-vertex half-width in px, aligned with `points`.
+    half_widths: Vec<f64>,
+    /// Per-vertex colour, aligned with `points`.
+    colors: Vec<Color>,
+    /// Total start-side clip radius in pt.
+    clip_start_pt: f64,
+    /// Total end-side clip radius in pt.
+    clip_end_pt: f64,
+}
+
+/// Endpoint-clip an attributed polyline per the spec's user and
+/// marker-driven clip radii. Returns `None` when fewer than two vertices
+/// survive.
+fn ribbon_clip(
+    points: &[Point],
+    half_widths: &[f64],
+    colors: &[Color],
+    space: ColorSpace,
+    spec: &OutlineSpec,
+    shapes: &ShapeRegistry,
+    dpi: f64,
+) -> Option<ClippedRibbon> {
+    let auto_clip_start_pt = auto_endpoint_clip_pt(
+        &spec.start_marker.name,
+        spec.start_marker.size_pt,
+        spec.start_marker.invert,
+        shapes,
+    );
+    let auto_clip_end_pt = auto_endpoint_clip_pt(
+        &spec.end_marker.name,
+        spec.end_marker.size_pt,
+        spec.end_marker.invert,
+        shapes,
+    );
+    let clip_start_pt = spec.user_clip_start_pt + auto_clip_start_pt;
+    let clip_end_pt = spec.user_clip_end_pt + auto_clip_end_pt;
+
+    let out = if clip_start_pt > 0.0 || clip_end_pt > 0.0 {
+        let start = (clip_start_pt > 0.0).then(|| EndClip::Circle {
+            center: points[0],
+            radius: pt_to_px(clip_start_pt, dpi),
+        });
+        let end = (clip_end_pt > 0.0).then(|| EndClip::Circle {
+            center: *points.last().unwrap(),
+            radius: pt_to_px(clip_end_pt, dpi),
+        });
+        clip_polyline_with_attrs(points, half_widths, colors, start, end, space)
+    } else {
+        (points.to_vec(), half_widths.to_vec(), colors.to_vec())
+    };
+    (out.0.len() >= 2).then_some(ClippedRibbon {
+        points: out.0,
+        half_widths: out.1,
+        colors: out.2,
+        clip_start_pt,
+        clip_end_pt,
+    })
+}
+
+/// Stamp the spec's endpoint markers at the terminals of the clipped
+/// attributed polyline. `start` selects which end.
+#[allow(clippy::too_many_arguments)]
+fn ribbon_endpoint_marker(
+    scene: &mut dyn SceneBuilder,
+    clipped: &[Point],
+    unclipped: &[Point],
+    start: bool,
+    clip_pt: f64,
+    spec: &OutlineSpec,
+    marker_xform: Affine,
+    shapes: &ShapeRegistry,
+    dpi: f64,
+) {
+    let marker = if start {
+        &spec.start_marker
+    } else {
+        &spec.end_marker
+    };
+    if marker.name.is_empty() {
+        return;
+    }
+    let marker_outline_px = endpoint_marker_outline_px(pt_to_px(spec.linewidth_pt, dpi), dpi);
+    let size_px = pt_to_px(marker.size_pt, dpi);
+    let fill = marker.fill.unwrap_or(spec.marker_fill);
+    let outward = endpoint_outward(clipped, unclipped, start, clip_pt > 0.0);
+    let placement = if start {
+        clipped[0]
+    } else {
+        *clipped.last().unwrap()
+    };
+    emit_endpoint_marker(
+        scene,
+        placement,
+        outward,
+        marker.invert,
+        &marker.name,
+        size_px,
+        fill,
+        spec.stroke_color,
+        marker_outline_px,
+        marker_xform,
+        shapes,
+        spec.pick,
+    );
+}
+
 /// Tessellate a curve carrying per-vertex widths and colours into a
 /// mesh, with the same endpoint clipping and endpoint markers
 /// [`draw_curve_outline`] applies to a uniform stroke.
@@ -684,60 +796,21 @@ pub(crate) fn draw_ribbon_mode_curve(
     if points.len() < 2 {
         return;
     }
-
-    let auto_clip_start_pt = auto_endpoint_clip_pt(
-        &spec.start_marker.name,
-        spec.start_marker.size_pt,
-        spec.start_marker.invert,
-        shapes,
-    );
-    let auto_clip_end_pt = auto_endpoint_clip_pt(
-        &spec.end_marker.name,
-        spec.end_marker.size_pt,
-        spec.end_marker.invert,
-        shapes,
-    );
-    let clip_start_pt = spec.user_clip_start_pt + auto_clip_start_pt;
-    let clip_end_pt = spec.user_clip_end_pt + auto_clip_end_pt;
-
-    let (clipped, clipped_widths, clipped_colors) = if clip_start_pt > 0.0 || clip_end_pt > 0.0 {
-        let start = (clip_start_pt > 0.0).then(|| EndClip::Circle {
-            center: points[0],
-            radius: pt_to_px(clip_start_pt, dpi),
-        });
-        let end = (clip_end_pt > 0.0).then(|| EndClip::Circle {
-            center: *points.last().unwrap(),
-            radius: pt_to_px(clip_end_pt, dpi),
-        });
-        clip_polyline_with_attrs(points, half_widths, colors, start, end, space)
-    } else {
-        (points.to_vec(), half_widths.to_vec(), colors.to_vec())
-    };
-    if clipped.len() < 2 {
+    let Some(clipped) = ribbon_clip(points, half_widths, colors, space, spec, shapes, dpi) else {
         return;
-    }
+    };
 
-    let marker_outline_px = endpoint_marker_outline_px(pt_to_px(spec.linewidth_pt, dpi), dpi);
-
-    if !spec.start_marker.name.is_empty() {
-        let size_px = pt_to_px(spec.start_marker.size_pt, dpi);
-        let fill = spec.start_marker.fill.unwrap_or(spec.marker_fill);
-        let outward = endpoint_outward(&clipped, points, true, clip_start_pt > 0.0);
-        emit_endpoint_marker(
-            scene,
-            clipped[0],
-            outward,
-            spec.start_marker.invert,
-            &spec.start_marker.name,
-            size_px,
-            fill,
-            spec.stroke_color,
-            marker_outline_px,
-            marker_xform,
-            shapes,
-            spec.pick,
-        );
-    }
+    ribbon_endpoint_marker(
+        scene,
+        &clipped.points,
+        points,
+        true,
+        clipped.clip_start_pt,
+        spec,
+        marker_xform,
+        shapes,
+        dpi,
+    );
 
     let opts = RibbonOptions {
         half_width: 0.0, // superseded by the per-vertex half widths
@@ -747,31 +820,178 @@ pub(crate) fn draw_ribbon_mode_curve(
         ..Default::default()
     };
     let mesh = polyline_ribbon_full(
-        &clipped,
-        Some(&clipped_colors),
-        Some(&clipped_widths),
+        &clipped.points,
+        Some(&clipped.colors),
+        Some(&clipped.half_widths),
         &opts,
     );
     scene.draw_mesh(&mesh, spec.xform, spec.pick);
 
-    if !spec.end_marker.name.is_empty() {
-        let size_px = pt_to_px(spec.end_marker.size_pt, dpi);
-        let fill = spec.end_marker.fill.unwrap_or(spec.marker_fill);
-        let outward = endpoint_outward(&clipped, points, false, clip_end_pt > 0.0);
-        let placement = *clipped.last().unwrap();
-        emit_endpoint_marker(
+    ribbon_endpoint_marker(
+        scene,
+        &clipped.points,
+        points,
+        false,
+        clipped.clip_end_pt,
+        spec,
+        marker_xform,
+        shapes,
+        dpi,
+    );
+}
+
+/// Tessellate a dashed curve carrying per-vertex widths and colours:
+/// walk the dash pattern along the attributed polyline and emit one
+/// ribbon mesh per dash, so a non-solid linetype keeps the curve's
+/// varying width and colour instead of collapsing to a uniform stroke.
+///
+/// Step lengths resolve against the local line width (see
+/// [`crate::linetype::walk_linetype_variable`]); marker steps in the
+/// pattern stamp their shape at the local width and colour. Endpoint
+/// clipping and endpoint markers match [`draw_ribbon_mode_curve`].
+///
+/// No-op when fewer than two vertices survive the endpoint clip.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_dashed_ribbon_curve(
+    scene: &mut dyn SceneBuilder,
+    shapes: &ShapeRegistry,
+    dpi: f64,
+    points: &[Point],
+    half_widths: &[f64],
+    colors: &[Color],
+    space: ColorSpace,
+    spec: &OutlineSpec,
+    marker_xform: Affine,
+    marker_outline_pt: f64,
+) {
+    if points.len() < 2 {
+        return;
+    }
+    let Some(clipped) = ribbon_clip(points, half_widths, colors, space, spec, shapes, dpi) else {
+        return;
+    };
+
+    ribbon_endpoint_marker(
+        scene,
+        &clipped.points,
+        points,
+        true,
+        clipped.clip_start_pt,
+        spec,
+        marker_xform,
+        shapes,
+        dpi,
+    );
+
+    emit_dashed_ribbon(
+        scene,
+        shapes,
+        dpi,
+        marker_outline_pt,
+        &clipped.points,
+        &clipped.half_widths,
+        &clipped.colors,
+        space,
+        &spec.dash_pattern,
+        pt_to_px(spec.dash_offset_pt, dpi),
+        spec.cap,
+        spec.join,
+        spec.xform,
+        spec.pick,
+    );
+
+    ribbon_endpoint_marker(
+        scene,
+        &clipped.points,
+        points,
+        false,
+        clipped.clip_end_pt,
+        spec,
+        marker_xform,
+        shapes,
+        dpi,
+    );
+}
+
+/// Walk a dash pattern along an attributed polyline, emitting one
+/// ribbon mesh per `Dash` step and one shape stamp per `Marker` step.
+/// Shared by [`draw_dashed_ribbon_curve`] (open line / spline curves,
+/// after endpoint clipping) and `PolygonGeom`'s dashed ribbon mode
+/// (closed rings, walked with the seam at the first vertex).
+///
+/// Step lengths and marker sizes resolve against the local line width
+/// (see [`crate::linetype::walk_linetype_variable`]); stamps take the
+/// local colour for both fill and stroke, outlined at
+/// `marker_outline_pt`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_dashed_ribbon(
+    scene: &mut dyn SceneBuilder,
+    shapes: &ShapeRegistry,
+    dpi: f64,
+    marker_outline_pt: f64,
+    points: &[Point],
+    half_widths: &[f64],
+    colors: &[Color],
+    space: ColorSpace,
+    pattern: &[LinetypeStep],
+    dash_offset_px: f64,
+    cap: Cap,
+    join: Join,
+    xform: Affine,
+    pick: PickId,
+) {
+    let opts = RibbonOptions {
+        half_width: 0.0, // superseded by the per-vertex half widths
+        cap,
+        join,
+        miter_limit: RIBBON_MITER_LIMIT,
+        ..Default::default()
+    };
+    let marker_outline_px = pt_to_px(marker_outline_pt, dpi);
+    // Markers are buffered so both walk callbacks can run without two
+    // simultaneous mutable borrows of the scene, then stamped in
+    // pattern order after the dashes.
+    let mut stamps = Vec::new();
+    walk_linetype_variable(
+        points,
+        half_widths,
+        colors,
+        space,
+        pattern,
+        dash_offset_px,
+        |run| {
+            let mesh = polyline_ribbon_full(
+                &run.points,
+                Some(&run.colors),
+                Some(&run.half_widths),
+                &opts,
+            );
+            scene.draw_mesh(&mesh, xform, pick);
+        },
+        |stamp| stamps.push(stamp),
+    );
+    for stamp in stamps {
+        let Some(shape) = shapes.get(stamp.name.as_ref()) else {
+            continue;
+        };
+        let local_h = shape.bounding_box().height();
+        let scale_factor = if local_h > 0.0 {
+            stamp.width_px / local_h
+        } else {
+            stamp.width_px
+        };
+        let xform_unscaled = xform
+            * Affine::translate(stamp.point.to_vec2())
+            * Affine::rotate(stamp.tangent.atan2());
+        crate::linetype::emit_marker_shape(
             scene,
-            placement,
-            outward,
-            spec.end_marker.invert,
-            &spec.end_marker.name,
-            size_px,
-            fill,
-            spec.stroke_color,
+            shape,
+            xform_unscaled,
+            scale_factor,
+            stamp.color,
+            stamp.color,
             marker_outline_px,
-            marker_xform,
-            shapes,
-            spec.pick,
+            pick,
         );
     }
 }

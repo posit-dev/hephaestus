@@ -357,6 +357,14 @@ name = "line"
 required-features = ["vello", "png"]
 
 [[example]]
+name = "line_dashed_variable"
+required-features = ["vello", "png"]
+
+[[example]]
+name = "polygon_dashed_variable"
+required-features = ["vello", "png"]
+
+[[example]]
 name = "rect"
 required-features = ["vello", "png"]
 
@@ -558,6 +566,10 @@ required-features = ["vello", "png"]
 
 [[example]]
 name = "long_labels"
+required-features = ["vello", "png"]
+
+[[example]]
+name = "axis_overlap"
 required-features = ["vello", "png"]
 
 [[example]]

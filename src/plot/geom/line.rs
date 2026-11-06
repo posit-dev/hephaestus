@@ -87,8 +87,8 @@ use crate::stroke::{Cap, Join};
 use super::linetype;
 use super::marks::{build_marks_from_column, MarkSlot};
 use super::outline::{
-    draw_curve_outline, draw_ribbon_mode_curve, resolve_outline_spec, OutlineChannels,
-    OutlineScales,
+    draw_curve_outline, draw_dashed_ribbon_curve, draw_ribbon_mode_curve, resolve_outline_spec,
+    OutlineChannels, OutlineScales,
 };
 use super::project::{project_and_densify, PathOptions, PathVertex, VertexAttrs};
 use super::resolve::{
@@ -468,15 +468,13 @@ fn draw_one_mark(
 
     // ── Ribbon-mode decision. Upgrade to a per-vertex
     // tessellated mesh when linewidth or stroke varies within
-    // the mark. Gated to solid linetype + no corner rounding
-    // (dashed patterns and curved beziers don't compose with
-    // the polyline-only ribbon primitive).
+    // the mark. Gated to no corner rounding (curved beziers don't
+    // compose with the polyline-only ribbon primitive); a non-solid
+    // linetype is walked dash-by-dash, each dash its own mesh.
     let linewidth_varies = channel_varies_across(linewidth_ch, linewidth_scale, &mark.rows);
     let stroke_varies = channel_varies_across(stroke_ch, stroke_scale, &mark.rows)
         || channel_varies_across(stroke_opacity_ch, stroke_opacity_scale, &mark.rows);
-    let ribbon_mode = spec.dash_pattern.is_empty()
-        && corner_radius_pt == 0.0
-        && (linewidth_varies || stroke_varies);
+    let ribbon_mode = corner_radius_pt == 0.0 && (linewidth_varies || stroke_varies);
     let stroke_space = channel_color_space(stroke_scale);
 
     // A non-positive width means "nothing to stroke" only when a
@@ -584,7 +582,7 @@ fn draw_one_mark(
             run_spec.user_clip_end_pt = 0.0;
             run_spec.end_marker.name.clear();
         }
-        if ribbon_mode {
+        if ribbon_mode && run_spec.dash_pattern.is_empty() {
             draw_ribbon_mode_curve(
                 scene,
                 ctx.shapes,
@@ -595,6 +593,19 @@ fn draw_one_mark(
                 stroke_space,
                 &run_spec,
                 run_spec.xform,
+            );
+        } else if ribbon_mode {
+            draw_dashed_ribbon_curve(
+                scene,
+                ctx.shapes,
+                ctx.dpi,
+                &run.points,
+                &run.widths,
+                &run.colors,
+                stroke_space,
+                &run_spec,
+                run_spec.xform,
+                ctx.theme.geom.marker_outline_pt,
             );
         } else {
             // The shared helper handles endpoint clip, path
@@ -2223,9 +2234,9 @@ mod tests {
     }
 
     #[test]
-    fn dashed_linetype_blocks_upgrade() {
-        // linetype != solid, even with varying linewidth → stay on
-        // kurbo stroke path.
+    fn dashed_linetype_upgrades_to_per_dash_meshes() {
+        // linetype != solid with varying linewidth → one ribbon mesh
+        // per dash, no uniform stroke.
         let mut g = LineGeom::builder()
             .keys(vec!["A", "A", "A"])
             .set("x", Raw(vec![0.0_f64, 0.5, 1.0]))
@@ -2242,8 +2253,170 @@ mod tests {
             &mut scene,
             &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
         );
-        assert_eq!(stroke_count(&scene), 1);
-        assert!(mesh_ops(&scene).is_empty());
+        assert_eq!(stroke_count(&scene), 0);
+        let dashes = mesh_ops(&scene).len();
+        assert!(
+            dashes >= 2,
+            "a dashed walk emits several meshes, got {dashes}"
+        );
+    }
+
+    #[test]
+    fn dashed_variable_width_lengthens_dashes_where_the_line_is_thick() {
+        // Pattern steps are multiples of the local width: the same
+        // `Dash(6)` spans ~8px on a uniformly thin line, but reaches
+        // far further once it extends into a thick region.
+        let shapes = registry();
+        // A varying channel is required to stay on the ribbon path, so
+        // the uniform case varies stroke colour instead of width.
+        let first_dash_span = |linewidth: Vec<f64>, stroke: Channel| {
+            let mut g = LineGeom::builder()
+                .keys(vec!["A", "A", "A"])
+                .set("x", Raw(vec![0.0_f64, 0.5, 1.0]))
+                .set("y", Raw(vec![0.5_f64, 0.5, 0.5]))
+                .set("stroke", stroke)
+                .set("linewidth", linewidth)
+                .set("linetype", Value::Linetype(linetype::dashed()))
+                .build();
+            g.rebuild_diff_against_previous();
+            let scales = no_scales();
+            let mut scene = RecordingScene::default();
+            g.draw(
+                &mut scene,
+                &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+            );
+            let m = mesh_ops(&scene);
+            let min = m[0]
+                .vertices
+                .iter()
+                .map(|v| v.x)
+                .fold(f64::INFINITY, f64::min);
+            let max = m[0]
+                .vertices
+                .iter()
+                .map(|v| v.x)
+                .fold(f64::NEG_INFINITY, f64::max);
+            max - min
+        };
+        let gradient = vec![
+            Color::new([1.0, 0.0, 0.0, 1.0]),
+            Color::new([0.0, 0.0, 1.0, 1.0]),
+            Color::new([1.0, 0.0, 0.0, 1.0]),
+        ];
+        let uniform = first_dash_span(vec![1.0_f64, 1.0, 1.0], gradient.clone().into());
+        let tapering = first_dash_span(vec![1.0_f64, 20.0, 1.0], red_solid().into());
+        assert!(
+            tapering > uniform * 1.5,
+            "a dash reaching into the thick region lengthens: uniform {uniform}, tapering {tapering}"
+        );
+    }
+
+    #[test]
+    fn dashed_variable_stroke_colour_interpolates_at_dash_cuts() {
+        // A blue→red gradient under a dashed linetype: the first dash's
+        // first vertex is blue, the last dash's last vertex is red —
+        // cut points carry the interpolated colour, not one flat value.
+        let mut g = LineGeom::builder()
+            .keys(vec!["A", "A", "A"])
+            .set("x", Raw(vec![0.0_f64, 0.5, 1.0]))
+            .set("y", Raw(vec![0.5_f64, 0.5, 0.5]))
+            .set(
+                "stroke",
+                vec![
+                    Color::new([0.0, 0.0, 1.0, 1.0]),
+                    Color::new([1.0, 0.0, 0.0, 1.0]),
+                    Color::new([0.0, 0.0, 1.0, 1.0]),
+                ],
+            )
+            .set("linewidth", 2.0_f64)
+            .set("linetype", Value::Linetype(linetype::dashed()))
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let meshes = mesh_ops(&scene);
+        assert!(meshes.len() >= 2);
+        let first_head = meshes.first().unwrap().colors[0].components;
+        let mid = &meshes[meshes.len() / 2];
+        let mid_c = mid.colors[mid.colors.len() / 2].components;
+        assert!(first_head[2] > first_head[0], "head dash is blue-ish");
+        assert!(
+            mid_c[0] > first_head[0],
+            "later dash picks up red: head {first_head:?}, mid {mid_c:?}"
+        );
+    }
+
+    #[test]
+    fn dashed_pinch_point_does_not_stall_the_walk() {
+        // Width pinches to zero mid-line: the pattern ruler clamps to a
+        // floor and dashes continue past the invisible region.
+        let mut g = LineGeom::builder()
+            .keys(vec!["A", "A", "A"])
+            .set("x", Raw(vec![0.0_f64, 0.5, 1.0]))
+            .set("y", Raw(vec![0.5_f64, 0.5, 0.5]))
+            .set("stroke", red_solid())
+            .set("linewidth", vec![4.0_f64, 0.0, 4.0])
+            .set("linetype", Value::Linetype(linetype::dashed()))
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        assert!(mesh_ops(&scene).len() >= 2, "dashes span the pinch");
+    }
+
+    #[test]
+    fn dashed_marker_pattern_sizes_markers_from_the_local_width() {
+        // A marker step in the pattern stamps at the local line width:
+        // with the width ramping up, the last marker's shape is scaled
+        // larger than the first's.
+        let mut g = LineGeom::builder()
+            .keys(vec!["A", "A", "A"])
+            .set("x", Raw(vec![0.0_f64, 0.5, 1.0]))
+            .set("y", Raw(vec![0.5_f64, 0.5, 0.5]))
+            .set("stroke", red_solid())
+            .set("linewidth", vec![1.0_f64, 8.0, 16.0])
+            .set(
+                "linetype",
+                Value::Linetype(linetype::pattern([
+                    linetype::marker("circle"),
+                    linetype::gap(6.0),
+                ])),
+            )
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        // Markers are fills; the scale lives in their transform.
+        let fills: Vec<f64> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Fill { transform, .. } => Some(transform.determinant().abs().sqrt()),
+                _ => None,
+            })
+            .collect();
+        assert!(fills.len() >= 2, "several marker stamps, got {fills:?}");
+        let first = fills[0];
+        let last = *fills.last().unwrap();
+        assert!(
+            last > first * 2.0,
+            "marker scale follows the ramping width: first {first}, last {last}"
+        );
     }
 
     #[test]

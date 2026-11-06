@@ -48,8 +48,8 @@
 use std::sync::Arc;
 
 use crate::brush::Brush;
-use crate::color::Color;
-use crate::geometry::Affine;
+use crate::color::{lerp_color, Color, ColorSpace};
+use crate::geometry::{Affine, Point, Vec2};
 use crate::path::{FillRule, Path};
 use crate::pick::PickId;
 use crate::primitives::PolylineSampler;
@@ -537,6 +537,252 @@ pub(crate) fn emit_marker_shape(
     }
 }
 
+// ─── Variable-width walk ─────────────────────────────────────────────────────
+
+/// One dash slice of a variable-width linetype walk: a sub-polyline
+/// carrying the per-vertex half-widths and colours of the source curve,
+/// interpolated at the slice endpoints.
+pub(crate) struct DashRun {
+    /// Slice vertices in draw order.
+    pub points: Vec<Point>,
+    /// Per-vertex half-width in px, aligned with `points`.
+    pub half_widths: Vec<f64>,
+    /// Per-vertex colour, aligned with `points`.
+    pub colors: Vec<Color>,
+}
+
+/// One marker placement from a variable-width linetype walk, with the
+/// curve's local attributes at the stamp position.
+pub(crate) struct MarkerStamp {
+    /// Stamp centre on the curve.
+    pub point: Point,
+    /// Local curve tangent (unit vector).
+    pub tangent: Vec2,
+    /// The shape's name from the pattern.
+    pub name: Arc<str>,
+    /// Local full line width in px — the stamp's size reference and the
+    /// pattern-unit ruler at this position.
+    pub width_px: f64,
+    /// Local curve colour, for the stamp's fill and stroke.
+    pub color: Color,
+}
+
+/// Walk a linetype pattern along an attributed polyline whose width and
+/// colour vary per vertex, emitting each `Dash` step as an attributed
+/// sub-polyline and each `Marker` step as a stamp placed and sized by the
+/// curve's local attributes.
+///
+/// Pattern step lengths are multiples of the *local* line width: the
+/// pattern coordinate advances at rate `1 / w(s)` per pixel of arc length,
+/// so a dash drawn where the line is thick is proportionally longer and
+/// the pattern's rhythm follows the line's width. This reduces to the
+/// uniform-width walk when every vertex shares one width. Where the width
+/// pinches to zero the ruler clamps to a small floor so the pattern keeps
+/// advancing through the invisible region.
+///
+/// `half_widths` and `colors` are length-aligned with `points`; `space`
+/// is the colour space cut-point vertices blend through. `dash_offset_px`
+/// shifts the starting pattern coordinate, converted at the width at the
+/// curve's head. Open-polyline walk only — no gap distribution.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn walk_linetype_variable(
+    points: &[Point],
+    half_widths: &[f64],
+    colors: &[Color],
+    space: ColorSpace,
+    pattern: &[LinetypeStep],
+    dash_offset_px: f64,
+    mut dash: impl FnMut(DashRun),
+    mut marker: impl FnMut(MarkerStamp),
+) {
+    debug_assert_eq!(points.len(), half_widths.len());
+    debug_assert_eq!(points.len(), colors.len());
+    if pattern.is_empty() || points.len() < 2 {
+        return;
+    }
+
+    let n = points.len();
+    // Cumulative arc distance at each vertex.
+    let mut cum = Vec::with_capacity(n);
+    cum.push(0.0);
+    for w in points.windows(2) {
+        cum.push(cum.last().unwrap() + (w[1] - w[0]).hypot());
+    }
+    let total = *cum.last().unwrap();
+    if total <= MARKER_EPSILON {
+        return;
+    }
+
+    // Full widths, clamped to a floor so the pattern ruler can't stall at
+    // a pinch point. The floor is 1% of the mean width (trapezoid over
+    // the piecewise-linear profile), which keeps the clamp invisible for
+    // any width the eye can resolve.
+    let mean_width = points
+        .windows(2)
+        .enumerate()
+        .map(|(i, w)| (w[1] - w[0]).hypot() * (half_widths[i] + half_widths[i + 1]))
+        .sum::<f64>()
+        / total;
+    let floor = (0.01 * mean_width).max(1e-3);
+    let ruler: Vec<f64> = half_widths.iter().map(|h| (2.0 * *h).max(floor)).collect();
+
+    // Pattern coordinate at a clamped arc distance: ∫ ds / w(s), with w
+    // piecewise linear between vertices.
+    let pattern_at = |d: f64| -> f64 {
+        let d = d.clamp(0.0, total);
+        let mut acc = 0.0;
+        for i in 0..n - 1 {
+            let seg_len = cum[i + 1] - cum[i];
+            if seg_len <= MARKER_EPSILON {
+                continue;
+            }
+            let x = (d - cum[i]).min(seg_len);
+            if x <= 0.0 {
+                break;
+            }
+            let (w0, w1) = (ruler[i], ruler[i + 1]);
+            let m = (w1 - w0) / seg_len;
+            acc += if m.abs() < 1e-12 {
+                x / w0
+            } else {
+                ((w0 + m * x) / w0).ln() / m
+            };
+            if d <= cum[i + 1] {
+                break;
+            }
+        }
+        acc
+    };
+
+    // Arc distance at which the pattern coordinate reaches `target`,
+    // inverting `pattern_at` segment by segment.
+    let distance_at = |target: f64| -> f64 {
+        let mut acc = 0.0;
+        for i in 0..n - 1 {
+            let seg_len = cum[i + 1] - cum[i];
+            if seg_len <= MARKER_EPSILON {
+                continue;
+            }
+            let (w0, w1) = (ruler[i], ruler[i + 1]);
+            let m = (w1 - w0) / seg_len;
+            let seg_units = if m.abs() < 1e-12 {
+                seg_len / w0
+            } else {
+                (w1 / w0).ln() / m
+            };
+            if acc + seg_units >= target - 1e-12 {
+                let x = if m.abs() < 1e-12 {
+                    (target - acc) * w0
+                } else {
+                    w0 * ((m * (target - acc)).exp() - 1.0) / m
+                };
+                return cum[i] + x.clamp(0.0, seg_len);
+            }
+            acc += seg_units;
+        }
+        total
+    };
+
+    // Point, unclamped half-width, colour and tangent at arc distance `d`.
+    let sample = |d: f64| -> (Point, f64, Color, Vec2) {
+        let d = d.clamp(0.0, total);
+        // `cum` is non-decreasing, so binary search finds the segment;
+        // degenerate (zero-length) segments are skipped by the `<=`.
+        let i = cum
+            .partition_point(|&c| c <= d)
+            .saturating_sub(1)
+            .min(n - 2);
+        let seg_len = cum[i + 1] - cum[i];
+        let t = if seg_len > MARKER_EPSILON {
+            ((d - cum[i]) / seg_len).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let p = points[i] + (points[i + 1] - points[i]) * t;
+        let h = half_widths[i] + t * (half_widths[i + 1] - half_widths[i]);
+        let c = lerp_color(colors[i], colors[i + 1], t, space);
+        let tangent = if seg_len > MARKER_EPSILON {
+            (points[i + 1] - points[i]) / seg_len
+        } else {
+            Vec2::new(1.0, 0.0)
+        };
+        (p, h.max(0.0), c, tangent)
+    };
+
+    // The walk proceeds in pattern coordinates; `head` is the pattern
+    // coordinate of arc distance 0 after the px dash offset (resolved at
+    // the head's width).
+    let total_units = pattern_at(total);
+    let mut cursor_units = if dash_offset_px != 0.0 {
+        -(dash_offset_px / ruler[0])
+    } else {
+        0.0
+    };
+    let mut step_idx = 0usize;
+    let max_iters = (total_units.ceil().clamp(64.0, 1_000_000.0) as usize + 4) * pattern.len();
+    let mut safety = 0usize;
+    while distance_at(cursor_units.max(0.0)) < total - MARKER_EPSILON && safety < max_iters {
+        safety += 1;
+        let step = &pattern[step_idx];
+        step_idx = (step_idx + 1) % pattern.len();
+        let next_units = cursor_units
+            + match step {
+                LinetypeStep::Dash(l) | LinetypeStep::Gap(l) => *l,
+                LinetypeStep::Marker(_) => 1.0,
+            };
+        match step {
+            LinetypeStep::Dash(_) => {
+                let start_px = distance_at(cursor_units.max(0.0));
+                let end_px = distance_at(next_units).min(total);
+                if end_px > start_px + MARKER_EPSILON && next_units > 0.0 {
+                    let mut run = DashRun {
+                        points: Vec::new(),
+                        half_widths: Vec::new(),
+                        colors: Vec::new(),
+                    };
+                    let (p, h, c, _) = sample(start_px);
+                    run.points.push(p);
+                    run.half_widths.push(h);
+                    run.colors.push(c);
+                    // Interior original vertices strictly inside the slice.
+                    let lo = cum.partition_point(|&c| c <= start_px + MARKER_EPSILON);
+                    let hi = cum.partition_point(|&c| c < end_px - MARKER_EPSILON);
+                    for i in lo.max(1)..hi.min(n - 1) {
+                        run.points.push(points[i]);
+                        run.half_widths.push(half_widths[i].max(0.0));
+                        run.colors.push(colors[i]);
+                    }
+                    let (p, h, c, _) = sample(end_px);
+                    run.points.push(p);
+                    run.half_widths.push(h);
+                    run.colors.push(c);
+                    if run.points.len() >= 2 {
+                        dash(run);
+                    }
+                }
+            }
+            LinetypeStep::Marker(name) => {
+                let mid_units = cursor_units + 0.5;
+                if mid_units >= 0.0 && mid_units <= total_units + MARKER_EPSILON {
+                    let mid_px = distance_at(mid_units.max(0.0));
+                    if mid_px <= total + MARKER_EPSILON {
+                        let (p, h, c, tangent) = sample(mid_px);
+                        marker(MarkerStamp {
+                            point: p,
+                            tangent,
+                            name: name.clone(),
+                            width_px: 2.0 * h,
+                            color: c,
+                        });
+                    }
+                }
+            }
+            LinetypeStep::Gap(_) => {}
+        }
+        cursor_units = next_units;
+    }
+}
+
 /// Build a sub-polyline from `sampler` spanning arc-length `[start,
 /// end]`. Includes interior original vertices that fall strictly
 /// between start and end, so straight runs stay one LineTo each.
@@ -566,6 +812,126 @@ fn build_sub_polyline(sampler: &PolylineSampler, start: f64, end: f64) -> Path {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rgb(r: f32, g: f32, b: f32) -> Color {
+        Color::new([r, g, b, 1.0])
+    }
+
+    #[test]
+    fn variable_walk_constant_width_matches_uniform_dash_lengths() {
+        // 100px straight line, constant 2px width, [Dash(6), Gap(4)]:
+        // 12px dashes at a 20px period, the last gap absorbing the tail.
+        let points = [Point::new(0.0, 0.0), Point::new(100.0, 0.0)];
+        let widths = [1.0, 1.0];
+        let colors = [rgb(1.0, 0.0, 0.0), rgb(1.0, 0.0, 0.0)];
+        let mut runs = Vec::new();
+        walk_linetype_variable(
+            &points,
+            &widths,
+            &colors,
+            ColorSpace::default(),
+            &dashed(),
+            0.0,
+            |run| runs.push(run),
+            |_| panic!("no markers in a dashed pattern"),
+        );
+        assert_eq!(runs.len(), 5);
+        for run in &runs {
+            let span = run.points.last().unwrap().x - run.points[0].x;
+            assert!((span - 12.0).abs() < 1e-6, "dash span {span}");
+        }
+    }
+
+    #[test]
+    fn variable_walk_interpolates_attrs_at_dash_cuts() {
+        // Width and colour at a dash's cut point lerp between the
+        // bracketing vertices.
+        let points = [Point::new(0.0, 0.0), Point::new(100.0, 0.0)];
+        let widths = [1.0, 5.0];
+        let colors = [rgb(0.0, 0.0, 1.0), rgb(1.0, 0.0, 0.0)];
+        let mut runs = Vec::new();
+        walk_linetype_variable(
+            &points,
+            &widths,
+            &colors,
+            ColorSpace::default(),
+            &pattern([dash(1.0), gap(1.0)]),
+            0.0,
+            |run| runs.push(run),
+            |_| {},
+        );
+        assert!(runs.len() >= 2);
+        let first = &runs[0];
+        // First dash starts at the head's own attributes.
+        assert!((first.half_widths[0] - 1.0).abs() < 1e-9);
+        assert_eq!(first.colors[0], colors[0]);
+        // Its tail lands 2px in (Dash(1) at local width 2px); the cut
+        // width and colour are interpolated, not snapped to a vertex.
+        let tail_w = *first.half_widths.last().unwrap();
+        assert!(tail_w > 1.0 && tail_w < 5.0, "cut width {tail_w}");
+        let tail_c = first.colors.last().unwrap().components;
+        assert!(tail_c[0] > 0.0 && tail_c[2] > 0.0, "cut colour {tail_c:?}");
+    }
+
+    #[test]
+    fn variable_walk_marker_size_and_colour_are_local() {
+        // Width ramps 2px → 20px; markers stamp at the local width and
+        // colour, so the second stamp is much larger than the first.
+        let points = [Point::new(0.0, 0.0), Point::new(1000.0, 0.0)];
+        let widths = [1.0, 10.0];
+        let colors = [rgb(0.0, 0.0, 1.0), rgb(1.0, 0.0, 0.0)];
+        let mut stamps = Vec::new();
+        walk_linetype_variable(
+            &points,
+            &widths,
+            &colors,
+            ColorSpace::default(),
+            &pattern([marker("circle"), gap(40.0)]),
+            0.0,
+            |_| {},
+            |stamp| stamps.push(stamp),
+        );
+        assert!(stamps.len() >= 2);
+        let first = &stamps[0];
+        let last = stamps.last().unwrap();
+        assert!(
+            last.width_px > first.width_px * 3.0,
+            "marker width follows the ramp: {} → {}",
+            first.width_px,
+            last.width_px
+        );
+        assert!(first.color.components[2] > first.color.components[0]);
+        assert!(last.color.components[0] > last.color.components[2]);
+    }
+
+    #[test]
+    fn variable_walk_pinch_point_keeps_the_pattern_advancing() {
+        // A zero-width pinch mid-line clamps the ruler instead of
+        // stalling: dashes appear on both sides of the pinch.
+        let points = [
+            Point::new(0.0, 0.0),
+            Point::new(50.0, 0.0),
+            Point::new(100.0, 0.0),
+        ];
+        let widths = [2.0, 0.0, 2.0];
+        let colors = [rgb(1.0, 0.0, 0.0); 3];
+        let mut runs = Vec::new();
+        walk_linetype_variable(
+            &points,
+            &widths,
+            &colors,
+            ColorSpace::default(),
+            &pattern([dash(2.0), gap(2.0)]),
+            0.0,
+            |run| runs.push(run),
+            |_| {},
+        );
+        let last_tail = runs.last().unwrap().points.last().unwrap().x;
+        assert!(
+            last_tail > 90.0,
+            "the walk reaches the far side of the pinch: {last_tail}"
+        );
+    }
 
     #[test]
     fn solid_is_empty() {

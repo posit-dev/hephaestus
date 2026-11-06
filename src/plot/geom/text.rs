@@ -49,9 +49,9 @@
 //!   mark; rect dimensions come from the laid-out text plus padding.
 //!   Drawn *before* the glyphs so it sits behind the text.
 //! - `"bg_fill_opacity"` — overrides alpha of `"bg_fill"`.
-//! - `"bg_stroke"`, `"bg_stroke_opacity"`, `"bg_linewidth"` — outline
-//!   styling for the background rect. Set without `"bg_fill"` for an
-//!   unfilled outlined label.
+//! - `"bg_stroke"`, `"bg_stroke_opacity"`, `"bg_linewidth"`,
+//!   `"bg_linetype"` — outline styling for the background rect. Set
+//!   without `"bg_fill"` for an unfilled outlined label.
 //! - `"bg_corner_radius"` — uniform corner radius in pt (default 0).
 //!   A relative value (`rel(f)`) multiplies the row's resolved font
 //!   size, e.g. `rel(0.25)` for a quarter-em radius.
@@ -110,7 +110,7 @@ use crate::plot::theme::HAlign;
 use crate::plot::value::Value;
 use crate::primitives::{rect as rect_path, rounded_rect};
 use crate::scene::SceneBuilder;
-use crate::stroke::{Cap, Join, Stroke};
+use crate::stroke::{Cap, Join};
 use crate::text::rich::{
     draw_rich_text, HAnchor, RichAnchor, RichKey, RichShapeCache, RichTextRun, RichTextStyleSheet,
     RichTextWidth, VAnchor,
@@ -118,9 +118,10 @@ use crate::text::rich::{
 use crate::text::{draw_text, TextRun, TextStyle};
 
 use super::resolve::{
-    band_width_at, override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or,
-    resolve_color_channel, resolve_color_channel_or_theme, resolve_len_channel_or,
-    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, PositionMap,
+    band_width_at, draw_stroke_with_linetype, override_alpha, pt_to_px, resolve_angle_channel,
+    resolve_bool_channel_or, resolve_color_channel, resolve_color_channel_or_theme,
+    resolve_len_channel_or, resolve_linetype_channel, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, PositionMap,
 };
 use super::rich::{panel_space_transform, OutlineSheets};
 use super::state::{
@@ -165,6 +166,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("bg_stroke", ExpectedOutput::Colors),
     ("bg_stroke_opacity", ExpectedOutput::Numbers),
     ("bg_linewidth", ExpectedOutput::Numbers),
+    ("bg_linetype", ExpectedOutput::Linetypes),
     ("bg_corner_radius", ExpectedOutput::Numbers),
     ("bg_padding", ExpectedOutput::Numbers),
     ("angle", ExpectedOutput::Numbers),
@@ -309,6 +311,7 @@ impl Geom for TextGeom {
         let bg_stroke_scale = ctx.scale_for("bg_stroke");
         let bg_stroke_opacity_scale = ctx.scale_for("bg_stroke_opacity");
         let bg_linewidth_scale = ctx.scale_for("bg_linewidth");
+        let bg_linetype_scale = ctx.scale_for("bg_linetype");
         let bg_corner_radius_scale = ctx.scale_for("bg_corner_radius");
         let bg_padding_scale = ctx.scale_for("bg_padding");
         let angle_scale = ctx.scale_for("angle");
@@ -355,6 +358,7 @@ impl Geom for TextGeom {
         let bg_stroke_ch = channels.get("bg_stroke");
         let bg_stroke_opacity_ch = channels.get("bg_stroke_opacity");
         let bg_linewidth_ch = channels.get("bg_linewidth");
+        let bg_linetype_ch = channels.get("bg_linetype");
         let bg_corner_radius_ch = channels.get("bg_corner_radius");
         let bg_padding_ch = channels.get("bg_padding");
         let angle_ch = channels.get("angle");
@@ -621,16 +625,24 @@ impl Geom for TextGeom {
                             );
                             let lw_px = pt_to_px(lw_pt, ctx.dpi);
                             if lw_px.is_finite() && lw_px > 0.0 {
-                                let stroke_spec = Stroke::new(lw_px)
-                                    .with_caps(Cap::Butt)
-                                    .with_join(Join::Miter);
-                                scene.stroke(
-                                    &stroke_spec,
-                                    xform,
-                                    &Brush::Solid(sc),
-                                    None,
+                                let dash_pattern =
+                                    resolve_linetype_channel(bg_linetype_ch, bg_linetype_scale, i);
+                                draw_stroke_with_linetype(
+                                    scene,
                                     &bg_path,
+                                    /* closed */ true,
+                                    sc,
+                                    sc,
+                                    lw_px,
+                                    Cap::Butt,
+                                    Join::Miter,
+                                    &dash_pattern,
+                                    0.0,
+                                    xform,
                                     pick,
+                                    ctx.shapes,
+                                    ctx.theme.geom.marker_outline_pt,
+                                    ctx.dpi,
                                 );
                             }
                         }
@@ -821,16 +833,24 @@ impl Geom for TextGeom {
                         );
                         let lw_px = pt_to_px(lw_pt, ctx.dpi);
                         if lw_px.is_finite() && lw_px > 0.0 {
-                            let stroke_spec = Stroke::new(lw_px)
-                                .with_caps(Cap::Butt)
-                                .with_join(Join::Miter);
-                            scene.stroke(
-                                &stroke_spec,
-                                xform,
-                                &Brush::Solid(sc),
-                                None,
+                            let dash_pattern =
+                                resolve_linetype_channel(bg_linetype_ch, bg_linetype_scale, i);
+                            draw_stroke_with_linetype(
+                                scene,
                                 &bg_path,
+                                /* closed */ true,
+                                sc,
+                                sc,
+                                lw_px,
+                                Cap::Butt,
+                                Join::Miter,
+                                &dash_pattern,
+                                0.0,
+                                xform,
                                 pick,
+                                ctx.shapes,
+                                ctx.theme.geom.marker_outline_pt,
+                                ctx.dpi,
                             );
                         }
                     }
@@ -1269,6 +1289,36 @@ mod tests {
         );
         assert_eq!(fill_count(&scene), 0);
         assert_eq!(stroke_count(&scene), 1);
+    }
+
+    #[test]
+    fn bg_linetype_dashes_bg_stroke() {
+        let g = TextGeom::builder()
+            .set("x", vec![0.5_f64])
+            .set("y", vec![0.5_f64])
+            .set("text", vec!["hi"])
+            .set("bg_stroke", Color::new([0.2, 0.2, 0.2, 1.0]))
+            .set(
+                "bg_linetype",
+                Value::Linetype(crate::plot::geom::linetype::dashed()),
+            )
+            .build();
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 200.0, 100.0), &shapes, &scales),
+        );
+        let dashed = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Stroke { stroke, .. } => Some(!stroke.dash_pattern.is_empty()),
+                _ => None,
+            })
+            .any(|b| b);
+        assert!(dashed);
     }
 
     #[test]
