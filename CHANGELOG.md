@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- **Variable width and colour on non-solid linetypes.** A `LineGeom`, `BSplineGeom` or `PolygonGeom` whose `linewidth` or `stroke` varies within a mark no longer falls back to a uniform stroke when the linetype is dashed: the pattern is walked along the attributed polyline and each dash becomes its own ribbon mesh, with widths and colours interpolated at the dash cut points. Step lengths resolve against the *local* line width — a dash drawn where the line is thick is proportionally longer — and `Marker` steps stamp at the local width and colour. Polygon rings are walked with no gap distribution, so the seam is visible; it is placed at the ring's thinnest vertex, where it is least noticeable. Corner rounding and polygon `expand` still pin the mark to the uniform-stroke path. Closes #25.
+
 ### Changed
 
 - **`PlotComposition::axis_title_at(side)` is renamed to `axis_title_of(side)`.** The name now belongs to the id-targeted axis-title builder `axis_title_at(id, side, text)`; the root-composition getter had to move since Rust has no overloading. **Breaking** for callers of the getter.

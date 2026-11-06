@@ -71,7 +71,7 @@ Principle: **scale mapping is applied to the raw `Value` before the typed extrac
 
 ## Outline emission (`outline.rs`)
 
-Every stroked curve resolves through `resolve_outline_spec` into an `OutlineSpec`, then emits through one of two helpers: `draw_curve_outline` for a uniform stroke, `draw_ribbon_mode_curve` for a per-vertex-width / per-vertex-colour mesh. Both apply the same endpoint clipping (user radius + the marker's own forward extent) and stamp the start marker before / the end marker after the curve. `OutlineDefaults` narrows either theme entry (`LineDefaults` or `ShapeDefaults`) to the four fields an outline reads, so stroke-only and filled-shape geoms drive the same resolver.
+Every stroked curve resolves through `resolve_outline_spec` into an `OutlineSpec`, then emits through one of three helpers: `draw_curve_outline` for a uniform stroke, `draw_ribbon_mode_curve` for a solid per-vertex-width / per-vertex-colour mesh, or `draw_dashed_ribbon_curve` when the linetype is non-solid and width or colour varies (one mesh per dash, step lengths resolved against the local width, markers stamped at the local width and colour; `emit_dashed_ribbon` is the shared core, also used by `PolygonGeom`'s dashed ring walk). Both apply the same endpoint clipping (user radius + the marker's own forward extent) and stamp the start marker before / the end marker after the curve. `OutlineDefaults` narrows either theme entry (`LineDefaults` or `ShapeDefaults`) to the four fields an outline reads, so stroke-only and filled-shape geoms drive the same resolver.
 
 ## Hot-loop monomorphism
 
