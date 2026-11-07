@@ -295,7 +295,7 @@ pub(super) fn render_binned_stack_body(
     // ticks at each break boundary. Reuse `draw_linear_axis_at` so
     // the rail matches the cartesian / colorbar axes pixel-for-pixel.
     let (axis_start, axis_end, tick_direction) = axis_baseline(side, bar_rect);
-    let majors_owned = colorbar_majors(domain);
+    let majors_owned = colorbar_majors(domain, bar_long_edge_pt(bar_rect, dpi));
     let majors_owned = if legend.bin_spacing == BinSpacing::Equal {
         colorbar_majors_remap_equal(&majors_owned)
     } else {
@@ -452,6 +452,7 @@ pub(super) fn render_colorbar_body(
         scene,
         palette,
         geom,
+        dpi,
     );
     if let Some(frame_el) = frame {
         paint_rect_frame(scene, frame_el, palette, bar_rect, dpi, false, true);
@@ -464,7 +465,7 @@ pub(super) fn render_colorbar_body(
     // radius axes pixel-for-pixel.
     let (axis_start, axis_end, tick_direction) = axis_baseline(side, bar_rect);
 
-    let majors_owned = colorbar_majors(domain);
+    let majors_owned = colorbar_majors(domain, bar_long_edge_pt(bar_rect, dpi));
     let majors_owned = if legend.bin_spacing == BinSpacing::Equal {
         colorbar_majors_remap_equal(&majors_owned)
     } else {
@@ -552,7 +553,13 @@ fn open_end_trim(majors: &[AxisTick], open_lower: bool, open_upper: bool) -> &[A
 /// [`Direction`](crate::scales::Direction): a legend lists its domain in
 /// domain order either way, so a reversed scale shows the same labels
 /// against a mirrored ramp rather than a mirrored rail.
-fn colorbar_majors(domain: &crate::plot::scale::Scale) -> Vec<AxisTick> {
+// The bar's long edge in pt — the extent a colorbar axis's tick
+// density resolves against.
+fn bar_long_edge_pt(bar: Rect, dpi: f64) -> f64 {
+    crate::plot::chrome::linear_axis::px_to_pt((bar.y1 - bar.y0).max(bar.x1 - bar.x0), dpi)
+}
+
+fn colorbar_majors(domain: &crate::plot::scale::Scale, axis_len_pt: f64) -> Vec<AxisTick> {
     let (min, max) = match domain.input_range() {
         Some(crate::scales::input::InputRange::Continuous { min, max }) => (*min, *max),
         _ => return Vec::new(),
@@ -563,7 +570,7 @@ fn colorbar_majors(domain: &crate::plot::scale::Scale) -> Vec<AxisTick> {
     }
     // `enumerate` before the filters — see the note in `chrome::axis::draw`.
     domain
-        .breaks(DEFAULT_BREAK_COUNT)
+        .breaks_for_extent(axis_len_pt)
         .iter()
         .enumerate()
         .filter(|(_, v)| !matches!(v, Value::Null))
@@ -599,6 +606,7 @@ fn draw_gradient_bar(
     scene: &mut dyn SceneBuilder,
     palette: &crate::plot::theme::Palette,
     geom: &crate::plot::theme::GeomTheme,
+    dpi: f64,
 ) {
     let (min, max) = match domain.input_range() {
         Some(crate::scales::input::InputRange::Continuous { min, max }) => (*min, *max),
@@ -674,9 +682,10 @@ fn draw_gradient_bar(
         // per bin at the *same* colour share offsets with the
         // adjacent bin's outer stop — peniko interpolates between
         // them across zero distance, producing an instant
-        // transition (a step) in the gradient.
+        // transition (a step) in the gradient. The same extent the
+        // bar's axis resolves against, so steps and ticks coincide.
         let mut break_values: Vec<f64> = domain
-            .breaks(DEFAULT_BREAK_COUNT)
+            .breaks_for_extent(bar_long_edge_pt(*bar, dpi))
             .iter()
             .filter_map(|v| {
                 let n = v.as_number().or_else(|| v.as_temporal_f64())?;

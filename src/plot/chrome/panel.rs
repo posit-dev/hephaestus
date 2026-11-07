@@ -34,7 +34,6 @@ use crate::plot::theme::{LineElement, RectElement, Theme};
 use crate::primitives::{
     annular_wedge, arc, circle, polygon, polyline, segment, wedge, PolygonOptions, PolylineOptions,
 };
-use crate::scales::breaks::DEFAULT_BREAK_COUNT;
 use crate::scales::value::Value;
 use crate::scene::SceneBuilder;
 
@@ -136,6 +135,7 @@ pub(crate) fn draw_panel_chrome(
                 scene,
                 scale,
                 0,
+                channel_extent_pt(projection, panel, 0, dpi),
                 |frac| channel_grid_path(projection, panel, 0, frac),
                 major_0,
                 minor_0,
@@ -148,6 +148,7 @@ pub(crate) fn draw_panel_chrome(
                 scene,
                 scale,
                 1,
+                channel_extent_pt(projection, panel, 1, dpi),
                 |frac| channel_grid_path(projection, panel, 1, frac),
                 major_1,
                 minor_1,
@@ -252,6 +253,7 @@ fn draw_grid_lines<F>(
     scene: &mut dyn SceneBuilder,
     scale: &Scale,
     channel: u8,
+    axis_len_pt: f64,
     mut path_at: F,
     major: Option<&LineElement>,
     minor: Option<&LineElement>,
@@ -278,7 +280,7 @@ fn draw_grid_lines<F>(
         // `enumerate` before the guards, so the ordinal addresses the
         // scale's own break list — see the note in `chrome::axis::draw`.
         for (break_index, v) in scale
-            .minor_breaks(DEFAULT_BREAK_COUNT)
+            .minor_breaks_for_extent(axis_len_pt)
             .into_iter()
             .enumerate()
         {
@@ -299,7 +301,7 @@ fn draw_grid_lines<F>(
     }
     if let Some((stroke, brush)) = &major_resolved {
         scene.push_pick_scope(&part_scope_for_channel(PlotPart::GridMajor, channel));
-        for (break_index, v) in scale.breaks(DEFAULT_BREAK_COUNT).into_iter().enumerate() {
+        for (break_index, v) in scale.breaks_for_extent(axis_len_pt).into_iter().enumerate() {
             if matches!(v, Value::Null) {
                 continue;
             }
@@ -526,6 +528,33 @@ pub(crate) fn channel_grid_path(
         // per-break grid path is unused.
         Projection::Custom(_) => None,
     }
+}
+
+// The rendered extent a channel's break target resolves against — the
+// same physical length the channel's axis draws into, so gridlines
+// and ticks land on the same breaks. Cartesian: the panel edge along
+// the channel. Polar: the swept arc at the outer ring for the angular
+// channel, the radial span for the radius channel.
+fn channel_extent_pt(projection: &Projection, panel: Rect, channel: u8, dpi: f64) -> f64 {
+    let px = match projection {
+        Projection::Polar(p) => {
+            let g = p.geometry(panel);
+            let angular = (channel == 0) == (p.angle_channel() != "y");
+            if angular {
+                (p.theta_end() - p.theta_start()).abs() * g.r_outer
+            } else {
+                g.r_outer - g.r_inner
+            }
+        }
+        _ => {
+            if channel == 0 {
+                panel.x1 - panel.x0
+            } else {
+                panel.y1 - panel.y0
+            }
+        }
+    };
+    crate::plot::chrome::linear_axis::px_to_pt(px, dpi)
 }
 
 // ─── Cartesian ──────────────────────────────────────────────────────────────

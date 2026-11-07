@@ -204,6 +204,12 @@ pub struct Scale {
     /// and discrete / ordinal values outside the domain. Defaults to
     /// [`Value::Null`], which renders as nothing.
     na_value: Value,
+    /// How major-tick density is specified: a plain count, or a
+    /// desired physical spacing in pt that resolves to a count against
+    /// the rendered axis extent at break time (see
+    /// [`Self::breaks_for_extent`]). Defaults to
+    /// [`BreakTarget::Count`]`(`[`DEFAULT_BREAK_COUNT`]`)`.
+    break_target: BreakTarget,
     /// Break-label spec: a rename / suppress table plus a fallback
     /// template, re-rendered against whatever break set the scale
     /// currently produces. Empty ⇒ the default per-variant labels.
@@ -247,6 +253,7 @@ impl Clone for Scale {
             color_space: self.color_space,
             direction: self.direction,
             na_value: self.na_value.clone(),
+            break_target: self.break_target,
             labels: self.labels.clone(),
             generation: self.generation,
             breaks_cache: Mutex::new(None),
@@ -270,6 +277,7 @@ impl Scale {
             color_space: ColorSpace::default(),
             direction: Direction::default(),
             na_value: Value::Null,
+            break_target: BreakTarget::Count(DEFAULT_BREAK_COUNT),
             labels: LabelSpec::new(),
             generation: 0,
             breaks_cache: Mutex::new(None),
@@ -543,6 +551,30 @@ impl Scale {
     pub fn set_na_value(&mut self, na_value: Value) {
         self.na_value = na_value;
         self.bump_generation();
+    }
+
+    /// Set how major-tick density is specified. `Count` behaves as a
+    /// plain tick target; `Spacing(pt)` stays symbolic until
+    /// [`Self::breaks_for_extent`] resolves it against the rendered
+    /// axis extent, so a resize re-derives the tick count rather than
+    /// stretching a fixed one. Explicit break specs
+    /// ([`Self::with_breaks`] and friends) win either way.
+    pub fn with_break_target(mut self, target: BreakTarget) -> Self {
+        self.break_target = target;
+        self
+    }
+
+    /// Replace the break target in place. Bumps the generation
+    /// counter. See [`Self::with_break_target`].
+    pub fn set_break_target(&mut self, target: BreakTarget) {
+        self.break_target = target;
+        self.bump_generation();
+    }
+
+    /// The configured major-tick density spec. See
+    /// [`Self::with_break_target`].
+    pub fn break_target(&self) -> BreakTarget {
+        self.break_target
     }
 
     // ── Break overrides (`&mut self`; bump generation) ──
@@ -913,6 +945,26 @@ impl Scale {
             *cache = Some((self.generation, n, computed.clone(), labels));
         }
         computed
+    }
+
+    /// Breaks at the scale's configured [`BreakTarget`], resolved
+    /// against the rendered axis extent in pt. `Count` ignores the
+    /// extent; `Spacing` divides it out — approximately, since the
+    /// break algorithm still picks the positions. Explicit break
+    /// specs win either way, as in [`Self::breaks`].
+    ///
+    /// Callers that don't know an extent — a measure pass before
+    /// layout, a discrete legend — should call [`Self::breaks`] with
+    /// an explicit count instead; resolving `Spacing` without a real
+    /// extent degrades to [`DEFAULT_BREAK_COUNT`].
+    pub fn breaks_for_extent(&self, axis_len_pt: f64) -> Vec<Value> {
+        self.breaks(resolve_target(self.break_target, axis_len_pt))
+    }
+
+    /// Minor breaks matching [`Self::breaks_for_extent`]'s majors: the
+    /// target resolves against the same extent before subdivision.
+    pub fn minor_breaks_for_extent(&self, axis_len_pt: f64) -> Vec<Value> {
+        self.minor_breaks(resolve_target(self.break_target, axis_len_pt))
     }
 
     // Scale-type's automatic break algorithm — extracted so `breaks`
@@ -1307,6 +1359,7 @@ impl std::fmt::Debug for Scale {
             .field("minor_breaks_spec", &self.minor_breaks_spec)
             .field("color_space", &self.color_space)
             .field("direction", &self.direction)
+            .field("break_target", &self.break_target)
             .field("labels", &self.labels)
             .field("generation", &self.generation)
             .finish()
@@ -1491,6 +1544,60 @@ mod tests {
         assert_eq!(s.format(&Value::Number(1.0)), "1.0");
         s.set_labels(LabelSpec::new());
         assert_eq!(s.format(&Value::Number(1.0)), "1");
+    }
+
+    // ── Break targets ──
+
+    // `Value` has no `PartialEq`; break sets compare by `key_eq`.
+    fn same_breaks(a: &[Value], b: &[Value]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.key_eq(y))
+    }
+
+    #[test]
+    fn the_default_target_is_the_default_count() {
+        assert_eq!(
+            identity().break_target(),
+            BreakTarget::Count(DEFAULT_BREAK_COUNT)
+        );
+    }
+
+    #[test]
+    fn a_count_target_ignores_the_extent() {
+        let s = continuous(0.0..=100.0).with_break_target(BreakTarget::Count(4));
+        let a = s.breaks_for_extent(100.0);
+        let b = s.breaks_for_extent(10_000.0);
+        assert!(same_breaks(&a, &b));
+    }
+
+    #[test]
+    fn a_spacing_target_resolves_against_the_extent() {
+        let s = continuous(0.0..=100.0).with_break_target(BreakTarget::Spacing(10.0));
+        let tight = s.breaks_for_extent(50.0);
+        let wide = s.breaks_for_extent(500.0);
+        assert!(
+            wide.len() > tight.len(),
+            "a longer axis should take more ticks: {} vs {}",
+            tight.len(),
+            wide.len()
+        );
+    }
+
+    #[test]
+    fn a_spacing_target_without_a_usable_extent_degrades_to_the_default_count() {
+        let s = continuous(0.0..=100.0).with_break_target(BreakTarget::Spacing(10.0));
+        // Only a non-finite extent is unusable — zero resolves to the
+        // two-tick floor instead.
+        let degenerate = s.breaks_for_extent(f64::NAN);
+        let default = s.breaks(DEFAULT_BREAK_COUNT);
+        assert!(same_breaks(&degenerate, &default));
+    }
+
+    #[test]
+    fn explicit_breaks_win_over_a_spacing_target() {
+        let s = continuous(0.0..=100.0)
+            .with_break_target(BreakTarget::Spacing(1.0))
+            .with_breaks(vec![Value::Number(0.0), Value::Number(50.0)]);
+        assert_eq!(s.breaks_for_extent(500.0).len(), 2);
     }
 
     #[test]

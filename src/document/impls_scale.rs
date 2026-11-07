@@ -23,7 +23,8 @@ use super::DocumentError;
 use crate::plot::scale::{
     BreaksSpec, LabelSpec, MinorBreaksSpec, Scale, ScaleRegistry, ScaleTypeKind,
 };
-use crate::scales::breaks::{CalendarUnit, TemporalInterval};
+use crate::scales::break_target::BreakTarget;
+use crate::scales::breaks::{CalendarUnit, TemporalInterval, DEFAULT_BREAK_COUNT};
 use crate::scales::direction::Direction;
 use crate::scales::input::InputRange;
 use crate::scales::locale::Locale;
@@ -113,6 +114,10 @@ impl_codec! {
         3 => TemporalInterval(interval),
     }
 
+    enum BreakTarget {
+        0 => Count(n),
+        1 => Spacing(pt),
+    }
 }
 
 // ─── Locale ──────────────────────────────────────────────────────────────────
@@ -158,8 +163,10 @@ impl Encode for Scale {
                 .template()
                 .map(|t| t.source().to_string())
                 .encode(w);
-            // Trailing: readers from before this field existed skip it.
+            // Trailing: readers from before these fields existed skip
+            // them.
             self.na_value().clone().encode(w);
+            self.break_target().encode(w);
             // `generation` and the break memo are not written: the counter
             // only keys a cache that starts empty, so a rebuilt scale
             // recomputes rather than trusting a number from the wire.
@@ -189,12 +196,19 @@ impl Decode for Scale {
             let direction = Direction::decode(r)?;
             let renames = Vec::<(Value, Option<String>)>::decode(r)?;
             let template = Option::<String>::decode(r)?;
-            // A document written before `na_value` existed ends the
-            // record here; missing data mapped to `Value::Null` then.
+            // Trailing fields, oldest first. A document written before
+            // `na_value` existed ends the record here; missing data
+            // mapped to `Value::Null` and the target was the default
+            // count then.
             let na_value = if r.pos() < end {
                 Value::decode(r)?
             } else {
                 Value::Null
+            };
+            let break_target = if r.pos() < end {
+                BreakTarget::decode(r)?
+            } else {
+                BreakTarget::Count(DEFAULT_BREAK_COUNT)
             };
 
             let mut labels = LabelSpec::new();
@@ -214,6 +228,7 @@ impl Decode for Scale {
 
             let mut s = Scale::new(kind);
             s.set_na_value(na_value);
+            s.set_break_target(break_target);
             s.set_labels(labels);
             s.set_transform(transform.kind);
             s.set_color_space(color_space);
@@ -322,6 +337,7 @@ mod tests {
         assert_eq!(a.color_space(), b.color_space());
         assert_eq!(a.direction(), b.direction());
         assert!(a.na_value().key_eq(b.na_value()));
+        assert_eq!(a.break_target(), b.break_target());
         // `LabelSpec` has no `PartialEq`; the wire form is the
         // comparison — same rename pairs, same template source.
         let renames_of = |s: &Scale| {
@@ -445,6 +461,7 @@ mod tests {
             .range_colors(vec![rgba(0.0, 0.0, 0.0, 1.0), rgba(1.0, 1.0, 1.0, 1.0)])
             .with_color_space(ColorSpace::Srgb)
             .with_direction(Direction::Reversed)
+            .with_break_target(BreakTarget::Spacing(24.0))
             .with_breaks(vec![Value::Number(1.0), Value::Number(10.0)])
             .with_minor_count(4);
         assert_same_config(&roundtrip(&s), &s);

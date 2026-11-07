@@ -53,8 +53,10 @@ pub fn draw_radius_axis(
     if g.r_outer <= 0.0 {
         return;
     }
-    let majors = axis_ticks(&scale.breaks(DEFAULT_BREAK_COUNT), scale);
-    let minors = axis_minor_ticks(scale, DEFAULT_BREAK_COUNT);
+    // The spoke's rendered length is this axis's extent.
+    let axis_len_pt = crate::plot::chrome::linear_axis::px_to_pt(g.r_outer - g.r_inner, dpi);
+    let majors = axis_ticks(&scale.breaks_for_extent(axis_len_pt), scale);
+    let minors = axis_minor_ticks(&scale.minor_breaks_for_extent(axis_len_pt), scale);
 
     let (ux, uy) = polar.unit_position(theta_frac);
     let start = Point::new(g.cx + g.r_inner * ux, g.cy - g.r_inner * uy);
@@ -153,6 +155,10 @@ pub fn draw_angular_axis(
     let span = polar.theta_end() - polar.theta_start();
     let is_full_circle = (span.abs() - std::f64::consts::TAU).abs() < 1e-6;
 
+    // The angular axis runs along the ring; its extent is the swept
+    // arc length at the ring's radius.
+    let axis_len_pt = crate::plot::chrome::linear_axis::px_to_pt(span.abs() * ring_r, dpi);
+
     // Resolve from theme: angular axis = channel 0; outer ring is
     // side 0 (the conventional "primary" side), inner ring is side 1.
     let side_idx = match ring {
@@ -176,7 +182,7 @@ pub fn draw_angular_axis(
     // `enumerate` before the guards, so the ordinal addresses the scale's own
     // break list — see the note in `chrome::axis::draw`.
     for (break_index, v) in scale
-        .minor_breaks(DEFAULT_BREAK_COUNT)
+        .minor_breaks_for_extent(axis_len_pt)
         .into_iter()
         .enumerate()
     {
@@ -216,7 +222,7 @@ pub fn draw_angular_axis(
         }
     }
 
-    for (break_index, v) in scale.breaks(DEFAULT_BREAK_COUNT).iter().enumerate() {
+    for (break_index, v) in scale.breaks_for_extent(axis_len_pt).iter().enumerate() {
         if matches!(v, Value::Null) {
             continue;
         }

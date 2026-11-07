@@ -178,6 +178,11 @@ pub(crate) struct AxisMeasure {
 
 impl AxisMeasure {
     fn new(scale: &Scale, side: AxisSide, dpi: f64, chrome_style: &AxisChromeStyle) -> Self {
+        // The rail's extent isn't known until layout, so measure
+        // shapes the default-count set; a spacing target resolves at
+        // draw. The reservation is still sound — a different break
+        // count changes how many labels there are, not how big each
+        // is.
         let breaks = scale.breaks(DEFAULT_BREAK_COUNT);
         let mut max_w: f64 = 0.0;
         let mut max_h: f64 = 0.0;
@@ -299,13 +304,22 @@ pub fn draw(
     theme: &Theme,
     images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
 ) {
-    let breaks = scale.breaks(DEFAULT_BREAK_COUNT);
-    if breaks.is_empty() {
-        return;
-    }
     let panel_w = panel_rect.x1 - panel_rect.x0;
     let panel_h = panel_rect.y1 - panel_rect.y0;
     if panel_w <= 0.0 || panel_h <= 0.0 {
+        return;
+    }
+    // Tick density responds to the rail this draw actually has; a
+    // count target ignores the extent by construction.
+    let axis_len_pt = crate::plot::chrome::linear_axis::px_to_pt(
+        match side {
+            AxisSide::Bottom | AxisSide::Top => panel_w,
+            AxisSide::Left | AxisSide::Right => panel_h,
+        },
+        dpi,
+    );
+    let breaks = scale.breaks_for_extent(axis_len_pt);
+    if breaks.is_empty() {
         return;
     }
 
@@ -337,7 +351,7 @@ pub fn draw(
     };
 
     let majors = axis_ticks(&breaks, scale);
-    let minors = axis_minor_ticks(scale, DEFAULT_BREAK_COUNT);
+    let minors = axis_minor_ticks(&scale.minor_breaks_for_extent(axis_len_pt), scale);
 
     // Resolve the (channel, side) axis from the theme. Channel
     // is determined by which axis side this is — Bottom/Top

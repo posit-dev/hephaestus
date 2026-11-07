@@ -95,6 +95,13 @@ pub(crate) fn pt_to_px(pt: f64, dpi: f64) -> f64 {
     pt * dpi / 72.0
 }
 
+/// Convert px to pt at the current dpi — the inverse of
+/// [`pt_to_px`], for handing a rendered extent to something specified
+/// in pt (a `BreakTarget::Spacing`).
+pub(crate) fn px_to_pt(px: f64, dpi: f64) -> f64 {
+    px * 72.0 / dpi
+}
+
 /// Resolved styling for one linear-axis draw call. Carries concrete
 /// colors + widths (palette already applied) so the draw routine
 /// itself touches no theme types.
@@ -287,13 +294,15 @@ pub(crate) fn axis_ticks(
 /// The minor ticks a scale contributes, as `(break_index, frac)`. Indexed
 /// against the scale's minor-break list exactly as [`axis_ticks`] is against
 /// its major one.
-pub(crate) fn axis_minor_ticks(scale: &crate::plot::scale::Scale, n: usize) -> Vec<(usize, f64)> {
-    scale
-        .minor_breaks(n)
-        .into_iter()
+pub(crate) fn axis_minor_ticks(
+    minors: &[crate::scales::value::Value],
+    scale: &crate::plot::scale::Scale,
+) -> Vec<(usize, f64)> {
+    minors
+        .iter()
         .enumerate()
         .filter(|(_, v)| !matches!(v, crate::scales::value::Value::Null))
-        .filter_map(|(i, v)| scale.map_break(&v).as_number().map(|f| (i, f)))
+        .filter_map(|(i, v)| scale.map_break(v).as_number().map(|f| (i, f)))
         .filter(|(_, f)| f.is_finite())
         .collect()
 }
