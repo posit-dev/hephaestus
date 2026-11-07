@@ -193,7 +193,6 @@ pub fn legend_stack_natural_size(
                 theme,
                 &theme.geom,
                 gap_px,
-                &theme.locale,
                 crate::plot::chrome::root_text_pt(theme),
             )
         })
@@ -238,7 +237,6 @@ pub fn legend_measure(
         theme,
         &theme.geom,
         legend_gap_px(theme, dpi),
-        &theme.locale,
         crate::plot::chrome::root_text_pt(theme),
     ))
 }
@@ -272,7 +270,6 @@ pub fn legend_stack_measure(
                 theme,
                 &theme.geom,
                 panel_gap_px,
-                &theme.locale,
                 crate::plot::chrome::root_text_pt(theme),
             )
         })
@@ -321,7 +318,6 @@ pub fn render_legend_stack(
                     theme,
                     &theme.geom,
                     panel_gap_px,
-                    &theme.locale,
                     crate::plot::chrome::root_text_pt(theme),
                 ),
             )
@@ -389,7 +385,6 @@ pub fn render_legend(
         theme,
         &theme.geom,
         legend_gap_px(theme, dpi),
-        &theme.locale,
         crate::plot::chrome::root_text_pt(theme),
     );
     render_legend_with_measure(
@@ -443,7 +438,6 @@ pub(crate) fn render_legend_with_measure(
             lt,
             theme,
             &theme.geom,
-            &theme.locale,
             crate::plot::chrome::root_text_pt(theme),
         ),
         LegendBody::Stack(stack) => render_stack_body(
@@ -459,7 +453,6 @@ pub(crate) fn render_legend_with_measure(
             lt,
             theme,
             &theme.geom,
-            &theme.locale,
             crate::plot::chrome::root_text_pt(theme),
         ),
         LegendBody::Colorbar(spec) => render_colorbar_body(
@@ -474,7 +467,6 @@ pub(crate) fn render_legend_with_measure(
             lt,
             theme,
             &theme.geom,
-            &theme.locale,
             crate::plot::chrome::root_text_pt(theme),
         ),
     }
@@ -679,7 +671,6 @@ fn render_stack_body(
     lt: &crate::plot::theme::LegendTheme,
     theme: &crate::plot::theme::Theme,
     geom: &crate::plot::theme::GeomTheme,
-    locale: &crate::scales::Locale,
     root_pt: f64,
 ) {
     let palette = &theme.palette;
@@ -783,7 +774,7 @@ fn render_stack_body(
             scene.pop_pick_scope();
         }
         if let Some(paint) = &styles.label {
-            let label = domain.format(v, locale);
+            let label = domain.format(v);
             let anchor = Point::new(label_rect.x0, (label_rect.y0 + label_rect.y1) * 0.5);
             scene.push_pick_scope(&part_scope(PlotPart::LegendLabel));
             draw_axis_label(

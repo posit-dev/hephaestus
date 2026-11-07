@@ -50,7 +50,7 @@ pub use pick::{PlotPart, PlotPath};
 pub use plot::{AspectMode, GeomId, Plot};
 pub use projection::{ChromeStrategy, CustomProjection, Projection};
 pub use scale::{
-    AxisSide, BinEdgeError, FormatSpec, InputRange, LegendSide, OutputRange, Scale, ScaleRegistry,
+    AxisSide, BinEdgeError, InputRange, LabelSpec, LegendSide, OutputRange, Scale, ScaleRegistry,
     ScaleTypeKind, Transform, TransformKind,
 };
 pub use value::{DataColumn, Date, DateTime, Duration, LinetypeStep, Time, Value};

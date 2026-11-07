@@ -137,7 +137,6 @@ pub(super) fn render_binned_stack_body(
     lt: &crate::plot::theme::LegendTheme,
     theme: &crate::plot::theme::Theme,
     geom: &crate::plot::theme::GeomTheme,
-    locale: &crate::scales::Locale,
     root_pt: f64,
 ) {
     let palette = &theme.palette;
@@ -296,7 +295,7 @@ pub(super) fn render_binned_stack_body(
     // ticks at each break boundary. Reuse `draw_linear_axis_at` so
     // the rail matches the cartesian / colorbar axes pixel-for-pixel.
     let (axis_start, axis_end, tick_direction) = axis_baseline(side, bar_rect);
-    let majors_owned = colorbar_majors(domain, locale);
+    let majors_owned = colorbar_majors(domain);
     let majors_owned = if legend.bin_spacing == BinSpacing::Equal {
         colorbar_majors_remap_equal(&majors_owned)
     } else {
@@ -340,7 +339,6 @@ pub(super) fn render_colorbar_body(
     lt: &crate::plot::theme::LegendTheme,
     theme: &crate::plot::theme::Theme,
     geom: &crate::plot::theme::GeomTheme,
-    locale: &crate::scales::Locale,
     root_pt: f64,
 ) {
     let palette = &theme.palette;
@@ -466,7 +464,7 @@ pub(super) fn render_colorbar_body(
     // radius axes pixel-for-pixel.
     let (axis_start, axis_end, tick_direction) = axis_baseline(side, bar_rect);
 
-    let majors_owned = colorbar_majors(domain, locale);
+    let majors_owned = colorbar_majors(domain);
     let majors_owned = if legend.bin_spacing == BinSpacing::Equal {
         colorbar_majors_remap_equal(&majors_owned)
     } else {
@@ -554,10 +552,7 @@ fn open_end_trim(majors: &[AxisTick], open_lower: bool, open_upper: bool) -> &[A
 /// [`Direction`](crate::scales::Direction): a legend lists its domain in
 /// domain order either way, so a reversed scale shows the same labels
 /// against a mirrored ramp rather than a mirrored rail.
-fn colorbar_majors(
-    domain: &crate::plot::scale::Scale,
-    locale: &crate::scales::Locale,
-) -> Vec<AxisTick> {
+fn colorbar_majors(domain: &crate::plot::scale::Scale) -> Vec<AxisTick> {
     let (min, max) = match domain.input_range() {
         Some(crate::scales::input::InputRange::Continuous { min, max }) => (*min, *max),
         _ => return Vec::new(),
@@ -580,7 +575,7 @@ fn colorbar_majors(
             Some(AxisTick {
                 break_index,
                 frac: (n - min) / span,
-                label: domain.format(v, locale),
+                label: domain.format(v),
             })
         })
         .collect()

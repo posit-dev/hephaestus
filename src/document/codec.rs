@@ -167,8 +167,8 @@ impl Writer {
 pub(crate) struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
-    /// Registries that resolve the names a document can only refer to
-    /// indirectly — formatters and geom kinds.
+    /// Registry that resolves the names a document can only refer to
+    /// indirectly — geom kinds.
     ctx: &'a super::ReadContext,
     /// Values read from their own chunk and referenced by index
     /// afterwards. One `Arc` per entry, handed out to every reference,
@@ -1113,25 +1113,6 @@ pub(crate) mod test_support {
         t.set_sheets(sheets);
         t.set_strings(strings);
         t
-    }
-
-    /// [`roundtrip`] against a caller-supplied context, for values whose
-    /// decode resolves a name through it.
-    pub(crate) fn roundtrip_with_context<T: Encode + Decode>(
-        v: &T,
-        ctx: &super::super::ReadContext,
-    ) -> T {
-        let mut w = Writer::new();
-        v.encode(&mut w);
-        let geometries = w.tables().geometries().to_vec();
-        let sheets = w.tables().sheets().to_vec();
-        let strings = w.tables().strings().to_vec();
-        let bytes = w.finish();
-
-        let mut r = Reader::with_tables(&bytes, ctx, tables(geometries, sheets, strings));
-        let out = T::decode(&mut r).expect("decoding what we just encoded");
-        assert!(r.is_empty(), "decode left {} bytes unread", r.remaining());
-        out
     }
 
     /// [`roundtrip`] plus an equality check, for types with `PartialEq`.

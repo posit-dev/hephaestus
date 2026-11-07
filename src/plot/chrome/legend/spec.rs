@@ -423,12 +423,7 @@ impl Legend {
     /// aesthetic resolving to the same value along the bar (see
     /// [`Scale::visual_equivalent_to`](crate::plot::scale::Scale::visual_equivalent_to)),
     /// since folding a colorbar keeps one bar and drops the other.
-    pub fn is_compatible_with(
-        &self,
-        other: &Legend,
-        registry: &ScaleRegistry,
-        locale: &crate::scales::Locale,
-    ) -> bool {
+    pub fn is_compatible_with(&self, other: &Legend, registry: &ScaleRegistry) -> bool {
         if self.side != other.side
             || self.title != other.title
             || self.theme_variant != other.theme_variant
@@ -449,8 +444,7 @@ impl Legend {
                         (a, &self.domain_scale),
                         (b, &other.domain_scale),
                         registry,
-                        locale,
-                    )
+                                )
             }
             _ => false,
         };
@@ -462,7 +456,7 @@ impl Legend {
                 registry.get(&self.domain_scale),
                 registry.get(&other.domain_scale),
             ) {
-                (Some(a), Some(b)) => a.legend_equivalent_to(b, locale),
+                (Some(a), Some(b)) => a.legend_equivalent_to(b),
                 _ => false,
             }
     }
@@ -508,7 +502,6 @@ fn colorbar_gradients_agree(
     a: (&ColorbarSpec, &str),
     b: (&ColorbarSpec, &str),
     registry: &ScaleRegistry,
-    locale: &crate::scales::Locale,
 ) -> bool {
     let (mine, theirs) = (stop_sources(a.0, a.1), stop_sources(b.0, b.1));
     mine.len() == theirs.len()
@@ -516,7 +509,7 @@ fn colorbar_gradients_agree(
             .iter()
             .zip(theirs.iter())
             .all(|((a_aes, a_src), (b_aes, b_src))| {
-                a_aes == b_aes && stop_sources_agree(a_src, b_src, registry, locale)
+                a_aes == b_aes && stop_sources_agree(a_src, b_src, registry)
             })
 }
 
@@ -524,17 +517,12 @@ fn colorbar_gradients_agree(
 /// value. Scales match by name, or by mapping inputs to the same
 /// outputs over the same domain; an unresolvable name only matches the
 /// identical name.
-fn stop_sources_agree(
-    a: &StopSource,
-    b: &StopSource,
-    registry: &ScaleRegistry,
-    locale: &crate::scales::Locale,
-) -> bool {
+fn stop_sources_agree(a: &StopSource, b: &StopSource, registry: &ScaleRegistry) -> bool {
     match (a, b) {
         (StopSource::Scale(x), StopSource::Scale(y)) => {
             x == y
                 || match (registry.get(x), registry.get(y)) {
-                    (Some(sx), Some(sy)) => sx.visual_equivalent_to(sy, locale),
+                    (Some(sx), Some(sy)) => sx.visual_equivalent_to(sy),
                     _ => false,
                 }
         }
@@ -552,16 +540,12 @@ fn stop_sources_agree(
 /// Collapse runs per render rather than at attach time, so it reflects
 /// whatever the scales hold now — registering or retraining a scale
 /// after the legends were attached still merges them.
-pub fn collapse_legends(
-    legends: &[Legend],
-    registry: &ScaleRegistry,
-    locale: &crate::scales::Locale,
-) -> Vec<Legend> {
+pub fn collapse_legends(legends: &[Legend], registry: &ScaleRegistry) -> Vec<Legend> {
     let mut out: Vec<Legend> = Vec::with_capacity(legends.len());
     for legend in legends {
         let target = legend.merge.then(|| {
             out.iter()
-                .position(|kept| kept.is_compatible_with(legend, registry, locale))
+                .position(|kept| kept.is_compatible_with(legend, registry))
         });
         match target.flatten() {
             Some(idx) => {
@@ -853,7 +837,6 @@ mod tests {
     use super::*;
     use crate::color::rgb;
     use crate::plot::scale;
-    use crate::scales::Locale;
 
     fn build_registry() -> ScaleRegistry {
         let mut reg = ScaleRegistry::new();
@@ -980,12 +963,11 @@ mod tests {
     #[test]
     fn legend_is_compatible_with_matching_triple() {
         let reg = build_registry();
-        let loc = Locale::default();
         let a = Legend::new("x").side(LegendSide::Right).title("T");
         let b = Legend::new("x").side(LegendSide::Right).title("T");
         let c = Legend::new("x").side(LegendSide::Right).title("U");
-        assert!(a.is_compatible_with(&b, &reg, &loc));
-        assert!(!a.is_compatible_with(&c, &reg, &loc));
+        assert!(a.is_compatible_with(&b, &reg));
+        assert!(!a.is_compatible_with(&c, &reg));
     }
 
     #[test]
@@ -994,10 +976,9 @@ mod tests {
         // entries trained to the same three categories; only their
         // output ranges differ.
         let reg = build_registry();
-        let loc = Locale::default();
         let color = Legend::new("category_color").title("Category");
         let size = Legend::new("category_size").title("Category");
-        assert!(color.is_compatible_with(&size, &reg, &loc));
+        assert!(color.is_compatible_with(&size, &reg));
     }
 
     #[test]
@@ -1008,27 +989,24 @@ mod tests {
             scale::discrete([Value::String(Arc::from("A")), Value::String(Arc::from("B"))])
                 .range_numbers([4.0, 8.0]),
         );
-        let loc = Locale::default();
         let three = Legend::new("category_color").title("Category");
         let two = Legend::new("other_cats").title("Category");
-        assert!(!three.is_compatible_with(&two, &reg, &loc));
+        assert!(!three.is_compatible_with(&two, &reg));
     }
 
     #[test]
     fn unresolvable_domain_scales_only_match_by_name() {
         let reg = build_registry();
-        let loc = Locale::default();
         let a = Legend::new("missing").title("T");
         let same = Legend::new("missing").title("T");
         let other = Legend::new("also_missing").title("T");
-        assert!(a.is_compatible_with(&same, &reg, &loc));
-        assert!(!a.is_compatible_with(&other, &reg, &loc));
+        assert!(a.is_compatible_with(&same, &reg));
+        assert!(!a.is_compatible_with(&other, &reg));
     }
 
     #[test]
     fn collapse_folds_keys_of_equivalent_scales() {
         let reg = build_registry();
-        let loc = Locale::default();
         let legends = vec![
             Legend::new("category_color")
                 .title("Category")
@@ -1037,7 +1015,7 @@ mod tests {
                 .title("Category")
                 .key(LegendKeySpec::point().scaled("size", "category_size")),
         ];
-        let collapsed = collapse_legends(&legends, &reg, &loc);
+        let collapsed = collapse_legends(&legends, &reg);
         assert_eq!(collapsed.len(), 1);
         let LegendBody::Stack(stack) = &collapsed[0].body else {
             panic!("stack body");
@@ -1051,7 +1029,6 @@ mod tests {
     #[test]
     fn collapse_keeps_non_merging_legends_apart() {
         let reg = build_registry();
-        let loc = Locale::default();
         let mut second = Legend::new("category_size")
             .title("Category")
             .key(LegendKeySpec::point().scaled("size", "category_size"));
@@ -1062,7 +1039,7 @@ mod tests {
                 .key(LegendKeySpec::rect().scaled("fill", "category_color")),
             second,
         ];
-        assert_eq!(collapse_legends(&legends, &reg, &loc).len(), 2);
+        assert_eq!(collapse_legends(&legends, &reg).len(), 2);
     }
 
     /// Two continuous colour scales over one domain: `ramp` and
@@ -1090,12 +1067,11 @@ mod tests {
     #[test]
     fn collapse_folds_identical_colorbars() {
         let reg = colorbar_registry();
-        let loc = Locale::default();
         let legends = vec![
             Legend::colorbar("ramp").title("Value"),
             Legend::colorbar("ramp").title("Value"),
         ];
-        let collapsed = collapse_legends(&legends, &reg, &loc);
+        let collapsed = collapse_legends(&legends, &reg);
         assert_eq!(collapsed.len(), 1);
         assert!(matches!(collapsed[0].body, LegendBody::Colorbar(_)));
     }
@@ -1105,76 +1081,67 @@ mod tests {
         // Separate registry entries, same domain and same palette — the
         // surviving bar stands in for both.
         let reg = colorbar_registry();
-        let loc = Locale::default();
         let legends = vec![
             Legend::colorbar("ramp").title("Value"),
             Legend::colorbar("same_ramp").title("Value"),
         ];
-        assert_eq!(collapse_legends(&legends, &reg, &loc).len(), 1);
+        assert_eq!(collapse_legends(&legends, &reg).len(), 1);
     }
 
     #[test]
     fn collapse_keeps_colorbars_with_different_palettes_apart() {
         let reg = colorbar_registry();
-        let loc = Locale::default();
         let legends = vec![
             Legend::colorbar("ramp").title("Value"),
             Legend::colorbar("other_ramp").title("Value"),
         ];
-        assert_eq!(collapse_legends(&legends, &reg, &loc).len(), 2);
+        assert_eq!(collapse_legends(&legends, &reg).len(), 2);
     }
 
     #[test]
     fn collapse_keeps_colorbars_with_different_bindings_apart() {
         let reg = colorbar_registry();
-        let loc = Locale::default();
         let plain = Legend::colorbar("ramp").title("Value");
         let faded = Legend::colorbar("ramp")
             .title("Value")
             .scaled("fill_opacity", "ramp_opacity");
-        assert!(!plain.is_compatible_with(&faded, &reg, &loc));
+        assert!(!plain.is_compatible_with(&faded, &reg));
         let also_faded = Legend::colorbar("ramp")
             .title("Value")
             .scaled("fill_opacity", "ramp_opacity");
-        assert!(faded.is_compatible_with(&also_faded, &reg, &loc));
+        assert!(faded.is_compatible_with(&also_faded, &reg));
     }
 
     #[test]
     fn collapse_keeps_stepped_and_smooth_colorbars_apart() {
         let reg = colorbar_registry();
-        let loc = Locale::default();
         let smooth = Legend::colorbar("ramp").title("Value");
         let stepped = Legend::colorbar("ramp").title("Value").binned();
-        assert!(!smooth.is_compatible_with(&stepped, &reg, &loc));
+        assert!(!smooth.is_compatible_with(&stepped, &reg));
         // `samples` is ignored on a stepped bar, so it can't keep two
         // otherwise-identical stepped colorbars apart.
         assert!(stepped.is_compatible_with(
             &Legend::colorbar("ramp").title("Value").binned().samples(8),
             &reg,
-            &loc
         ));
-        assert!(!smooth.is_compatible_with(
-            &Legend::colorbar("ramp").title("Value").samples(8),
-            &reg,
-            &loc
-        ));
+        assert!(
+            !smooth.is_compatible_with(&Legend::colorbar("ramp").title("Value").samples(8), &reg,)
+        );
     }
 
     #[test]
     fn collapse_keeps_a_colorbar_and_a_stack_apart() {
         let reg = build_registry();
-        let loc = Locale::default();
         let bar = Legend::colorbar("category_color").title("Category");
         let stack = Legend::new("category_color")
             .title("Category")
             .key(LegendKeySpec::rect().scaled("fill", "category_color"));
-        assert!(!bar.is_compatible_with(&stack, &reg, &loc));
+        assert!(!bar.is_compatible_with(&stack, &reg));
     }
 
     #[test]
     fn collapse_separates_legends_with_different_theme_variants() {
         let reg = build_registry();
-        let loc = Locale::default();
         let legends = vec![
             Legend::new("category_color")
                 .title("Category")
@@ -1184,17 +1151,16 @@ mod tests {
                 .title("Category")
                 .key(LegendKeySpec::point().scaled("size", "category_size")),
         ];
-        assert_eq!(collapse_legends(&legends, &reg, &loc).len(), 2);
+        assert_eq!(collapse_legends(&legends, &reg).len(), 2);
     }
     #[test]
     fn legends_with_different_open_flags_are_not_compatible() {
         let reg = build_registry();
-        let loc = Locale::default();
         let a = Legend::new("x").open_lower();
         let b = Legend::new("x");
-        assert!(!a.is_compatible_with(&b, &reg, &loc));
+        assert!(!a.is_compatible_with(&b, &reg));
         let c = Legend::new("x").open_upper();
-        assert!(!a.is_compatible_with(&c, &reg, &loc));
+        assert!(!a.is_compatible_with(&c, &reg));
     }
 
     #[test]
@@ -1202,7 +1168,7 @@ mod tests {
         let reg = build_registry();
         let a = Legend::new("x").equal_bins();
         let b = Legend::new("x");
-        assert!(!a.is_compatible_with(&b, &reg, &Locale::default()));
+        assert!(!a.is_compatible_with(&b, &reg));
     }
 
     #[test]

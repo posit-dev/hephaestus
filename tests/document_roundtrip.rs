@@ -418,69 +418,29 @@ fn every_panel_of_the_test_composition_actually_draws_something() {
 
 // ─── Refusals ────────────────────────────────────────────────────────────────
 
-/// An anonymous formatter closure can't be named, so it can't be
-/// reproduced. The write says so rather than quietly dropping it.
+/// A label spec is plain data, so it round-trips whole: the reader
+/// renders the labels the writer saw with nothing to resolve.
 #[test]
-fn an_anonymous_formatter_is_refused_and_names_the_scale() {
-    let comp = || Patch::new("p");
-    let mut view = PlotComposition::new(&stack(comp(), Patch::new("q")))
-        .add_scale("t", scale::continuous(0.0..=1.0));
-    view.update_scale("t", |s| s.set_format(|_, _| "custom".to_string()));
-
-    match write_composition(&view, &WriteOptions::new()) {
-        Err(e) => {
-            let msg = e.to_string();
-            assert!(msg.contains("\"t\""), "error should name the scale: {msg}");
-            assert!(
-                msg.contains("with_named_format"),
-                "error should say how to fix it: {msg}"
-            );
-        }
-        Ok(_) => panic!("an anonymous formatter should be refused"),
-    }
-}
-
-/// The same plot writes once `lossy` is set, and the scale falls back to
-/// default labels rather than the closure's output.
-#[test]
-fn lossy_mode_writes_an_anonymous_formatter_as_default_labels() {
-    use hephaestus::plot::FormatSpec;
-    use hephaestus::scales::locale::Locale;
-    use hephaestus::scales::value::Value;
-
-    let comp = || stack(Patch::new("p"), Patch::new("q"));
-    let mut view = PlotComposition::new(&comp()).add_scale("t", scale::continuous(0.0..=100.0));
-    view.update_scale("t", |s| s.set_format(|_, _| "custom".to_string()));
-
-    let bytes = write_composition(&view, &WriteOptions::new().lossy(true))
-        .expect("lossy mode should write it");
-    let reloaded = read_composition(&bytes, &ReadContext::new()).expect("readable");
-    let scale = reloaded.scale("t").expect("the scale survives");
-    assert_eq!(scale.format_spec(), FormatSpec::Default);
-    assert_eq!(scale.format(&Value::Number(50.0), &Locale::EN_US), "50");
-}
-
-/// A named formatter round-trips when the reader is told what the name
-/// means — the path a host is expected to use.
-#[test]
-fn a_named_formatter_round_trips_through_the_read_context() {
-    use hephaestus::plot::FormatSpec;
-    use hephaestus::scales::locale::Locale;
+fn a_label_spec_round_trips_whole() {
+    use hephaestus::plot::LabelSpec;
     use hephaestus::scales::value::Value;
 
     let comp = || stack(Patch::new("p"), Patch::new("q"));
     let mut view = PlotComposition::new(&comp()).add_scale("t", scale::continuous(0.0..=100.0));
     view.update_scale("t", |s| {
-        s.set_named_format("pct", |v, _| format!("{}%", v.as_number().unwrap_or(0.0)));
+        let mut spec = LabelSpec::new();
+        spec.rename(Value::Number(0.0), "nil")
+            .suppress(Value::Number(100.0))
+            .set_template("{}%");
+        s.set_labels(spec);
     });
 
-    let bytes = write_composition(&view, &WriteOptions::new()).expect("a named formatter is fine");
-    let ctx = ReadContext::new()
-        .with_formatter("pct", |v, _| format!("{}%", v.as_number().unwrap_or(0.0)));
-    let reloaded = read_composition(&bytes, &ctx).expect("readable");
+    let bytes = write_composition(&view, &WriteOptions::new()).expect("a label spec is data");
+    let reloaded = read_composition(&bytes, &ReadContext::new()).expect("readable");
     let scale = reloaded.scale("t").expect("the scale survives");
-    assert_eq!(scale.format_spec(), FormatSpec::Named("pct".into()));
-    assert_eq!(scale.format(&Value::Number(50.0), &Locale::EN_US), "50%");
+    assert_eq!(scale.format(&Value::Number(0.0)), "nil");
+    assert_eq!(scale.format(&Value::Number(100.0)), "");
+    assert_eq!(scale.format(&Value::Number(50.0)), "50%");
 }
 
 /// A truncated document reports where it ran out rather than panicking.

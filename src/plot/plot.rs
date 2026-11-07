@@ -1609,7 +1609,7 @@ impl Plot {
                         if matches!(v, Value::Null) {
                             continue;
                         }
-                        let text = scale.format(&v, &theme.locale);
+                        let text = scale.format(&v);
                         let run = TextRun::new(&text, label_style, dpi);
                         let h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
                         let w = run.natural_width();
@@ -1638,7 +1638,7 @@ impl Plot {
                             continue;
                         }
                         let theta = polar.theta_for_frac(frac);
-                        let text = scale.format(&v, &theme.locale);
+                        let text = scale.format(&v);
                         let run = TextRun::new(&text, label_style, dpi);
                         let h = run.set_max_width(f32::INFINITY, HAlign::Start) as f64;
                         let w = run.natural_width();
@@ -1869,8 +1869,7 @@ impl Plot {
         dpi: f64,
         theme: &crate::plot::theme::Theme,
     ) -> Patch {
-        let collapsed =
-            crate::plot::chrome::legend::collapse_legends(&self.legends, registry, &theme.locale);
+        let collapsed = crate::plot::chrome::legend::collapse_legends(&self.legends, registry);
         for (side, slot, group) in legends_grouped_by_side(&collapsed) {
             if group.is_empty() {
                 continue;
@@ -1974,8 +1973,7 @@ impl Plot {
         // Legends — render each side's stack of attached legends
         // into the matching slot. Mirrors the wiring loop, and must
         // collapse identically to it for the measured space to match.
-        let collapsed =
-            crate::plot::chrome::legend::collapse_legends(&self.legends, registry, &theme.locale);
+        let collapsed = crate::plot::chrome::legend::collapse_legends(&self.legends, registry);
         for (side, slot, group) in legends_grouped_by_side(&collapsed) {
             if group.is_empty() {
                 continue;
@@ -3300,11 +3298,8 @@ mod tests {
             };
             plot.add_legend(key());
             plot.add_legend_separate(key());
-            let collapsed = crate::plot::chrome::legend::collapse_legends(
-                plot.legends(),
-                &registry,
-                &default_theme().locale,
-            );
+            let collapsed =
+                crate::plot::chrome::legend::collapse_legends(plot.legends(), &registry);
             assert_eq!(collapsed.len(), 2);
         }
     }

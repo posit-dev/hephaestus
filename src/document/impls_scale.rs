@@ -8,9 +8,10 @@
 //! rejected by [`Scale::try_set_bins`], not silently accepted into a
 //! scale that would misplace rows.
 //!
-//! The one value a scale carries that isn't plain data gets a wire form
-//! of its own: [`FormatSpec`] names the label formatter instead of
-//! carrying it. [`Locale`] is a tag, so it travels as the string it is.
+//! A scale's label spec is plain data — a rename table plus a template
+//! string — so it travels whole, and a reader renders the labels the
+//! writer saw with nothing to resolve. [`Locale`] is a tag, so it
+//! travels as the string it is.
 
 use super::codec::impl_codec;
 #[cfg(feature = "document-read")]
@@ -20,7 +21,7 @@ use super::codec::{Encode, Writer};
 #[cfg(feature = "document-read")]
 use super::DocumentError;
 use crate::plot::scale::{
-    BreaksSpec, FormatSpec, MinorBreaksSpec, Scale, ScaleRegistry, ScaleTypeKind,
+    BreaksSpec, LabelSpec, MinorBreaksSpec, Scale, ScaleRegistry, ScaleTypeKind,
 };
 use crate::scales::breaks::{CalendarUnit, TemporalInterval};
 use crate::scales::direction::Direction;
@@ -29,6 +30,7 @@ use crate::scales::locale::Locale;
 use crate::scales::output::OutputRange;
 use crate::scales::scale_type::TemporalUnit;
 use crate::scales::transform::{Transform, TransformKind};
+use crate::scales::value::Value;
 
 impl_codec! {
     enum TemporalUnit {
@@ -111,11 +113,6 @@ impl_codec! {
         3 => TemporalInterval(interval),
     }
 
-    enum FormatSpec {
-        0 => Default,
-        1 => Named(name),
-        2 => Custom,
-    }
 }
 
 // ─── Locale ──────────────────────────────────────────────────────────────────
@@ -149,7 +146,20 @@ impl Encode for Scale {
             self.minor_breaks_spec().cloned().encode(w);
             self.color_space().encode(w);
             self.direction().encode(w);
-            self.format_spec().encode(w);
+            // The label spec, whole: rename entries as
+            // `(value, Some(new label) | None = suppressed)`, then the
+            // fallback template's source text.
+            self.labels()
+                .renames()
+                .map(|(v, l)| (v.clone(), l.map(str::to_string)))
+                .collect::<Vec<_>>()
+                .encode(w);
+            self.labels()
+                .template()
+                .map(|t| t.source().to_string())
+                .encode(w);
+            // Trailing: readers from before this field existed skip it.
+            self.na_value().clone().encode(w);
             // `generation` and the break memo are not written: the counter
             // only keys a cache that starts empty, so a rebuilt scale
             // recomputes rather than trusting a number from the wire.
@@ -160,7 +170,14 @@ impl Encode for Scale {
 #[cfg(feature = "document-read")]
 impl Decode for Scale {
     fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
-        super::codec::read_record(r, "Scale", |r| {
+        // Hand-rolled record framing rather than `read_record`: the
+        // trailing `na_value` predates nobody, so the reader needs the
+        // record's end to tell "absent from an older document" apart
+        // from "present" — a blind read would consume the next record's
+        // bytes instead of failing.
+        let len = r.count()?;
+        let end = r.pos() + len;
+        let out = (|r: &mut Reader<'_>| {
             let kind = ScaleTypeKind::decode(r)?;
             let transform = Transform::decode(r)?;
             let input = Option::<InputRange>::decode(r)?;
@@ -170,9 +187,34 @@ impl Decode for Scale {
             let minor = Option::<MinorBreaksSpec>::decode(r)?;
             let color_space = super::codec::Decode::decode(r)?;
             let direction = Direction::decode(r)?;
-            let format = FormatSpec::decode(r)?;
+            let renames = Vec::<(Value, Option<String>)>::decode(r)?;
+            let template = Option::<String>::decode(r)?;
+            // A document written before `na_value` existed ends the
+            // record here; missing data mapped to `Value::Null` then.
+            let na_value = if r.pos() < end {
+                Value::decode(r)?
+            } else {
+                Value::Null
+            };
+
+            let mut labels = LabelSpec::new();
+            for (v, label) in renames {
+                match label {
+                    Some(l) => {
+                        labels.rename(v, l);
+                    }
+                    None => {
+                        labels.suppress(v);
+                    }
+                }
+            }
+            if let Some(t) = &template {
+                labels.set_template(t);
+            }
 
             let mut s = Scale::new(kind);
+            s.set_na_value(na_value);
+            s.set_labels(labels);
             s.set_transform(transform.kind);
             s.set_color_space(color_space);
             s.set_direction(direction);
@@ -226,19 +268,10 @@ impl Decode for Scale {
                 None => {}
             }
 
-            // Two ways to end up on default labels, both deliberate.
-            // `Custom` reaches the wire only from a lossy write, and names
-            // nothing a reader could resolve. A `Named` the reader hasn't
-            // been taught is a gap in its registry — worth rendering plain
-            // ticks for rather than refusing the whole plot over cosmetics.
-            if let FormatSpec::Named(name) = &format {
-                if let Some(f) = r.ctx().formatter(name) {
-                    s.set_named_format(name.clone(), move |v, loc| f(v, loc));
-                }
-            }
-
             Ok(s)
-        })
+        })(r)?;
+        r.skip_to(end, "Scale")?;
+        Ok(out)
     }
 }
 
@@ -271,7 +304,7 @@ impl Decode for ScaleRegistry {
 
 #[cfg(all(test, feature = "document-read", feature = "document-write"))]
 mod tests {
-    use super::super::codec::test_support::{assert_roundtrip, roundtrip, roundtrip_with_context};
+    use super::super::codec::test_support::{assert_roundtrip, roundtrip};
     use super::*;
     use crate::color::{rgba, ColorSpace};
     use crate::plot::scale;
@@ -288,7 +321,20 @@ mod tests {
         assert_eq!(a.bins(), b.bins());
         assert_eq!(a.color_space(), b.color_space());
         assert_eq!(a.direction(), b.direction());
-        assert_eq!(a.format_spec(), b.format_spec());
+        assert!(a.na_value().key_eq(b.na_value()));
+        // `LabelSpec` has no `PartialEq`; the wire form is the
+        // comparison — same rename pairs, same template source.
+        let renames_of = |s: &Scale| {
+            s.labels()
+                .renames()
+                .map(|(v, l)| (format!("{v:?}"), l.map(str::to_string)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(renames_of(a), renames_of(b));
+        assert_eq!(
+            a.labels().template().map(|t| t.source()),
+            b.labels().template().map(|t| t.source())
+        );
         assert_eq!(
             format!("{:?}", a.breaks_spec()),
             format!("{:?}", b.breaks_spec())
@@ -405,6 +451,18 @@ mod tests {
     }
 
     #[test]
+    fn a_scale_round_trips_its_na_value() {
+        let s = scale::continuous(0.0..=1.0)
+            .range_colors(vec![rgba(0.0, 0.0, 0.0, 1.0), rgba(1.0, 1.0, 1.0, 1.0)])
+            .with_na_value(Value::Color(rgba(0.5, 0.5, 0.5, 1.0)));
+        let out = roundtrip(&s);
+        assert_same_config(&out, &s);
+        assert!(out
+            .na_value()
+            .key_eq(&Value::Color(rgba(0.5, 0.5, 0.5, 1.0))));
+    }
+
+    #[test]
     fn a_binned_scale_round_trips_its_edges() {
         let s = scale::binned(0.0..=30.0, vec![0.0, 10.0, 20.0, 30.0]);
         let out = roundtrip(&s);
@@ -433,11 +491,11 @@ mod tests {
         ]);
         let out = roundtrip(&s);
         assert_eq!(
-            out.format(&Value::Number(0.0), &Locale::EN_US),
+            out.format(&Value::Number(0.0)),
             "low",
-            "explicit labels should outrank the default formatter"
+            "explicit labels should outrank the label spec"
         );
-        assert_eq!(out.format(&Value::Number(2.0), &Locale::EN_US), "high");
+        assert_eq!(out.format(&Value::Number(2.0)), "high");
     }
 
     /// Break positions and labels are index-aligned by construction, so
@@ -463,7 +521,8 @@ mod tests {
             Option::<MinorBreaksSpec>::None.encode(w);
             ColorSpace::Oklab.encode(w);
             Direction::Forward.encode(w);
-            FormatSpec::Default.encode(w);
+            Vec::<(Value, Option<String>)>::new().encode(w);
+            Option::<String>::None.encode(w);
         });
 
         let bytes = w.finish();
@@ -495,7 +554,8 @@ mod tests {
             Option::<MinorBreaksSpec>::None.encode(w);
             ColorSpace::Oklab.encode(w);
             Direction::Forward.encode(w);
-            FormatSpec::Default.encode(w);
+            Vec::<(Value, Option<String>)>::new().encode(w);
+            Option::<String>::None.encode(w);
         });
 
         let bytes = w.finish();
@@ -509,38 +569,31 @@ mod tests {
         ));
     }
 
-    // ── Formatters ──
+    // ── Label specs ──
 
     #[test]
-    fn a_default_formatter_round_trips_as_default() {
+    fn an_empty_label_spec_round_trips() {
         let s = scale::continuous(0.0..=1.0);
-        assert_eq!(roundtrip(&s).format_spec(), FormatSpec::Default);
-    }
-
-    /// The name survives, and the closure comes back from the context
-    /// rather than from the document.
-    #[test]
-    fn a_named_formatter_is_restored_from_the_read_context() {
-        let s = scale::continuous(0.0..=100.0)
-            .with_named_format("pct", |v, _| format!("{}%", v.as_number().unwrap_or(0.0)));
-
-        let ctx = super::super::ReadContext::new()
-            .with_formatter("pct", |v, _| format!("{}%", v.as_number().unwrap_or(0.0)));
-        let out = roundtrip_with_context(&s, &ctx);
-
-        assert_eq!(out.format_spec(), FormatSpec::Named("pct".into()));
-        assert_eq!(out.format(&Value::Number(50.0), &Locale::EN_US), "50%");
-    }
-
-    /// A formatter the reader has never heard of leaves default labels
-    /// rather than failing the whole document.
-    #[test]
-    fn an_unknown_formatter_name_falls_back_to_default_labels() {
-        let s = scale::continuous(0.0..=100.0)
-            .with_named_format("nobody-knows", |_, _| "custom".to_string());
         let out = roundtrip(&s);
-        assert_eq!(out.format_spec(), FormatSpec::Default);
-        assert_eq!(out.format(&Value::Number(50.0), &Locale::EN_US), "50");
+        assert!(out.labels().rename_is_empty());
+        assert!(out.labels().template().is_none());
+    }
+
+    /// The spec is plain data, so it travels whole: the reader renders
+    /// the labels the writer saw, with nothing to resolve.
+    #[test]
+    fn a_label_spec_round_trips_renames_suppressions_and_template() {
+        let mut spec = LabelSpec::new();
+        spec.rename(Value::Number(0.0), "zero")
+            .suppress(Value::Number(50.0))
+            .set_template("{:num %.1f}");
+        let s = scale::continuous(0.0..=100.0).with_labels(spec);
+
+        let out = roundtrip(&s);
+        assert_same_config(&out, &s);
+        assert_eq!(out.format(&Value::Number(0.0)), "zero");
+        assert_eq!(out.format(&Value::Number(50.0)), "");
+        assert_eq!(out.format(&Value::Number(25.0)), "25.0");
     }
 
     // ── Locale ──

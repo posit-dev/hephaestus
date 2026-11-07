@@ -1,18 +1,16 @@
-//! What a reader needs beyond the bytes: the registries that resolve
+//! What a reader needs beyond the bytes: the registry that resolves
 //! names a document can only refer to indirectly.
 //!
-//! Two things in a plot are code rather than data — a
-//! [`Scale`](crate::plot::Scale)'s label formatter and a
-//! [`Geom`](crate::plot::Geom)'s concrete type. A document names them;
-//! the [`ReadContext`] is how a host says what those names mean. Both
-//! default to what this crate ships, so a plot built only from builtins
-//! reads with no setup.
+//! One thing in a plot is code rather than data — a
+//! [`Geom`](crate::plot::Geom)'s concrete type. A document names it;
+//! the [`ReadContext`] is how a host says what the name means. It
+//! defaults to what this crate ships, so a plot built only from
+//! builtins reads with no setup.
 
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use crate::plot::geom::{Channel, GeomBuilder};
-use crate::plot::scale::LabelFormatter;
 use crate::plot::Geom;
 use crate::scales::value::DataColumn;
 
@@ -24,47 +22,41 @@ use crate::scales::value::DataColumn;
 /// [`BuildableGeom::build_from`](crate::plot::BuildableGeom::build_from).
 pub type GeomFactory = fn(Option<DataColumn>, HashMap<String, Channel>) -> Box<dyn Geom>;
 
-/// Registries a document is read against.
+/// Registry a document is read against.
 ///
-/// [`Self::new`] knows every geom and no named formatters, which is
-/// right for a plot that uses only this crate's geoms and no
-/// [`Scale::with_named_format`](crate::plot::Scale::with_named_format).
-/// [`Self::default`] registers nothing, so a document read against it
-/// fails with [`DocumentError::UnknownGeom`](super::DocumentError::UnknownGeom)
+/// [`Self::new`] knows every geom, which is right for a plot that uses
+/// only this crate's geoms. [`Self::default`] registers nothing, so a
+/// document read against it fails with
+/// [`DocumentError::UnknownGeom`](super::DocumentError::UnknownGeom)
 /// on the first geom it holds; build up from it only when supplying every
 /// factory by hand.
 #[derive(Default)]
 pub struct ReadContext {
     geoms: HashMap<String, GeomFactory>,
-    formatters: HashMap<String, Arc<LabelFormatter>>,
 }
 
 impl std::fmt::Debug for ReadContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut geoms: Vec<&str> = self.geoms.keys().map(String::as_str).collect();
         geoms.sort_unstable();
-        let mut formatters: Vec<&str> = self.formatters.keys().map(String::as_str).collect();
-        formatters.sort_unstable();
         f.debug_struct("ReadContext")
             .field("geoms", &geoms)
-            .field("formatters", &formatters)
             .finish()
     }
 }
 
 impl ReadContext {
-    /// The shared context that knows this crate's geoms and no named
-    /// formatters.
+    /// The shared context that knows this crate's geoms.
     ///
     /// [`Self::new`] builds the same thing, but it builds a factory table per
     /// call; a consumer reading document after document — a page swapping
     /// plots, a renderer in a loop — wants this one. Reach for `new` only to
-    /// add a formatter or a geom of your own.
+    /// add a geom of your own.
     pub fn builtin() -> &'static ReadContext {
         default_context()
     }
 
-    /// A context that knows this crate's geoms and no named formatters.
+    /// A context that knows this crate's geoms.
     pub fn new() -> Self {
         let mut out = Self::default();
         out.register_builtin_geoms();
@@ -82,33 +74,9 @@ impl ReadContext {
         self
     }
 
-    /// Teach the context a named label formatter, matching a name a
-    /// scale was given via
-    /// [`Scale::with_named_format`](crate::plot::Scale::with_named_format).
-    ///
-    /// A document naming a formatter this context doesn't know reads
-    /// with the scale's default labels rather than failing: the labels
-    /// are cosmetic, and refusing the whole plot over them would be
-    /// worse than rendering it with plain ones.
-    pub fn with_formatter<F>(mut self, name: impl Into<String>, f: F) -> Self
-    where
-        F: Fn(&crate::scales::value::Value, &crate::scales::locale::Locale) -> String
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.formatters.insert(name.into(), Arc::new(f));
-        self
-    }
-
     /// The factory for `kind`, if the context knows it.
     pub(crate) fn geom_factory(&self, kind: &str) -> Option<GeomFactory> {
         self.geoms.get(kind).copied()
-    }
-
-    /// The formatter registered under `name`, if any.
-    pub(crate) fn formatter(&self, name: &str) -> Option<Arc<LabelFormatter>> {
-        self.formatters.get(name).cloned()
     }
 
     fn register_builtin_geoms(&mut self) {

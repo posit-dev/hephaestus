@@ -53,7 +53,7 @@ pub fn draw_radius_axis(
     if g.r_outer <= 0.0 {
         return;
     }
-    let majors = axis_ticks(&scale.breaks(DEFAULT_BREAK_COUNT), scale, &theme.locale);
+    let majors = axis_ticks(&scale.breaks(DEFAULT_BREAK_COUNT), scale);
     let minors = axis_minor_ticks(scale, DEFAULT_BREAK_COUNT);
 
     let (ux, uy) = polar.unit_position(theta_frac);
@@ -255,7 +255,7 @@ pub fn draw_angular_axis(
             tick_end.x + label_gap_px * rx,
             tick_end.y + label_gap_px * ry,
         );
-        let text = scale.format(v, &theme.locale);
+        let text = scale.format(v);
         scene.push_pick_scope(&part_scope(PlotPart::AxisTickLabel));
         scene.push_pick_scope(&item);
         draw_axis_label(
@@ -284,7 +284,7 @@ pub fn draw_angular_axis(
                 .iter()
                 .filter(|v| !matches!(v, Value::Null))
                 .fold((0.0_f64, 0.0_f64), |(mw, mh), v| {
-                    let label = scale.format(v, &theme.locale);
+                    let label = scale.format(v);
                     let run = ChromeRun::shape(&label, &style, dpi, chrome_style.rich.as_ref());
                     (mw.max(run.width()), mh.max(run.line_box_height()))
                 });

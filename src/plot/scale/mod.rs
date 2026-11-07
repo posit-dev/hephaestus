@@ -22,91 +22,30 @@ use crate::color::{Color, ColorSpace};
 #[cfg(test)]
 use crate::scales::value::DataColumn;
 use crate::scales::value::{LinetypeStep, Value};
-use crate::scales::Closed;
-use crate::scales::Locale;
 
 // The scales-layer surface, re-exported so `crate::plot::scale::*`
 // reaches both this bundle and the algorithms it delegates to. The
 // submodules (`breaks`, `transform`, etc.) come through wholesale;
 // selected free functions and types are pulled to the top level.
 pub use crate::scales::{
-    binned_band_width, binned_band_width_at, binned_breaks, binned_map, binned_map_break, breaks,
-    chrome, continuous_breaks, continuous_map, continuous_minor_breaks, discrete_band_width,
-    discrete_breaks, discrete_map, discrete_map_at, extended_breaks, identity_map, input,
-    linear_breaks, linear_minor_breaks_between, log_minor_breaks, log_pretty_breaks, ordinal_map,
-    ordinal_map_at, output, scale_type, sqrt_breaks, symlog_breaks, symlog_minor_breaks,
-    temporal_breaks, temporal_breaks_with_interval, temporal_minor_breaks,
-    temporal_minor_breaks_with_interval, transform, transform_allowed_domain, transform_forward,
-    transform_inverse, value, wrap_temporal_value, AxisSide, CalendarUnit, Direction, InputRange,
-    LegendSide, OutputRange, ScaleTypeKind, TemporalInterval, TemporalUnit, Transform,
-    TransformKind, DEFAULT_BREAK_COUNT,
+    binned_band_width, binned_band_width_at, binned_breaks, binned_map, binned_map_break,
+    break_target, breaks, chrome, continuous_breaks, continuous_breaks_with_target, continuous_map,
+    continuous_minor_breaks, default_label, discrete_band_width, discrete_breaks, discrete_map,
+    discrete_map_at, extended_breaks, identity_map, input, label, linear_breaks,
+    linear_minor_breaks_between, log_minor_breaks, log_pretty_breaks, ordinal_map, ordinal_map_at,
+    output, rel, resolve_target, scale_type, shared_precision, sqrt_breaks, symlog_breaks,
+    symlog_minor_breaks, temporal_breaks, temporal_breaks_with_interval,
+    temporal_breaks_with_target, temporal_minor_breaks, temporal_minor_breaks_with_interval,
+    transform, transform_allowed_domain, transform_forward, transform_inverse, value,
+    wrap_temporal_value, AxisSide, BreakTarget, CalendarUnit, Closed, Direction, InputRange,
+    LabelSpec, LegendSide, OutputRange, Placeholder, Rel, ScaleTypeKind, Template,
+    TemporalInterval, TemporalUnit, Transform, TransformKind, DEFAULT_BREAK_COUNT,
 };
 
-/// Tick-label formatter closure stored on a [`Scale`]. Receives a break
-/// value and the active [`Locale`], and returns its rendered label.
-///
-/// The default formatter ignores the locale: a [`Locale`] is a tag, not
-/// a table of formatting rules, so interpreting it is the closure's job.
-/// A locale-aware or calendar-native axis is built by supplying one.
-pub type LabelFormatter = dyn Fn(&Value, &Locale) -> String + Send + Sync;
-
-/// Readable description of which formatter a [`Scale`] carries.
-///
-/// A closure can't be inspected, so this is what tells a caller — a
-/// serializer above all — whether a scale's labels can be reproduced
-/// elsewhere. See [`Scale::format_spec`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FormatSpec {
-    /// No override; labels come from the built-in per-variant rules
-    /// ([`Scale::default_format`]).
-    Default,
-    /// A formatter registered under a name, set via
-    /// [`Scale::with_named_format`]. Reproducible anywhere the same
-    /// name resolves to the same closure.
-    Named(Arc<str>),
-    /// An anonymous closure, set via [`Scale::with_format`]. Cannot be
-    /// named, and so cannot be carried outside the process that built
-    /// it.
-    Custom,
-}
-
-/// The formatter a scale carries, paired with whatever identifies it.
-///
-/// One field rather than a closure plus a separate name, so the two
-/// can't disagree.
-enum FormatterSlot {
-    Default,
-    Named(Arc<str>, Arc<LabelFormatter>),
-    Custom(Arc<LabelFormatter>),
-}
-
-impl Clone for FormatterSlot {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Default => Self::Default,
-            Self::Named(n, f) => Self::Named(n.clone(), f.clone()),
-            Self::Custom(f) => Self::Custom(f.clone()),
-        }
-    }
-}
-
-impl FormatterSlot {
-    /// The closure to apply, if this slot holds one.
-    fn formatter(&self) -> Option<&Arc<LabelFormatter>> {
-        match self {
-            Self::Default => None,
-            Self::Named(_, f) | Self::Custom(f) => Some(f),
-        }
-    }
-
-    fn spec(&self) -> FormatSpec {
-        match self {
-            Self::Default => FormatSpec::Default,
-            Self::Named(n, _) => FormatSpec::Named(n.clone()),
-            Self::Custom(_) => FormatSpec::Custom,
-        }
-    }
-}
+/// One memoized [`Scale::breaks`] result: the generation and tick
+/// target it was computed at, the break set, and the labels resolved
+/// against that set. See the field docs on `Scale::breaks_cache`.
+type BreaksMemo = (u64, usize, Vec<Value>, Vec<Option<String>>);
 
 /// Why a bin-edge list can't describe a bin ladder.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -169,16 +108,16 @@ fn check_bin_edges(edges: &[f64]) -> Result<(), BinEdgeError> {
 /// User-supplied break specification. When set on a [`Scale`], replaces
 /// the scale-type's automatic break algorithm at
 /// [`Scale::breaks`]. The [`BreaksSpec::Labeled`] variant additionally
-/// supplies fixed label strings that bypass the formatter.
+/// supplies fixed label strings that bypass the label spec.
 #[derive(Clone, Debug)]
 pub enum BreaksSpec {
     /// Pin exact break positions; labels still flow through the
-    /// formatter / default per-variant rules.
+    /// label spec / default per-variant rules.
     Explicit(Vec<Value>),
     /// Pin exact positions paired with explicit label strings. The two
     /// vectors are index-aligned and have equal length by construction
     /// (built via `unzip` in the setter). Labels here take priority
-    /// over any custom formatter for the listed values.
+    /// over the label spec for the listed values.
     Labeled {
         /// Break positions, in input-space.
         breaks: Vec<Value>,
@@ -261,22 +200,29 @@ pub struct Scale {
     /// axis and a palette alike. Ignored by
     /// [`ScaleTypeKind::Identity`], which normalises nothing.
     direction: Direction,
-    /// User-supplied tick-label formatter and its identity, if any.
-    /// [`FormatterSlot::Default`] ⇒ use the default per-variant
-    /// formatter (see [`Scale::default_format`]).
-    formatter: FormatterSlot,
+    /// The output missing data maps to: [`Value::Null`], numeric NaN,
+    /// and discrete / ordinal values outside the domain. Defaults to
+    /// [`Value::Null`], which renders as nothing.
+    na_value: Value,
+    /// Break-label spec: a rename / suppress table plus a fallback
+    /// template, re-rendered against whatever break set the scale
+    /// currently produces. Empty ⇒ the default per-variant labels.
+    labels: LabelSpec,
     /// Bumped on every mutation. Keys the break memo below, and is
     /// plumbed for the same job in future per-channel caches.
     generation: u64,
     /// Memoized result of the last [`Self::breaks`] call, keyed on the
-    /// generation it was computed at and the tick target. Chrome asks
-    /// for the same breaks a dozen times per frame — axis measure, axis
-    /// draw, gridlines, legend — and every miss re-runs a
-    /// Wilkinson-extended search.
+    /// generation it was computed at and the tick target, plus the
+    /// labels resolved against that break set. Chrome asks for the
+    /// same breaks a dozen times per frame — axis measure, axis draw,
+    /// gridlines, legend — and every miss re-runs a
+    /// Wilkinson-extended search. Carrying the labels is what lets
+    /// [`Self::format`] give a break its shared-precision rendering
+    /// rather than a value-local one.
     ///
     /// A `Mutex` rather than a `RefCell` so `Scale` stays `Sync`; the
     /// lock is uncontended and far cheaper than the search it skips.
-    breaks_cache: Mutex<Option<(u64, usize, Vec<Value>)>>,
+    breaks_cache: Mutex<Option<BreaksMemo>>,
     /// Lazily-built value→index map over a discrete domain, keyed on
     /// the generation it was computed at. [`ScaleTypeKind::Discrete`]
     /// and [`ScaleTypeKind::Ordinal`] map by scanning the domain for a
@@ -300,7 +246,8 @@ impl Clone for Scale {
             minor_breaks_spec: self.minor_breaks_spec.clone(),
             color_space: self.color_space,
             direction: self.direction,
-            formatter: self.formatter.clone(),
+            na_value: self.na_value.clone(),
+            labels: self.labels.clone(),
             generation: self.generation,
             breaks_cache: Mutex::new(None),
             discrete_index: Mutex::new(None),
@@ -322,7 +269,8 @@ impl Scale {
             minor_breaks_spec: None,
             color_space: ColorSpace::default(),
             direction: Direction::default(),
-            formatter: FormatterSlot::Default,
+            na_value: Value::Null,
+            labels: LabelSpec::new(),
             generation: 0,
             breaks_cache: Mutex::new(None),
             discrete_index: Mutex::new(None),
@@ -469,6 +417,17 @@ impl Scale {
         self
     }
 
+    /// Set the output missing data maps to. [`Value::Null`], numeric
+    /// NaN, and discrete / ordinal values outside the domain produce
+    /// this value instead of a range lookup — map it to a visible
+    /// stand-in (a grey, a named linetype) to make missing rows show,
+    /// or leave it [`Value::Null`] to drop them. Ignored by
+    /// [`ScaleTypeKind::Identity`], which maps nothing.
+    pub fn with_na_value(mut self, na_value: Value) -> Self {
+        self.na_value = na_value;
+        self
+    }
+
     // ── Mutators (`&mut self`; bump generation) ──
 
     /// Replace the continuous domain in place. Bumps the generation
@@ -579,10 +538,17 @@ impl Scale {
         self.bump_generation();
     }
 
+    /// Replace the missing-data output in place. Bumps the generation
+    /// counter. See [`Self::with_na_value`].
+    pub fn set_na_value(&mut self, na_value: Value) {
+        self.na_value = na_value;
+        self.bump_generation();
+    }
+
     // ── Break overrides (`&mut self`; bump generation) ──
 
     /// Pin exact break positions, overriding the scale-type's automatic
-    /// algorithm. Labels still flow through the formatter / default
+    /// algorithm. Labels still flow through the label spec / default
     /// per-variant rules; to pin labels too, use
     /// [`Self::with_breaks_labeled`].
     pub fn with_breaks(mut self, breaks: Vec<Value>) -> Self {
@@ -599,7 +565,7 @@ impl Scale {
 
     /// Pin exact break positions paired with explicit label strings.
     /// Each pair contributes one tick at the given value labelled with
-    /// the given string; labels take priority over any formatter for
+    /// the given string; labels take priority over the label spec for
     /// the listed values.
     pub fn with_breaks_labeled(mut self, pairs: Vec<(Value, String)>) -> Self {
         let (breaks, labels): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
@@ -724,73 +690,30 @@ impl Scale {
         self.bump_generation();
     }
 
-    // ── Formatter override ──
+    // ── Label spec ──
 
-    /// Set a custom formatter applied to each break value before
-    /// rendering. Overrides the default per-variant formatter. The
-    /// closure receives `(&Value, &Locale)` — consult the locale's
-    /// decimal / grouping separators or month / day arrays as needed,
-    /// or ignore it for locale-insensitive labels. Explicit labels
-    /// set via [`Self::with_breaks_labeled`] still take priority over
-    /// this closure for the values they cover.
-    pub fn with_format<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&Value, &Locale) -> String + Send + Sync + 'static,
-    {
-        self.formatter = FormatterSlot::Custom(Arc::new(f));
+    /// Set the break-label spec: a [`Value`]-keyed rename / suppress
+    /// table plus a fallback [`Template`], re-rendered against whatever
+    /// break set the scale currently produces (viewport resize,
+    /// re-domain). Overrides the default per-variant labels for every
+    /// break the table doesn't name. Explicit labels set via
+    /// [`Self::with_breaks_labeled`] still take priority for the
+    /// values they cover.
+    pub fn with_labels(mut self, labels: LabelSpec) -> Self {
+        self.labels = labels;
         self
     }
 
-    /// Replace the formatter in place. Bumps the generation counter.
-    /// See [`Self::with_format`] for the closure shape.
-    pub fn set_format<F>(&mut self, f: F)
-    where
-        F: Fn(&Value, &Locale) -> String + Send + Sync + 'static,
-    {
-        self.formatter = FormatterSlot::Custom(Arc::new(f));
+    /// Replace the label spec in place. Bumps the generation counter.
+    /// See [`Self::with_labels`].
+    pub fn set_labels(&mut self, labels: LabelSpec) {
+        self.labels = labels;
         self.bump_generation();
     }
 
-    /// Set a formatter under a name, so callers that only see the
-    /// scale's configuration can still identify it — the closure
-    /// behaves exactly as in [`Self::with_format`].
-    ///
-    /// The name is what makes the formatter reproducible somewhere
-    /// else: a consumer that resolves the same name to an equivalent
-    /// closure renders the same labels. Names are the caller's
-    /// vocabulary; the crate reserves none.
-    pub fn with_named_format<F>(mut self, name: impl Into<Arc<str>>, f: F) -> Self
-    where
-        F: Fn(&Value, &Locale) -> String + Send + Sync + 'static,
-    {
-        self.formatter = FormatterSlot::Named(name.into(), Arc::new(f));
-        self
-    }
-
-    /// Replace the formatter in place with a named one. Bumps the
-    /// generation counter. See [`Self::with_named_format`].
-    pub fn set_named_format<F>(&mut self, name: impl Into<Arc<str>>, f: F)
-    where
-        F: Fn(&Value, &Locale) -> String + Send + Sync + 'static,
-    {
-        self.formatter = FormatterSlot::Named(name.into(), Arc::new(f));
-        self.bump_generation();
-    }
-
-    /// Clear the custom formatter; revert to the default per-variant
-    /// rules. Bumps the generation counter.
-    pub fn clear_format(&mut self) {
-        self.formatter = FormatterSlot::Default;
-        self.bump_generation();
-    }
-
-    /// Which formatter this scale carries.
-    ///
-    /// The closure itself is opaque; this reports whether there is one
-    /// and whether it can be named. Bumping the generation is a
-    /// mutation concern, so this is a plain read.
-    pub fn format_spec(&self) -> FormatSpec {
-        self.formatter.spec()
+    /// Borrow the break-label spec. See [`Self::with_labels`].
+    pub fn labels(&self) -> &LabelSpec {
+        &self.labels
     }
 
     fn bump_generation(&mut self) {
@@ -808,7 +731,7 @@ impl Scale {
                 input,
                 self.input_range.as_ref(),
                 self.output_range.as_ref(),
-                &Value::Null,
+                &self.na_value,
                 &self.transform,
                 self.color_space,
                 self.direction,
@@ -823,7 +746,7 @@ impl Scale {
                     idx,
                     domain.len(),
                     self.output_range.as_ref(),
-                    &Value::Null,
+                    &self.na_value,
                     self.direction,
                 )
             }
@@ -837,7 +760,7 @@ impl Scale {
                     idx,
                     domain.len(),
                     self.output_range.as_ref(),
-                    &Value::Null,
+                    &self.na_value,
                     self.color_space,
                     self.direction,
                 )
@@ -850,7 +773,7 @@ impl Scale {
                 self.input_range.as_ref(),
                 self.bins.as_deref(),
                 self.output_range.as_ref(),
-                &Value::Null,
+                &self.na_value,
                 self.color_space,
                 self.direction,
                 Closed::Left,
@@ -971,7 +894,7 @@ impl Scale {
     /// scale) silently falls back to the automatic algorithm.
     pub fn breaks(&self, n: usize) -> Vec<Value> {
         if let Ok(cache) = self.breaks_cache.lock() {
-            if let Some((gen, cached_n, values)) = cache.as_ref() {
+            if let Some((gen, cached_n, values, _)) = cache.as_ref() {
                 if *gen == self.generation && *cached_n == n {
                     return values.clone();
                 }
@@ -983,7 +906,11 @@ impl Scale {
             .and_then(|spec| self.breaks_from_spec(spec))
             .unwrap_or_else(|| self.breaks_auto(n));
         if let Ok(mut cache) = self.breaks_cache.lock() {
-            *cache = Some((self.generation, n, computed.clone()));
+            // Labels resolve here, against the whole break set, so a
+            // plain-`{}` template renders every numeric break at the
+            // set's shared decimal precision.
+            let labels = self.labels.labels(&computed);
+            *cache = Some((self.generation, n, computed.clone(), labels));
         }
         computed
     }
@@ -1190,27 +1117,40 @@ impl Scale {
         }
     }
 
-    /// Format a value as its tick label, in the given locale.
+    /// Format a value as its tick label.
     ///
     /// Precedence (highest first): an explicit [`BreaksSpec::Labeled`]
-    /// label for `v`, a custom formatter set via [`Self::with_format`]
-    /// (passed `(v, locale)`), then the built-in per-variant default
-    /// ([`Self::default_format`]). Numeric values render via Rust's
-    /// shortest round-trip `Display` after a 12-sig-fig snap (so
-    /// `0.30000000000000004` reads as `"0.3"`). Temporal variants
-    /// render as compact `YYYY-MM-DD` / `HH:MM:SS`. None of it consults
-    /// `locale`, which is passed through for a custom formatter to
-    /// interpret.
-    pub fn format(&self, v: &Value, locale: &Locale) -> String {
+    /// label for `v`, a rename entry in the [`LabelSpec`]
+    /// ([`Self::with_labels`]), then the spec's fallback template — the
+    /// default per-variant rendering when no template is set. When `v`
+    /// is one of the scale's current memoized breaks its label is the
+    /// one resolved against that whole break set, so numbers share a
+    /// decimal precision; anything else renders value-locally. A
+    /// suppressed break — and [`Value::Null`] — renders as an empty
+    /// string.
+    pub fn format(&self, v: &Value) -> String {
         if let Some(BreaksSpec::Labeled { breaks, labels }) = &self.breaks_spec {
             if let Some(i) = breaks.iter().position(|b| b.key_eq(v)) {
                 return labels[i].clone();
             }
         }
-        if let Some(f) = self.formatter.formatter() {
-            return f(v, locale);
+        if let Some(label) = self.cached_label(v) {
+            return label;
         }
-        format_value(v)
+        self.labels.label(v).unwrap_or_default()
+    }
+
+    // The label `v` carries in the memoized break set, if `v` is one of
+    // those breaks. `None` — no cache, a stale one, or `v` not among
+    // the breaks — sends the caller to value-local rendering.
+    fn cached_label(&self, v: &Value) -> Option<String> {
+        let cache = self.breaks_cache.lock().ok()?;
+        let (gen, _, breaks, labels) = cache.as_ref()?;
+        if *gen != self.generation {
+            return None;
+        }
+        let i = breaks.iter().position(|b| b.key_eq(v))?;
+        Some(labels[i].clone().unwrap_or_default())
     }
 
     /// Band width as a fraction of the panel (in `[0, 1]`). Continuous
@@ -1270,6 +1210,11 @@ impl Scale {
     }
 
     /// The space this scale's colour output range interpolates through.
+    /// The output missing data maps to. See [`Self::with_na_value`].
+    pub fn na_value(&self) -> &Value {
+        &self.na_value
+    }
+
     pub fn color_space(&self) -> ColorSpace {
         self.color_space
     }
@@ -1290,21 +1235,6 @@ impl Scale {
     /// scale uses its automatic minor-break algorithm.
     pub fn minor_breaks_spec(&self) -> Option<&MinorBreaksSpec> {
         self.minor_breaks_spec.as_ref()
-    }
-
-    /// Built-in per-variant tick-label formatter, given a locale.
-    /// Exposed so user closures supplied to [`Self::with_format`]
-    /// can fall through to the default for variants they don't care
-    /// to customise:
-    ///
-    /// ```ignore
-    /// scale.with_format(|v, locale| match v {
-    ///     Value::Number(n) => format!("${n:.2}"),
-    ///     other => Scale::default_format(other, locale),
-    /// })
-    /// ```
-    pub fn default_format(v: &Value, _locale: &Locale) -> String {
-        format_value(v)
     }
 
     /// Monotonic counter incremented on every mutation. Keys
@@ -1329,7 +1259,7 @@ impl Scale {
     /// part of the output mapping for the same reason: a legend lists
     /// its domain in domain order whichever way the scale runs, so a
     /// reversed scale lays out the same rows.
-    pub fn legend_equivalent_to(&self, other: &Scale, locale: &Locale) -> bool {
+    pub fn legend_equivalent_to(&self, other: &Scale) -> bool {
         if self.scale_type != other.scale_type
             || self.transform != other.transform
             || self.input_range != other.input_range
@@ -1343,7 +1273,7 @@ impl Scale {
             && mine
                 .iter()
                 .zip(theirs.iter())
-                .all(|(a, b)| a.key_eq(b) && self.format(a, locale) == other.format(b, locale))
+                .all(|(a, b)| a.key_eq(b) && self.format(a) == other.format(b))
     }
 
     /// True when `other` both lays out the same legend domain (see
@@ -1357,11 +1287,11 @@ impl Scale {
     /// in different spaces draw different bars too, so the interpolation
     /// space counts as part of the visual — as does the direction the
     /// ramp runs in.
-    pub fn visual_equivalent_to(&self, other: &Scale, locale: &Locale) -> bool {
+    pub fn visual_equivalent_to(&self, other: &Scale) -> bool {
         self.output_range == other.output_range
             && self.color_space == other.color_space
             && self.direction == other.direction
-            && self.legend_equivalent_to(other, locale)
+            && self.legend_equivalent_to(other)
     }
 }
 
@@ -1377,145 +1307,10 @@ impl std::fmt::Debug for Scale {
             .field("minor_breaks_spec", &self.minor_breaks_spec)
             .field("color_space", &self.color_space)
             .field("direction", &self.direction)
-            .field("formatter", &self.format_spec())
+            .field("labels", &self.labels)
             .field("generation", &self.generation)
             .finish()
     }
-}
-
-// ─── Format helper ───────────────────────────────────────────────────────────
-
-/// Best-effort tick-label formatter.
-///
-/// - `Number(n)` → `format!("{n}")` (Rust's f64 Display; strips trailing
-///   zeros for clean values).
-/// - `Date(d)` → `YYYY-MM-DD`.
-/// - `DateTime(us)` → `YYYY-MM-DD HH:MM:SS` (UTC).
-/// - `Time(us)` → `HH:MM:SS.fff` (or `HH:MM:SS` if sub-second is 0).
-/// - `Duration(us)` → compact `Hh Mm Ss` or `MM:SS` depending on magnitude.
-/// - `String(s)` → `s`.
-/// - Others → debug-formatted.
-fn format_value(v: &Value) -> String {
-    use crate::scales::value::Date;
-    match v {
-        Value::Number(n) => format_number(*n),
-        Value::String(s) => (**s).to_string(),
-        Value::Bool(b) => format!("{b}"),
-        Value::Null => "NA".to_string(),
-        Value::Color(c) => format!("{c:?}"),
-        Value::Date(d) => {
-            let (y, m, dd) = Date::from_days(*d).to_ymd();
-            format!("{y:04}-{m:02}-{dd:02}")
-        }
-        Value::DateTime(us) => {
-            let dt = crate::scales::value::DateTime::from_micros(*us);
-            let (date, time_us) = dt.split();
-            let (y, m, dd) = date.to_ymd();
-            let (h, mi, s, _us) = split_time_micros(time_us);
-            format!("{y:04}-{m:02}-{dd:02} {h:02}:{mi:02}:{s:02}")
-        }
-        Value::Time(ns) => {
-            let (h, mi, s, sub_ns) = split_time_nanos(*ns);
-            if sub_ns == 0 {
-                format!("{h:02}:{mi:02}:{s:02}")
-            } else {
-                let millis = sub_ns / 1_000_000;
-                format!("{h:02}:{mi:02}:{s:02}.{millis:03}")
-            }
-        }
-        Value::Duration(us) => {
-            let neg = *us < 0;
-            let mut abs = us.unsigned_abs();
-            let micros = (abs % 1_000_000) as u32;
-            abs /= 1_000_000;
-            let seconds = (abs % 60) as u32;
-            abs /= 60;
-            let minutes = (abs % 60) as u32;
-            abs /= 60;
-            let hours = abs;
-            let sign = if neg { "-" } else { "" };
-            if hours > 0 {
-                format!("{sign}{hours}h {minutes:02}m {seconds:02}s")
-            } else if minutes > 0 {
-                format!("{sign}{minutes}m {seconds:02}s")
-            } else if micros == 0 {
-                format!("{sign}{seconds}s")
-            } else {
-                let millis = micros / 1000;
-                format!("{sign}{seconds}.{millis:03}s")
-            }
-        }
-        Value::Linetype(p) => {
-            if p.is_empty() {
-                "solid".to_string()
-            } else {
-                let parts: Vec<String> = p
-                    .iter()
-                    .map(|s| match s {
-                        LinetypeStep::Dash(f) => format!("dash({f})"),
-                        LinetypeStep::Gap(f) => format!("gap({f})"),
-                        LinetypeStep::Marker(name) => format!("marker({name:?})"),
-                    })
-                    .collect();
-                format!("[{}]", parts.join(", "))
-            }
-        }
-        Value::Geometry(g) => format!("{g:?}"),
-        Value::Relative(f) => format!("{}×", format_number(*f)),
-    }
-}
-
-/// Format a finite f64 as its tick label, scrubbing accumulated
-/// floating-point noise. Break-generation algorithms accumulate a few
-/// ULPs of error which surface as digits in the 14th-16th position;
-/// rounding at 12 significant figures wipes that noise while preserving
-/// any precision a plot label could plausibly need.
-///
-/// The round-trip via 12-significant-digit scientific form snaps to a
-/// nearby f64 that Rust's shortest-round-trip `Display` then prints
-/// cleanly: `0.30000000000000004` → `"0.3"`; `0.6000000000001` → `"0.6"`.
-fn format_number(n: f64) -> String {
-    let raw = if !n.is_finite() {
-        format!("{n}")
-    } else if n == 0.0 {
-        "0".to_string()
-    } else {
-        let cleaned: f64 = format!("{n:.11e}")
-            .parse()
-            .expect("formatted scientific f64 round-trips");
-        format!("{cleaned}")
-    };
-    raw
-}
-
-/// Project a continuous-domain endpoint to its canonical f64. Accepts
-/// numeric and temporal `Value` variants; panics for other variants since
-/// they have no continuous ordering.
-/// Split microseconds-since-midnight into (hour, minute, second, sub_us).
-/// Used by the DateTime formatter (DateTime stays μs even though Time
-/// switched to ns).
-fn split_time_micros(us: i64) -> (u8, u8, u8, u32) {
-    let us = us.rem_euclid(86_400_000_000);
-    let micros_of_sec = (us % 1_000_000) as u32;
-    let total_secs = us / 1_000_000;
-    let s = (total_secs % 60) as u8;
-    let total_mins = total_secs / 60;
-    let mi = (total_mins % 60) as u8;
-    let h = ((total_mins / 60) % 24) as u8;
-    (h, mi, s, micros_of_sec)
-}
-
-/// Split nanoseconds-since-midnight into (hour, minute, second, sub_ns).
-/// Used by the Time formatter.
-fn split_time_nanos(ns: i64) -> (u8, u8, u8, u32) {
-    let ns = ns.rem_euclid(86_400_000_000_000);
-    let nanos_of_sec = (ns % 1_000_000_000) as u32;
-    let total_secs = ns / 1_000_000_000;
-    let s = (total_secs % 60) as u8;
-    let total_mins = total_secs / 60;
-    let mi = (total_mins % 60) as u8;
-    let h = ((total_mins / 60) % 24) as u8;
-    (h, mi, s, nanos_of_sec)
 }
 
 // ─── ScaleRegistry ───────────────────────────────────────────────────────────
@@ -1634,35 +1429,68 @@ mod tests {
     }
 
     #[test]
-    fn the_default_formatter_ignores_the_locale() {
-        // A `Locale` is a tag, so there is nothing for the built-in
-        // formatter to read: numbers and dates render identically
-        // whatever locale is passed. A locale-aware axis supplies a
-        // closure.
+    fn default_labels_render_per_variant() {
         let n = continuous(0.0..=1.0);
         let d = Scale::new(ScaleTypeKind::Temporal(TemporalUnit::Date));
         let date = Value::Date(crate::scales::value::Date::from_ymd(2024, 3, 7).to_days());
-        for loc in [Locale::EN_US, Locale::DE_DE, Locale::from("ar-EG")] {
-            assert_eq!(n.format(&Value::Number(0.5), &loc), "0.5");
-            assert_eq!(d.format(&date, &loc), "2024-03-07");
-        }
+        assert_eq!(n.format(&Value::Number(0.5)), "0.5");
+        assert_eq!(d.format(&date), "2024-03-07");
     }
 
     #[test]
-    fn a_closure_receives_the_tag_to_interpret() {
-        // The locale reaches user code, which is the point of carrying
-        // it: a formatter can key off the tag even though the crate
-        // never does.
-        let s = continuous(0.0..=1.0).with_format(|v, locale| match locale.tag() {
-            "de-DE" => format!("{v:?} (de)"),
-            other => format!("{v:?} ({other})"),
-        });
-        assert!(s
-            .format(&Value::Number(0.5), &Locale::DE_DE)
-            .ends_with("(de)"));
-        assert!(s
-            .format(&Value::Number(0.5), &Locale::from("ar-EG"))
-            .ends_with("(ar-EG)"));
+    fn a_label_spec_renames_suppresses_and_templates() {
+        let mut spec = LabelSpec::new();
+        spec.rename(Value::Number(0.0), "nil")
+            .suppress(Value::Number(1.0))
+            .set_template("{:num %.2f}");
+        let s = continuous(0.0..=1.0).with_labels(spec);
+        assert_eq!(s.format(&Value::Number(0.0)), "nil");
+        assert_eq!(s.format(&Value::Number(1.0)), "");
+        assert_eq!(s.format(&Value::Number(0.5)), "0.50");
+    }
+
+    #[test]
+    fn explicit_labeled_breaks_outrank_the_label_spec() {
+        let mut spec = LabelSpec::new();
+        spec.rename(Value::Number(0.0), "spec");
+        let s = continuous(0.0..=2.0)
+            .with_breaks_labeled(vec![(Value::Number(0.0), "explicit".to_string())])
+            .with_labels(spec);
+        assert_eq!(s.format(&Value::Number(0.0)), "explicit");
+    }
+
+    #[test]
+    fn current_breaks_share_a_decimal_precision() {
+        let s = continuous(54.25..=55.75).with_breaks(vec![
+            Value::Number(54.5),
+            Value::Number(55.0),
+            Value::Number(55.5),
+        ]);
+        // The break memo is what shares the set, so breaks must be
+        // asked for first — exactly the order chrome does it in.
+        let _ = s.breaks(DEFAULT_BREAK_COUNT);
+        assert_eq!(s.format(&Value::Number(55.0)), "55.0");
+        // A value outside the break set renders value-locally.
+        assert_eq!(s.format(&Value::Number(55.0 + 100.0)), "155");
+    }
+
+    #[test]
+    fn labels_survive_clone() {
+        let mut spec = LabelSpec::new();
+        spec.set_template("{:num %.1f}");
+        let s = identity().with_labels(spec);
+        assert_eq!(s.clone().format(&Value::Number(3.0)), "3.0");
+    }
+
+    #[test]
+    fn set_labels_replaces_the_spec() {
+        let mut s = identity();
+        let mut spec = LabelSpec::new();
+        spec.set_template("{:num %.1f}");
+        s.set_labels(spec);
+        assert_eq!(s.format(&Value::Number(1.0)), "1.0");
+        s.set_labels(LabelSpec::new());
+        assert_eq!(s.format(&Value::Number(1.0)), "1");
     }
 
     #[test]
@@ -1789,6 +1617,32 @@ mod tests {
         let s = continuous(0.0..=10.0);
         assert!(s.map(&Value::Null).is_null());
         assert!(s.map(&Value::String("nope".into())).is_null());
+    }
+
+    #[test]
+    fn missing_data_maps_to_the_configured_na_value() {
+        let grey = Value::Color(crate::color::rgba(0.5, 0.5, 0.5, 1.0));
+        let s = continuous(0.0..=10.0)
+            .range_colors(vec![
+                crate::color::rgba(0.0, 0.0, 0.0, 1.0),
+                crate::color::rgba(1.0, 1.0, 1.0, 1.0),
+            ])
+            .with_na_value(grey.clone());
+        assert!(s.map(&Value::Null).key_eq(&grey));
+        assert!(s.map(&Value::Number(f64::NAN)).key_eq(&grey));
+        // Present data still comes from the range.
+        assert!(s
+            .map(&Value::Number(10.0))
+            .key_eq(&Value::Color(crate::color::rgba(1.0, 1.0, 1.0, 1.0))));
+    }
+
+    #[test]
+    fn out_of_domain_discrete_input_maps_to_the_na_value() {
+        let s = discrete(["a", "b"].map(Value::from))
+            .range_strings(vec!["A".into(), "B".into()])
+            .with_na_value(Value::from("missing"));
+        assert!(s.map(&Value::from("zzz")).key_eq(&Value::from("missing")));
+        assert!(s.map(&Value::from("a")).key_eq(&Value::from("A")));
     }
 
     #[test]
@@ -2033,11 +1887,10 @@ mod tests {
         let b = continuous(0.0..=1.0)
             .range_colors(stops)
             .with_color_space(ColorSpace::Srgb);
-        let locale = Locale::default();
         // Same domain and breaks, so the legend rows still collapse …
-        assert!(a.legend_equivalent_to(&b, &locale));
+        assert!(a.legend_equivalent_to(&b));
         // … but the bars they'd draw differ.
-        assert!(!a.visual_equivalent_to(&b, &locale));
+        assert!(!a.visual_equivalent_to(&b));
     }
 
     #[test]
@@ -2296,13 +2149,12 @@ mod tests {
 
     #[test]
     fn binned_legend_equivalence_distinguishes_bin_edges() {
-        let locale = Locale::default();
         let a = binned(0.0..=30.0, vec![0.0, 10.0, 20.0, 30.0]);
         let b = binned(0.0..=30.0, vec![0.0, 15.0, 30.0]);
-        assert!(!a.legend_equivalent_to(&b, &locale));
+        assert!(!a.legend_equivalent_to(&b));
         let c = binned(0.0..=30.0, vec![0.0, 10.0, 20.0, 30.0])
             .range_colors([Color::new([1.0, 0.0, 0.0, 1.0])]);
-        assert!(a.legend_equivalent_to(&c, &locale));
+        assert!(a.legend_equivalent_to(&c));
     }
 
     // ── Direction ──
@@ -2515,7 +2367,6 @@ mod tests {
 
     #[test]
     fn direction_is_part_of_a_scale_visual_but_not_its_legend_layout() {
-        let loc = Locale::default();
         let stops = [
             Color::new([1.0, 0.0, 0.0, 1.0]),
             Color::new([0.0, 0.0, 1.0, 1.0]),
@@ -2525,11 +2376,11 @@ mod tests {
             .range_colors(stops)
             .with_direction(Direction::Reversed);
         assert!(
-            fwd.legend_equivalent_to(&rev, &loc),
+            fwd.legend_equivalent_to(&rev),
             "same domain, same rows, same labels"
         );
         assert!(
-            !fwd.visual_equivalent_to(&rev, &loc),
+            !fwd.visual_equivalent_to(&rev),
             "a mirrored ramp is a different bar"
         );
     }
@@ -2613,10 +2464,7 @@ mod tests {
     fn temporal_format_dates() {
         let s = continuous(Date::from_ymd(2024, 1, 1)..=Date::from_ymd(2024, 12, 31));
         assert_eq!(
-            s.format(
-                &Value::Date(Date::from_ymd(2024, 1, 15).to_days()),
-                &Locale::EN_US
-            ),
+            s.format(&Value::Date(Date::from_ymd(2024, 1, 15).to_days())),
             "2024-01-15"
         );
     }
@@ -2629,7 +2477,7 @@ mod tests {
         );
         let dt = DateTime::from_ymd_hms_micros(2024, 6, 15, 12, 34, 56, 0);
         assert_eq!(
-            s.format(&Value::DateTime(dt.to_micros()), &Locale::EN_US),
+            s.format(&Value::DateTime(dt.to_micros())),
             "2024-06-15 12:34:56"
         );
     }
@@ -2643,22 +2491,13 @@ mod tests {
             Time::from_hms_micros(0, 0, 0, 0)..=Time::from_hms_micros(23, 59, 59, 999_999),
         );
         let t = Time::from_hms_micros(7, 8, 9, 123_000);
-        assert_eq!(
-            s.format(&Value::Time(t.to_nanos()), &Locale::EN_US),
-            "07:08:09.123"
-        );
+        assert_eq!(s.format(&Value::Time(t.to_nanos())), "07:08:09.123000");
         let t_exact = Time::from_hms_micros(7, 8, 9, 0);
-        assert_eq!(
-            s.format(&Value::Time(t_exact.to_nanos()), &Locale::EN_US),
-            "07:08:09"
-        );
+        assert_eq!(s.format(&Value::Time(t_exact.to_nanos())), "07:08:09");
 
         // ns-input constructor: 7:08:09 + 456 ns sub-second.
         let t_ns = Time::from_hms_nanos(7, 8, 9, 456_000_000);
-        assert_eq!(
-            s.format(&Value::Time(t_ns.to_nanos()), &Locale::EN_US),
-            "07:08:09.456"
-        );
+        assert_eq!(s.format(&Value::Time(t_ns.to_nanos())), "07:08:09.456000");
     }
 
     #[test]
@@ -2684,21 +2523,24 @@ mod tests {
 
     #[test]
     fn temporal_format_duration() {
+        // Default rendering is bare seconds; a composite span is a
+        // template away.
         let s = identity();
+        assert_eq!(s.format(&Value::Duration(45 * 1_000_000)), "45");
+
+        let mut spec = LabelSpec::new();
+        spec.set_template("{:duration}");
+        let s = identity().with_labels(spec);
         assert_eq!(
-            s.format(
-                &Value::Duration(3 * 3600 * 1_000_000 + 25 * 60 * 1_000_000 + 12 * 1_000_000),
-                &Locale::EN_US
-            ),
-            "3h 25m 12s"
+            s.format(&Value::Duration(
+                3 * 3600 * 1_000_000 + 25 * 60 * 1_000_000 + 12 * 1_000_000
+            )),
+            // Composite spans carry the two largest units.
+            "3h 25m"
         );
         assert_eq!(
-            s.format(&Value::Duration(-90 * 1_000_000), &Locale::EN_US),
-            "-1m 30s"
-        );
-        assert_eq!(
-            s.format(&Value::Duration(45 * 1_000_000), &Locale::EN_US),
-            "45s"
+            s.format(&Value::Duration(-90 * 1_000_000)),
+            "\u{2212}1m 30s"
         );
     }
 
@@ -2931,7 +2773,7 @@ mod tests {
 
     #[test]
     fn temporal_breaks_return_date_variant_not_number() {
-        // The formatter relies on the Date variant to render as
+        // The default label relies on the Date variant to render as
         // YYYY-MM-DD; if breaks come back as Value::Number the labels
         // render as raw day numbers.
         let s = temporal(Date::from_ymd(2024, 1, 1)..=Date::from_ymd(2024, 12, 31));
@@ -3017,112 +2859,23 @@ mod tests {
         assert!(result.is_err(), "expected panic on non-temporal endpoint");
     }
 
-    // ── Float-precision-safe default number formatter ──
+    // ── Default number rendering ──
 
     #[test]
-    fn default_number_formatter_scrubs_floating_point_noise() {
+    fn default_numbers_render_shortest_round_trip_with_a_unicode_minus() {
         let s = identity();
-        assert_eq!(s.format(&Value::Number(0.1 + 0.2), &Locale::EN_US), "0.3");
-        assert_eq!(
-            s.format(&Value::Number(0.6000000000001), &Locale::EN_US),
-            "0.6"
-        );
-        assert_eq!(s.format(&Value::Number(1.0), &Locale::EN_US), "1");
-        assert_eq!(s.format(&Value::Number(1.5), &Locale::EN_US), "1.5");
-        assert_eq!(s.format(&Value::Number(0.0), &Locale::EN_US), "0");
-        assert_eq!(s.format(&Value::Number(-0.0), &Locale::EN_US), "0");
-        // 12-sig-fig snap preserves real precision (9 sig figs here).
-        assert_eq!(
-            s.format(&Value::Number(0.123456789), &Locale::EN_US),
-            "0.123456789"
-        );
+        assert_eq!(s.format(&Value::Number(1.0)), "1");
+        assert_eq!(s.format(&Value::Number(1.5)), "1.5");
+        assert_eq!(s.format(&Value::Number(0.0)), "0");
+        assert_eq!(s.format(&Value::Number(0.123456789)), "0.123456789");
+        // No sig-fig snap: the value prints as-is.
+        assert_eq!(s.format(&Value::Number(0.1 + 0.2)), "0.30000000000000004");
+        // Labels are presentation: U+2212, not a hyphen.
+        assert_eq!(s.format(&Value::Number(-2.5)), "\u{2212}2.5");
         // Non-finite values pass through.
-        assert_eq!(
-            s.format(&Value::Number(f64::INFINITY), &Locale::EN_US),
-            "inf"
-        );
-        assert_eq!(
-            s.format(&Value::Number(f64::NEG_INFINITY), &Locale::EN_US),
-            "-inf"
-        );
-        assert_eq!(s.format(&Value::Number(f64::NAN), &Locale::EN_US), "NaN");
-    }
-
-    // ── Custom formatter ──
-
-    #[test]
-    fn custom_formatter_overrides_default() {
-        let s = identity().with_format(|v, locale| match v {
-            Value::Number(n) => format!("${n:.2}"),
-            other => Scale::default_format(other, locale),
-        });
-        assert_eq!(s.format(&Value::Number(12.345), &Locale::EN_US), "$12.35");
-        // Non-numeric variants fall through to the default delegate.
-        assert_eq!(s.format(&Value::from("abc"), &Locale::EN_US), "abc");
-    }
-
-    #[test]
-    fn clear_format_reverts_to_default() {
-        let mut s = identity().with_format(|_, _| "X".to_string());
-        assert_eq!(s.format(&Value::Number(1.0), &Locale::EN_US), "X");
-        s.clear_format();
-        assert_eq!(s.format(&Value::Number(1.0), &Locale::EN_US), "1");
-    }
-
-    #[test]
-    fn formatter_survives_clone() {
-        let s = identity().with_format(|v, locale| match v {
-            Value::Number(n) => format!("n={n}"),
-            other => Scale::default_format(other, locale),
-        });
-        let s2 = s.clone();
-        assert_eq!(s.format(&Value::Number(3.0), &Locale::EN_US), "n=3");
-        assert_eq!(s2.format(&Value::Number(3.0), &Locale::EN_US), "n=3");
-    }
-
-    // ── Formatter identity ──
-
-    #[test]
-    fn a_scale_without_a_formatter_reports_the_default_spec() {
-        assert_eq!(identity().format_spec(), FormatSpec::Default);
-    }
-
-    #[test]
-    fn an_anonymous_formatter_reports_custom_and_cannot_be_named() {
-        let s = identity().with_format(|_, _| "X".to_string());
-        assert_eq!(s.format_spec(), FormatSpec::Custom);
-    }
-
-    #[test]
-    fn a_named_formatter_reports_its_name_and_still_applies() {
-        let s = identity().with_named_format("usd", |v, locale| match v {
-            Value::Number(n) => format!("${n:.2}"),
-            other => Scale::default_format(other, locale),
-        });
-        assert_eq!(s.format_spec(), FormatSpec::Named("usd".into()));
-        assert_eq!(s.format(&Value::Number(12.345), &Locale::EN_US), "$12.35");
-    }
-
-    #[test]
-    fn set_named_format_replaces_an_anonymous_one() {
-        let mut s = identity().with_format(|_, _| "X".to_string());
-        s.set_named_format("tag", |_, _| "Y".to_string());
-        assert_eq!(s.format_spec(), FormatSpec::Named("tag".into()));
-        assert_eq!(s.format(&Value::Number(1.0), &Locale::EN_US), "Y");
-    }
-
-    #[test]
-    fn clearing_a_named_formatter_reverts_the_spec_too() {
-        let mut s = identity().with_named_format("tag", |_, _| "Y".to_string());
-        s.clear_format();
-        assert_eq!(s.format_spec(), FormatSpec::Default);
-        assert_eq!(s.format(&Value::Number(1.0), &Locale::EN_US), "1");
-    }
-
-    #[test]
-    fn a_formatter_name_survives_clone() {
-        let s = identity().with_named_format("tag", |_, _| "Y".to_string());
-        assert_eq!(s.clone().format_spec(), FormatSpec::Named("tag".into()));
+        assert_eq!(s.format(&Value::Number(f64::INFINITY)), "inf");
+        assert_eq!(s.format(&Value::Number(f64::NEG_INFINITY)), "\u{2212}inf");
+        assert_eq!(s.format(&Value::Number(f64::NAN)), "NaN");
     }
 
     // ── Bin-edge validation ──
@@ -3196,20 +2949,22 @@ mod tests {
             (Value::Number(0.0), "low".to_string()),
             (Value::Number(1.0), "high".to_string()),
         ]);
-        assert_eq!(s.format(&Value::Number(0.0), &Locale::EN_US), "low");
-        assert_eq!(s.format(&Value::Number(1.0), &Locale::EN_US), "high");
-        // Unlisted values fall through to formatter / default.
-        assert_eq!(s.format(&Value::Number(0.5), &Locale::EN_US), "0.5");
+        assert_eq!(s.format(&Value::Number(0.0)), "low");
+        assert_eq!(s.format(&Value::Number(1.0)), "high");
+        // Unlisted values fall through to the label spec / default.
+        assert_eq!(s.format(&Value::Number(0.5)), "0.5");
     }
 
     #[test]
-    fn labeled_breaks_take_priority_over_formatter() {
+    fn labeled_breaks_take_priority_over_the_label_spec() {
+        let mut spec = LabelSpec::new();
+        spec.set_template("FORMATTED {}");
         let s = continuous(0.0..=1.0)
-            .with_format(|_, _| "FORMATTED".to_string())
+            .with_labels(spec)
             .with_breaks_labeled(vec![(Value::Number(0.5), "MID".to_string())]);
-        assert_eq!(s.format(&Value::Number(0.5), &Locale::EN_US), "MID");
-        // Outside the labeled set, formatter wins.
-        assert_eq!(s.format(&Value::Number(0.7), &Locale::EN_US), "FORMATTED");
+        assert_eq!(s.format(&Value::Number(0.5)), "MID");
+        // Outside the labeled set, the template wins.
+        assert_eq!(s.format(&Value::Number(0.7)), "FORMATTED 0.7");
     }
 
     #[test]
@@ -3494,7 +3249,7 @@ mod tests {
         s.set_breaks(vec![Value::Number(5.0)]);
         assert!(s.generation() > g0);
         let g1 = s.generation();
-        s.set_format(|_, _| "X".to_string());
+        s.set_labels(LabelSpec::new());
         assert!(s.generation() > g1);
         let g2 = s.generation();
         s.set_interval(1.0);
@@ -3528,7 +3283,7 @@ mod tests {
     fn override_chained_builders_do_not_bump_generation() {
         let s = continuous(0.0..=10.0)
             .with_breaks(vec![Value::Number(5.0)])
-            .with_format(|_, _| "X".to_string())
+            .with_labels(LabelSpec::new())
             .with_interval(2.0);
         assert_eq!(s.generation(), 0);
     }

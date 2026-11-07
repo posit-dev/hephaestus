@@ -8,7 +8,7 @@
 
 use crate::color::Color;
 use crate::layout::{Extent, Inset, Track};
-use crate::plot::{FormatSpec, PlotComposition};
+use crate::plot::PlotComposition;
 
 /// Something in a plot that a document can't carry.
 ///
@@ -17,15 +17,6 @@ use crate::plot::{FormatSpec, PlotComposition};
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UnsupportedItem {
-    /// A scale carries an anonymous formatter closure. Give it a name
-    /// with
-    /// [`Scale::with_named_format`](crate::plot::Scale::with_named_format)
-    /// so a reader can resolve it, or accept the default labels.
-    CustomFormatter {
-        /// Name the scale is registered under.
-        scale: String,
-    },
-
     /// A geom returns `None` from [`Geom::kind`](crate::plot::Geom::kind),
     /// so nothing identifies which constructor should rebuild it.
     UnnameableGeom {
@@ -71,11 +62,6 @@ pub enum UnsupportedItem {
 impl std::fmt::Display for UnsupportedItem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::CustomFormatter { scale } => write!(
-                f,
-                "scale {scale:?} has an anonymous label formatter; name it with \
-                 `with_named_format` so a reader can resolve it"
-            ),
             Self::UnnameableGeom { patch, index } => write!(
                 f,
                 "geom {index} on patch {patch:?} does not implement `Geom::kind`, \
@@ -111,10 +97,9 @@ impl std::fmt::Display for UnsupportedItem {
 pub struct WriteOptions {
     /// Degrade what can't be carried instead of refusing.
     ///
-    /// An anonymous formatter is dropped to default labels, an
-    /// unnameable geom is omitted, a track reference is replaced with an
-    /// `Auto` track. Off by default: silently changing a plot is worse
-    /// than saying what's wrong.
+    /// An unnameable geom is omitted, a track reference is replaced
+    /// with an `Auto` track. Off by default: silently changing a plot
+    /// is worse than saying what's wrong.
     pub lossy: bool,
 
     /// Background colour a consumer should render behind the plot.
@@ -231,14 +216,6 @@ impl WriteOptions {
 /// Empty means the plot writes losslessly.
 pub fn unsupported_items(comp: &PlotComposition) -> Vec<UnsupportedItem> {
     let mut out = Vec::new();
-
-    for (name, scale) in comp.scales.iter() {
-        if scale.format_spec() == FormatSpec::Custom {
-            out.push(UnsupportedItem::CustomFormatter {
-                scale: name.to_string(),
-            });
-        }
-    }
 
     for patch in &comp.plot_order {
         for plot in comp.plots.get(patch).into_iter().flatten() {

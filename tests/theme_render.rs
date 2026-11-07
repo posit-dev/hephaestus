@@ -14,7 +14,7 @@ use hephaestus::composition::{beside, Composition, Patch};
 use hephaestus::geometry::Size;
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::theme::{
-    Element, Length, Locale, Palette, RectElement, Theme, ThemeColor, ThemePart,
+    Element, Length, Palette, RectElement, Theme, ThemeColor, ThemePart,
 };
 use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom};
 use hephaestus::scales::chrome::AxisSide;
@@ -439,10 +439,9 @@ fn legend_key_frame_uses_theme_swatch_color() {
 #[test]
 fn locale_default_renders_decimal_point() {
     // Default locale is `Locale::EN_US` → decimal point.
-    let theme = Theme::default();
     let s = scale::continuous(0.0..=1.0);
     let breaks = s.breaks(hephaestus::scales::DEFAULT_BREAK_COUNT);
-    let labels: Vec<String> = breaks.iter().map(|v| s.format(v, &theme.locale)).collect();
+    let labels: Vec<String> = breaks.iter().map(|v| s.format(v)).collect();
     assert!(
         !labels.iter().any(|l| l.contains(',')),
         "EN_US labels must not contain decimal commas; got {labels:?}"
@@ -450,29 +449,13 @@ fn locale_default_renders_decimal_point() {
 }
 
 #[test]
-fn user_formatter_receives_locale() {
-    // A user-supplied formatter closure gets `(value, locale)` and can
-    // branch on the tag. This is the only way an axis becomes
-    // locale-aware, the built-in formatter having no rules to apply.
-    let s = scale::continuous(0.0..=1.0).with_format(|v, locale| match v {
-        hephaestus::scales::Value::Number(n) => {
-            format!(
-                "{n:.1}{}",
-                if locale.tag() == "de-DE" {
-                    " DE"
-                } else {
-                    " US"
-                }
-            )
-        }
-        other => hephaestus::plot::Scale::default_format(other, locale),
-    });
-    assert!(s
-        .format(&hephaestus::scales::Value::Number(0.5), &Locale::EN_US)
-        .ends_with(" US"));
-    assert!(s
-        .format(&hephaestus::scales::Value::Number(0.5), &Locale::DE_DE)
-        .ends_with(" DE"));
+fn a_label_spec_template_formats_axis_labels() {
+    // Custom tick labels are a `LabelSpec`: plain data, re-rendered
+    // against whatever break set the scale currently produces.
+    let mut spec = hephaestus::plot::LabelSpec::new();
+    spec.set_template("{:num %.1f}");
+    let s = scale::continuous(0.0..=1.0).with_labels(spec);
+    assert_eq!(s.format(&hephaestus::scales::Value::Number(0.5)), "0.5");
 }
 
 // ─── Chrome text outlines ───────────────────────────────────────────────────

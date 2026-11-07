@@ -268,7 +268,6 @@ pub(crate) struct AxisTick {
 pub(crate) fn axis_ticks(
     breaks: &[crate::scales::value::Value],
     scale: &crate::plot::scale::Scale,
-    locale: &crate::scales::Locale,
 ) -> Vec<AxisTick> {
     breaks
         .iter()
@@ -278,7 +277,7 @@ pub(crate) fn axis_ticks(
             scale.map_break(v).as_number().map(|frac| AxisTick {
                 break_index,
                 frac,
-                label: scale.format(v, locale),
+                label: scale.format(v),
             })
         })
         .filter(|t| t.frac.is_finite())
@@ -670,7 +669,6 @@ mod tests {
     fn a_dropped_break_leaves_a_gap_rather_than_shifting_later_ticks() {
         use crate::plot::scale;
         use crate::scales::value::Value;
-        use crate::scales::Locale;
 
         // Breaks 1 and 3 are unmappable on a continuous scale, so the rail
         // draws three ticks out of five.
@@ -682,7 +680,7 @@ mod tests {
             Value::Number(1.0),
         ]);
         let breaks = sc.breaks(5);
-        let ticks = axis_ticks(&breaks, &sc, &Locale::default());
+        let ticks = axis_ticks(&breaks, &sc);
 
         assert_eq!(ticks.len(), 3);
         // The survivors report where they sit in `breaks`, not where they
@@ -693,10 +691,7 @@ mod tests {
         );
         // And each index really does address the break it came from.
         for t in &ticks {
-            assert_eq!(
-                sc.format(&breaks[t.break_index], &Locale::default()),
-                t.label
-            );
+            assert_eq!(sc.format(&breaks[t.break_index]), t.label);
         }
     }
 

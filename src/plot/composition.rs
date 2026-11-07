@@ -554,11 +554,7 @@ impl CompositionChrome {
 
         // Legends — one stack per populated side, sized through the
         // same measure the per-plot ring uses.
-        let collapsed = crate::plot::chrome::legend::collapse_legends(
-            &self.legends,
-            ctx.registry,
-            &theme.locale,
-        );
+        let collapsed = crate::plot::chrome::legend::collapse_legends(&self.legends, ctx.registry);
         for (side, slot, group) in legends_grouped_by_side(&collapsed) {
             if group.is_empty() {
                 continue;
@@ -781,8 +777,7 @@ impl CompositionChrome {
 
         // Must collapse identically to `wire` for the measured space
         // to match what gets drawn.
-        let collapsed =
-            crate::plot::chrome::legend::collapse_legends(&self.legends, registry, &theme.locale);
+        let collapsed = crate::plot::chrome::legend::collapse_legends(&self.legends, registry);
         for (side, slot, group) in legends_grouped_by_side(&collapsed) {
             if group.is_empty() {
                 continue;
@@ -2613,7 +2608,7 @@ mod tests {
         assert_ne!(one, two, "each attach gets its own id");
         assert_eq!(view.legends().len(), 2, "storage keeps both as attached");
 
-        let collapsed = collapse_legends(view.legends(), view.scales(), &Theme::default().locale);
+        let collapsed = collapse_legends(view.legends(), view.scales());
         assert_eq!(collapsed.len(), 1, "compatible legends render as one");
         let LegendBody::Stack(stack) = &collapsed[0].body else {
             panic!("stack body");
@@ -2646,9 +2641,8 @@ mod tests {
                 .title("Category")
                 .key(LegendKeySpec::point().scaled("shape", "cat_shape")),
         );
-        let locale = Theme::default().locale;
         assert_eq!(
-            collapse_legends(view.legends(), view.scales(), &locale).len(),
+            collapse_legends(view.legends(), view.scales()).len(),
             1,
             "distinct scales over the same domain share one legend"
         );
@@ -2658,7 +2652,7 @@ mod tests {
             *s = scale::discrete([Value::String(std::sync::Arc::from("A"))]);
         });
         assert_eq!(
-            collapse_legends(view.legends(), view.scales(), &locale).len(),
+            collapse_legends(view.legends(), view.scales()).len(),
             2,
             "collapse re-evaluates against the current scale state"
         );

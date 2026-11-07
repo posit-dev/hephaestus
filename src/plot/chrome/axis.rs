@@ -177,13 +177,7 @@ pub(crate) struct AxisMeasure {
 }
 
 impl AxisMeasure {
-    fn new(
-        scale: &Scale,
-        side: AxisSide,
-        dpi: f64,
-        chrome_style: &AxisChromeStyle,
-        locale: &crate::scales::Locale,
-    ) -> Self {
+    fn new(scale: &Scale, side: AxisSide, dpi: f64, chrome_style: &AxisChromeStyle) -> Self {
         let breaks = scale.breaks(DEFAULT_BREAK_COUNT);
         let mut max_w: f64 = 0.0;
         let mut max_h: f64 = 0.0;
@@ -191,7 +185,7 @@ impl AxisMeasure {
             if matches!(v, Value::Null) {
                 continue;
             }
-            let label = scale.format(v, locale);
+            let label = scale.format(v);
             // Shaped through whichever pipeline the draw pass uses,
             // so the reserved rail matches what lands in it.
             let run = crate::plot::chrome::text::ChromeRun::shape(
@@ -278,13 +272,7 @@ pub fn measure(
         crate::plot::chrome::root_text_pt(theme),
         images,
     );
-    Box::new(AxisMeasure::new(
-        scale,
-        side,
-        dpi,
-        &chrome_style,
-        &theme.locale,
-    ))
+    Box::new(AxisMeasure::new(scale, side, dpi, &chrome_style))
 }
 
 /// Stroke tick marks and draw tick labels into `slot_rect`, mapping
@@ -348,7 +336,7 @@ pub fn draw(
         ),
     };
 
-    let majors = axis_ticks(&breaks, scale, &theme.locale);
+    let majors = axis_ticks(&breaks, scale);
     let minors = axis_minor_ticks(scale, DEFAULT_BREAK_COUNT);
 
     // Resolve the (channel, side) axis from the theme. Channel

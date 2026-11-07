@@ -99,9 +99,9 @@ renderer seeding a surface from the hints before it draws should call
 `read_document`.
 
 `ReadContext::builtin()` is the shared context; `ReadContext::new` builds a
-fifteen-entry geom factory table per call, so it is for adding a formatter or a
-geom of your own rather than for the default case. A host reading document after
-document wants the shared one.
+fifteen-entry geom factory table per call, so it is for adding a geom of your
+own rather than for the default case. A host reading document after document
+wants the shared one.
 
 ## Conventions
 
@@ -139,4 +139,4 @@ Two traps if you touch this:
 
 - `src/plot/composition.rs` — `CompositionTemplate` is the layout spec this module writes, and was already measure-free before it existed. `from_document` is the constructor the read path lands in.
 - `src/plot/geom/mod.rs` — `Geom::kind` supplies the tag; `GeomBuilder::from_parts` + `BuildableGeom::build_from` is the reconstruction path.
-- `src/plot/scale/mod.rs` — `FormatSpec` is how a label formatter is named rather than carried.
+- `src/plot/scale/mod.rs` — a scale's `LabelSpec` (rename table plus template) is plain data and travels whole.

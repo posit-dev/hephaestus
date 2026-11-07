@@ -113,7 +113,6 @@ impl LegendMeasure {
         theme: &crate::plot::theme::Theme,
         geom: &crate::plot::theme::GeomTheme,
         legend_gap_px: f64,
-        locale: &crate::scales::Locale,
         root_pt: f64,
     ) -> Self {
         // Label + title styles come from the LegendTheme so measure
@@ -152,7 +151,7 @@ impl LegendMeasure {
             let Some(label_style) = label_style.as_ref() else {
                 continue;
             };
-            let label = domain.map(|s| s.format(v, locale)).unwrap_or_default();
+            let label = domain.map(|s| s.format(v)).unwrap_or_default();
             let run = ChromeRun::shape(&label, label_style, dpi, label_rich.as_ref());
             let h = run.line_box_height();
             // Labels render unwrapped, so the slot needs the full
@@ -233,8 +232,7 @@ impl LegendMeasure {
                     // draw, no reservation).
                     let label = match label_style.as_ref() {
                         Some(style) => {
-                            let label_text =
-                                domain.map(|s| s.format(v, locale)).unwrap_or_default();
+                            let label_text = domain.map(|s| s.format(v)).unwrap_or_default();
                             let run =
                                 ChromeRun::shape(&label_text, style, dpi, label_rich.as_ref());
                             let nat_h = run.line_box_height();
@@ -729,7 +727,6 @@ mod tests {
             theme,
             &theme.geom,
             0.0,
-            &theme.locale,
             crate::plot::chrome::root_text_pt(theme),
         );
         match m.body {
@@ -783,7 +780,6 @@ mod tests {
             &theme,
             &theme.geom,
             0.0,
-            &theme.locale,
             crate::plot::chrome::root_text_pt(&theme),
         );
         // Derive the expectation from the bin count independently of
