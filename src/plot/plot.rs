@@ -1739,7 +1739,25 @@ impl Plot {
             if let Some(scale_name) = axis.scale_name() {
                 if let (Some(panel_rect), Some(scale)) = (panel, resolve_scale(scale_name)) {
                     let slot = cartesian_axis_slot(side);
-                    if let Some(slot_rect) = layout.get(&self.patch_id, slot) {
+                    // An axis whose chrome is entirely inside the panel
+                    // (inside labels + inward ticks) reserves a
+                    // zero-thickness slot the solver may drop; the
+                    // baseline then lies on the panel edge itself.
+                    let slot_rect = layout.get(&self.patch_id, slot).unwrap_or(match side {
+                        AxisSide::Bottom => {
+                            Rect::new(panel_rect.x0, panel_rect.y1, panel_rect.x1, panel_rect.y1)
+                        }
+                        AxisSide::Top => {
+                            Rect::new(panel_rect.x0, panel_rect.y0, panel_rect.x1, panel_rect.y0)
+                        }
+                        AxisSide::Left => {
+                            Rect::new(panel_rect.x0, panel_rect.y0, panel_rect.x0, panel_rect.y1)
+                        }
+                        AxisSide::Right => {
+                            Rect::new(panel_rect.x1, panel_rect.y0, panel_rect.x1, panel_rect.y1)
+                        }
+                    });
+                    {
                         // A cartesian axis sits in its anatomical slot, so the
                         // region frame names that slot; the axis frame carries
                         // the handle it was attached under.
@@ -2081,7 +2099,7 @@ impl Plot {
         // time; `Inside` draws a strip flush against the panel edge
         // instead, reserving no outer chrome.
         for location in [TitleLocation::Outside, TitleLocation::Inside] {
-            self.draw_axis_titles_into(scene, layout, dpi, theme, location);
+            self.draw_axis_titles_into(scene, layout, registry, dpi, theme, location);
         }
 
         scene.pop_pick_scope();
@@ -2095,6 +2113,7 @@ impl Plot {
         &self,
         scene: &mut dyn SceneBuilder,
         layout: &crate::composition::CompositionLayout,
+        registry: &ScaleRegistry,
         dpi: f64,
         theme: &crate::plot::theme::Theme,
         want: crate::plot::theme::TitleLocation,
@@ -2140,6 +2159,17 @@ impl Plot {
                 TitleLocation::Outside => {
                     let slot = cartesian_axis_title_slot(side);
                     if let Some(rect) = layout.get(&self.patch_id, slot) {
+                        // Stand the title off the chrome toward the
+                        // panel by the title gap — the same margin
+                        // `axis_title_cell` reserves.
+                        let title_gap_px = crate::plot::chrome::linear_axis::pt_to_px(
+                            resolved
+                                .title_gap
+                                .resolve(crate::plot::chrome::linear_axis::TITLE_GAP_PT),
+                            dpi,
+                        );
+                        let rect =
+                            crate::plot::chrome::text::inset_title_rect(rect, side, title_gap_px);
                         scene.push_pick_scope(&crate::plot::pick::region_scope(slot));
                         scene.push_pick_scope(&crate::plot::pick::axis_scope(
                             axis.id(),
@@ -2230,22 +2260,58 @@ impl Plot {
                     );
                     let (mt, mr, mb, ml) = margin.resolve(root_pt);
                     let pt_to_px = dpi / 72.0;
+                    // An inside title sits beyond the axis's own inside
+                    // label rail — flush against the panel edge only when
+                    // the rail draws outside or is blank.
+                    let rail_inset = axis
+                        .scale_name()
+                        .and_then(|name| registry.get(name))
+                        .map(|scale| {
+                            crate::plot::chrome::axis::inside_title_inset(
+                                scale,
+                                side,
+                                dpi,
+                                theme,
+                                &self.images,
+                            )
+                        })
+                        .unwrap_or(0.0);
                     let strip_rect = match side {
                         AxisSide::Bottom => {
                             let h = rotated_h + (mt + mb) * pt_to_px;
-                            Rect::new(panel.x0, panel.y1 - h, panel.x1, panel.y1)
+                            Rect::new(
+                                panel.x0,
+                                panel.y1 - rail_inset - h,
+                                panel.x1,
+                                panel.y1 - rail_inset,
+                            )
                         }
                         AxisSide::Top => {
                             let h = rotated_h + (mt + mb) * pt_to_px;
-                            Rect::new(panel.x0, panel.y0, panel.x1, panel.y0 + h)
+                            Rect::new(
+                                panel.x0,
+                                panel.y0 + rail_inset,
+                                panel.x1,
+                                panel.y0 + rail_inset + h,
+                            )
                         }
                         AxisSide::Left => {
                             let w = rotated_w + (ml + mr) * pt_to_px;
-                            Rect::new(panel.x0, panel.y0, panel.x0 + w, panel.y1)
+                            Rect::new(
+                                panel.x0 + rail_inset,
+                                panel.y0,
+                                panel.x0 + rail_inset + w,
+                                panel.y1,
+                            )
                         }
                         AxisSide::Right => {
                             let w = rotated_w + (ml + mr) * pt_to_px;
-                            Rect::new(panel.x1 - w, panel.y0, panel.x1, panel.y1)
+                            Rect::new(
+                                panel.x1 - rail_inset - w,
+                                panel.y0,
+                                panel.x1 - rail_inset,
+                                panel.y1,
+                            )
                         }
                     };
                     // Use the layout-aware draw helper so the title

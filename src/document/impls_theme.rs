@@ -138,20 +138,81 @@ impl_codec! {
         1 => Inside,
     }
 
-    record AxisTheme {
-        title,
-        text,
-        line,
-        ticks,
-        ticks_minor,
-        tick_length,
-        tick_length_minor,
-        tick_gap,
-        title_gap,
-        title_location,
-    }
-
     record PerAxis { all, by_channel, by_channel_side }
+}
+
+// `AxisTheme` is hand-rolled rather than `record`: its decode guards the
+// trailing `label_location` on the record's declared end, the same way
+// `Scale`'s does — a document written before the field existed must still
+// read, and the macro form has no way to express an absent tail.
+const _: () = {
+    #[allow(unused_variables, dead_code)]
+    fn every_field_listed(v: &AxisTheme) {
+        let AxisTheme {
+            title,
+            text,
+            line,
+            ticks,
+            ticks_minor,
+            tick_length,
+            tick_length_minor,
+            tick_gap,
+            title_gap,
+            title_location,
+            label_location,
+        } = v;
+    }
+};
+
+#[cfg(feature = "document-write")]
+impl Encode for AxisTheme {
+    fn encode(&self, w: &mut Writer) {
+        let body = w.detached(|w| {
+            self.title.encode(w);
+            self.text.encode(w);
+            self.line.encode(w);
+            self.ticks.encode(w);
+            self.ticks_minor.encode(w);
+            self.tick_length.encode(w);
+            self.tick_length_minor.encode(w);
+            self.tick_gap.encode(w);
+            self.title_gap.encode(w);
+            self.title_location.encode(w);
+            self.label_location.encode(w);
+        });
+        w.bytes(&body);
+    }
+}
+
+#[cfg(feature = "document-read")]
+impl Decode for AxisTheme {
+    fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
+        let len = r.count()?;
+        let end = r.pos() + len;
+        let out = (|r: &mut Reader<'_>| {
+            Ok(AxisTheme {
+                title: Decode::decode(r)?,
+                text: Decode::decode(r)?,
+                line: Decode::decode(r)?,
+                ticks: Decode::decode(r)?,
+                ticks_minor: Decode::decode(r)?,
+                tick_length: Decode::decode(r)?,
+                tick_length_minor: Decode::decode(r)?,
+                tick_gap: Decode::decode(r)?,
+                title_gap: Decode::decode(r)?,
+                title_location: Decode::decode(r)?,
+                // A document written before `label_location` existed ends
+                // the record here; its axes drew every label rail outside.
+                label_location: if r.pos() < end {
+                    Decode::decode(r)?
+                } else {
+                    None
+                },
+            })
+        })(r)?;
+        r.skip_to(end, "AxisTheme")?;
+        Ok(out)
+    }
 }
 
 // ─── Legend ──────────────────────────────────────────────────────────────────
@@ -566,6 +627,7 @@ mod tests {
         );
         theme.geom.point.shape = std::sync::Arc::from("diamond");
         theme.locale = crate::scales::locale::Locale::DE_DE;
+        theme.axis.by_channel_side[0][0].label_location = Some(TitleLocation::Inside);
 
         assert_eq!(roundtrip(&theme), theme);
     }

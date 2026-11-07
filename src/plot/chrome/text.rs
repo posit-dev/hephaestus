@@ -523,11 +523,38 @@ pub(crate) fn effective_text(
     }
 }
 
+/// Per-side near-edge margins for an axis title slot, as
+/// [`WithMargin`](crate::text::WithMargin) edges `(top, right,
+/// bottom, left)`: the title gap goes between the chrome toward the
+/// panel and the title's near edge.
+fn title_gap_margins(side: AxisSide, gap_px: f64) -> (f64, f64, f64, f64) {
+    match side {
+        AxisSide::Bottom => (gap_px, 0.0, 0.0, 0.0),
+        AxisSide::Top => (0.0, 0.0, gap_px, 0.0),
+        AxisSide::Left => (0.0, gap_px, 0.0, 0.0),
+        AxisSide::Right => (0.0, 0.0, 0.0, gap_px),
+    }
+}
+
+/// Inset `rect`'s near edge for `side` by `gap_px`, so the drawn
+/// title lands one title gap beyond the slot's panel-side edge —
+/// matching the reservation [`title_gap_margins`] adds.
+pub(crate) fn inset_title_rect(rect: Rect, side: AxisSide, gap_px: f64) -> Rect {
+    match side {
+        AxisSide::Bottom => Rect::new(rect.x0, rect.y0 + gap_px, rect.x1, rect.y1),
+        AxisSide::Top => Rect::new(rect.x0, rect.y0, rect.x1, rect.y1 - gap_px),
+        AxisSide::Left => Rect::new(rect.x0, rect.y0, rect.x1 - gap_px, rect.y1),
+        AxisSide::Right => Rect::new(rect.x0 + gap_px, rect.y0, rect.x1, rect.y1),
+    }
+}
+
 /// Build the `Cell` for a cartesian axis title slot. Vertical sides
 /// (Left/Right) wrap the shaped run in a [`RotatedAxisTitleMeasure`]
 /// so the slot's column width reflects the rotated text's footprint
 /// (one font line height) rather than the natural string width.
 /// Horizontal sides reuse the unrotated `TextRun` measure directly.
+/// Either way the slot thickens by the theme's title gap on its near
+/// edge, keeping the title clear of the chrome toward the panel.
 pub(crate) fn axis_title_cell(
     title: &str,
     side: AxisSide,
@@ -543,13 +570,23 @@ pub(crate) fn axis_title_cell(
     };
     let style = text_style_from(&el, root_pt);
     let run = measure_for_element(title, &el, &style, dpi, theme, images);
-    if side.is_vertical() {
-        Cell::measured(RotatedAxisTitleMeasure {
+    let gap_px = crate::plot::chrome::linear_axis::pt_to_px(
+        resolved
+            .title_gap
+            .resolve(crate::plot::chrome::linear_axis::TITLE_GAP_PT),
+        dpi,
+    );
+    let measured: Box<dyn crate::layout::Measure> = if side.is_vertical() {
+        Box::new(RotatedAxisTitleMeasure {
             rotated_w: run.height_at(f64::INFINITY, dpi),
         })
     } else {
-        Cell::measured_boxed(run)
-    }
+        run
+    };
+    Cell::measured(crate::text::WithMargin::new(
+        measured,
+        title_gap_margins(side, gap_px),
+    ))
 }
 
 /// Measure for an axis title rotated 90° onto a vertical chrome
@@ -983,6 +1020,39 @@ mod tests {
         };
         rich_chrome_for(&el, theme, DPI, &crate::image_registry::no_images())
             .expect("markdown is on")
+    }
+
+    /// The axis-title slot reservation carries the theme's title gap
+    /// on its near edge, so an outside title never sits flush against
+    /// the axis chrome.
+    #[test]
+    fn the_axis_title_slot_reserves_the_title_gap() {
+        use crate::scales::chrome::AxisSide;
+
+        let gapped = axis_title_cell(
+            "Title",
+            AxisSide::Bottom,
+            &Theme::default(),
+            DPI,
+            &crate::image_registry::no_images(),
+        );
+        let mut flush_theme = Theme::default();
+        flush_theme.axis.all.title_gap = Some(crate::plot::theme::Length::Abs(0.0));
+        let flush = axis_title_cell(
+            "Title",
+            AxisSide::Bottom,
+            &flush_theme,
+            DPI,
+            &crate::image_registry::no_images(),
+        );
+
+        let gap_px = crate::plot::chrome::linear_axis::TITLE_GAP_PT * DPI / 72.0;
+        let with = gapped.into_measure().height_at(200.0, DPI);
+        let without = flush.into_measure().height_at(200.0, DPI);
+        assert!(
+            (with - without - gap_px).abs() < 0.01,
+            "the gap adds {gap_px}px to the reservation ({without} → {with})"
+        );
     }
 
     /// A slot that leaves `markdown` unset gets no context, so it

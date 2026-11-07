@@ -80,7 +80,7 @@ Use `ThemeColor::Fixed(Color::rgb(...))` only for things that must lock to a spe
 
 ## Axis cascade specifics
 
-`AxisTheme` carries seven slot fields plus five typed `Option<Length>` / `Option<TitleLocation>` fields. The axis-specific cascade in `PerAxis::resolve(ch, side)` does **per-field merging**, not whole-element override — a user who sets `by_channel_side[0][0].tick_length` without touching anything else gets just that one field changed, with every other field walking up through `by_channel[0]` → `all` → defaults.
+`AxisTheme` carries seven slot fields plus six typed `Option<Length>` / `Option<TitleLocation>` fields. The axis-specific cascade in `PerAxis::resolve(ch, side)` does **per-field merging**, not whole-element override — a user who sets `by_channel_side[0][0].tick_length` without touching anything else gets just that one field changed, with every other field walking up through `by_channel[0]` → `all` → defaults.
 
 The `ResolvedAxis` returned is a concrete bundle ready to draw. `Length` fields stay unresolved at this stage so the chrome renderer can apply them against the right per-call parent (text size against base text, tick length against the line root).
 

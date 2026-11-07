@@ -145,6 +145,22 @@ fn per_axis_resolves_per_field() {
 }
 
 #[test]
+fn per_axis_cascades_label_location_per_field() {
+    use crate::plot::theme::TitleLocation;
+
+    let mut axis = PerAxis::new(axis_concrete_defaults());
+    assert_eq!(axis.resolve(0, 0).label_location, TitleLocation::Outside);
+
+    axis.by_channel[0].label_location = Some(TitleLocation::Inside);
+    axis.by_channel_side[1][1].label_location = Some(TitleLocation::Inside);
+
+    assert_eq!(axis.resolve(0, 0).label_location, TitleLocation::Inside); // channel
+    assert_eq!(axis.resolve(0, 1).label_location, TitleLocation::Inside); // channel
+    assert_eq!(axis.resolve(1, 0).label_location, TitleLocation::Outside); // root
+    assert_eq!(axis.resolve(1, 1).label_location, TitleLocation::Inside); // side
+}
+
+#[test]
 fn theme_part_merge_replaces_set_fields() {
     let base = Theme::default();
     let part = ThemePart {

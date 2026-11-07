@@ -721,12 +721,22 @@ impl CompositionChrome {
                 continue;
             };
             let (ch, side_idx) = crate::plot::chrome::axis::axis_side_to_channel_side(side);
-            let Some(el) = theme.resolved_axis(ch, side_idx).title else {
+            let resolved_axis = theme.resolved_axis(ch, side_idx);
+            let Some(el) = resolved_axis.title else {
                 continue;
             };
             let Some(rect) = layout.get(comp_id, cartesian_axis_title_slot(side)) else {
                 continue;
             };
+            // The same title gap the plot-level path and the slot
+            // reservation apply.
+            let title_gap_px = crate::plot::chrome::linear_axis::pt_to_px(
+                resolved_axis
+                    .title_gap
+                    .resolve(crate::plot::chrome::linear_axis::TITLE_GAP_PT),
+                dpi,
+            );
+            let rect = crate::plot::chrome::text::inset_title_rect(rect, side, title_gap_px);
             let color = el
                 .color
                 .clone()
@@ -2282,6 +2292,76 @@ mod tests {
             "both panels sit below the title band, got panel y0 {} vs title y1 {}",
             a.y0,
             title.y1
+        );
+    }
+
+    /// An axis whose labels and title flip inside frees its chrome
+    /// band, and the freed space accrues to the panel.
+    #[test]
+    fn inside_axis_chrome_grows_the_panel() {
+        use crate::plot::chrome::axis::{Axis, AxisPlacement};
+        use crate::plot::theme::{Length, TitleLocation};
+
+        let build = |inside: bool| {
+            let mut view = PlotComposition::new(&comp_two())
+                .with_plot(crate::plot::Plot::new(&comp_two(), "a"));
+            view.insert_scale("x", scale::continuous(0.0..=1.0));
+            view.update_plot("a", |p| {
+                p.set_binding("x", "x");
+                p.add_axis(Axis::rail("x", AxisPlacement::Cartesian(AxisSide::Bottom)).title("X"));
+            });
+            if inside {
+                let mut theme = Theme::default();
+                let ax = &mut theme.axis.by_channel_side[0][0];
+                ax.label_location = Some(TitleLocation::Inside);
+                ax.title_location = Some(TitleLocation::Inside);
+                ax.tick_length = Some(Length::Abs(-2.75));
+                view.set_theme(theme);
+            }
+            let mut scene = crate::scene::recording::RecordingScene::default();
+            view.render(&mut scene, Size::new(600.0, 400.0), 96.0);
+            (view, scene)
+        };
+
+        let (out_view, _) = build(false);
+        let (in_view, in_scene) = build(true);
+        let panel = |v: &PlotComposition| {
+            v.last_layout
+                .as_ref()
+                .unwrap()
+                .get("a", crate::composition::Slot::Panel)
+                .unwrap()
+        };
+        let (out_p, in_p) = (panel(&out_view), panel(&in_view));
+        assert!(
+            in_p.y1 > out_p.y1 + 10.0,
+            "the panel grows into the freed chrome ({} → {})",
+            out_p.y1,
+            in_p.y1
+        );
+
+        // The freed band shows in the layout: neither the rail nor the
+        // title slot carries height any more.
+        let l = in_view.last_layout.as_ref().unwrap();
+        for slot in [
+            crate::composition::Slot::AxisBottom,
+            crate::composition::Slot::AxisBottomTitle,
+        ] {
+            let thin = l.get("a", slot).is_none_or(|r| r.y1 - r.y0 < 0.5);
+            assert!(thin, "{slot:?} still reserves a band");
+        }
+
+        // Chrome glyphs draw just within the panel's bottom edge.
+        let glyph_near_bottom = in_scene.ops.iter().any(|op| {
+            matches!(op, crate::scene::recording::Op::DrawGlyphs(run) if run.glyphs.iter().any(|g| {
+                let y = (run.transform * crate::geometry::Point::new(g.x as f64, g.y as f64)).y;
+                y < in_p.y1 && y > in_p.y1 - 40.0
+            }))
+        });
+        assert!(
+            glyph_near_bottom,
+            "inside labels and title draw just within the panel (bottom edge {})",
+            in_p.y1
         );
     }
 

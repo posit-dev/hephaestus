@@ -127,6 +127,11 @@ pub(crate) struct AxisChromeStyle {
     /// pipeline and `text_outline` is carried on the sheet instead.
     pub rich: Option<RichChrome>,
     pub draw_labels: bool,
+    /// Which side of the baseline the tick-label rail sits on.
+    /// `Inside` flips the rail into the panel; tick direction is
+    /// unaffected (a negative `tick_length_px` is what points ticks
+    /// inward).
+    pub label_location: crate::plot::theme::TitleLocation,
 }
 
 fn resolve_line_color(el: &LineElement, defaults: &LineElement) -> crate::plot::theme::ThemeColor {
@@ -229,6 +234,7 @@ impl AxisChromeStyle {
             text_outline,
             rich,
             draw_labels,
+            label_location: resolved.label_location,
         }
     }
 }
@@ -379,37 +385,37 @@ fn bisect_keep(boxes: &[LabelBox], fracs: &[f64]) -> Vec<bool> {
 }
 
 /// Where the label at `pos` sits: the anchor its near edge aligns to,
-/// and the outward direction it extends into. Distinct from the tick
-/// direction when the tick length is negative (the tick grows inward)
-/// — labels still go outward, the user-visible side.
+/// and the direction the label extends into, as a unit vector.
+///
+/// The side is the one `style.label_location` names: `Outside` puts
+/// the rail a tick-length plus gap out from the baseline, on the
+/// tick side. `Inside` mirrors that across the baseline: beyond the
+/// inward tick end when the tick points inward (negative length),
+/// else a gap inside the baseline.
 fn label_anchor(
     pos: Point,
     tick_direction: (f64, f64),
     style: &AxisChromeStyle,
 ) -> (Point, (f64, f64)) {
     let (tx, ty) = tick_direction;
-    let (outward_tx, outward_ty) = if style.tick_length_px < 0.0 {
-        (-tx, -ty)
-    } else {
-        (tx, ty)
+    // Unit vector from the baseline toward the label rail. Outside,
+    // that is the tick direction; inside, its mirror.
+    let (dir_x, dir_y) = match style.label_location {
+        crate::plot::theme::TitleLocation::Outside => (tx, ty),
+        crate::plot::theme::TitleLocation::Inside => (-tx, -ty),
     };
-    let outward_end = if style.tick_length_px < 0.0 {
-        Point::new(
-            pos.x - style.tick_length_px * tx,
-            pos.y - style.tick_length_px * ty,
-        )
-    } else {
-        Point::new(
-            pos.x + style.tick_length_px * tx,
-            pos.y + style.tick_length_px * ty,
-        )
+    // Tick extent toward the rail. Outside, the label holds the full
+    // tick magnitude off the baseline even when the tick itself grows
+    // inward — the rail keeps its usual standoff. Inside, only an
+    // inward (negative) tick pushes the label further in.
+    let extent = match style.label_location {
+        crate::plot::theme::TitleLocation::Outside => style.tick_length_px.abs(),
+        crate::plot::theme::TitleLocation::Inside => (-style.tick_length_px).max(0.0),
     };
+    let offset = extent + style.gap_px;
     (
-        Point::new(
-            outward_end.x + style.gap_px * outward_tx,
-            outward_end.y + style.gap_px * outward_ty,
-        ),
-        (outward_tx, outward_ty),
+        Point::new(pos.x + offset * dir_x, pos.y + offset * dir_y),
+        (dir_x, dir_y),
     )
 }
 
@@ -1040,6 +1046,83 @@ mod tests {
         assert!(
             max_x > 390.0,
             "last label drawn near the rail end ({max_x})"
+        );
+    }
+
+    /// Highest (smallest-y) and lowest glyph pen positions across
+    /// every emitted run.
+    fn glyph_y_extent(scene: &RecordingScene) -> (f64, f64) {
+        let (mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY);
+        for op in &scene.ops {
+            if let Op::DrawGlyphs(run) = op {
+                for g in &run.glyphs {
+                    min_y = min_y.min(g.y as f64);
+                    max_y = max_y.max(g.y as f64);
+                }
+            }
+        }
+        assert!(min_y.is_finite(), "no glyphs emitted");
+        (min_y, max_y)
+    }
+
+    fn three_tick_axis(style: &AxisChromeStyle) -> RecordingScene {
+        let majors: Vec<AxisTick> = (0..3)
+            .map(|i| AxisTick {
+                break_index: i,
+                frac: i as f64 / 2.0,
+                label: i.to_string(),
+            })
+            .collect();
+        let mut scene = RecordingScene::default();
+        draw_linear_axis_at(
+            &mut scene,
+            Point::new(0.0, 0.0),
+            Point::new(400.0, 0.0),
+            (0.0, 1.0),
+            &majors,
+            &[],
+            style,
+            DPI,
+        );
+        scene
+    }
+
+    /// A Bottom axis's tick direction points down (+y); `Inside`
+    /// labels must land above the baseline, outside ones below it.
+    #[test]
+    fn inside_labels_flip_to_the_other_side_of_the_baseline() {
+        let (_theme, mut style) = chrome_style();
+        let outside = three_tick_axis(&style);
+        let (_, out_max) = glyph_y_extent(&outside);
+        assert!(out_max > 0.0, "outside labels sit below the baseline");
+
+        style.label_location = crate::plot::theme::TitleLocation::Inside;
+        let inside = three_tick_axis(&style);
+        let (_, in_max) = glyph_y_extent(&inside);
+        assert!(
+            in_max < 0.0,
+            "inside labels sit entirely above the baseline ({in_max})"
+        );
+    }
+
+    /// An inward tick (negative length) pushes an inside label rail
+    /// further in by exactly the tick's length.
+    #[test]
+    fn an_inward_tick_pushes_inside_labels_past_its_end() {
+        let (_theme, mut style) = chrome_style();
+        style.label_location = crate::plot::theme::TitleLocation::Inside;
+        style.tick_length_px = 0.0;
+        let flush = three_tick_axis(&style);
+        let (_, flush_max) = glyph_y_extent(&flush);
+
+        style.tick_length_px = -10.0;
+        let ticked = three_tick_axis(&style);
+        let (_, ticked_max) = glyph_y_extent(&ticked);
+
+        assert!(
+            (flush_max - ticked_max - 10.0).abs() < 0.5,
+            "labels moved {}px, expected 10",
+            flush_max - ticked_max
         );
     }
 

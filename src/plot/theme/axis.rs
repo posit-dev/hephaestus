@@ -17,17 +17,19 @@ use super::length::Length;
 use super::palette::ThemeColor;
 use super::{LineElement, TextElement};
 
-/// Where the axis title sits relative to the panel.
+/// Where a piece of axis chrome — the title, or the tick-label rail —
+/// sits relative to the panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TitleLocation {
-    /// Title sits in the outer chrome slot, beyond the tick labels,
-    /// on the side of the panel the axis draws against. The default
-    /// for Cartesian axes.
+    /// The chrome sits in the outer slot, beyond the panel edge, on
+    /// the side of the panel the axis draws against. The default for
+    /// Cartesian axes.
     #[default]
     Outside,
-    /// Title sits inside the panel, aligned with the axis. Useful
-    /// for compact plots and projection styles that put the title
-    /// near the axis baseline.
+    /// The chrome sits inside the panel, flush against the axis's
+    /// edge, and reserves no outer slot space. Useful for compact
+    /// plots and projection styles that keep chrome near the axis
+    /// baseline.
     Inside,
 }
 
@@ -74,6 +76,13 @@ pub struct AxisTheme {
     pub title_gap: Option<Length>,
     /// Where the axis title sits relative to the panel.
     pub title_location: Option<TitleLocation>,
+    /// Where the tick-label rail sits relative to the panel.
+    /// `Inside` draws the labels just within the panel edge — past
+    /// the tick end when ticks also point inward (negative
+    /// [`Self::tick_length`]), else past the baseline — and reserves
+    /// only the outward tick extent in the axis slot. Independent of
+    /// [`Self::title_location`], so the two can flip separately.
+    pub label_location: Option<TitleLocation>,
 }
 
 /// Default major tick mark length, pt. Matches ggplot2's
@@ -134,6 +143,7 @@ fn build_axis_concrete_defaults() -> AxisTheme {
         tick_gap: Some(Length::Abs(DEFAULT_TICK_GAP_PT)),
         title_gap: Some(Length::Abs(DEFAULT_TITLE_GAP_PT)),
         title_location: Some(TitleLocation::Outside),
+        label_location: Some(TitleLocation::Outside),
     }
 }
 
@@ -258,6 +268,12 @@ impl PerAxis {
             .or(self.all.title_location)
             .or(defaults.title_location)
             .expect("axis_concrete_defaults sets title_location");
+        let label_location = by_cs
+            .label_location
+            .or(by_ch.label_location)
+            .or(self.all.label_location)
+            .or(defaults.label_location)
+            .expect("axis_concrete_defaults sets label_location");
 
         ResolvedAxis {
             title,
@@ -270,6 +286,7 @@ impl PerAxis {
             tick_gap,
             title_gap,
             title_location,
+            label_location,
         }
     }
 }
@@ -329,6 +346,8 @@ pub struct ResolvedAxis {
     pub title_gap: Length,
     /// Axis-title placement.
     pub title_location: TitleLocation,
+    /// Tick-label rail placement.
+    pub label_location: TitleLocation,
 }
 
 /// Walk the cascade chain for a `TextElement` slot and merge into

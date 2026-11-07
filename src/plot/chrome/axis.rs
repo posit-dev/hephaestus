@@ -169,11 +169,16 @@ pub(crate) struct AxisMeasure {
     /// (max label height across all ticks, in px at the dpi captured at
     /// construction). Computed once.
     max_label_h_px: f64,
-    /// Resolved tick length (px, absolute value — sign drives draw
-    /// direction but not reservation magnitude).
+    /// Resolved tick length, px — signed, since the reservation
+    /// differs per side: an inside label rail reserves only the
+    /// outward (positive) extent, an outside rail the magnitude.
     tick_length_px: f64,
     /// Resolved gap between tick end and label near-edge, px.
     gap_px: f64,
+    /// Which side of the baseline the label rail draws on. `Inside`
+    /// labels sit within the panel and shrink the reservation to the
+    /// outward tick extent.
+    label_location: crate::plot::theme::TitleLocation,
 }
 
 impl AxisMeasure {
@@ -212,24 +217,51 @@ impl AxisMeasure {
             side,
             max_label_w_px: max_w,
             max_label_h_px: max_h,
-            // Reservation uses the tick's magnitude — sign flips the
-            // tick's draw direction but the slot still needs to fit
-            // it either way.
-            tick_length_px: chrome_style.tick_length_px.abs(),
+            tick_length_px: chrome_style.tick_length_px,
             gap_px: chrome_style.gap_px,
+            label_location: chrome_style.label_location,
         }
+    }
+
+    /// Thickness of the chrome the axis draws inside the panel edge,
+    /// px: the inward tick extent plus, when the labels also draw
+    /// inside, the gap and the label dimension along the axis's
+    /// perpendicular. What an inside axis title must yield to.
+    fn inside_rail_px(&self) -> f64 {
+        let mut rail = (-self.tick_length_px).max(0.0);
+        if matches!(
+            self.label_location,
+            crate::plot::theme::TitleLocation::Inside
+        ) {
+            let label_dim = if self.side.is_vertical() {
+                self.max_label_w_px
+            } else {
+                self.max_label_h_px
+            };
+            rail += self.gap_px + label_dim;
+        }
+        rail
     }
 
     /// Total px contribution along the axis's perpendicular direction.
     /// For Left/Right axes this is the column width; for Bottom/Top it's
-    /// the row height.
+    /// the row height. An inside label rail draws over the panel and
+    /// reserves nothing, so the reservation collapses to the outward
+    /// tick extent.
     fn chrome_thickness_px(&self) -> f64 {
+        if matches!(
+            self.label_location,
+            crate::plot::theme::TitleLocation::Inside
+        ) {
+            return self.tick_length_px.max(0.0);
+        }
+        let tick_extent = self.tick_length_px.abs();
         let label_dim = if self.side.is_vertical() {
             self.max_label_w_px
         } else {
             self.max_label_h_px
         };
-        self.tick_length_px + self.gap_px + label_dim
+        tick_extent + self.gap_px + label_dim
     }
 }
 
@@ -280,6 +312,36 @@ pub fn measure(
     Box::new(AxisMeasure::new(scale, side, dpi, &chrome_style))
 }
 
+/// The distance an inside axis title stands off the panel edge, px:
+/// past whatever chrome the axis draws inside — inward ticks, and the
+/// label rail when labels are also inside — plus the title gap. The
+/// gap is what keeps the title clear of the baseline when nothing
+/// else of the axis draws inside.
+pub(crate) fn inside_title_inset(
+    scale: &Scale,
+    side: AxisSide,
+    dpi: f64,
+    theme: &Theme,
+    images: &std::sync::Arc<crate::image_registry::ImageRegistry>,
+) -> f64 {
+    let (ch, side_idx) = axis_side_to_channel_side(side);
+    let resolved = theme.resolved_axis(ch, side_idx);
+    let chrome_style = AxisChromeStyle::from_resolved(
+        &resolved,
+        theme,
+        dpi,
+        crate::plot::chrome::root_text_pt(theme),
+        images,
+    );
+    let rail = if chrome_style.draw_labels {
+        AxisMeasure::new(scale, side, dpi, &chrome_style).inside_rail_px()
+    } else {
+        // Labels are blank; only inward ticks reach inside the panel.
+        (-chrome_style.tick_length_px).max(0.0)
+    };
+    rail + chrome_style.title_gap_px
+}
+
 /// Stroke tick marks and draw tick labels into `slot_rect`, mapping
 /// the scale's breaks into panel-space pixels via `panel_rect`.
 ///
@@ -288,8 +350,12 @@ pub fn measure(
 ///   returns a `Value::Number` in `[0, 1]`; the geom-side convention
 ///   `px = panel.x0 + frac * panel_w` (and `panel.y1 - frac * panel_h`
 ///   for y, to flip pixels-grow-downward) applies here too.
-/// - Tick marks stroke outward from the panel edge into `slot_rect`.
-/// - Labels are anchored toward `slot_rect`'s far edge from the panel.
+/// - Tick marks stroke outward from the panel edge into `slot_rect`
+///   (or inward, over the panel, when the theme's tick length is
+///   negative).
+/// - Labels anchor on the side the theme's `label_location` names:
+///   outward into `slot_rect` by default, or just inside the panel
+///   edge when `Inside`.
 ///
 /// Silently does nothing if the scale has no input range, has empty
 /// breaks, or the slot rect is degenerate.
@@ -543,6 +609,108 @@ mod tests {
             "markdown labels lose their markers, so the rail narrows ({} → {})",
             width(plain.as_ref()),
             width(md.as_ref())
+        );
+    }
+
+    /// A theme whose x-axis labels draw inside the panel.
+    fn inside_label_theme(tick_length_pt: f64) -> Theme {
+        let mut t = Theme::default();
+        t.axis.by_channel_side[0][0].label_location =
+            Some(crate::plot::theme::TitleLocation::Inside);
+        t.axis.by_channel_side[0][0].tick_length =
+            Some(crate::plot::theme::Length::Abs(tick_length_pt));
+        t
+    }
+
+    /// An inside label rail reserves only the outward tick extent —
+    /// the labels themselves draw over the panel.
+    #[test]
+    fn inside_labels_reserve_only_the_outward_tick_extent() {
+        let s = scale::continuous(0.0..=100.0);
+        let dpi = dpi_96();
+        let outward = measure(
+            &s,
+            AxisSide::Bottom,
+            dpi,
+            &inside_label_theme(2.75),
+            &crate::image_registry::no_images(),
+        );
+        let inward = measure(
+            &s,
+            AxisSide::Bottom,
+            dpi,
+            &inside_label_theme(-2.75),
+            &crate::image_registry::no_images(),
+        );
+        let outside = measure(
+            &s,
+            AxisSide::Bottom,
+            dpi,
+            &Theme::default(),
+            &crate::image_registry::no_images(),
+        );
+
+        let h_outward = outward.height_at(400.0, dpi);
+        let h_inward = inward.height_at(400.0, dpi);
+        let h_outside = outside.height_at(400.0, dpi);
+
+        // Positive (outward) ticks still need their slot; inward ticks
+        // draw over the panel and leave nothing to reserve.
+        assert!(h_outward > 0.0, "outward ticks still reserve their length");
+        assert_eq!(
+            h_inward, 0.0,
+            "inward ticks + inside labels reserve nothing"
+        );
+        assert!(
+            h_outward < h_outside,
+            "dropping the label rail shrinks the reservation ({h_outward} vs {h_outside})"
+        );
+    }
+
+    /// The title inset is always at least the title gap, and grows by
+    /// whatever chrome the axis draws inside: inward ticks, then the
+    /// label rail when labels flip in too.
+    #[test]
+    fn inside_title_inset_tracks_the_label_rail() {
+        let s = scale::continuous(0.0..=100.0);
+        let dpi = dpi_96();
+        let title_gap_px = crate::plot::chrome::linear_axis::TITLE_GAP_PT * dpi / 72.0;
+        let outside = inside_title_inset(
+            &s,
+            AxisSide::Bottom,
+            dpi,
+            &Theme::default(),
+            &crate::image_registry::no_images(),
+        );
+        assert!(
+            (outside - title_gap_px).abs() < 0.01,
+            "outside labels: just the title gap ({outside})"
+        );
+
+        let inside = inside_title_inset(
+            &s,
+            AxisSide::Bottom,
+            dpi,
+            &inside_label_theme(-2.75),
+            &crate::image_registry::no_images(),
+        );
+        assert!(
+            inside > outside + title_gap_px,
+            "an inside rail (inward tick + gap + labels) pushes the title well past the gap ({inside})"
+        );
+
+        let mut blank_text = inside_label_theme(-2.75);
+        blank_text.axis.by_channel_side[0][0].text = crate::plot::theme::Element::Blank;
+        let blanked = inside_title_inset(
+            &s,
+            AxisSide::Bottom,
+            dpi,
+            &blank_text,
+            &crate::image_registry::no_images(),
+        );
+        assert!(
+            (blanked - 2.0 * title_gap_px).abs() < 0.01,
+            "blank labels: inward tick + title gap ({blanked})"
         );
     }
 
