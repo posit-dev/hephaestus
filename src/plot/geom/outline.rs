@@ -44,8 +44,9 @@ use super::resolve::{
     auto_endpoint_clip_pt, draw_stroke_with_linetype, emit_endpoint_marker,
     endpoint_marker_outline_px, endpoint_outward, override_alpha, pt_to_px,
     resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel,
-    resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
-    resolve_number_channel, resolve_number_channel_or, resolve_str_channel_or, ChannelBind,
+    resolve_color_channel_or_theme, resolve_join_channel, resolve_len_channel_or,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or,
+    resolve_str_channel_or, ChannelBind,
 };
 use super::{Channel, GeomContext};
 
@@ -234,16 +235,19 @@ pub(crate) fn resolve_outline_spec(
     let start_marker_name =
         resolve_str_channel_or(ch.start_marker, sc.start_marker, i0, "").into_owned();
     let end_marker_name = resolve_str_channel_or(ch.end_marker, sc.end_marker, i0, "").into_owned();
-    let start_marker_size_pt = resolve_number_channel_or(
+    // A relative marker size (`rel(f)`) multiplies the resolved linewidth.
+    let start_marker_size_pt = resolve_len_channel_or(
         ch.start_marker_size,
         sc.start_marker_size,
         i0,
+        linewidth_pt,
         default_marker_size_pt,
     );
-    let end_marker_size_pt = resolve_number_channel_or(
+    let end_marker_size_pt = resolve_len_channel_or(
         ch.end_marker_size,
         sc.end_marker_size,
         i0,
+        linewidth_pt,
         default_marker_size_pt,
     );
     let start_marker_fill = resolve_color_channel(ch.start_marker_fill, sc.start_marker_fill, i0);

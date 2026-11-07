@@ -30,6 +30,9 @@
 //! - `"fill"` — text colour (optional; default black).
 //! - `"fill_opacity"` — overrides the alpha component of `"fill"`
 //!   (optional; expects `0..=1`).
+//! - `"text_stroke"`, `"text_linewidth"` — per-glyph outline colour
+//!   and thickness in pt, drawn behind the fill (halo). A relative
+//!   linewidth (`rel(f)`) multiplies the row's resolved font size.
 //! - `"width"` — soft-wrap width in pt (optional; default 0 = no wrap).
 //!   When positive, the text is laid out with this as the maximum line
 //!   width and lines break at word boundaries.
@@ -50,8 +53,12 @@
 //!   `"bg_linetype"` — outline styling for the background rect. Set
 //!   without `"bg_fill"` for an unfilled outlined label.
 //! - `"bg_corner_radius"` — uniform corner radius in pt (default 0).
+//!   A relative value (`rel(f)`) multiplies the row's resolved font
+//!   size, e.g. `rel(0.25)` for a quarter-em radius.
 //! - `"bg_padding"` — uniform padding in pt between the text and the
-//!   background rect edge (default 0).
+//!   background rect edge (default 0). A relative value (`rel(f)`)
+//!   multiplies the row's resolved font size, e.g. `rel(0.8)` for
+//!   0.8em padding — including when font size is data-mapped.
 //!
 //! ### Background-rect vertical balance
 //!
@@ -113,8 +120,8 @@ use crate::text::{draw_text, TextRun, TextStyle};
 use super::resolve::{
     band_width_at, draw_stroke_with_linetype, override_alpha, pt_to_px, resolve_angle_channel,
     resolve_bool_channel_or, resolve_color_channel, resolve_color_channel_or_theme,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
-    PositionMap,
+    resolve_len_channel_or, resolve_linetype_channel, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, PositionMap,
 };
 use super::rich::{panel_space_transform, OutlineSheets};
 use super::state::{
@@ -478,10 +485,12 @@ impl Geom for TextGeom {
                 let row_sheet = self.rich_outline_sheets.resolve(
                     rich_sheet,
                     row_stroke,
-                    resolve_number_channel_or(
+                    // Relative linewidth (`rel(f)`) multiplies the font size.
+                    resolve_len_channel_or(
                         text_linewidth_ch,
                         text_linewidth_scale,
                         i,
+                        size_pt,
                         ctx.theme.geom.text.text_linewidth_pt,
                     ),
                 );
@@ -556,8 +565,9 @@ impl Geom for TextGeom {
                 );
                 let has_bg = bg_fill.is_some() || bg_stroke.is_some();
                 let (draw_x, draw_y, bg_rect_opt) = if has_bg {
+                    // Relative padding (`rel(f)`) multiplies the font size.
                     let padding_pt =
-                        resolve_number_channel_or(bg_padding_ch, bg_padding_scale, i, 0.0);
+                        resolve_len_channel_or(bg_padding_ch, bg_padding_scale, i, size_pt, 0.0);
                     let padding_px = pt_to_px(padding_pt, ctx.dpi);
                     let bg_w = text_w + 2.0 * padding_px;
                     let bg_h = text_h + 2.0 * padding_px;
@@ -582,10 +592,12 @@ impl Geom for TextGeom {
                 // Draw label bg first, then rich text on top.
                 if let Some(bg_rect) = bg_rect_opt {
                     if bg_rect.is_finite() && bg_rect.width() > 0.0 && bg_rect.height() > 0.0 {
-                        let bg_corner_radius_pt = resolve_number_channel_or(
+                        // Relative radius (`rel(f)`) multiplies the font size.
+                        let bg_corner_radius_pt = resolve_len_channel_or(
                             bg_corner_radius_ch,
                             bg_corner_radius_scale,
                             i,
+                            size_pt,
                             0.0,
                         );
                         let bg_corner_radius_px = pt_to_px(bg_corner_radius_pt, ctx.dpi).max(0.0);
@@ -713,10 +725,12 @@ impl Geom for TextGeom {
                 i,
                 text_stroke_theme,
             );
-            let text_linewidth_pt = resolve_number_channel_or(
+            // Relative linewidth (`rel(f)`) multiplies the font size.
+            let text_linewidth_pt = resolve_len_channel_or(
                 text_linewidth_ch,
                 text_linewidth_scale,
                 i,
+                size_pt,
                 ctx.theme.geom.text.text_linewidth_pt,
             );
 
@@ -748,7 +762,9 @@ impl Geom for TextGeom {
             //   centred inside the bg rect even when the last line has
             //   no descenders ("men" looks centred like "jay" does).
             let (draw_x, draw_y, bg_rect_opt) = if has_bg {
-                let padding_pt = resolve_number_channel_or(bg_padding_ch, bg_padding_scale, i, 0.0);
+                // Relative padding (`rel(f)`) multiplies the font size.
+                let padding_pt =
+                    resolve_len_channel_or(bg_padding_ch, bg_padding_scale, i, size_pt, 0.0);
                 let padding_px = pt_to_px(padding_pt, ctx.dpi);
                 let descender_px = run.last_line_descender();
                 let top_pad_eff = padding_px.max(descender_px);
@@ -784,10 +800,12 @@ impl Geom for TextGeom {
             // ── Background rect (drawn before glyphs to sit behind). ──
             if let Some(bg_rect) = bg_rect_opt {
                 if bg_rect.is_finite() && bg_rect.width() > 0.0 && bg_rect.height() > 0.0 {
-                    let bg_corner_radius_pt = resolve_number_channel_or(
+                    // Relative radius (`rel(f)`) multiplies the font size.
+                    let bg_corner_radius_pt = resolve_len_channel_or(
                         bg_corner_radius_ch,
                         bg_corner_radius_scale,
                         i,
+                        size_pt,
                         0.0,
                     );
                     let bg_corner_radius_px = pt_to_px(bg_corner_radius_pt, ctx.dpi).max(0.0);
@@ -1376,6 +1394,46 @@ mod tests {
     }
 
     #[test]
+    fn bg_padding_relative_multiplies_font_size() {
+        // rel(1.0) at a 12 pt font must give the same rect as an
+        // absolute 12 pt padding.
+        let build = |padding: Value| {
+            TextGeom::builder()
+                .set("x", vec![0.5_f64])
+                .set("y", vec![0.5_f64])
+                .set("text", vec!["hi"])
+                .set("size", vec![12.0_f64])
+                .set("fill", red())
+                .set("bg_fill", red())
+                .set("bg_padding", padding)
+                .build()
+        };
+        let g_rel = build(crate::plot::value::rel(1.0).into());
+        let g_abs = build(12.0_f64.into());
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut s_rel = RecordingScene::default();
+        let mut s_abs = RecordingScene::default();
+        let c = ctx(Rect::new(0.0, 0.0, 200.0, 100.0), &shapes, &scales);
+        g_rel.draw(&mut s_rel, &c);
+        g_abs.draw(&mut s_abs, &c);
+        let bb_rel = fill_bbox(&s_rel).expect("fill rel");
+        let bb_abs = fill_bbox(&s_abs).expect("fill abs");
+        assert!(
+            (bb_rel.width() - bb_abs.width()).abs() < 0.5,
+            "width {} vs {}",
+            bb_rel.width(),
+            bb_abs.width()
+        );
+        assert!(
+            (bb_rel.height() - bb_abs.height()).abs() < 0.5,
+            "height {} vs {}",
+            bb_rel.height(),
+            bb_abs.height()
+        );
+    }
+
+    #[test]
     fn bg_rebalance_reserves_descender_at_zero_padding() {
         // With padding=0 and the geom_label rebalance trick, the bg
         // should still reserve `descender` of space above the text
@@ -1697,6 +1755,40 @@ mod tests {
         };
         assert_eq!(count_stroked(&make_plain()), 0);
         assert!(count_stroked(&make_outlined()) >= 1);
+    }
+
+    #[test]
+    fn text_linewidth_relative_multiplies_font_size() {
+        // rel(0.5) at a 12 pt font must give the same outline width as
+        // an absolute 6 pt linewidth.
+        let make = |lw: Value| {
+            let g = TextGeom::builder()
+                .set("x", vec![0.5_f64])
+                .set("y", vec![0.5_f64])
+                .set("text", vec!["hello"])
+                .set("size", vec![12.0_f64])
+                .set("fill", red())
+                .set("text_stroke", Color::new([0.0, 0.0, 1.0, 1.0]))
+                .set("text_linewidth", lw)
+                .build();
+            draw_text_geom_to_scene(g)
+        };
+        let outline_width = |scene: &RecordingScene| {
+            scene
+                .ops
+                .iter()
+                .find_map(|op| match op {
+                    Op::DrawGlyphs(g) => g.style.as_ref().map(|s| s.width),
+                    _ => None,
+                })
+                .expect("outline pass")
+        };
+        let rel = outline_width(&make(crate::plot::value::rel(0.5).into()));
+        let abs = outline_width(&make(6.0_f64.into()));
+        assert!(
+            (rel - abs).abs() < 1e-3,
+            "rel width {rel} vs abs width {abs}"
+        );
     }
 
     #[test]

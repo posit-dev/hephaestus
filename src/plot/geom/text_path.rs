@@ -56,7 +56,8 @@
 //! - `"text_stroke"` — per-glyph outline colour (optional; per mark).
 //!   Drawn behind the fill.
 //! - `"text_linewidth"` — outline thickness in pt (optional; per
-//!   mark). No effect without `"text_stroke"`.
+//!   mark). No effect without `"text_stroke"`. A relative value
+//!   (`rel(f)`) multiplies the mark's resolved font size.
 //! - `"fill"` — glyph colour (optional; default black; per mark). A
 //!   markdown span that sets its own colour overrides it.
 //! - `"fill_opacity"` — overrides the alpha component of `"fill"` (optional;
@@ -109,8 +110,8 @@ use crate::text::{run_layout_glyphs, run_layout_rules, TextRun, TextStyle};
 use super::marks::{build_marks_from_column, unique_values_at_first_rows, MarkSlot};
 use super::resolve::{
     override_alpha, pt_to_px, resolve_angle_channel, resolve_bool_channel_or,
-    resolve_color_channel_or_theme, resolve_number_channel, resolve_number_channel_or,
-    resolve_pick_id, resolve_str_channel_or, PositionMap,
+    resolve_color_channel_or_theme, resolve_len_channel_or, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, resolve_str_channel_or, PositionMap,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
@@ -490,10 +491,12 @@ impl Geom for TextPathGeom {
                 i0,
                 text_stroke_theme,
             );
-            let text_linewidth_pt = resolve_number_channel_or(
+            // Relative linewidth (`rel(f)`) multiplies the font size.
+            let text_linewidth_pt = resolve_len_channel_or(
                 text_linewidth_ch,
                 text_linewidth_scale,
                 i0,
+                size_pt,
                 ctx.theme.geom.text_path.text_linewidth_pt,
             );
             let outline_stroke = match (text_stroke_color, text_linewidth_pt) {

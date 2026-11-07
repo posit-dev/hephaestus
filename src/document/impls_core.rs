@@ -212,6 +212,7 @@ impl_codec! {
         8 => Duration(micros),
         9 => Linetype(steps),
         10 => Geometry(g),
+        11 => Relative(f),
     }
 
     enum DataColumn {
@@ -228,6 +229,7 @@ impl_codec! {
         10 => Duration(v),
         11 => Linetype(v),
         12 => Geometry(v),
+        13 => Relative(v),
     }
 }
 
@@ -458,6 +460,7 @@ mod tests {
             Value::DateTime(1_700_000_000_000_000),
             Value::Time(3_600_000_000_000),
             Value::Duration(-5_000_000),
+            Value::Relative(0.8),
         ];
         for v in cases {
             assert!(

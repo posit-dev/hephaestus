@@ -37,9 +37,9 @@ use super::resolve::{
     auto_endpoint_clip_pt, channel_varies_per_row, draw_stroke_with_linetype, emit_endpoint_marker,
     endpoint_marker_outline_px, endpoint_outward, override_alpha, pt_to_px, resolve_angle_channel,
     resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel,
-    resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
-    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_str_channel_or,
-    PositionMap,
+    resolve_color_channel_or_theme, resolve_join_channel, resolve_len_channel_or,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
+    resolve_str_channel_or, PositionMap,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
@@ -335,16 +335,19 @@ impl Geom for SegmentGeom {
                 None => resolve_str_channel_or(end_marker_ch, end_marker_scale, i, ""),
             };
             let default_marker_size_pt = 3.0 * linewidth_pt;
-            let start_marker_size_pt = resolve_number_channel_or(
+            // A relative marker size (`rel(f)`) multiplies the resolved linewidth.
+            let start_marker_size_pt = resolve_len_channel_or(
                 start_marker_size_ch,
                 start_marker_size_scale,
                 i,
+                linewidth_pt,
                 default_marker_size_pt,
             );
-            let end_marker_size_pt = resolve_number_channel_or(
+            let end_marker_size_pt = resolve_len_channel_or(
                 end_marker_size_ch,
                 end_marker_size_scale,
                 i,
+                linewidth_pt,
                 default_marker_size_pt,
             );
             let start_invert = resolve_bool_channel_or(
@@ -1134,6 +1137,26 @@ mod tests {
         // Linear part determinant = size_px^2 for any rotation.
         let det = coeffs[0] * coeffs[3] - coeffs[1] * coeffs[2];
         let expected_size = 6.0 * 96.0 / 72.0;
+        assert!(
+            (det.abs() - expected_size * expected_size).abs() < 1e-6,
+            "det = {}, expected ±{}",
+            det,
+            expected_size * expected_size
+        );
+    }
+
+    #[test]
+    fn marker_size_relative_multiplies_linewidth() {
+        // linewidth = 2 pt, rel(5.0) → marker size = 10 pt at 96 dpi.
+        let g = horizontal_segment_with(|b| {
+            b.set("end_marker", "arrow-closed")
+                .set("end_marker_size", crate::plot::value::rel(5.0));
+        });
+        let scene = draw_into_scene(&g);
+        let xf = fills_after_strokes(&scene)[0];
+        let coeffs = xf.as_coeffs();
+        let det = coeffs[0] * coeffs[3] - coeffs[1] * coeffs[2];
+        let expected_size = 10.0 * 96.0 / 72.0;
         assert!(
             (det.abs() - expected_size * expected_size).abs() < 1e-6,
             "det = {}, expected ±{}",

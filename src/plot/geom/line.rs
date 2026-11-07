@@ -48,6 +48,16 @@
 //!   exits a circle of that radius centred on the first / last vertex.
 //!   Use for arrowhead attachment or for trimming edges to node
 //!   boundaries in graph layouts.
+//! - `"start_marker"` / `"end_marker"` — shape name stamped at the
+//!   polyline's first / last vertex (per-mark; default none).
+//! - `"start_marker_size"` / `"end_marker_size"` — marker size in pt
+//!   (per-mark; default 3 × the resolved linewidth). A relative value
+//!   (`rel(f)`) multiplies the resolved linewidth, e.g. `rel(4.0)` —
+//!   including when linewidth is data-mapped.
+//! - `"start_marker_fill"` / `"end_marker_fill"` — marker interior
+//!   colour (per-mark; defaults to the resolved stroke colour).
+//! - `"start_marker_invert"` / `"end_marker_invert"` — flip the
+//!   marker to point inward (per-mark; default `false`).
 //! - `"angle"` — rotation in **radians** around the mark's centroid
 //!   (mean of finite vertex positions in panel space), mathematical
 //!   CCW. Per-mark; default `0.0`. Applies after vertex resolution
@@ -1924,6 +1934,21 @@ mod tests {
         let coeffs = xf.as_coeffs();
         let det = coeffs[0] * coeffs[3] - coeffs[1] * coeffs[2];
         let expected = 6.0 * 96.0 / 72.0;
+        assert!((det.abs() - expected * expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn line_marker_size_relative_multiplies_linewidth() {
+        // linewidth = 2 pt, rel(4.0) → marker size = 8 pt at 96 dpi.
+        let g = horizontal_line_with(|b| {
+            b.set("end_marker", "arrow-closed")
+                .set("end_marker_size", crate::plot::value::rel(4.0));
+        });
+        let scene = draw_into(&g);
+        let xf = fills_after_stroke(&scene)[0];
+        let coeffs = xf.as_coeffs();
+        let det = coeffs[0] * coeffs[3] - coeffs[1] * coeffs[2];
+        let expected = 8.0 * 96.0 / 72.0;
         assert!((det.abs() - expected * expected).abs() < 1e-6);
     }
 
