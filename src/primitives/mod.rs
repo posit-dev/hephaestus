@@ -84,7 +84,10 @@ mod tolerance;
 pub use arc_length::{ArcLengthWalker, ArcSample, PolylineSampler, TrailingPolicy};
 pub use clip::{clip_polylines_to_polygon, intersect_polygons};
 pub use corner::round_corners;
-pub use end_clip::{clip_polyline, clip_polyline_with_attrs, EndClip};
+pub use end_clip::{
+    clip_polyline, clip_polyline_interior, clip_polyline_interior_with_attrs,
+    clip_polyline_with_attrs, EndClip,
+};
 pub use offset::offset_polygon;
 pub use path_corner::round_path_corners;
 pub use ribbon::{

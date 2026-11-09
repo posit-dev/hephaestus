@@ -397,6 +397,10 @@ name = "image_geom"
 required-features = ["vello", "png"]
 
 [[example]]
+name = "vertex_markers"
+required-features = ["vello", "png"]
+
+[[example]]
 name = "text_geom"
 required-features = ["vello", "png"]
 

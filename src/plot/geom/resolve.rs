@@ -19,13 +19,13 @@ use crate::brush::Brush;
 use crate::color::{Color, ColorSpace};
 use crate::geometry::{Affine, Point, Vec2};
 use crate::linetype::{draw_linetype_with_markers, emit_marker_shape};
-use crate::path::Path;
+use crate::path::{FillRule, Path};
 use crate::pick::PickId;
 use crate::plot::scale::{InputRange, Scale, ScaleTypeKind};
 use crate::plot::value::{LinetypeStep, Value};
 use crate::primitives::PolylineSampler;
 use crate::scene::SceneBuilder;
-use crate::shape::ShapeRegistry;
+use crate::shape::{ShapeKind, ShapeRegistry, ShapeStyle};
 use crate::stroke::{Cap, Join, Stroke};
 
 use super::{Channel, GeomContext};
@@ -664,6 +664,235 @@ pub(crate) fn draw_stroke_with_linetype(
         pick,
         /* distribute */ closed,
     );
+}
+
+// ─── Vertex markers ──────────────────────────────────────────────────────────
+
+/// Channel handles for the per-vertex marker surface (`vertex_marker`
+/// and its companions), shared by the multi-vertex geoms.
+#[derive(Clone, Copy)]
+pub(crate) struct VertexMarkerChannels<'a> {
+    /// Shape name stamped at a vertex; empty disables that vertex.
+    pub name: Option<&'a Channel>,
+    /// Marker size in pt (or `rel(f)` of the vertex's linewidth).
+    pub size: Option<&'a Channel>,
+    /// Marker interior colour; falls back to the vertex's stroke colour.
+    pub fill: Option<&'a Channel>,
+    /// Marker outline colour; falls back to the vertex's stroke colour.
+    pub stroke: Option<&'a Channel>,
+    /// Arc-length trim radius around the vertex in pt.
+    pub buffer: Option<&'a Channel>,
+}
+
+impl<'a> VertexMarkerChannels<'a> {
+    /// Look up the five vertex-marker channels by name.
+    pub(crate) fn from_map(channels: &'a std::collections::HashMap<String, Channel>) -> Self {
+        VertexMarkerChannels {
+            name: channels.get("vertex_marker"),
+            size: channels.get("vertex_marker_size"),
+            fill: channels.get("vertex_marker_fill"),
+            stroke: channels.get("vertex_marker_stroke"),
+            buffer: channels.get("vertex_marker_buffer"),
+        }
+    }
+
+    /// Whether the `vertex_marker` channel is bound at all — the cheap
+    /// check geoms use to skip all per-vertex marker work.
+    pub(crate) fn is_bound(&self) -> bool {
+        self.name.is_some()
+    }
+}
+
+/// Scale references for the vertex-marker surface, mirroring
+/// [`VertexMarkerChannels`].
+#[derive(Clone, Copy)]
+pub(crate) struct VertexMarkerScales<'a> {
+    /// Scale for `vertex_marker`.
+    pub name: Option<&'a Scale>,
+    /// Scale for `vertex_marker_size`.
+    pub size: Option<&'a Scale>,
+    /// Scale for `vertex_marker_fill`.
+    pub fill: Option<&'a Scale>,
+    /// Scale for `vertex_marker_stroke`.
+    pub stroke: Option<&'a Scale>,
+    /// Scale for `vertex_marker_buffer`.
+    pub buffer: Option<&'a Scale>,
+}
+
+impl<'a> VertexMarkerScales<'a> {
+    /// Look up the five vertex-marker scales by channel name.
+    pub(crate) fn from_ctx(ctx: &'a GeomContext<'_>) -> Self {
+        VertexMarkerScales {
+            name: ctx.scale_for("vertex_marker"),
+            size: ctx.scale_for("vertex_marker_size"),
+            fill: ctx.scale_for("vertex_marker_fill"),
+            stroke: ctx.scale_for("vertex_marker_stroke"),
+            buffer: ctx.scale_for("vertex_marker_buffer"),
+        }
+    }
+}
+
+/// A resolved vertex marker for one source row.
+#[derive(Clone)]
+pub(crate) struct VertexMarkerSpec {
+    /// Shape name registered in the [`ShapeRegistry`].
+    pub name: String,
+    /// Marker size in pt.
+    pub size_pt: f64,
+    /// Marker interior colour (the vertex's stroke colour when the fill
+    /// channel is unset).
+    pub fill: Color,
+    /// Marker outline colour (the vertex's stroke colour when the
+    /// `vertex_marker_stroke` channel is unset).
+    pub stroke: Color,
+    /// Arc-length trim radius around the vertex in pt. Zero when both
+    /// the buffer channel and the marker's own forward extent are zero.
+    pub buffer_pt: f64,
+    /// Linewidth in pt the marker's outline width follows (the vertex's
+    /// own in ribbon mode, the mark's otherwise).
+    pub linewidth_pt: f64,
+}
+
+/// Resolve one source row's vertex marker. Returns `None` when the
+/// `vertex_marker` channel is unset or resolves to an empty name at
+/// this row. `linewidth_pt` / `stroke_color` are the vertex's own
+/// resolved values (per-row in ribbon mode, per-mark otherwise): the
+/// size default and outline width follow the former, the fill and
+/// outline colour the latter. A zero / unset `vertex_marker_buffer`
+/// is clearance added on top of the marker's own extent, mirroring
+/// the endpoint markers' additive auto-clip.
+pub(crate) fn resolve_vertex_marker(
+    ch: &VertexMarkerChannels<'_>,
+    sc: &VertexMarkerScales<'_>,
+    row: usize,
+    linewidth_pt: f64,
+    stroke_color: Color,
+    shapes: &ShapeRegistry,
+) -> Option<VertexMarkerSpec> {
+    let name = resolve_str_channel_or(ch.name, sc.name, row, "").into_owned();
+    if name.is_empty() {
+        return None;
+    }
+    let size_pt = resolve_len_channel_or(ch.size, sc.size, row, linewidth_pt, 3.0 * linewidth_pt);
+    let buffer_pt = {
+        // The user's buffer is clearance *beyond* the marker's own
+        // extent — the additive rule `clip_start_radius` follows for
+        // endpoint markers. A vertex marker is centred on its vertex,
+        // so its extent is the shape's largest half-extent — the
+        // centre-based analogue of the endpoint markers' anchor-based
+        // auto-clip.
+        let auto = shapes
+            .get(&name)
+            .map(|shape| {
+                let bbox = shape.bounding_box();
+                let half_w = (bbox.x1 - bbox.x0) * 0.5;
+                let half_h = (bbox.y1 - bbox.y0) * 0.5;
+                half_w.max(half_h).max(0.0) * size_pt
+            })
+            .unwrap_or(0.0);
+        resolve_number_channel_or(ch.buffer, sc.buffer, row, 0.0) + auto
+    };
+    Some(VertexMarkerSpec {
+        name,
+        size_pt,
+        fill: resolve_color_channel(ch.fill, sc.fill, row).unwrap_or(stroke_color),
+        stroke: resolve_color_channel(ch.stroke, sc.stroke, row).unwrap_or(stroke_color),
+        buffer_pt,
+        linewidth_pt,
+    })
+}
+
+/// Stamp a resolved vertex marker upright at `at`, centred on the
+/// point: the shape's bounding-box centre lands on the vertex, unlike
+/// [`emit_endpoint_marker`], which lands the shape's *anchor* — a
+/// tip-oriented reference point — on the curve terminal. The stamp
+/// paints over the curve, outlined at the vertex's linewidth floored
+/// at [`MIN_MARKER_OUTLINE_PT`], and inherits the mark's pick id.
+pub(crate) fn emit_vertex_marker(
+    scene: &mut dyn SceneBuilder,
+    at: Point,
+    spec: &VertexMarkerSpec,
+    xform: Affine,
+    shapes: &ShapeRegistry,
+    dpi: f64,
+    pick: PickId,
+) {
+    let Some(shape) = shapes.get(&spec.name) else {
+        return;
+    };
+    let size_px = pt_to_px(spec.size_pt, dpi);
+    if !(size_px.is_finite() && size_px > 0.0) {
+        return;
+    }
+    let bbox = shape.bounding_box();
+    let center = Vec2::new((bbox.x0 + bbox.x1) * 0.5, (bbox.y0 + bbox.y1) * 0.5);
+    let origin = at.to_vec2() - center * size_px;
+    let local = xform * Affine::translate(origin);
+    let outline_px = endpoint_marker_outline_px(pt_to_px(spec.linewidth_pt, dpi), dpi);
+    match shape.kind() {
+        ShapeKind::Paths { paths, style } => {
+            // Point-style emission, unlike the endpoint / linetype
+            // markers: a fill-style shape gets an outline ring too,
+            // and a fully transparent fill or stroke skips its op —
+            // transparent fill leaves an open (hollow) marker,
+            // transparent stroke a ringless one. The subpaths are
+            // stroked under `Affine::scale(size_px)`, so the width is
+            // divided by the same factor to land at `outline_px` in
+            // output pixels.
+            let xform = local * Affine::scale(size_px);
+            let outline = Stroke::new(outline_px / size_px);
+            for sub in paths {
+                match style {
+                    ShapeStyle::Fill => {
+                        if spec.fill.components[3] > 0.0 {
+                            scene.fill(
+                                FillRule::NonZero,
+                                xform,
+                                &Brush::Solid(spec.fill),
+                                None,
+                                sub,
+                                pick,
+                            );
+                        }
+                        if spec.stroke.components[3] > 0.0 {
+                            scene.stroke(
+                                &outline,
+                                xform,
+                                &Brush::Solid(spec.stroke),
+                                None,
+                                sub,
+                                pick,
+                            );
+                        }
+                    }
+                    ShapeStyle::Stroke => {
+                        if spec.stroke.components[3] > 0.0 {
+                            scene.stroke(
+                                &outline,
+                                xform,
+                                &Brush::Solid(spec.stroke),
+                                None,
+                                sub,
+                                pick,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        ShapeKind::Glyph { .. } => {
+            emit_marker_shape(
+                scene,
+                shape,
+                local,
+                size_px,
+                spec.fill,
+                spec.stroke,
+                outline_px,
+                pick,
+            );
+        }
+    }
 }
 
 /// Minimum outline width for a stamped marker, in pt. A marker's

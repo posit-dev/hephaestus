@@ -43,6 +43,29 @@
 //!   mathematical CCW. Per-mark; default `0.0`. Holes rotate together
 //!   with the outer ring as a rigid body. Applies after expand +
 //!   corner rounding (the constructed path is rotated whole).
+//! - `"vertex_marker"` — shape name stamped **upright** at every
+//!   vertex of every ring (per-vertex; default none). Resolves at each
+//!   row of the mark, so it can be data-mapped. Stamps land on the
+//!   data vertices — `"expand"` and `"corner_radius"` deform the
+//!   outline but never move a stamp.
+//! - `"vertex_marker_size"` — marker size in pt (per-vertex; default
+//!   3 × the vertex's resolved linewidth). A relative value
+//!   (`rel(f)`) multiplies the resolved linewidth.
+//! - `"vertex_marker_fill"` / `"vertex_marker_stroke"` — marker
+//!   interior / outline colour (per-vertex; both default to the
+//!   vertex's resolved stroke colour). A fully transparent fill
+//!   leaves an open (hollow) marker; a fully transparent stroke
+//!   drops the outline ring.
+//! - `"vertex_marker_buffer"` — clearance in pt beyond the marker's
+//!   own extent (per-vertex; default `0.0`). Trims the **stroke ring
+//!   only** — the fill is emitted from the untrimmed rings — by
+//!   buffer + extent of arc length on both sides of the vertex, the
+//!   additive rule `clip_start_radius` follows for endpoint markers.
+//!   Trims cut across the ring seam when the vertex is the ring's
+//!   first, leave each surviving sub-run open, apply before corner
+//!   rounding, and require `"expand" = 0` (an offset outline no
+//!   longer passes through the data vertices, so there is nothing
+//!   coherent to trim).
 //!
 //! Order matters: `"expand"` is applied **before** `"corner_radius"`.
 //! Offsetting an already-filleted polygon would treat the existing
@@ -56,7 +79,9 @@ use crate::geometry::{Affine, Point};
 use crate::path::FillRule;
 use crate::plot::scale::Scale;
 use crate::plot::value::DataColumn;
-use crate::primitives::{polygon_ribbon_full, CornerRounding, RibbonOptions};
+use crate::primitives::{
+    polygon_ribbon_full, polyline_ribbon_full, round_corners, CornerRounding, RibbonOptions,
+};
 use crate::scene::SceneBuilder;
 
 use super::marks::group_rows_by_key;
@@ -65,10 +90,11 @@ use super::outline::{
 };
 use super::project::{project_and_densify_one, PathOptions, PathVertex, VertexAttrs};
 use super::resolve::{
-    channel_color_space, channel_varies_across, offset_px, override_alpha, pt_to_px,
-    resolve_angle_channel, resolve_cap_channel, resolve_color_channel,
-    resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
-    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, ChannelBind, PositionMap,
+    channel_color_space, channel_varies_across, draw_stroke_with_linetype, emit_vertex_marker,
+    offset_px, override_alpha, pt_to_px, resolve_angle_channel, resolve_cap_channel,
+    resolve_color_channel, resolve_color_channel_or_theme, resolve_join_channel,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
+    resolve_vertex_marker, ChannelBind, PositionMap, VertexMarkerChannels, VertexMarkerScales,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
@@ -103,6 +129,11 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("corner_max_angle", ExpectedOutput::Numbers),
     ("angle", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
+    ("vertex_marker", ExpectedOutput::Strings),
+    ("vertex_marker_size", ExpectedOutput::Numbers),
+    ("vertex_marker_fill", ExpectedOutput::Colors),
+    ("vertex_marker_stroke", ExpectedOutput::Colors),
+    ("vertex_marker_buffer", ExpectedOutput::Numbers),
 ];
 
 // ─── PolygonGeom ─────────────────────────────────────────────────────────────
@@ -223,6 +254,9 @@ struct PolygonDrawCtx<'a> {
     corner_radius: ChannelBind<'a>,
     corner_max_angle: ChannelBind<'a>,
     angle: ChannelBind<'a>,
+    /// The per-vertex marker surface, resolved per source row.
+    vmarker_ch: VertexMarkerChannels<'a>,
+    vmarker_sc: VertexMarkerScales<'a>,
 }
 
 impl<'a> PolygonDrawCtx<'a> {
@@ -267,6 +301,8 @@ impl<'a> PolygonDrawCtx<'a> {
             corner_radius: b("corner_radius"),
             corner_max_angle: b("corner_max_angle"),
             angle: b("angle"),
+            vmarker_ch: VertexMarkerChannels::from_map(channels),
+            vmarker_sc: VertexMarkerScales::from_ctx(ctx),
         })
     }
 }
@@ -451,6 +487,8 @@ fn draw_one_polygon_mark(
             ch: angle_ch,
             scale: angle_scale,
         },
+        vmarker_ch,
+        vmarker_sc,
     } = dc;
 
     // Prepared position scales: transform constants resolved once per
@@ -546,8 +584,23 @@ fn draw_one_polygon_mark(
     };
     let fallback_stroke = stroke_color.unwrap_or_else(|| Color::new([0.0, 0.0, 0.0, 1.0]));
     let stroke_space = channel_color_space(stroke_scale);
+    let vm_active = vmarker_ch.is_bound();
     let opts = PathOptions::ring(3).with_color_space(stroke_space);
-    for ring in &mark.rings {
+    let opts = if vm_active {
+        // Vertex-marker stamping needs to find each surviving source
+        // vertex in the densified ring.
+        opts.with_source_tracking()
+    } else {
+        opts
+    };
+    let mut rings_source: Vec<Vec<(usize, usize)>> = Vec::new();
+    let mut stamp_pts: Vec<Vec<Point>> = Vec::new();
+    // Indices into `mark.rings` of the rings that survived projection,
+    // parallel to `rings_source` / `stamp_pts`: a ring that drops out
+    // (fewer than 3 finite vertices) must not shift the per-ring
+    // marker specs off their rows.
+    let mut vm_rings: Vec<usize> = Vec::new();
+    for (ri, ring) in mark.rings.iter().enumerate() {
         let run = project_and_densify_one(ctx, ring.len(), &opts, |k| {
             let i = ring[k];
             let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
@@ -583,6 +636,13 @@ fn draw_one_polygon_mark(
             }
         });
         if !run.points.is_empty() {
+            if vm_active {
+                // Stamp positions are the data vertices, captured
+                // before `expand` / corner rounding deform the rings.
+                stamp_pts.push(run.source.iter().map(|&(pi, _)| run.points[pi]).collect());
+                rings_source.push(run.source);
+                vm_rings.push(ri);
+            }
             rings_pts.push(run.points);
             if ribbon_mode {
                 rings_widths.push(run.widths);
@@ -634,13 +694,85 @@ fn draw_one_polygon_mark(
         max_angle_deg: corner_max_angle_deg,
     });
 
+    // ── Per-vertex markers, resolved per source row of each ring. ──
+    // In ribbon mode the vertex's own linewidth / stroke colour drive
+    // the marker's size default, fill fallback and outline width;
+    // otherwise the mark's resolved values do.
+    let ring_vmarkers: Vec<Vec<Option<super::resolve::VertexMarkerSpec>>> = if vm_active {
+        vm_rings
+            .iter()
+            .map(|&ri| {
+                let ring = &mark.rings[ri];
+                (0..ring.len())
+                    .map(|k| {
+                        let i = ring[k];
+                        let (lw_pt, col) = if ribbon_mode {
+                            (
+                                resolve_number_channel_or(
+                                    linewidth_ch,
+                                    linewidth_scale,
+                                    i,
+                                    ctx.theme.geom.polygon.linewidth_pt,
+                                ),
+                                override_alpha(
+                                    resolve_color_channel(stroke_ch, stroke_scale, i),
+                                    resolve_number_channel(
+                                        stroke_opacity_ch,
+                                        stroke_opacity_scale,
+                                        i,
+                                    ),
+                                )
+                                .unwrap_or(fallback_stroke),
+                            )
+                        } else {
+                            (linewidth_pt, stroke_color.unwrap_or(fallback_stroke))
+                        };
+                        resolve_vertex_marker(&vmarker_ch, &vmarker_sc, i, lw_pt, col, ctx.shapes)
+                    })
+                    .collect()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Arc-length trim radii around each ring's buffered vertices,
+    // keyed by position in the densified ring points. Buffering
+    // requires no `expand`: an offset outline doesn't pass through
+    // the data vertices, so there is nothing coherent to trim.
+    let ring_cuts: Vec<Vec<(usize, f64)>> = if vm_active && expand_pt == 0.0 {
+        rings_source
+            .iter()
+            .zip(&ring_vmarkers)
+            .map(|(src, vms)| {
+                src.iter()
+                    .filter_map(|&(pi, k)| {
+                        vms[k].as_ref().and_then(|m| {
+                            (m.buffer_pt > 0.0).then_some((pi, pt_to_px(m.buffer_pt, ctx.dpi)))
+                        })
+                    })
+                    .collect()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let trims_active = stroke_color.is_some() && ring_cuts.iter().any(|c| !c.is_empty());
+
     // The shared helper emits the EvenOdd fill (when bound) and the
     // closed stroke (when bound). Ribbon mode replaces the closed
     // stroke with a per-ring mesh, so we suppress the helper's stroke
-    // in that case and emit the mesh below.
+    // in that case and emit the mesh below. Vertex-marker buffering
+    // also suppresses it: the trimmed stroke is emitted per sub-run
+    // below, open, while the fill still comes from the untrimmed
+    // rings here.
     let spec = PolygonSpec {
         fill_color,
-        stroke_color: if ribbon_mode { None } else { stroke_color },
+        stroke_color: if ribbon_mode || trims_active {
+            None
+        } else {
+            stroke_color
+        },
         linewidth_pt,
         dash_pattern: dash_pattern.clone(),
         dash_offset_pt,
@@ -652,6 +784,48 @@ fn draw_one_polygon_mark(
         pick,
     };
     draw_polygon_fill_and_stroke(scene, ctx, &offset_rings, &spec);
+
+    // Trimmed stroke, one open sub-run per surviving stretch of ring.
+    // Trims apply before corner rounding so a fillet never bridges a
+    // buffer gap; each sub-run restarts the dash phase.
+    if trims_active && !ribbon_mode {
+        let linewidth_px = pt_to_px(linewidth_pt, ctx.dpi);
+        if linewidth_px.is_finite() && linewidth_px > 0.0 {
+            let sc = stroke_color.unwrap_or(fallback_stroke);
+            for (r, ring) in offset_rings.iter().enumerate() {
+                if ring.len() < 3 || r >= ring_cuts.len() {
+                    continue;
+                }
+                for sub in crate::primitives::clip_polyline_interior(ring, &ring_cuts[r], true) {
+                    if sub.len() < 2 {
+                        continue;
+                    }
+                    let path = if let Some(rounding) = corner_rounding {
+                        round_corners(&sub, false, rounding)
+                    } else {
+                        crate::primitives::polyline(&sub, Default::default())
+                    };
+                    draw_stroke_with_linetype(
+                        scene,
+                        &path,
+                        /* closed */ false,
+                        sc,
+                        spec.marker_fill,
+                        linewidth_px,
+                        cap,
+                        join,
+                        &dash_pattern,
+                        dash_offset_pt,
+                        xform,
+                        pick,
+                        ctx.shapes,
+                        ctx.theme.geom.marker_outline_pt,
+                        ctx.dpi,
+                    );
+                }
+            }
+        }
+    }
 
     // The per-ring widths carry the outline's thickness in ribbon
     // mode, so the per-mark `linewidth` value has no say here — a zero
@@ -670,47 +844,99 @@ fn draw_one_polygon_mark(
             }
             let widths = &rings_widths[r];
             let colors = &rings_colors[r];
-            if dash_pattern.is_empty() {
-                let mesh = polygon_ribbon_full(ring, Some(colors), Some(widths), &opts);
-                scene.draw_mesh(&mesh, xform, pick);
-            } else {
-                // Closed-ring dash walk: the pattern runs around the
-                // perimeter with no gap distribution, so there is a
-                // seam. Start the walk at the thinnest vertex, where
-                // the seam is least visible.
-                let start = widths
-                    .iter()
-                    .enumerate()
-                    .min_by(|(_, a), (_, b)| a.total_cmp(b))
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                let mut closed_pts: Vec<Point> = ring[start..].to_vec();
-                closed_pts.extend_from_slice(&ring[..start]);
-                let mut closed_widths: Vec<f64> = widths[start..].to_vec();
-                closed_widths.extend_from_slice(&widths[..start]);
-                let mut closed_colors: Vec<Color> = colors[start..].to_vec();
-                closed_colors.extend_from_slice(&colors[..start]);
-                let mut closed_widths = widths.clone();
-                let mut closed_colors = colors.clone();
-                closed_pts.push(closed_pts[0]);
-                closed_widths.push(closed_widths[0]);
-                closed_colors.push(closed_colors[0]);
-                emit_dashed_ribbon(
-                    scene,
-                    ctx.shapes,
-                    ctx.dpi,
-                    ctx.theme.geom.marker_outline_pt,
-                    &closed_pts,
-                    &closed_widths,
-                    &closed_colors,
-                    stroke_space,
-                    &dash_pattern,
-                    pt_to_px(dash_offset_pt, ctx.dpi),
-                    cap,
-                    join,
-                    xform,
-                    pick,
-                );
+            // Vertex-marker buffering splits the ring into open
+            // sub-runs, each meshed or dash-walked on its own.
+            let sub_runs: Vec<(Vec<Point>, Vec<f64>, Vec<Color>)> =
+                if trims_active && r < ring_cuts.len() && !ring_cuts[r].is_empty() {
+                    crate::primitives::clip_polyline_interior_with_attrs(
+                        ring,
+                        widths,
+                        colors,
+                        &ring_cuts[r],
+                        true,
+                        stroke_space,
+                    )
+                } else {
+                    vec![(ring.clone(), widths.clone(), colors.clone())]
+                };
+            for (sub_pts, sub_widths, sub_colors) in &sub_runs {
+                if sub_pts.len() < 2 {
+                    continue;
+                }
+                if dash_pattern.is_empty() {
+                    if sub_runs.len() == 1 {
+                        let mesh =
+                            polygon_ribbon_full(sub_pts, Some(sub_colors), Some(sub_widths), &opts);
+                        scene.draw_mesh(&mesh, xform, pick);
+                    } else {
+                        // Trimmed sub-runs are open; the ring mesh
+                        // would close across the buffer gap.
+                        let mesh = polyline_ribbon_full(
+                            sub_pts,
+                            Some(sub_colors),
+                            Some(sub_widths),
+                            &opts,
+                        );
+                        scene.draw_mesh(&mesh, xform, pick);
+                    }
+                } else {
+                    // Closed-ring dash walk: the pattern runs around
+                    // the perimeter with no gap distribution, so there
+                    // is a seam. Start the walk at the thinnest
+                    // vertex, where the seam is least visible. A
+                    // trimmed sub-run is open already and walks from
+                    // its own start.
+                    let (mut closed_pts, mut closed_widths, mut closed_colors) =
+                        if sub_runs.len() == 1 {
+                            let start = sub_widths
+                                .iter()
+                                .enumerate()
+                                .min_by(|(_, a), (_, b)| a.total_cmp(b))
+                                .map(|(i, _)| i)
+                                .unwrap_or(0);
+                            let mut pts: Vec<Point> = sub_pts[start..].to_vec();
+                            pts.extend_from_slice(&sub_pts[..start]);
+                            let mut ws: Vec<f64> = sub_widths[start..].to_vec();
+                            ws.extend_from_slice(&sub_widths[..start]);
+                            let mut cs: Vec<Color> = sub_colors[start..].to_vec();
+                            cs.extend_from_slice(&sub_colors[..start]);
+                            (pts, ws, cs)
+                        } else {
+                            (sub_pts.clone(), sub_widths.clone(), sub_colors.clone())
+                        };
+                    closed_pts.push(closed_pts[0]);
+                    closed_widths.push(closed_widths[0]);
+                    closed_colors.push(closed_colors[0]);
+                    emit_dashed_ribbon(
+                        scene,
+                        ctx.shapes,
+                        ctx.dpi,
+                        ctx.theme.geom.marker_outline_pt,
+                        &closed_pts,
+                        &closed_widths,
+                        &closed_colors,
+                        stroke_space,
+                        &dash_pattern,
+                        pt_to_px(dash_offset_pt, ctx.dpi),
+                        cap,
+                        join,
+                        xform,
+                        pick,
+                    );
+                }
+            }
+        }
+    }
+
+    // Vertex markers stamp last so they paint over the stroke / mesh.
+    // Positions are the data vertices, captured before `expand` and
+    // corner rounding deformed the rings.
+    if vm_active {
+        for ((pts, src), vms) in stamp_pts.iter().zip(&rings_source).zip(&ring_vmarkers) {
+            for (&(_, k), &at) in src.iter().zip(pts) {
+                if let Some(m) = &vms[k] {
+                    emit_vertex_marker(scene, at, m, xform, ctx.shapes, ctx.dpi, pick);
+                }
             }
         }
     }
@@ -1611,5 +1837,167 @@ mod tests {
             .filter(|op| matches!(op, Op::Fill { .. }))
             .count();
         assert_eq!(fills, 1);
+    }
+
+    // ── Vertex markers ──
+
+    fn body_stroke_count(scene: &RecordingScene) -> usize {
+        // Marker-outline strokes are scaled transforms; the ring
+        // stroke(s) go out under the identity when no angle is set.
+        scene
+            .ops
+            .iter()
+            .filter(
+                |op| matches!(op, Op::Stroke { transform, .. } if *transform == Affine::IDENTITY),
+            )
+            .count()
+    }
+
+    #[test]
+    fn vertex_marker_stamps_at_ring_vertices() {
+        let mut g = PolygonGeom::builder()
+            .set("x", vec![0.0_f64, 1.0, 1.0, 0.0])
+            .set("y", vec![0.0_f64, 0.0, 1.0, 1.0])
+            .set("stroke", red())
+            .set("vertex_marker", "circle")
+            .build();
+        g.rebuild_diff_against_previous();
+        let r = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &r, &scales),
+        );
+        let fills = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count();
+        assert_eq!(fills, 4, "one stamp per ring vertex");
+    }
+
+    #[test]
+    fn vertex_marker_buffer_trims_stroke_ring_not_fill() {
+        // A single buffered vertex (marker on vertex 0 only) splits
+        // the stroke ring into one open sub-run; the interior fill
+        // still emits from the untrimmed ring.
+        let mut g = PolygonGeom::builder()
+            .set("x", vec![0.0_f64, 1.0, 1.0, 0.0])
+            .set("y", vec![0.0_f64, 0.0, 1.0, 1.0])
+            .set("fill", red())
+            .set("stroke", red())
+            .set("vertex_marker", vec!["circle", "", "", ""])
+            .set("vertex_marker_buffer", 9.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let r = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &r, &scales),
+        );
+        let fills = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count();
+        assert_eq!(fills, 2, "interior fill + 1 stamp");
+        assert_eq!(
+            body_stroke_count(&scene),
+            1,
+            "one open sub-run survives the single cut"
+        );
+    }
+
+    #[test]
+    fn vertex_marker_two_buffers_give_two_open_sub_runs() {
+        // Cuts at opposite corners: two surviving sub-runs, and no
+        // synthetic ring closure across either buffer gap.
+        let mut g = PolygonGeom::builder()
+            .set("x", vec![0.0_f64, 1.0, 1.0, 0.0])
+            .set("y", vec![0.0_f64, 0.0, 1.0, 1.0])
+            .set("stroke", red())
+            .set("vertex_marker", vec!["circle", "", "circle", ""])
+            .set("vertex_marker_buffer", 9.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let r = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &r, &scales),
+        );
+        assert_eq!(body_stroke_count(&scene), 2);
+    }
+
+    #[test]
+    fn vertex_marker_specs_stay_aligned_when_a_ring_drops_out() {
+        // Three rings; the middle one is entirely NaN and drops out of
+        // the projected rings. The last ring's stamps must resolve
+        // against its own rows — not the dropped ring's, which name no
+        // marker at all.
+        let mut g = PolygonGeom::builder()
+            .set(
+                "x",
+                vec![
+                    0.0_f64,
+                    1.0,
+                    1.0,
+                    0.0, //
+                    f64::NAN,
+                    f64::NAN,
+                    f64::NAN,
+                    f64::NAN, //
+                    2.0,
+                    3.0,
+                    3.0,
+                    2.0,
+                ],
+            )
+            .set(
+                "y",
+                vec![
+                    0.0_f64,
+                    0.0,
+                    1.0,
+                    1.0, //
+                    f64::NAN,
+                    f64::NAN,
+                    f64::NAN,
+                    f64::NAN, //
+                    0.0,
+                    0.0,
+                    1.0,
+                    1.0,
+                ],
+            )
+            .set("ring", vec![0_i32, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2])
+            .set("stroke", red())
+            .set(
+                "vertex_marker",
+                vec![
+                    "circle", "circle", "circle", "circle", //
+                    "", "", "", "", //
+                    "circle", "circle", "circle", "circle",
+                ],
+            )
+            .build();
+        g.rebuild_diff_against_previous();
+        let r = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &r, &scales),
+        );
+        let fills = scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count();
+        assert_eq!(fills, 8, "both surviving rings stamp at all four vertices");
     }
 }

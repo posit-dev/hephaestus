@@ -235,6 +235,311 @@ fn trim_start_with_attrs(
     (Vec::new(), Vec::new(), Vec::new())
 }
 
+// ─── Interior trimming ───────────────────────────────────────────────────────
+
+/// One node of a trimmed sub-run: either a cut boundary at an arc-length
+/// position along the original path, or an original vertex passed through
+/// untouched.
+enum TrimNode {
+    /// Boundary interpolated at an arc length measured along the path
+    /// (including the closing edge for a ring).
+    Cut(f64),
+    /// Original vertex by index.
+    Vert(usize),
+}
+
+/// Split a polyline into sub-runs by cutting an arc-length neighbourhood
+/// out around selected vertices.
+///
+/// `cuts` is a list of `(vertex index, radius)` pairs: the path is
+/// trimmed `radius` px of arc length on both sides of that vertex. Cut
+/// neighbourhoods that overlap merge into one — the path between two
+/// buffered vertices disappears entirely once their radii reach each
+/// other. A cut centred on the first or last vertex of an open polyline
+/// trims only the one side that exists. When `closed` is set the path is
+/// treated as a ring: arc length includes the closing edge from the last
+/// vertex back to the first, so a cut on vertex 0 trims across the seam,
+/// and the surviving runs are returned open (no synthetic closure is
+/// added across a cut).
+///
+/// Returns the surviving sub-runs in path order. Empty when the cuts
+/// consume the whole path.
+pub fn clip_polyline_interior(
+    points: &[Point],
+    cuts: &[(usize, f64)],
+    closed: bool,
+) -> Vec<Vec<Point>> {
+    let n = points.len();
+    if n < 2 {
+        return vec![points.to_vec()];
+    }
+    let closing = closing_len(points, closed);
+    interior_trim_nodes(points, closing, cuts, closed)
+        .into_iter()
+        .map(|run| {
+            run.iter()
+                .map(|node| match *node {
+                    TrimNode::Cut(a) => point_at(points, closing, a),
+                    TrimNode::Vert(i) => points[i],
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// [`clip_polyline_interior`] for a polyline carrying parallel per-vertex
+/// `widths` and `colors` arrays. Cut boundaries receive attributes
+/// interpolated from the bracketing vertices at the cut parameter, the
+/// colour through `space` — the same rule
+/// [`clip_polyline_with_attrs`] uses for endpoint cuts.
+pub fn clip_polyline_interior_with_attrs(
+    points: &[Point],
+    widths: &[f64],
+    colors: &[Color],
+    cuts: &[(usize, f64)],
+    closed: bool,
+    space: ColorSpace,
+) -> Vec<(Vec<Point>, Vec<f64>, Vec<Color>)> {
+    debug_assert_eq!(points.len(), widths.len());
+    debug_assert_eq!(points.len(), colors.len());
+    let n = points.len();
+    if n < 2 {
+        return vec![(points.to_vec(), widths.to_vec(), colors.to_vec())];
+    }
+    let closing = closing_len(points, closed);
+    interior_trim_nodes(points, closing, cuts, closed)
+        .into_iter()
+        .map(|run| {
+            let mut ps = Vec::with_capacity(run.len());
+            let mut ws = Vec::with_capacity(run.len());
+            let mut cs = Vec::with_capacity(run.len());
+            for node in run {
+                match node {
+                    TrimNode::Cut(a) => {
+                        let (p, w, c) =
+                            point_at_with_attrs(points, widths, colors, closing, a, space);
+                        ps.push(p);
+                        ws.push(w);
+                        cs.push(c);
+                    }
+                    TrimNode::Vert(i) => {
+                        ps.push(points[i]);
+                        ws.push(widths[i]);
+                        cs.push(colors[i]);
+                    }
+                }
+            }
+            (ps, ws, cs)
+        })
+        .collect()
+}
+
+/// Arc length of the closing edge — zero for an open path.
+fn closing_len(points: &[Point], closed: bool) -> f64 {
+    if closed && points.len() >= 2 {
+        (points[0] - points[points.len() - 1]).hypot()
+    } else {
+        0.0
+    }
+}
+
+/// Compute the sub-runs surviving the cuts as lists of [`TrimNode`]s.
+/// Shared core of the plain and attributed interior trims.
+fn interior_trim_nodes(
+    points: &[Point],
+    closing: f64,
+    cuts: &[(usize, f64)],
+    closed: bool,
+) -> Vec<Vec<TrimNode>> {
+    let n = points.len();
+    // Cumulative arc length at each vertex; `total` spans the whole
+    // path, closing edge included for a ring.
+    let mut s = vec![0.0; n];
+    for i in 1..n {
+        s[i] = s[i - 1] + (points[i] - points[i - 1]).hypot();
+    }
+    let total = s[n - 1] + closing;
+    if total <= 0.0 {
+        return vec![Vec::new()];
+    }
+
+    // Raw cut intervals in arc space. Ring intervals are normalised
+    // into [0, total) and may wrap past the end; wrap splits them into
+    // two linear intervals.
+    let mut ivs: Vec<(f64, f64)> = Vec::new();
+    for &(idx, r) in cuts {
+        if idx >= n || !r.is_finite() || r <= 0.0 {
+            continue;
+        }
+        let (a, b) = (s[idx] - r, s[idx] + r);
+        if closed {
+            let len = (b - a).min(total);
+            if len >= total {
+                return Vec::new(); // one cut swallows the whole ring
+            }
+            let a = a.rem_euclid(total);
+            let b = a + len;
+            if b > total {
+                ivs.push((a, total));
+                ivs.push((0.0, b - total));
+            } else {
+                ivs.push((a, b));
+            }
+        } else {
+            let (a, b) = (a.max(0.0), b.min(total));
+            if a < b {
+                ivs.push((a, b));
+            }
+        }
+    }
+    if ivs.is_empty() {
+        return vec![(0..n).map(TrimNode::Vert).collect()];
+    }
+
+    // Merge overlapping intervals.
+    ivs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut merged: Vec<(f64, f64)> = Vec::with_capacity(ivs.len());
+    for (a, b) in ivs {
+        match merged.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => merged.push((a, b)),
+        }
+    }
+    // On a ring, intervals touching arc 0 and arc `total` are the same
+    // circular interval — join them into one that extends past `total`.
+    if closed && merged.len() > 1 && merged[0].0 == 0.0 && merged[merged.len() - 1].1 == total {
+        let head = merged.remove(0);
+        merged.last_mut().unwrap().1 = head.1 + total;
+    }
+
+    // Complement arcs — the gaps between merged cut intervals. On a
+    // ring the arc from the last interval's end around the seam to the
+    // first interval's start is a gap too, expressed past `total` so a
+    // run crossing the seam extracts as one piece.
+    let mut gaps: Vec<(f64, f64)> = Vec::with_capacity(merged.len() + 1);
+    for w in merged.windows(2) {
+        gaps.push((w[0].1, w[1].0));
+    }
+    if closed {
+        let wrap = (merged[merged.len() - 1].1, merged[0].0 + total);
+        if wrap.0 < wrap.1 {
+            gaps.push(wrap);
+        }
+    } else {
+        if merged[0].0 > 0.0 {
+            gaps.insert(0, (0.0, merged[0].0));
+        }
+        let last_b = merged[merged.len() - 1].1;
+        if last_b < total {
+            gaps.push((last_b, total));
+        }
+    }
+
+    let eps = 1e-9 * total.max(1.0);
+    let mut runs = Vec::with_capacity(gaps.len());
+    for &(ga, gb) in gaps.iter() {
+        if gb - ga <= eps {
+            continue;
+        }
+        let mut run = vec![TrimNode::Cut(ga)];
+        // Original vertices strictly inside the gap, in path order.
+        // Vertices before `ga` lift past the seam (+total) for a wrap
+        // gap, so they walk in a second pass to keep the run ordered.
+        for (i, &si) in s.iter().enumerate() {
+            if si > ga + eps && si < gb - eps {
+                run.push(TrimNode::Vert(i));
+            }
+        }
+        for (i, &si) in s.iter().enumerate() {
+            let lifted = si + total;
+            if si < ga && lifted > ga + eps && lifted < gb - eps {
+                run.push(TrimNode::Vert(i));
+            }
+        }
+        run.push(TrimNode::Cut(gb));
+        runs.push(run);
+    }
+    runs
+}
+
+/// Locate an arc-length position on the path as a segment index and
+/// parameter. Positions past the last vertex's cumulative length sit on
+/// the closing edge (last → first), which exists only for a ring.
+fn locate(s: &[f64], closing: f64, a: f64) -> (usize, f64) {
+    let n = s.len();
+    if a >= s[n - 1] {
+        let t = if closing > 0.0 {
+            (a - s[n - 1]) / closing
+        } else {
+            0.0
+        };
+        return (n - 1, t.clamp(0.0, 1.0));
+    }
+    // Largest j with s[j] <= a; degenerate (zero-length) edges get t=0.
+    let j = match s.binary_search_by(|v| v.total_cmp(&a)) {
+        Ok(j) => j,
+        Err(j) => j - 1,
+    };
+    let len = s[j + 1] - s[j];
+    let t = if len > 0.0 { (a - s[j]) / len } else { 0.0 };
+    (j, t)
+}
+
+/// Interpolate the point at arc length `a` along the path. Positions
+/// past the total length wrap around the seam of a ring.
+fn point_at(points: &[Point], closing: f64, a: f64) -> Point {
+    let mut s = Vec::with_capacity(points.len());
+    s.push(0.0);
+    for i in 1..points.len() {
+        s.push(s[i - 1] + (points[i] - points[i - 1]).hypot());
+    }
+    let total = s[points.len() - 1] + closing;
+    // A ring wraps positions past the seam; an open path clamps.
+    let a = if closing > 0.0 && total > 0.0 {
+        a.rem_euclid(total)
+    } else {
+        a.clamp(0.0, total)
+    };
+    let (j, t) = locate(&s, closing, a);
+    let p0 = points[j];
+    let p1 = if j + 1 < points.len() {
+        points[j + 1]
+    } else {
+        points[0] // closing edge of a ring
+    };
+    p0 + (p1 - p0) * t
+}
+
+/// [`point_at`], additionally lerping the per-vertex attributes at the
+/// cut parameter.
+fn point_at_with_attrs(
+    points: &[Point],
+    widths: &[f64],
+    colors: &[Color],
+    closing: f64,
+    a: f64,
+    space: ColorSpace,
+) -> (Point, f64, Color) {
+    let mut s = Vec::with_capacity(points.len());
+    s.push(0.0);
+    for i in 1..points.len() {
+        s.push(s[i - 1] + (points[i] - points[i - 1]).hypot());
+    }
+    let total = s[points.len() - 1] + closing;
+    let a = if closing > 0.0 && total > 0.0 {
+        a.rem_euclid(total)
+    } else {
+        a.clamp(0.0, total)
+    };
+    let (j, t) = locate(&s, closing, a);
+    let k = if j + 1 < points.len() { j + 1 } else { 0 };
+    (
+        points[j] + (points[k] - points[j]) * t,
+        widths[j] + t * (widths[k] - widths[j]),
+        lerp_color(colors[j], colors[k], t, space),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,6 +733,107 @@ mod tests {
             clip_polyline_with_attrs(&pts, &widths, &colors, Some(clip), None, ColorSpace::Srgb);
         assert_eq!(out_p, vec![pt(-5.0, 0.0), pt(5.0, 0.0)]);
         assert_eq!(out_w, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn interior_trim_cuts_around_middle_vertex() {
+        // Straight 10px line; cut radius 1 around the vertex at x=5.
+        let pts = [pt(0.0, 0.0), pt(5.0, 0.0), pt(10.0, 0.0)];
+        let runs = clip_polyline_interior(&pts, &[(1, 1.0)], false);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0], vec![pt(0.0, 0.0), pt(4.0, 0.0)]);
+        assert_eq!(runs[1], vec![pt(6.0, 0.0), pt(10.0, 0.0)]);
+    }
+
+    #[test]
+    fn interior_trim_no_cuts_returns_input() {
+        let pts = [pt(0.0, 0.0), pt(5.0, 0.0), pt(10.0, 0.0)];
+        let runs = clip_polyline_interior(&pts, &[], false);
+        assert_eq!(runs, vec![pts.to_vec()]);
+    }
+
+    #[test]
+    fn interior_trim_at_open_endpoint_trims_one_side() {
+        let pts = [pt(0.0, 0.0), pt(10.0, 0.0)];
+        let runs = clip_polyline_interior(&pts, &[(0, 2.0)], false);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0], vec![pt(2.0, 0.0), pt(10.0, 0.0)]);
+    }
+
+    #[test]
+    fn interior_trim_overlapping_radii_merge() {
+        // Two buffered vertices whose radii touch: the path between
+        // them disappears entirely rather than leaving a sliver.
+        let pts = [pt(0.0, 0.0), pt(4.0, 0.0), pt(6.0, 0.0), pt(10.0, 0.0)];
+        let runs = clip_polyline_interior(&pts, &[(1, 2.0), (2, 2.0)], false);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0], vec![pt(0.0, 0.0), pt(2.0, 0.0)]);
+        assert_eq!(runs[1], vec![pt(8.0, 0.0), pt(10.0, 0.0)]);
+    }
+
+    #[test]
+    fn interior_trim_consuming_whole_path_returns_empty() {
+        let pts = [pt(0.0, 0.0), pt(10.0, 0.0)];
+        let runs = clip_polyline_interior(&pts, &[(0, 6.0), (1, 6.0)], false);
+        assert!(runs.is_empty());
+    }
+
+    #[test]
+    fn interior_trim_ring_cut_on_vertex_zero_crosses_seam() {
+        // Unit square, total arc 4. A radius-0.5 cut on vertex 0 trims
+        // 0.5 into the last edge and 0.5 into the first edge; the one
+        // surviving run crosses no seam and holds vertices 1 and 2.
+        let pts = [pt(0.0, 0.0), pt(1.0, 0.0), pt(1.0, 1.0), pt(0.0, 1.0)];
+        let runs = clip_polyline_interior(&pts, &[(0, 0.5)], true);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            runs[0],
+            vec![
+                pt(0.5, 0.0),
+                pt(1.0, 0.0),
+                pt(1.0, 1.0),
+                pt(0.0, 1.0),
+                pt(0.0, 0.5)
+            ]
+        );
+    }
+
+    #[test]
+    fn interior_trim_ring_two_cuts_give_two_open_runs() {
+        let pts = [pt(0.0, 0.0), pt(1.0, 0.0), pt(1.0, 1.0), pt(0.0, 1.0)];
+        let runs = clip_polyline_interior(&pts, &[(0, 0.25), (2, 0.25)], true);
+        assert_eq!(runs.len(), 2);
+        // Run 1: from the cut past vertex 2 (0.75, 1) through vertex 3
+        // to the cut before the seam (0, 0.25).
+        assert_eq!(runs[0], vec![pt(0.75, 1.0), pt(0.0, 1.0), pt(0.0, 0.25)]);
+        // Run 2 wraps the seam: from the cut past the seam (0.25, 0)
+        // through vertex 1 to the cut before vertex 2 (1, 0.75).
+        assert_eq!(runs[1], vec![pt(0.25, 0.0), pt(1.0, 0.0), pt(1.0, 0.75)]);
+    }
+
+    #[test]
+    fn interior_trim_with_attrs_lerps_at_cuts() {
+        let pts = [pt(0.0, 0.0), pt(10.0, 0.0)];
+        let widths = [0.0_f64, 10.0];
+        let colors = [
+            Color::new([0.0, 0.0, 0.0, 1.0]),
+            Color::new([1.0, 1.0, 1.0, 1.0]),
+        ];
+        let runs = clip_polyline_interior_with_attrs(
+            &pts,
+            &widths,
+            &colors,
+            &[(0, 2.0)],
+            false,
+            ColorSpace::Srgb,
+        );
+        assert_eq!(runs.len(), 1);
+        let (p, w, c) = &runs[0];
+        assert_eq!(p.len(), 2);
+        // Cut at t = 0.2 along the single segment.
+        assert!((p[0].x - 2.0).abs() < 1e-9);
+        assert!((w[0] - 2.0).abs() < 1e-9);
+        assert!((c[0].components[0] - 0.2).abs() < 1e-5);
     }
 
     #[test]

@@ -58,6 +58,31 @@
 //!   colour (per-mark; defaults to the resolved stroke colour).
 //! - `"start_marker_invert"` / `"end_marker_invert"` — flip the
 //!   marker to point inward (per-mark; default `false`).
+//! - `"vertex_marker"` — shape name stamped **upright** at every
+//!   vertex of the polyline (per-vertex; default none). Unlike the
+//!   endpoint-marker channels this resolves at each row of the mark,
+//!   so it can be data-mapped. Vertices whose position doesn't
+//!   resolve (gap breaks) get no stamp; gap-adjacent run terminals
+//!   do. Stamps sit at the data vertices: `"corner_radius"` pulls the
+//!   stroke off a vertex but never moves a stamp.
+//! - `"vertex_marker_size"` — marker size in pt (per-vertex; default
+//!   3 × the vertex's resolved linewidth). A relative value
+//!   (`rel(f)`) multiplies the resolved linewidth.
+//! - `"vertex_marker_fill"` / `"vertex_marker_stroke"` — marker
+//!   interior / outline colour (per-vertex; both default to the
+//!   vertex's resolved stroke colour). A fully transparent fill
+//!   leaves an open (hollow) marker; a fully transparent stroke
+//!   drops the outline ring.
+//! - `"vertex_marker_buffer"` — clearance in pt beyond the marker's
+//!   own extent (per-vertex; default `0.0`). The stroke is trimmed
+//!   buffer + extent of arc length on both sides of the vertex so
+//!   the marker sits in a clean gap — the additive rule
+//!   `clip_start_radius` follows for endpoint markers. Trims apply
+//!   before corner rounding, each surviving sub-run restarts the
+//!   dash phase, and the stroke is all they affect. A terminal that
+//!   also carries `clip_start_radius` or an endpoint marker is
+//!   trimmed twice: the endpoint clip is measured from the end the
+//!   vertex trim left behind.
 //! - `"angle"` — rotation in **radians** around the mark's centroid
 //!   (mean of finite vertex positions in panel space), mathematical
 //!   CCW. Per-mark; default `0.0`. Applies after vertex resolution
@@ -92,9 +117,10 @@ use super::outline::{
 };
 use super::project::{project_and_densify, PathOptions, PathVertex, VertexAttrs};
 use super::resolve::{
-    channel_color_space, channel_varies_across, offset_px, override_alpha, pt_to_px,
-    resolve_angle_channel, resolve_color_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, ChannelBind, PositionMap,
+    channel_color_space, channel_varies_across, emit_vertex_marker, offset_px, override_alpha,
+    pt_to_px, resolve_angle_channel, resolve_color_channel, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, resolve_vertex_marker, ChannelBind, PositionMap,
+    VertexMarkerChannels, VertexMarkerScales,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
@@ -134,6 +160,11 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("end_marker_fill", ExpectedOutput::Colors),
     ("start_marker_invert", ExpectedOutput::Any),
     ("end_marker_invert", ExpectedOutput::Any),
+    ("vertex_marker", ExpectedOutput::Strings),
+    ("vertex_marker_size", ExpectedOutput::Numbers),
+    ("vertex_marker_fill", ExpectedOutput::Colors),
+    ("vertex_marker_stroke", ExpectedOutput::Colors),
+    ("vertex_marker_buffer", ExpectedOutput::Numbers),
 ];
 
 // ─── LineGeom ────────────────────────────────────────────────────────────────
@@ -235,6 +266,9 @@ struct LineDrawCtx<'a> {
     /// resolved as one outline spec per mark.
     outline_ch: OutlineChannels<'a>,
     outline_sc: OutlineScales<'a>,
+    /// The per-vertex marker surface, resolved per source row.
+    vmarker_ch: VertexMarkerChannels<'a>,
+    vmarker_sc: VertexMarkerScales<'a>,
 }
 
 impl<'a> LineDrawCtx<'a> {
@@ -275,6 +309,8 @@ impl<'a> LineDrawCtx<'a> {
             y_band: b("y_band"),
             outline_ch: OutlineChannels::from_map(channels, ""),
             outline_sc: OutlineScales::from_ctx(ctx, ""),
+            vmarker_ch: VertexMarkerChannels::from_map(channels),
+            vmarker_sc: VertexMarkerScales::from_ctx(ctx),
         })
     }
 }
@@ -435,6 +471,8 @@ fn draw_one_mark(
         },
         outline_ch,
         outline_sc,
+        vmarker_ch,
+        vmarker_sc,
     } = dc;
 
     // Prepared position scales: transform constants resolved once per
@@ -485,6 +523,43 @@ fn draw_one_mark(
         return;
     }
 
+    // ── Per-vertex markers, resolved per source row. ──
+    //
+    // Unlike the per-mark endpoint markers, these resolve at every
+    // row of the mark so they can be data-mapped. In ribbon mode the
+    // vertex's own linewidth / stroke colour drive the marker's size
+    // default, fill fallback and outline width; otherwise the mark's
+    // resolved values do.
+    let vmarkers: Vec<Option<super::resolve::VertexMarkerSpec>> = if vmarker_ch.is_bound() {
+        (0..mark.rows.len())
+            .map(|k| {
+                let i = mark.rows[k];
+                let (lw_pt, col) = if ribbon_mode {
+                    (
+                        resolve_number_channel_or(
+                            linewidth_ch,
+                            linewidth_scale,
+                            i,
+                            ctx.theme.geom.line.linewidth_pt,
+                        ),
+                        override_alpha(
+                            resolve_color_channel(stroke_ch, stroke_scale, i),
+                            resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i),
+                        )
+                        .unwrap_or(stroke_color),
+                    )
+                } else {
+                    (spec.linewidth_pt, stroke_color)
+                };
+                resolve_vertex_marker(&vmarker_ch, &vmarker_sc, i, lw_pt, col, ctx.shapes)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // Skip all per-vertex marker work when no row named a shape.
+    let vm_active = vmarkers.iter().any(Option::is_some);
+
     // ── Per-vertex positions for this mark, split into runs. ──
     //
     // A row whose x or y doesn't resolve to a finite position ends
@@ -495,45 +570,48 @@ fn draw_one_mark(
     // In ribbon mode each vertex additionally carries its own
     // half-width and colour, which densified interior points lerp
     // between their bracketing rows.
-    let runs = project_and_densify(
-        ctx,
-        mark.rows.len(),
-        &PathOptions::split(2).with_color_space(stroke_space),
-        |k| {
-            let i = mark.rows[k];
-            let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
-            let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
-            let attrs = ribbon_mode.then(|| {
-                let w_pt = resolve_number_channel_or(
-                    linewidth_ch,
-                    linewidth_scale,
-                    i,
-                    ctx.theme.geom.line.linewidth_pt,
-                );
-                VertexAttrs {
-                    // Clamp so a scale range reaching below zero pinches the
-                    // ribbon shut instead of flipping its shoulders.
-                    half_width_px: (pt_to_px(w_pt, ctx.dpi) * 0.5).max(0.0),
-                    color: override_alpha(
-                        resolve_color_channel(stroke_ch, stroke_scale, i),
-                        resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i),
-                    )
-                    .unwrap_or(stroke_color),
-                }
-            });
-            PathVertex {
-                frac: [
-                    x_pos.map(&x_col.get(i), x_band),
-                    y_pos.map(&y_col.get(i), y_band),
-                ],
-                offset_px: (
-                    offset_px(x_offset_ch, x_offset_scale, i, ctx.dpi),
-                    offset_px(y_offset_ch, y_offset_scale, i, ctx.dpi),
-                ),
-                attrs,
+    let path_opts = PathOptions::split(2).with_color_space(stroke_space);
+    let path_opts = if vm_active {
+        // Vertex-marker stamping needs to find each surviving source
+        // vertex in the densified run.
+        path_opts.with_source_tracking()
+    } else {
+        path_opts
+    };
+    let runs = project_and_densify(ctx, mark.rows.len(), &path_opts, |k| {
+        let i = mark.rows[k];
+        let x_band = resolve_number_channel_or(x_band_ch, x_band_scale, i, 0.0);
+        let y_band = resolve_number_channel_or(y_band_ch, y_band_scale, i, 0.0);
+        let attrs = ribbon_mode.then(|| {
+            let w_pt = resolve_number_channel_or(
+                linewidth_ch,
+                linewidth_scale,
+                i,
+                ctx.theme.geom.line.linewidth_pt,
+            );
+            VertexAttrs {
+                // Clamp so a scale range reaching below zero pinches the
+                // ribbon shut instead of flipping its shoulders.
+                half_width_px: (pt_to_px(w_pt, ctx.dpi) * 0.5).max(0.0),
+                color: override_alpha(
+                    resolve_color_channel(stroke_ch, stroke_scale, i),
+                    resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i),
+                )
+                .unwrap_or(stroke_color),
             }
-        },
-    );
+        });
+        PathVertex {
+            frac: [
+                x_pos.map(&x_col.get(i), x_band),
+                y_pos.map(&y_col.get(i), y_band),
+            ],
+            offset_px: (
+                offset_px(x_offset_ch, x_offset_scale, i, ctx.dpi),
+                offset_px(y_offset_ch, y_offset_scale, i, ctx.dpi),
+            ),
+            attrs,
+        }
+    });
     if runs.is_empty() {
         return;
     }
@@ -570,56 +648,155 @@ fn draw_one_mark(
     // Endpoint clipping and endpoint markers belong to the mark's
     // terminals, not to every run's: only the first run opens the line
     // and only the last one closes it. Interior run ends are gap edges,
-    // so their spec drops both terminals.
+    // so their spec drops both terminals. The same rule applies to the
+    // sub-runs a vertex-marker buffer trims a run into: only the
+    // sub-runs touching the mark's true terminals keep them.
     let last_run = runs.len() - 1;
     for (ri, run) in runs.iter().enumerate() {
-        let mut run_spec = spec.clone();
-        if ri != 0 {
-            run_spec.user_clip_start_pt = 0.0;
-            run_spec.start_marker.name.clear();
-        }
-        if ri != last_run {
-            run_spec.user_clip_end_pt = 0.0;
-            run_spec.end_marker.name.clear();
-        }
-        if ribbon_mode && run_spec.dash_pattern.is_empty() {
-            draw_ribbon_mode_curve(
-                scene,
-                ctx.shapes,
-                ctx.dpi,
-                &run.points,
-                &run.widths,
-                &run.colors,
-                stroke_space,
-                &run_spec,
-                run_spec.xform,
-            );
-        } else if ribbon_mode {
-            draw_dashed_ribbon_curve(
-                scene,
-                ctx.shapes,
-                ctx.dpi,
-                &run.points,
-                &run.widths,
-                &run.colors,
-                stroke_space,
-                &run_spec,
-                run_spec.xform,
-                ctx.theme.geom.marker_outline_pt,
-            );
+        // Arc-length trim radii around this run's buffered vertices,
+        // keyed by position in the densified points.
+        let cuts: Vec<(usize, f64)> = if vm_active {
+            run.source
+                .iter()
+                .filter_map(|&(pi, k)| {
+                    vmarkers[k].as_ref().and_then(|m| {
+                        (m.buffer_pt > 0.0).then_some((pi, pt_to_px(m.buffer_pt, ctx.dpi)))
+                    })
+                })
+                .collect()
         } else {
-            // The shared helper handles endpoint clip, path
-            // construction (straight or corner-rounded), start marker,
-            // stroke (fast path or dashed-with-markers walker), and end
-            // marker.
-            draw_curve_outline(
-                scene,
-                ctx.shapes,
-                ctx.dpi,
-                ctx.theme.geom.marker_outline_pt,
-                &run.points,
-                &run_spec,
+            Vec::new()
+        };
+
+        if ribbon_mode {
+            // Sub-runs carry their widths / colours along; untrimmed,
+            // the run itself is the single sub-run.
+            type AttrSub<'a> = (
+                std::borrow::Cow<'a, [Point]>,
+                std::borrow::Cow<'a, [f64]>,
+                std::borrow::Cow<'a, [crate::color::Color]>,
             );
+            let subs: Vec<AttrSub<'_>> = if cuts.is_empty() {
+                vec![(
+                    std::borrow::Cow::Borrowed(&run.points[..]),
+                    std::borrow::Cow::Borrowed(&run.widths[..]),
+                    std::borrow::Cow::Borrowed(&run.colors[..]),
+                )]
+            } else {
+                crate::primitives::clip_polyline_interior_with_attrs(
+                    &run.points,
+                    &run.widths,
+                    &run.colors,
+                    &cuts,
+                    false,
+                    stroke_space,
+                )
+                .into_iter()
+                .map(|(p, w, c)| {
+                    (
+                        std::borrow::Cow::Owned(p),
+                        std::borrow::Cow::Owned(w),
+                        std::borrow::Cow::Owned(c),
+                    )
+                })
+                .collect()
+            };
+            let last_sub = subs.len().saturating_sub(1);
+            for (si, (pts, ws, cs)) in subs.iter().enumerate() {
+                if pts.len() < 2 {
+                    continue;
+                }
+                let mut run_spec = spec.clone();
+                if ri != 0 || si != 0 {
+                    run_spec.user_clip_start_pt = 0.0;
+                    run_spec.start_marker.name.clear();
+                }
+                if ri != last_run || si != last_sub {
+                    run_spec.user_clip_end_pt = 0.0;
+                    run_spec.end_marker.name.clear();
+                }
+                if run_spec.dash_pattern.is_empty() {
+                    draw_ribbon_mode_curve(
+                        scene,
+                        ctx.shapes,
+                        ctx.dpi,
+                        pts,
+                        ws,
+                        cs,
+                        stroke_space,
+                        &run_spec,
+                        run_spec.xform,
+                    );
+                } else {
+                    draw_dashed_ribbon_curve(
+                        scene,
+                        ctx.shapes,
+                        ctx.dpi,
+                        pts,
+                        ws,
+                        cs,
+                        stroke_space,
+                        &run_spec,
+                        run_spec.xform,
+                        ctx.theme.geom.marker_outline_pt,
+                    );
+                }
+            }
+        } else {
+            let subs: Vec<std::borrow::Cow<'_, [Point]>> = if cuts.is_empty() {
+                vec![std::borrow::Cow::Borrowed(&run.points[..])]
+            } else {
+                crate::primitives::clip_polyline_interior(&run.points, &cuts, false)
+                    .into_iter()
+                    .map(std::borrow::Cow::Owned)
+                    .collect()
+            };
+            let last_sub = subs.len().saturating_sub(1);
+            for (si, pts) in subs.iter().enumerate() {
+                if pts.len() < 2 {
+                    continue;
+                }
+                let mut run_spec = spec.clone();
+                if ri != 0 || si != 0 {
+                    run_spec.user_clip_start_pt = 0.0;
+                    run_spec.start_marker.name.clear();
+                }
+                if ri != last_run || si != last_sub {
+                    run_spec.user_clip_end_pt = 0.0;
+                    run_spec.end_marker.name.clear();
+                }
+                // The shared helper handles endpoint clip, path
+                // construction (straight or corner-rounded), start
+                // marker, stroke (fast path or dashed-with-markers
+                // walker), and end marker.
+                draw_curve_outline(
+                    scene,
+                    ctx.shapes,
+                    ctx.dpi,
+                    ctx.theme.geom.marker_outline_pt,
+                    pts,
+                    &run_spec,
+                );
+            }
+        }
+
+        // Vertex markers stamp last so they paint over the stroke —
+        // including over trim-created sub-run ends at their own
+        // buffer boundary.
+        if vm_active {
+            for &(pi, k) in &run.source {
+                if let Some(m) = &vmarkers[k] {
+                    emit_vertex_marker(
+                        scene,
+                        run.points[pi],
+                        m,
+                        spec.xform,
+                        ctx.shapes,
+                        ctx.dpi,
+                        pick,
+                    );
+                }
+            }
         }
     }
 }
@@ -2582,5 +2759,298 @@ mod tests {
             max_x < 100.0,
             "expected clipped endpoint < 100 px, got max_x = {max_x}"
         );
+    }
+
+    // ── Vertex markers ──
+
+    /// Count fill ops in the scene — one per stamped "circle" marker.
+    fn fill_count(scene: &RecordingScene) -> usize {
+        scene
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Fill { .. }))
+            .count()
+    }
+
+    #[test]
+    fn vertex_marker_stamps_once_per_vertex() {
+        let mut g = LineGeom::builder()
+            .set("x", vec![0.0_f64, 0.5, 1.0])
+            .set("y", vec![0.0_f64, 1.0, 0.0])
+            .set("stroke", red_solid())
+            .set("vertex_marker", "circle")
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        assert_eq!(fill_count(&scene), 3, "one stamp per vertex");
+    }
+
+    #[test]
+    fn vertex_marker_per_row_size_and_fill_respected() {
+        // Data-mapped size / fill: the two stamps scale and colour
+        // independently.
+        let mut g = LineGeom::builder()
+            .set("x", vec![0.0_f64, 1.0])
+            .set("y", vec![0.0_f64, 0.0])
+            .set("stroke", red_solid())
+            .set("vertex_marker", vec!["circle", "circle"])
+            .set("vertex_marker_size", vec![3.0_f64, 9.0])
+            .set(
+                "vertex_marker_fill",
+                vec![
+                    Color::new([0.0, 0.0, 0.0, 1.0]),
+                    Color::new([1.0, 1.0, 1.0, 1.0]),
+                ],
+            )
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let fills: Vec<(f64, &crate::brush::Brush)> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Fill {
+                    transform, brush, ..
+                } => Some((transform.as_coeffs()[0].abs(), brush)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fills.len(), 2);
+        // The 9pt stamp's scale is 3× the 3pt stamp's.
+        assert!(
+            (fills[1].0 / fills[0].0 - 3.0).abs() < 1e-9,
+            "scale ratio {}",
+            fills[1].0 / fills[0].0
+        );
+    }
+
+    #[test]
+    fn vertex_marker_stamps_at_gap_adjacent_terminals() {
+        // The middle row is missing, splitting the line into two
+        // 2-vertex runs. All four finite vertices stamp — the
+        // gap-adjacent run terminals too.
+        let mut g = LineGeom::builder()
+            .set("x", vec![0.0_f64, 0.25, f64::NAN, 0.75, 1.0])
+            .set("y", vec![0.0_f64, 0.0, 0.0, 0.0, 0.0])
+            .set("stroke", red_solid())
+            .set("vertex_marker", "circle")
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        assert_eq!(fill_count(&scene), 4, "only finite vertices stamp");
+    }
+
+    #[test]
+    fn vertex_marker_buffer_trims_the_stroke() {
+        // A buffered middle vertex splits one stroke into two sub-runs.
+        let mut g = LineGeom::builder()
+            .set("x", vec![0.0_f64, 0.5, 1.0])
+            .set("y", vec![0.0_f64, 0.0, 0.0])
+            .set("stroke", red_solid())
+            .set("vertex_marker_buffer", 9.0_f64)
+            .set("vertex_marker", "circle")
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        // Two stroked sub-runs + one marker-outline stroke per stamp
+        // (3 stamps × 1) — but the stamps' strokes are scaled
+        // transforms; count only body strokes by path length instead:
+        // two sub-runs means two body stroke ops with identity xform.
+        let body_strokes = scene
+            .ops
+            .iter()
+            .filter(
+                |op| matches!(op, Op::Stroke { transform, .. } if *transform == Affine::IDENTITY),
+            )
+            .count();
+        assert_eq!(body_strokes, 2, "buffer splits the stroke in two");
+    }
+
+    #[test]
+    fn vertex_marker_auto_buffer_trims_by_marker_extent() {
+        // No explicit buffer: a set marker trims the stroke by the
+        // shape's own forward extent — the same auto-clip endpoint
+        // markers get. A 12 pt circle on a 100 px line must visibly
+        // shorten the stroke.
+        let mut g = LineGeom::builder()
+            .set("x", vec![0.0_f64, 1.0])
+            .set("y", vec![0.0_f64, 0.0])
+            .set("stroke", red_solid())
+            .set("vertex_marker", "circle")
+            .set("vertex_marker_size", 12.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let body_strokes = scene
+            .ops
+            .iter()
+            .filter(
+                |op| matches!(op, Op::Stroke { transform, .. } if *transform == Affine::IDENTITY),
+            )
+            .count();
+        // Both endpoints are buffered (the circle's auto extent at
+        // each end), but the two trims on a two-vertex line leave a
+        // single middle sub-run — one body stroke, and it must be
+        // shorter than the untrimmed 100 px.
+        assert_eq!(body_strokes, 1);
+    }
+
+    #[test]
+    fn vertex_marker_ribbon_mode_sizes_stamps_at_local_width() {
+        // Varying linewidth upgrades to ribbon mode; the marker size
+        // default (3 × linewidth) follows the local width.
+        let mut g = LineGeom::builder()
+            .keys(vec!["A", "A"])
+            .set("x", vec![0.0_f64, 1.0])
+            .set("y", vec![0.0_f64, 0.0])
+            .set("linewidth", vec![2.0_f64, 8.0])
+            .set("stroke", red_solid())
+            .set("vertex_marker", "circle")
+            .set("vertex_marker_buffer", 0.0_f64)
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let scales_seen: Vec<f64> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Fill { transform, .. } => Some(transform.as_coeffs()[0].abs()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(scales_seen.len(), 2);
+        // 3× local width: 6 pt vs 24 pt → scale ratio 4.
+        let ratio = scales_seen[1] / scales_seen[0];
+        assert!((ratio - 4.0).abs() < 1e-9, "scale ratio {ratio}");
+    }
+
+    #[test]
+    fn vertex_marker_stroke_defaults_to_line_stroke_and_overrides() {
+        // Marker outline colours: the first line binds no
+        // `vertex_marker_stroke` (rings take the line's red), the
+        // second maps it to blue.
+        let marker_brushes = |g: &mut LineGeom| -> Vec<Color> {
+            g.rebuild_diff_against_previous();
+            let shapes = registry();
+            let scales = no_scales();
+            let mut scene = RecordingScene::default();
+            g.draw(
+                &mut scene,
+                &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+            );
+            scene
+                .ops
+                .iter()
+                .filter_map(|op| match op {
+                    // Marker-outline strokes carry the stamp's scale
+                    // transform; the body stroke is identity.
+                    Op::Stroke {
+                        transform,
+                        brush: crate::brush::Brush::Solid(c),
+                        ..
+                    } if *transform != Affine::IDENTITY => Some(*c),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut default = LineGeom::builder()
+            .set("x", vec![0.0_f64, 1.0])
+            .set("y", vec![0.0_f64, 0.0])
+            .set("stroke", red_solid())
+            .set("vertex_marker", "circle")
+            .build();
+        assert!(
+            marker_brushes(&mut default)
+                .iter()
+                .all(|c| *c == red_solid()),
+            "unset vertex_marker_stroke follows the line stroke"
+        );
+
+        let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
+        let mut mapped = LineGeom::builder()
+            .set("x", vec![0.0_f64, 1.0])
+            .set("y", vec![0.0_f64, 0.0])
+            .set("stroke", red_solid())
+            .set("vertex_marker", "circle")
+            .set("vertex_marker_stroke", blue)
+            .build();
+        assert!(
+            marker_brushes(&mut mapped).iter().all(|c| *c == blue),
+            "bound vertex_marker_stroke overrides the line stroke"
+        );
+    }
+
+    #[test]
+    fn vertex_marker_stamps_inside_mark_transform() {
+        // A rotated mark stamps its vertex markers under the same
+        // non-identity transform as the stroke.
+        use std::f64::consts::PI;
+        let mut g = LineGeom::builder()
+            .set("x", vec![0.0_f64, 1.0])
+            .set("y", vec![0.0_f64, 0.0])
+            .set("stroke", red_solid())
+            .set("angle", PI)
+            .set("vertex_marker", "circle")
+            .build();
+        g.rebuild_diff_against_previous();
+        let shapes = registry();
+        let scales = no_scales();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(Rect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let stamp_xforms: Vec<Affine> = scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Fill { transform, .. } => Some(*transform),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stamp_xforms.len(), 2);
+        for x in stamp_xforms {
+            assert!(
+                x.as_coeffs()[0] < 0.0,
+                "π rotation should flip the stamp's x basis"
+            );
+        }
     }
 }

@@ -62,6 +62,11 @@ pub(crate) struct VertexRun {
     pub widths: Vec<f64>,
     /// Per-vertex stroke colours. Empty for a plain path.
     pub colors: Vec<Color>,
+    /// Maps source vertices to their position in `points`:
+    /// `(points index, source index)` per surviving source vertex, in
+    /// path order. Populated only when the walk's
+    /// [`PathOptions::track_source`] is set; empty otherwise.
+    pub source: Vec<(usize, usize)>,
 }
 
 /// Path-level settings for [`project_and_densify`].
@@ -80,6 +85,11 @@ pub(crate) struct PathOptions {
     /// Colour space densified vertices blend their bracketing rows'
     /// colours through. Unused for a plain path.
     pub color_space: ColorSpace,
+    /// Record each surviving source vertex's position in the run's
+    /// `points` (see [`VertexRun::source`]). Costs two `usize` pushes
+    /// per source vertex; off by default since only vertex-marker
+    /// stamping needs the mapping.
+    pub track_source: bool,
 }
 
 impl PathOptions {
@@ -90,6 +100,7 @@ impl PathOptions {
             closing: false,
             min_run_len,
             color_space: ColorSpace::default(),
+            track_source: false,
         }
     }
 
@@ -113,6 +124,13 @@ impl PathOptions {
     /// Set the colour space densified vertices blend through.
     pub(crate) fn with_color_space(mut self, space: ColorSpace) -> Self {
         self.color_space = space;
+        self
+    }
+
+    /// Record each surviving source vertex's position in the run's
+    /// `points` into [`VertexRun::source`].
+    pub(crate) fn with_source_tracking(mut self) -> Self {
+        self.track_source = true;
         self
     }
 }
@@ -166,6 +184,9 @@ where
             }
         }
         run.points.push(pt);
+        if opts.track_source {
+            run.source.push((run.points.len() - 1, k));
+        }
         if let Some(a) = v.attrs {
             run.widths.push(a.half_width_px);
             run.colors.push(a.color);
@@ -263,5 +284,6 @@ fn flush_run(runs: &mut Vec<VertexRun>, run: &mut VertexRun, min_run_len: usize)
         run.points.clear();
         run.widths.clear();
         run.colors.clear();
+        run.source.clear();
     }
 }
