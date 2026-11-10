@@ -974,6 +974,57 @@ fn an_image_is_embedded_once_and_referenced_per_draw() {
     assert_well_formed(&svg);
 }
 
+#[test]
+#[cfg(feature = "png")]
+fn an_image_brush_tiles_a_fill_through_a_pattern() {
+    use hephaestus::brush::{Extend, ImageBrush};
+    let mut s = scene();
+    let brush = Brush::Image(ImageBrush::new(checkerboard()).with_extend(Extend::Repeat));
+    s.fill(
+        FillRule::NonZero,
+        Affine::IDENTITY,
+        &brush,
+        None,
+        &rect_path(Rect::new(0.0, 0.0, 40.0, 40.0)),
+        PickId::Skip,
+    );
+    let svg = encode_svg(&s);
+    assert!(
+        svg.contains(
+            "<pattern id=\"pt0\" patternUnits=\"userSpaceOnUse\" width=\"4\" height=\"4\">"
+        ),
+        "{svg}"
+    );
+    assert_eq!(
+        svg.matches("data:image/png;base64,").count(),
+        1,
+        "the payload must be written once: {svg}"
+    );
+    assert!(svg.contains("fill=\"url(#pt0)\""), "{svg}");
+    assert!(s.warnings().is_empty(), "{:?}", s.warnings());
+    assert_well_formed(&svg);
+}
+
+/// A pad or reflect sampler is more than a `<pattern>` can express, so
+/// the fill tiles and reports.
+#[test]
+#[cfg(feature = "png")]
+fn a_padding_image_brush_repeats_and_says_so() {
+    use hephaestus::brush::ImageBrush;
+    let mut s = scene();
+    let brush = Brush::Image(ImageBrush::new(checkerboard()));
+    s.fill(
+        FillRule::NonZero,
+        Affine::IDENTITY,
+        &brush,
+        None,
+        &rect_path(Rect::new(0.0, 0.0, 40.0, 40.0)),
+        PickId::Skip,
+    );
+    assert!(s.warnings().contains(&SvgWarning::UnsupportedExtend));
+    assert_well_formed(&encode_svg(&s));
+}
+
 /// Without an encoder there is nothing to embed, so an image reports
 /// rather than drawing something wrong. Constructed by hand because the
 /// `image` module is itself gated on having a codec.

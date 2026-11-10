@@ -4,7 +4,7 @@
 use super::defs::{DefKind, Defs};
 use super::writer::{num, transform_attr};
 use super::{SvgWarning, Warnings};
-use crate::brush::{Brush, Extend, Gradient, GradientKind};
+use crate::brush::{Brush, Extend, Gradient, GradientKind, ImageBrush};
 use crate::color::Color;
 use crate::geometry::Affine;
 
@@ -49,15 +49,46 @@ pub(crate) fn resolve(
     match brush {
         Brush::Solid(c) => solid(*c),
         Brush::Gradient(g) => gradient(g, brush_transform, defs, doc_prefix, decimals, warnings),
-        Brush::Image(_) => {
-            // An image brush needs a `<pattern>`; until that lands,
-            // saying so beats painting the wrong color silently.
-            warnings.note(SvgWarning::ImageBrushUnsupported);
-            Paint {
-                value: "none".into(),
-                opacity: None,
-            }
+        Brush::Image(ib) => {
+            image_pattern(ib, brush_transform, defs, doc_prefix, decimals, warnings)
         }
+    }
+}
+
+/// Intern an image brush as a `<pattern>` tiling its image, and return
+/// the `url(#…)` that references it.
+///
+/// Only `Repeat` is exact: an SVG pattern always tiles, so a pad or
+/// reflect sampler repeats instead and says so.
+fn image_pattern(
+    ib: &ImageBrush,
+    brush_transform: Option<Affine>,
+    defs: &mut Defs,
+    doc_prefix: &str,
+    decimals: u8,
+    warnings: &mut Warnings,
+) -> Paint {
+    let sampler = &ib.sampler;
+    if sampler.x_extend != Extend::Repeat || sampler.y_extend != Extend::Repeat {
+        warnings.note(SvgWarning::UnsupportedExtend);
+    }
+    let Some(id) = super::image::pattern(
+        &ib.image,
+        sampler.quality,
+        brush_transform,
+        defs,
+        doc_prefix,
+        decimals,
+        warnings,
+    ) else {
+        return Paint {
+            value: "none".into(),
+            opacity: None,
+        };
+    };
+    Paint {
+        value: format!("url(#{id})"),
+        opacity: (sampler.alpha < 1.0).then_some(sampler.alpha),
     }
 }
 
@@ -224,6 +255,90 @@ mod tests {
         // The same gradient again reuses the definition.
         let q = resolve(&Brush::Gradient(g), None, &mut defs, "", 3, &mut warnings);
         assert_eq!(q.value, "url(#lg0)");
+    }
+
+    /// A 2×1 red/blue image to tile.
+    #[cfg(feature = "png")]
+    fn checker() -> ImageBrush {
+        use crate::brush::{Blob, Image, ImageAlphaType, ImageFormat};
+        ImageBrush::new(Image {
+            data: Blob::from(vec![255, 0, 0, 255, 0, 0, 255, 255]),
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha,
+            width: 2,
+            height: 1,
+        })
+    }
+
+    #[cfg(feature = "png")]
+    #[test]
+    fn a_repeating_image_brush_is_interned_as_a_pattern() {
+        let mut defs = Defs::default();
+        let mut warnings = Warnings::default();
+        let brush = Brush::Image(checker().with_extend(Extend::Repeat));
+        let p = resolve(&brush, None, &mut defs, "", 3, &mut warnings);
+        assert_eq!(p.value, "url(#pt0)");
+        assert_eq!(p.opacity, None, "the default sampler is opaque");
+        assert!(!warnings.contains(&SvgWarning::UnsupportedExtend));
+        let mut out = String::new();
+        defs.write(&mut out, None);
+        assert!(
+            out.contains(
+                "<pattern id=\"pt0\" patternUnits=\"userSpaceOnUse\" width=\"2\" height=\"1\">"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("data:image/png;base64,"), "{out}");
+
+        // The same brush again reuses the definition.
+        let q = resolve(&brush, None, &mut defs, "", 3, &mut warnings);
+        assert_eq!(q.value, "url(#pt0)");
+    }
+
+    #[cfg(feature = "png")]
+    #[test]
+    fn a_non_repeating_image_brush_tiles_and_says_so() {
+        let mut defs = Defs::default();
+        let mut warnings = Warnings::default();
+        // The default sampler pads, which a pattern cannot express.
+        let p = resolve(
+            &Brush::Image(checker()),
+            None,
+            &mut defs,
+            "",
+            3,
+            &mut warnings,
+        );
+        assert!(p.value.starts_with("url(#"), "{:?}", p.value);
+        assert!(warnings.contains(&SvgWarning::UnsupportedExtend));
+    }
+
+    #[cfg(feature = "png")]
+    #[test]
+    fn an_image_brushs_alpha_becomes_the_paint_opacity() {
+        let mut defs = Defs::default();
+        let mut warnings = Warnings::default();
+        let brush = Brush::Image(checker().with_extend(Extend::Repeat).with_alpha(0.5));
+        let p = resolve(&brush, None, &mut defs, "", 3, &mut warnings);
+        assert_eq!(p.opacity, Some(0.5));
+    }
+
+    #[cfg(not(feature = "png"))]
+    #[test]
+    fn an_image_brush_without_a_png_encoder_draws_nothing_and_says_so() {
+        use crate::brush::{Blob, Image, ImageAlphaType, ImageFormat};
+        let mut defs = Defs::default();
+        let mut warnings = Warnings::default();
+        let brush = Brush::Image(ImageBrush::new(Image {
+            data: Blob::from(vec![255, 0, 0, 255]),
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha,
+            width: 1,
+            height: 1,
+        }));
+        let p = resolve(&brush, None, &mut defs, "", 3, &mut warnings);
+        assert_eq!(p.value, "none");
+        assert!(warnings.contains(&SvgWarning::MissingPngFeature));
     }
 
     #[test]

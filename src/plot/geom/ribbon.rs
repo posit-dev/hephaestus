@@ -92,9 +92,9 @@ use crate::scene::SceneBuilder;
 use super::marks::{build_marks_from_column, MarkSlot};
 use super::outline::{draw_curve_outline, resolve_outline_spec, OutlineChannels, OutlineScales};
 use super::resolve::{
-    channel_color_space, channel_varies_across, override_alpha, pt_to_px, resolve_color_channel,
-    resolve_color_channel_or_theme, resolve_number_channel, resolve_number_channel_or,
-    resolve_pick_id, resolve_position, ChannelBind, PositionMap,
+    brush_override_alpha, channel_color_space, channel_varies_across, override_alpha, pt_to_px,
+    resolve_brush_channel_or_theme, resolve_color_channel, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, resolve_position, ChannelBind, PositionMap,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
@@ -118,7 +118,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("y_band", ExpectedOutput::Numbers),
     ("x2_band", ExpectedOutput::Numbers),
     ("y2_band", ExpectedOutput::Numbers),
-    ("fill", ExpectedOutput::Colors),
+    ("fill", ExpectedOutput::Fills),
     ("fill_opacity", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
     // Curve A outline.
@@ -470,12 +470,13 @@ fn draw_one_ribbon_mark(
 
     let i0 = mark.first_row;
 
-    // Per-mark fill colour at first row, at the per-mark fill
-    // opacity. Used for both the uniform `Brush::Solid` path and as
-    // a fallback colour when building gradient stops if a row's
-    // own fill is unresolved.
-    let mark_fill = override_alpha(
-        resolve_color_channel_or_theme(
+    // Per-mark fill at first row, at the per-mark fill opacity. A
+    // solid colour feeds both the uniform path and the per-vertex
+    // gradient machinery; a gradient or image pattern always takes
+    // the uniform path — per-vertex colour stops come from colour
+    // scales, and there is no per-vertex brush interpolation.
+    let mark_fill = brush_override_alpha(
+        resolve_brush_channel_or_theme(
             fill.ch,
             fill.scale,
             i0,
@@ -705,11 +706,20 @@ fn draw_one_ribbon_mark(
     // two curves with per-vertex colours, so the gradient
     // follows the band's actual sweep instead of a screen-aligned
     // axis.
-    if let Some(mark_color) = mark_fill {
-        let varies = channel_varies_across(fill.ch, fill.scale, &row_for_vertex)
-            || channel_varies_across(fill_opacity.ch, fill_opacity.scale, &row_for_vertex);
+    if let Some(mark_brush) = &mark_fill {
+        let solid = match mark_brush {
+            Brush::Solid(c) => Some(*c),
+            _ => None,
+        };
+        let varies = solid.is_some()
+            && (channel_varies_across(fill.ch, fill.scale, &row_for_vertex)
+                || channel_varies_across(fill_opacity.ch, fill_opacity.scale, &row_for_vertex));
         let axis_aligned = matches!(orientation, Orientation::Horizontal | Orientation::Vertical);
         let use_mesh = varies && (!axis_aligned || !is_linear);
+        // The gradient-stops fallback colour. Consulted only on the
+        // varying paths, which `solid.is_some()` gates — but the
+        // binding has to exist either way.
+        let mark_color = solid.unwrap_or(Color::BLACK);
 
         let row_fill = RowFill::new(fill, fill_opacity, mark_color);
         if use_mesh {
@@ -771,7 +781,7 @@ fn draw_one_ribbon_mark(
                     .map(Brush::Gradient)
                     .unwrap_or_else(|| Brush::Solid(mark_color))
             } else {
-                Brush::Solid(mark_color)
+                mark_brush.clone()
             };
             scene.fill(
                 FillRule::NonZero,

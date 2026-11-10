@@ -5,10 +5,10 @@
 //! because both a fill and a stroke can carry one, and `sh` cannot
 //! stroke. One mechanism serves both.
 
-use super::res::{ResKind, Resources};
+use super::res::{ResKind, Resources, RES_REF};
 use super::writer::{matrix, num, COLOR_DECIMALS};
 use super::{PdfWarning, Warnings};
-use crate::brush::{Brush, Extend, Gradient, GradientKind};
+use crate::brush::{Brush, Extend, Gradient, GradientKind, ImageBrush, ImageQuality, Sampling};
 use crate::color::Color;
 use crate::geometry::{Affine, Rect};
 
@@ -104,12 +104,69 @@ pub(crate) fn resolve(
     match brush {
         Brush::Solid(c) => solid(*c),
         Brush::Gradient(g) => gradient(g, brush_transform, space, res, decimals, warnings),
-        Brush::Image(_) => {
-            // An image brush needs a tiling pattern; until that lands,
-            // saying so beats painting the wrong color silently.
-            warnings.note(PdfWarning::ImageBrushUnsupported);
-            Paint::none()
-        }
+        Brush::Image(ib) => image_brush(ib, brush_transform, space, res, decimals, warnings),
+    }
+}
+
+/// Intern an image brush as a tiling pattern and return the operators
+/// that select it.
+///
+/// The tile is the image's own pixel space: `/BBox`, `/XStep` and
+/// `/YStep` are all the image size, and the content stream maps the
+/// unit square onto it exactly as `draw_image` does. The `/Matrix`
+/// carries the same composition a shading pattern's does — see the
+/// module AGENTS.md. Only `Repeat` is exact: a tiling pattern always
+/// repeats, so a pad or reflect sampler repeats instead and says so.
+fn image_brush(
+    ib: &ImageBrush,
+    brush_transform: Option<Affine>,
+    space: PaintSpace,
+    res: &mut Resources,
+    decimals: u8,
+    warnings: &mut Warnings,
+) -> Paint {
+    let sampler = &ib.sampler;
+    if sampler.x_extend != Extend::Repeat || sampler.y_extend != Extend::Repeat {
+        warnings.note(PdfWarning::UnsupportedExtend);
+    }
+    let sampling = match sampler.quality {
+        ImageQuality::Low => Sampling::Nearest,
+        _ => Sampling::Bilinear,
+    };
+    let Some(xobject) = super::image::intern(&ib.image, sampling, res, warnings) else {
+        return Paint::none();
+    };
+    let (w, h) = (f64::from(ib.image.width), f64::from(ib.image.height));
+    let mut dict = String::from("/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [");
+    for v in [0.0, 0.0, w, h] {
+        num(&mut dict, v, decimals);
+        dict.push(' ');
+    }
+    dict.pop();
+    dict.push_str("] /XStep ");
+    num(&mut dict, w, decimals);
+    dict.push_str(" /YStep ");
+    num(&mut dict, h, decimals);
+    dict.push_str(" /Matrix [");
+    let m = space.pattern_base * space.transform * brush_transform.unwrap_or(Affine::IDENTITY);
+    matrix(&mut dict, m, decimals);
+    dict.pop();
+    dict.push_str("] /Resources ");
+    dict.push_str(RES_REF);
+    let mut content = String::from("q\n");
+    super::content::write_placement(
+        &mut content,
+        super::image::unit_to_pixels(&ib.image),
+        decimals,
+    );
+    content.push_str(&format!("/{xobject} Do\nQ\n"));
+    let key = format!("tile:{dict}|{content}");
+    let name = res.intern_stream(ResKind::Pattern, &key, &dict, content.into_bytes(), None);
+    Paint {
+        fill_ops: format!("/Pattern cs /{name} scn\n"),
+        stroke_ops: format!("/Pattern CS /{name} SCN\n"),
+        alpha: (sampler.alpha < 1.0).then(|| sampler.alpha.clamp(0.0, 1.0)),
+        mask: None,
     }
 }
 
@@ -562,6 +619,113 @@ mod tests {
             &mut warnings,
         );
         assert_eq!(r.fill_ops, "/Pattern cs /P1 scn\n");
+    }
+
+    /// A 2×1 red/blue image to tile.
+    fn checker() -> ImageBrush {
+        use crate::brush::{Blob, Image, ImageAlphaType, ImageFormat};
+        ImageBrush::new(Image {
+            data: Blob::from(vec![255, 0, 0, 255, 0, 0, 255, 255]),
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha,
+            width: 2,
+            height: 1,
+        })
+    }
+
+    #[test]
+    fn a_repeating_image_brush_is_interned_as_a_tiling_pattern() {
+        let mut res = Resources::default();
+        let mut warnings = Warnings::default();
+        let brush = Brush::Image(checker().with_extend(Extend::Repeat));
+        let p = resolve(
+            &brush,
+            None,
+            space(Affine::IDENTITY),
+            &mut res,
+            3,
+            &mut warnings,
+        );
+        // The image XObject is interned first, so the pattern is P1.
+        assert_eq!(p.fill_ops, "/Pattern cs /P1 scn\n");
+        assert_eq!(p.stroke_ops, "/Pattern CS /P1 SCN\n");
+        assert_eq!(p.alpha, None, "the default sampler is opaque");
+        assert!(!warnings.contains(&PdfWarning::UnsupportedExtend));
+
+        // The same brush under the same transform reuses the pattern.
+        let q = resolve(
+            &brush,
+            None,
+            space(Affine::IDENTITY),
+            &mut res,
+            3,
+            &mut warnings,
+        );
+        assert_eq!(q.fill_ops, p.fill_ops);
+
+        // Under a different transform it is a different pattern, which
+        // is correct: the matrix carries the transform.
+        let r = resolve(
+            &brush,
+            None,
+            space(Affine::translate((5.0, 0.0))),
+            &mut res,
+            3,
+            &mut warnings,
+        );
+        assert_ne!(r.fill_ops, p.fill_ops);
+
+        let mut objects = super::super::writer::Objects::new();
+        let res_ref = objects.alloc();
+        let root = objects.alloc();
+        let dict = res.write(&mut objects, false, res_ref, "");
+        assert!(dict.contains("/Pattern << /P1 "), "{dict}");
+        let file = String::from_utf8_lossy(&objects.finish(root)).into_owned();
+        assert!(file.contains("/PatternType 1"), "{file}");
+        assert!(file.contains("/XStep 2"), "{file}");
+        assert!(file.contains("/X0 Do"), "{file}");
+    }
+
+    #[test]
+    fn a_non_repeating_image_brush_tiles_and_says_so() {
+        let mut res = Resources::default();
+        let mut warnings = Warnings::default();
+        // The default sampler pads, which a tiling pattern cannot
+        // express.
+        let p = resolve(
+            &Brush::Image(checker()),
+            None,
+            space(Affine::IDENTITY),
+            &mut res,
+            3,
+            &mut warnings,
+        );
+        assert!(p.fill_ops.starts_with("/Pattern cs"), "{}", p.fill_ops);
+        assert!(warnings.contains(&PdfWarning::UnsupportedExtend));
+    }
+
+    #[test]
+    fn an_unembeddable_image_brush_paints_nothing() {
+        use crate::brush::{Blob, Image, ImageAlphaType, ImageFormat};
+        let mut res = Resources::default();
+        let mut warnings = Warnings::default();
+        let brush = Brush::Image(ImageBrush::new(Image {
+            data: Blob::from(vec![0, 0, 0]),
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha,
+            width: 2,
+            height: 1,
+        }));
+        let p = resolve(
+            &brush,
+            None,
+            space(Affine::IDENTITY),
+            &mut res,
+            3,
+            &mut warnings,
+        );
+        assert_eq!(p.alpha, Some(0.0));
+        assert!(warnings.contains(&PdfWarning::UnembeddableImage));
     }
 
     #[test]

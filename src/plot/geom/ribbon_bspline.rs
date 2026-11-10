@@ -130,8 +130,9 @@ use super::bspline_eval::{
 use super::marks::{build_marks_from_column, MarkSlot};
 use super::outline::{draw_curve_outline, resolve_outline_spec, OutlineChannels, OutlineScales};
 use super::resolve::{
-    apply_per_row_offsets, override_alpha, resolve_color_channel_or_theme, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, resolve_str_channel_or, ChannelBind, PositionMap,
+    apply_per_row_offsets, brush_override_alpha, resolve_brush_channel_or_theme,
+    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_str_channel_or,
+    ChannelBind, PositionMap,
 };
 use super::ribbon::{append_cap_fan_to_mesh, resolve_b_row, CapDirection, Orientation, RowFill};
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
@@ -158,7 +159,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("y2_band", ExpectedOutput::Numbers),
     ("degree", ExpectedOutput::Numbers),
     ("interpolation", ExpectedOutput::Strings),
-    ("fill", ExpectedOutput::Colors),
+    ("fill", ExpectedOutput::Fills),
     ("fill_opacity", ExpectedOutput::Numbers),
     ("pick_id", ExpectedOutput::Numbers),
     // Curve A outline.
@@ -501,8 +502,12 @@ fn draw_one_ribbon_bspline_mark(
 
     let i0 = mark.first_row;
 
-    let mark_fill = override_alpha(
-        resolve_color_channel_or_theme(
+    // A solid colour feeds both the uniform path and the per-vertex
+    // gradient machinery; a gradient or image pattern always takes the
+    // uniform path — per-vertex colour stops come from colour scales,
+    // and there is no per-vertex brush interpolation.
+    let mark_fill = brush_override_alpha(
+        resolve_brush_channel_or_theme(
             fill.ch,
             fill.scale,
             i0,
@@ -676,13 +681,21 @@ fn draw_one_ribbon_bspline_mark(
     // Fill dispatch: solid colour → single brush over the closed
     // contour; varying fill → per-vertex mesh on a merged-u grid
     // so paired (A, B) vertices align across the two curves.
-    if let Some(mark_color) = mark_fill {
-        let varies = super::resolve::channel_varies_across(fill.ch, fill.scale, &row_for_ctrl)
-            || super::resolve::channel_varies_across(
-                fill_opacity.ch,
-                fill_opacity.scale,
-                &row_for_ctrl,
-            );
+    if let Some(mark_brush) = &mark_fill {
+        let solid = match mark_brush {
+            Brush::Solid(c) => Some(*c),
+            _ => None,
+        };
+        let varies = solid.is_some()
+            && (super::resolve::channel_varies_across(fill.ch, fill.scale, &row_for_ctrl)
+                || super::resolve::channel_varies_across(
+                    fill_opacity.ch,
+                    fill_opacity.scale,
+                    &row_for_ctrl,
+                ));
+        // The gradient-stops fallback colour. Consulted only on the
+        // varying path, which `solid.is_some()` gates.
+        let mark_color = solid.unwrap_or(crate::color::Color::BLACK);
 
         if varies {
             let (mut curve_a_merged, mut curve_b_merged, merged_u) = build_merged_grid(
@@ -783,7 +796,7 @@ fn draw_one_ribbon_bspline_mark(
             scene.fill(
                 FillRule::NonZero,
                 Affine::IDENTITY,
-                &Brush::Solid(mark_color),
+                mark_brush,
                 None,
                 &path,
                 pick,

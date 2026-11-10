@@ -117,6 +117,8 @@ impl_codec! {
     enum BreakTarget {
         0 => Count(n),
         1 => Spacing(pt),
+        2 => MaxSpacing(pt),
+        3 => MinSpacing(pt),
     }
 }
 

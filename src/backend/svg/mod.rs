@@ -59,8 +59,9 @@ pub enum SvgWarning {
     /// A radial gradient had a non-zero focal radius, written as the
     /// SVG 2 `fr` attribute that older consumers ignore.
     RadialFocalRadius,
-    /// An image brush was used as a fill or stroke paint.
-    ImageBrushUnsupported,
+    /// An image brush's sampler asked to pad or reflect at the edges.
+    /// An SVG `<pattern>` only tiles, so the image repeats instead.
+    UnsupportedExtend,
     /// A coordinate was not finite and was written as zero.
     NonFiniteCoordinate,
     /// More layers were pushed than popped; the difference was closed

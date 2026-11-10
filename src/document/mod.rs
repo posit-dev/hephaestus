@@ -269,6 +269,14 @@ pub fn write_composition(
             g.as_ref().encode(w);
         }
     });
+    // Brushes reference nothing interned, so they can follow geometry.
+    let brushes = w.detached(|w| {
+        let table = w.tables().brushes().to_vec();
+        w.varint(table.len() as u64);
+        for b in &table {
+            b.as_ref().encode(w);
+        }
+    });
     // Marker shapes a caller registered or replaced. Encoded before the
     // string table because a glyph shape's style names font families.
     let shape_bytes = w.detached(|w| {
@@ -320,6 +328,7 @@ pub fn write_composition(
             (wire::CHUNK_FONTS, font_bytes),
             (wire::CHUNK_STRINGS, strings),
             (wire::CHUNK_GEOMETRY, geometry),
+            (wire::CHUNK_BRUSHES, brushes),
             (wire::CHUNK_SHEETS, sheets),
             (wire::CHUNK_THEME, theme),
             (wire::CHUNK_SCALES, scales),
@@ -488,6 +497,17 @@ pub fn read_document(bytes: &[u8], ctx: &ReadContext) -> Result<ReadDocument, Do
             sheets.push(std::sync::Arc::new(impls_theme::decode_sheet(&mut r)?));
         }
         tables.set_sheets(sheets);
+    }
+    // Optional: documents written before brushes existed have no such
+    // chunk, and an empty table is what their absence means.
+    if let Some(body) = wire::chunk(&chunks, wire::CHUNK_BRUSHES) {
+        let mut r = Reader::with_tables(body, ctx, tables.clone());
+        let n = r.count()?;
+        let mut brushes = Vec::with_capacity(n);
+        for _ in 0..n {
+            brushes.push(std::sync::Arc::new(crate::brush::Brush::decode(&mut r)?));
+        }
+        tables.set_brushes(brushes);
     }
 
     let (root_id, hints, writer_version) = decode_head(required(&chunks, wire::CHUNK_HEAD)?, ctx)?;

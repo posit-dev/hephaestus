@@ -229,6 +229,60 @@ pub(crate) fn resolve_color_channel_or_theme(
     resolve_color_channel(channel, scale, i).or(theme_default)
 }
 
+/// Resolve a fill channel to a brush. A color becomes a solid brush; a
+/// [`Value::Brush`] passes through unchanged. Returns `None` when unset
+/// or when the resolved value is neither — the same contract as
+/// [`resolve_color_channel`], with a wider output type.
+pub(crate) fn resolve_brush_channel(
+    channel: Option<&Channel>,
+    scale: Option<&Scale>,
+    i: usize,
+) -> Option<Brush> {
+    match &*resolve_value(channel, scale, i)? {
+        Value::Color(c) => Some(Brush::Solid(*c)),
+        Value::Brush(b) => Some((**b).clone()),
+        _ => None,
+    }
+}
+
+/// Like [`resolve_brush_channel`] but falls back to a theme-provided
+/// solid when the channel resolves to `None`. See
+/// [`resolve_color_channel_or_theme`] for why the theme colour arrives
+/// pre-resolved.
+pub(crate) fn resolve_brush_channel_or_theme(
+    channel: Option<&Channel>,
+    scale: Option<&Scale>,
+    i: usize,
+    theme_default: Option<Color>,
+) -> Option<Brush> {
+    resolve_brush_channel(channel, scale, i).or_else(|| theme_default.map(Brush::Solid))
+}
+
+/// Replace a brush's alpha with `alpha` — the `fill_opacity` companion
+/// applied to a brush fill. Solid: the color's alpha; gradient: every
+/// stop's alpha; image: the sampler's multiplier.
+pub(crate) fn brush_override_alpha(brush: Option<Brush>, alpha: Option<f64>) -> Option<Brush> {
+    let b = brush?;
+    let Some(a) = alpha else { return Some(b) };
+    let a = a as f32;
+    Some(match b {
+        Brush::Solid(c) => {
+            let [r, g, blue, _] = c.components;
+            Brush::Solid(Color::new([r, g, blue, a]))
+        }
+        Brush::Gradient(mut g) => {
+            for stop in g.stops.iter_mut() {
+                stop.color.components[3] = a;
+            }
+            Brush::Gradient(g)
+        }
+        Brush::Image(mut i) => {
+            i.sampler.alpha = a;
+            Brush::Image(i)
+        }
+    })
+}
+
 /// Resolve an optional numeric channel. Returns `None` when the channel
 /// is unset or the resolved value isn't numeric; the caller decides
 /// what absence means.

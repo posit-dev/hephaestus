@@ -122,7 +122,7 @@ Each is reported through `PdfScene::warnings()`, deduplicated by variant, and ea
 | `Extend::Repeat` / `Reflect` | padded. PDF has no repeating shading in any version — a degradation SVG does *not* have. |
 | `Compose` ≠ `SrcOver` | composited as `SrcOver`. PDF's imaging model fixes source-over; `/BM` selects a blend function, not a Porter-Duff operator. This one is genuinely inexpressible, unlike SVG's, where a restructured filter tree is a known path. |
 | asymmetric stroke caps | the start cap wins. PDF has one line-cap setting. Unreachable from `plot/`. |
-| `Brush::Image` as paint | nothing drawn. Needs a tiling pattern; nothing in-crate constructs one. |
+| `Brush::Image` with a pad or reflect sampler | repeated instead. A tiling pattern only repeats, which is exactly the `Repeat` sampler; anything else repeats too, reported as `UnsupportedExtend`. |
 | PNG bitmap strike without `png` | that glyph is not drawn. |
 | glyph with neither outlines nor a color form | not drawn, and reported. |
 

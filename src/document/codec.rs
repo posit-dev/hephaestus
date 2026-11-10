@@ -1085,12 +1085,13 @@ pub(crate) mod test_support {
         let geometries = w.tables().geometries().to_vec();
         let sheets = w.tables().sheets().to_vec();
         let strings = w.tables().strings().to_vec();
+        let brushes = w.tables().brushes().to_vec();
         let bytes = w.finish();
 
         let mut r = Reader::with_tables(
             &bytes,
             super::super::read::default_context(),
-            tables(geometries, sheets, strings),
+            tables(geometries, sheets, strings, brushes),
         );
         let out = T::decode(&mut r).expect("decoding what we just encoded");
         assert!(
@@ -1102,16 +1103,18 @@ pub(crate) mod test_support {
         out
     }
 
-    /// Bundle the three tables a reader resolves references through.
+    /// Bundle the tables a reader resolves references through.
     fn tables(
         geometries: Vec<std::sync::Arc<crate::scales::geometry::Geometry>>,
         sheets: Vec<std::sync::Arc<crate::text::rich::RichTextStyleSheet>>,
         strings: Vec<std::sync::Arc<str>>,
+        brushes: Vec<std::sync::Arc<crate::brush::Brush>>,
     ) -> super::super::intern::ReadTables {
         let mut t = super::super::intern::ReadTables::default();
         t.set_geometries(geometries);
         t.set_sheets(sheets);
         t.set_strings(strings);
+        t.set_brushes(brushes);
         t
     }
 

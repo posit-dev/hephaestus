@@ -21,6 +21,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::brush::Brush;
 use crate::scales::geometry::Geometry;
 use crate::text::rich::RichTextStyleSheet;
 
@@ -36,6 +37,14 @@ pub(crate) struct WriteTables {
     /// lists.
     geometry_index: HashMap<*const Geometry, u32>,
     geometries: Vec<Arc<Geometry>>,
+    /// Distinct brushes, keyed by **content** rather than pointer.
+    ///
+    /// `Value::Brush`'s own `key_eq` is content equality (with a
+    /// pointer fast path), so content keying reproduces exactly the
+    /// dedup live comparisons report — the same argument as strings,
+    /// through zygos's `brush_key_eq` / `brush_key_hash`.
+    brush_index: HashMap<BrushKey, u32>,
+    brushes: Vec<Arc<Brush>>,
     /// Distinct style sheets, keyed by `Arc` pointer for the same
     /// reason, paired with the name the document refers to them by.
     sheet_index: HashMap<*const RichTextStyleSheet, u32>,
@@ -82,6 +91,23 @@ impl WriteTables {
         &self.geometries
     }
 
+    /// Index for `b`, adding it to the table if it's new.
+    pub(crate) fn brush(&mut self, b: &Arc<Brush>) -> u32 {
+        let key = BrushKey(b.clone());
+        if let Some(&i) = self.brush_index.get(&key) {
+            return i;
+        }
+        let i = self.brushes.len() as u32;
+        self.brushes.push(b.clone());
+        self.brush_index.insert(key, i);
+        i
+    }
+
+    /// The interned brushes, in index order.
+    pub(crate) fn brushes(&self) -> &[Arc<Brush>] {
+        &self.brushes
+    }
+
     /// Index for `s`, adding it to the table if it's new.
     pub(crate) fn string(&mut self, s: &Arc<str>) -> u32 {
         if let Some(&i) = self.string_index.get(s) {
@@ -104,6 +130,30 @@ impl WriteTables {
     }
 }
 
+/// A brush as a content-keyed table entry: equality and hashing are
+/// zygos's structural brush comparison, so two brushes that render
+/// identically share one entry no matter how they were allocated.
+#[cfg(feature = "document-write")]
+#[derive(Clone, Debug)]
+struct BrushKey(Arc<Brush>);
+
+#[cfg(feature = "document-write")]
+impl PartialEq for BrushKey {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || crate::scales::value::brush_key_eq(&self.0, &other.0)
+    }
+}
+
+#[cfg(feature = "document-write")]
+impl Eq for BrushKey {}
+
+#[cfg(feature = "document-write")]
+impl std::hash::Hash for BrushKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        crate::scales::value::brush_key_hash(&self.0, state);
+    }
+}
+
 /// Read-side tables: index to the single `Arc` every reference shares.
 ///
 /// `Clone` is O(1) and shallow — cloning shares the same tables, and so the
@@ -118,6 +168,7 @@ pub(crate) struct ReadTables {
     geometries: Arc<Vec<Arc<Geometry>>>,
     sheets: Arc<Vec<Arc<RichTextStyleSheet>>>,
     strings: Arc<Vec<Arc<str>>>,
+    brushes: Arc<Vec<Arc<Brush>>>,
 }
 
 #[cfg(feature = "document-read")]
@@ -147,6 +198,17 @@ impl ReadTables {
     /// Install the string table read from its chunk.
     pub(crate) fn set_strings(&mut self, ss: Vec<Arc<str>>) {
         self.strings = Arc::new(ss);
+    }
+
+    /// Install the brush table read from its chunk.
+    pub(crate) fn set_brushes(&mut self, bs: Vec<Arc<Brush>>) {
+        self.brushes = Arc::new(bs);
+    }
+
+    /// The brush at `index`, or `None` when the document referenced
+    /// past the end of its own table.
+    pub(crate) fn brush(&self, index: u32) -> Option<Arc<Brush>> {
+        self.brushes.get(index as usize).cloned()
     }
 
     /// The string at `index`, or `None` when the document referenced

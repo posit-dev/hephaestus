@@ -18,6 +18,12 @@ use super::codec::{Decode, Reader};
 use super::codec::{Encode, Writer};
 #[cfg(feature = "document-read")]
 use super::DocumentError;
+use crate::brush::{
+    Brush, ColorSpaceTag, ColorStop, ColorStops, DynamicColor, Extend, Flags, Gradient,
+    GradientKind, HueDirection, Image as ImageData, ImageAlphaType, ImageBrush, ImageFormat,
+    ImageQuality, ImageSampler, InterpolationAlphaSpace, LinearGradientPosition, Missing,
+    RadialGradientPosition, SweepGradientPosition,
+};
 use crate::color::{Color, ColorSpace};
 use crate::geometry::{Point, Rect, Size, Vec2};
 use crate::path::{Path, PathEl};
@@ -197,6 +203,296 @@ impl_codec! {
     }
 }
 
+// ─── Brushes ─────────────────────────────────────────────────────────────────
+//
+// peniko's brush vocabulary, encoded field by field. The only bulk
+// payload is an image's pixels, which go through `bytes` for the same
+// reason `ImageEntry` does: the blanket `Vec<T>` impl varints every
+// byte.
+//
+// The `ColorSpaceTag` order is the document's own, fixed here; the
+// upstream discriminants have gaps and may grow, neither of which a
+// wire format inherits.
+
+impl_codec! {
+    enum Extend {
+        0 => Pad,
+        1 => Repeat,
+        2 => Reflect,
+    }
+
+    enum InterpolationAlphaSpace {
+        0 => Premultiplied,
+        1 => Unpremultiplied,
+    }
+
+    enum ImageAlphaType {
+        0 => Alpha,
+        1 => AlphaPremultiplied,
+    }
+
+    enum ImageQuality {
+        0 => Low,
+        1 => Medium,
+        2 => High,
+    }
+
+    struct ColorStop { offset, color }
+
+    struct LinearGradientPosition { start, end }
+    struct RadialGradientPosition { start_center, start_radius, end_center, end_radius }
+    struct SweepGradientPosition { center, start_angle, end_angle }
+
+    enum GradientKind {
+        0 => Linear(pos),
+        1 => Radial(pos),
+        2 => Sweep(pos),
+    }
+
+    record Gradient { kind, extend, interpolation_cs, hue_direction, interpolation_alpha_space, stops }
+
+    struct ImageSampler { x_extend, y_extend, quality, alpha }
+    struct ImageBrush { image, sampler }
+
+    enum Brush {
+        0 => Solid(c),
+        1 => Gradient(g),
+        2 => Image(i),
+    }
+}
+
+// `ColorSpaceTag`, `HueDirection` and `ImageFormat` are
+// `#[non_exhaustive]` upstream, which the macro's exhaustiveness check
+// cannot see past — so they are written by hand. The tag order is the
+// document's own, fixed here; a variant upstream adds later degrades
+// to the default rather than failing, since `Encode` has no error
+// channel.
+#[cfg(feature = "document-write")]
+impl Encode for ColorSpaceTag {
+    fn encode(&self, w: &mut Writer) {
+        w.varint(match self {
+            ColorSpaceTag::Srgb => 0,
+            ColorSpaceTag::LinearSrgb => 1,
+            ColorSpaceTag::Lab => 2,
+            ColorSpaceTag::Lch => 3,
+            ColorSpaceTag::Hsl => 4,
+            ColorSpaceTag::Hwb => 5,
+            ColorSpaceTag::Oklab => 6,
+            ColorSpaceTag::Oklch => 7,
+            ColorSpaceTag::DisplayP3 => 8,
+            ColorSpaceTag::A98Rgb => 9,
+            ColorSpaceTag::ProphotoRgb => 10,
+            ColorSpaceTag::Rec2020 => 11,
+            ColorSpaceTag::AcesCg => 12,
+            ColorSpaceTag::XyzD50 => 13,
+            ColorSpaceTag::XyzD65 => 14,
+            ColorSpaceTag::Aces2065_1 => 15,
+            _ => 0,
+        });
+    }
+}
+
+#[cfg(feature = "document-read")]
+impl Decode for ColorSpaceTag {
+    fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
+        Ok(match r.varint()? {
+            0 => ColorSpaceTag::Srgb,
+            1 => ColorSpaceTag::LinearSrgb,
+            2 => ColorSpaceTag::Lab,
+            3 => ColorSpaceTag::Lch,
+            4 => ColorSpaceTag::Hsl,
+            5 => ColorSpaceTag::Hwb,
+            6 => ColorSpaceTag::Oklab,
+            7 => ColorSpaceTag::Oklch,
+            8 => ColorSpaceTag::DisplayP3,
+            9 => ColorSpaceTag::A98Rgb,
+            10 => ColorSpaceTag::ProphotoRgb,
+            11 => ColorSpaceTag::Rec2020,
+            12 => ColorSpaceTag::AcesCg,
+            13 => ColorSpaceTag::XyzD50,
+            14 => ColorSpaceTag::XyzD65,
+            15 => ColorSpaceTag::Aces2065_1,
+            tag => {
+                return Err(DocumentError::Invalid {
+                    what: "color space tag",
+                    why: format!("unknown tag {tag}"),
+                })
+            }
+        })
+    }
+}
+
+#[cfg(feature = "document-write")]
+impl Encode for HueDirection {
+    fn encode(&self, w: &mut Writer) {
+        w.varint(match self {
+            HueDirection::Shorter => 0,
+            HueDirection::Longer => 1,
+            HueDirection::Increasing => 2,
+            HueDirection::Decreasing => 3,
+            _ => 0,
+        });
+    }
+}
+
+#[cfg(feature = "document-read")]
+impl Decode for HueDirection {
+    fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
+        Ok(match r.varint()? {
+            0 => HueDirection::Shorter,
+            1 => HueDirection::Longer,
+            2 => HueDirection::Increasing,
+            3 => HueDirection::Decreasing,
+            tag => {
+                return Err(DocumentError::Invalid {
+                    what: "hue direction",
+                    why: format!("unknown tag {tag}"),
+                })
+            }
+        })
+    }
+}
+
+#[cfg(feature = "document-write")]
+impl Encode for ImageFormat {
+    fn encode(&self, w: &mut Writer) {
+        w.varint(match self {
+            ImageFormat::Rgba8 => 0,
+            ImageFormat::Bgra8 => 1,
+            _ => 0,
+        });
+    }
+}
+
+#[cfg(feature = "document-read")]
+impl Decode for ImageFormat {
+    fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
+        Ok(match r.varint()? {
+            0 => ImageFormat::Rgba8,
+            1 => ImageFormat::Bgra8,
+            tag => {
+                return Err(DocumentError::Invalid {
+                    what: "image format",
+                    why: format!("unknown tag {tag}"),
+                })
+            }
+        })
+    }
+}
+
+// `DynamicColor`'s flags are opaque: the public surface is a
+// missing-component set plus an optional CSS color name. The name is
+// provenance for CSS serialization, which a plot document has no use
+// for — the components already carry the resolved value — so what
+// round-trips is the missing set, as a four-bit mask.
+#[cfg(feature = "document-write")]
+impl Encode for DynamicColor {
+    fn encode(&self, w: &mut Writer) {
+        self.cs.encode(w);
+        for c in self.components {
+            w.f32(c);
+        }
+        let missing = self.flags.missing();
+        let mut mask = 0u64;
+        for ix in 0..4 {
+            if missing.contains(ix) {
+                mask |= 1 << ix;
+            }
+        }
+        w.varint(mask);
+    }
+}
+
+#[cfg(feature = "document-read")]
+impl Decode for DynamicColor {
+    fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
+        let cs = ColorSpaceTag::decode(r)?;
+        let components = <[f32; 4]>::decode(r)?;
+        let mask = r.varint()?;
+        let mut missing = Missing::EMPTY;
+        for ix in 0..4 {
+            if mask & (1 << ix) != 0 {
+                missing.insert(ix);
+            }
+        }
+        Ok(DynamicColor {
+            cs,
+            flags: Flags::from_missing(missing),
+            components,
+        })
+    }
+}
+
+// `ColorStops` is a `SmallVec` wrapper with no constructor from a
+// `Vec`, so it cannot go through the macro's struct form.
+#[cfg(feature = "document-write")]
+impl Encode for ColorStops {
+    fn encode(&self, w: &mut Writer) {
+        self.as_slice().encode(w);
+    }
+}
+
+#[cfg(feature = "document-read")]
+impl Decode for ColorStops {
+    fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
+        let stops = Vec::<ColorStop>::decode(r)?;
+        Ok(ColorStops::from(stops.as_slice()))
+    }
+}
+
+// Hand-written rather than through `impl_codec!` for the reason
+// `ImageEntry` is: the blanket `Vec<T>` impl varints every byte, and
+// pixels are exactly the bulk case.
+#[cfg(feature = "document-write")]
+impl Encode for ImageData {
+    fn encode(&self, w: &mut Writer) {
+        self.format.encode(w);
+        self.alpha_type.encode(w);
+        self.width.encode(w);
+        self.height.encode(w);
+        w.bytes(self.data.as_ref());
+    }
+}
+
+#[cfg(feature = "document-read")]
+impl Decode for ImageData {
+    fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
+        Ok(ImageData {
+            format: Decode::decode(r)?,
+            alpha_type: Decode::decode(r)?,
+            width: Decode::decode(r)?,
+            height: Decode::decode(r)?,
+            data: crate::brush::Blob::from(r.bytes()?.to_vec()),
+        })
+    }
+}
+
+// A brush is interned like a geometry rather than written inline: a
+// `RawData` fill column of five thousand rows naming one pattern is
+// one table entry plus a varint per row, and the reader hands every
+// row the *same* `Arc` — so a backend's texture cache sees one blob,
+// not five thousand. Keyed on content rather than pointer because
+// `Value::Brush`'s own `key_eq` is content equality; the document
+// reproduces the dedup the live comparison would report.
+#[cfg(feature = "document-write")]
+impl Encode for Arc<Brush> {
+    fn encode(&self, w: &mut Writer) {
+        let index = w.tables().brush(self);
+        w.varint(u64::from(index));
+    }
+}
+
+#[cfg(feature = "document-read")]
+impl Decode for Arc<Brush> {
+    fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
+        let index = u32::decode(r)?;
+        r.tables().brush(index).ok_or(DocumentError::Invalid {
+            what: "brush reference",
+            why: format!("index {index} is past the end of the brush table"),
+        })
+    }
+}
+
 // ─── Data model ──────────────────────────────────────────────────────────────
 
 impl_codec! {
@@ -213,6 +509,7 @@ impl_codec! {
         9 => Linetype(steps),
         10 => Geometry(g),
         11 => Relative(f),
+        12 => Brush(b),
     }
 
     enum DataColumn {
@@ -230,6 +527,7 @@ impl_codec! {
         11 => Linetype(v),
         12 => Geometry(v),
         13 => Relative(v),
+        14 => Brush(v),
     }
 }
 
@@ -569,5 +867,101 @@ mod tests {
             }
             other => panic!("expected a discriminant error, got {other:?}"),
         }
+    }
+
+    // ─── Brushes ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_solid_brush_round_trips() {
+        let b = Brush::Solid(rgba(0.25, 0.5, 0.75, 0.5));
+        let out = roundtrip(&b);
+        assert!(crate::scales::value::brush_key_eq(&b, &out));
+    }
+
+    #[test]
+    fn a_gradient_brush_round_trips_with_kind_stops_and_extend() {
+        let g = Gradient::new_linear((0.0, 0.0), (10.0, 0.0))
+            .with_stops([Color::BLACK, rgba(1.0, 0.0, 0.0, 0.5)])
+            .with_extend(Extend::Reflect);
+        let b = Brush::Gradient(g);
+        let out = roundtrip(&b);
+        assert!(crate::scales::value::brush_key_eq(&b, &out));
+
+        let radial = Brush::Gradient(
+            Gradient::new_two_point_radial((5.0, 5.0), 2.0, (5.0, 5.0), 10.0)
+                .with_stops([Color::BLACK, Color::WHITE]),
+        );
+        let out = roundtrip(&radial);
+        assert!(crate::scales::value::brush_key_eq(&radial, &out));
+    }
+
+    #[test]
+    fn an_image_brush_round_trips_with_its_pixels_intact() {
+        let pixels = vec![255u8, 0, 0, 255, 0, 0, 255, 128];
+        let b = Brush::Image(
+            ImageBrush::new(ImageData {
+                data: crate::brush::Blob::from(pixels.clone()),
+                format: ImageFormat::Bgra8,
+                alpha_type: ImageAlphaType::AlphaPremultiplied,
+                width: 2,
+                height: 1,
+            })
+            .with_x_extend(Extend::Repeat)
+            .with_quality(ImageQuality::Low)
+            .with_alpha(0.75),
+        );
+        let out = roundtrip(&b);
+        let Brush::Image(i) = &out else {
+            panic!("expected an image brush, got {out:?}")
+        };
+        assert_eq!(i.image.data.as_ref(), pixels.as_slice());
+        assert_eq!(i.image.format, ImageFormat::Bgra8);
+        assert_eq!(i.image.alpha_type, ImageAlphaType::AlphaPremultiplied);
+        assert_eq!((i.image.width, i.image.height), (2, 1));
+        assert_eq!(i.sampler.x_extend, Extend::Repeat);
+        assert_eq!(i.sampler.y_extend, Extend::Pad);
+        assert_eq!(i.sampler.quality, ImageQuality::Low);
+        assert_eq!(i.sampler.alpha, 0.75);
+    }
+
+    #[test]
+    fn a_brush_value_round_trips_through_the_table() {
+        let v = Value::from(
+            Gradient::new_linear((0.0, 0.0), (4.0, 4.0)).with_stops([Color::BLACK, Color::WHITE]),
+        );
+        let out = roundtrip(&v);
+        match (&v, &out) {
+            (Value::Brush(a), Value::Brush(b)) => {
+                assert!(crate::scales::value::brush_key_eq(a, b))
+            }
+            _ => panic!("expected a brush value, got {out:?}"),
+        }
+    }
+
+    #[test]
+    fn a_brush_column_round_trips_with_sharing_restored() {
+        let brush: Arc<Brush> = Arc::new(Brush::Gradient(
+            Gradient::new_linear((0.0, 0.0), (1.0, 0.0)).with_stops([Color::BLACK, Color::WHITE]),
+        ));
+        let col = DataColumn::Brush(vec![brush.clone(), brush.clone()]);
+        let out = roundtrip(&col);
+        let DataColumn::Brush(rows) = &out else {
+            panic!("expected a brush column, got {out:?}")
+        };
+        assert_eq!(rows.len(), 2);
+        assert!(
+            Arc::ptr_eq(&rows[0], &rows[1]),
+            "one table entry, shared by every row that referenced it"
+        );
+        assert!(crate::scales::value::brush_key_eq(&rows[0], &brush));
+    }
+
+    #[test]
+    fn equal_brushes_share_one_table_entry() {
+        let mut t = super::super::intern::WriteTables::default();
+        let a: Arc<Brush> = Arc::new(Brush::Solid(Color::BLACK));
+        let b: Arc<Brush> = Arc::new(Brush::Solid(Color::BLACK));
+        assert_eq!(t.brush(&a), t.brush(&b));
+        assert_eq!(t.brushes().len(), 1, "content keying folds them");
     }
 }

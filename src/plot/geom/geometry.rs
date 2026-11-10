@@ -54,11 +54,11 @@ use super::outline::{
 use super::point::GLYPH_BBOX_REFERENCE;
 use super::project::{project_and_densify_one, PathOptions, PathVertex};
 use super::resolve::{
-    channel_varies_per_row, override_alpha, pt_to_px, resolve_angle_channel,
-    resolve_bool_channel_or, resolve_cap_channel, resolve_color_channel,
-    resolve_color_channel_or_theme, resolve_join_channel, resolve_len_channel_or,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
-    resolve_str_channel_or, PositionMap,
+    brush_override_alpha, channel_varies_per_row, override_alpha, pt_to_px, resolve_angle_channel,
+    resolve_bool_channel_or, resolve_brush_channel_or_theme, resolve_cap_channel,
+    resolve_color_channel, resolve_color_channel_or_theme, resolve_join_channel,
+    resolve_len_channel_or, resolve_linetype_channel, resolve_number_channel,
+    resolve_number_channel_or, resolve_pick_id, resolve_str_channel_or, PositionMap,
 };
 use super::state::{finalize_state, require_data_column, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
@@ -78,7 +78,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("y_offset", ExpectedOutput::Numbers),
     ("x_band", ExpectedOutput::Numbers),
     ("y_band", ExpectedOutput::Numbers),
-    ("fill", ExpectedOutput::Colors),
+    ("fill", ExpectedOutput::Fills),
     ("fill_opacity", ExpectedOutput::Numbers),
     ("stroke", ExpectedOutput::Colors),
     ("stroke_opacity", ExpectedOutput::Numbers),
@@ -650,8 +650,8 @@ fn draw_point(
     ctx: &GeomContext<'_>,
     dc: &DrawCtx<'_>,
 ) {
-    let fill_color = override_alpha(
-        resolve_color_channel_or_theme(dc.fill_ch, dc.fill_scale, dc.i, dc.fixed.point_fill_theme),
+    let fill_brush = brush_override_alpha(
+        resolve_brush_channel_or_theme(dc.fill_ch, dc.fill_scale, dc.i, dc.fixed.point_fill_theme),
         resolve_number_channel(dc.fill_opacity_ch, dc.fill_opacity_scale, dc.i),
     );
     let stroke_color = override_alpha(
@@ -708,15 +708,8 @@ fn draw_point(
                 for sub in paths {
                     match style {
                         ShapeStyle::Fill => {
-                            if let Some(fc) = fill_color {
-                                scene.fill(
-                                    FillRule::NonZero,
-                                    xform,
-                                    &Brush::Solid(fc),
-                                    None,
-                                    sub,
-                                    dc.pick,
-                                );
+                            if let Some(fb) = &fill_brush {
+                                scene.fill(FillRule::NonZero, xform, fb, None, sub, dc.pick);
                             }
                             if let Some(sc) = stroke_color {
                                 let st = Stroke::new(stroke_width_local);
@@ -738,7 +731,7 @@ fn draw_point(
                 em_bbox,
                 em_origin,
             } => {
-                let Some(fc) = fill_color else { continue };
+                let Some(fb) = &fill_brush else { continue };
                 let h = em_bbox.height();
                 if h <= 0.0 || !h.is_finite() {
                     continue;
@@ -752,13 +745,12 @@ fn draw_point(
                     x: 0.0,
                     y: 0.0,
                 }];
-                let brush = Brush::Solid(fc);
                 let run = GlyphRun {
                     font,
                     font_size: effective_font_size_px as f32,
                     transform: Affine::translate((pt.x + centring_px.x, pt.y + centring_px.y)),
                     glyph_transform: None,
-                    brush: &brush,
+                    brush: fb,
                     brush_alpha: 1.0,
                     hint: false,
                     glyphs: &glyphs,
@@ -942,8 +934,8 @@ fn draw_polygons(
     ctx: &GeomContext<'_>,
     dc: &DrawCtx<'_>,
 ) {
-    let fill_color = override_alpha(
-        resolve_color_channel_or_theme(
+    let fill_brush = brush_override_alpha(
+        resolve_brush_channel_or_theme(
             dc.fill_ch,
             dc.fill_scale,
             dc.i,
@@ -960,7 +952,7 @@ fn draw_polygons(
         ),
         resolve_number_channel(dc.stroke_opacity_ch, dc.stroke_opacity_scale, dc.i),
     );
-    if fill_color.is_none() && stroke_color.is_none() {
+    if fill_brush.is_none() && stroke_color.is_none() {
         return;
     }
     let expand_pt = resolve_number_channel_or(dc.expand_ch, dc.expand_scale, dc.i, 0.0);
@@ -1047,8 +1039,12 @@ fn draw_polygons(
     // stroke color.
     let processed_rings = expand_polygons(all_rings, Some(&ring_owners), expand_px, MITER_LIMIT);
 
+    let fill_solid = match &fill_brush {
+        Some(Brush::Solid(c)) => Some(*c),
+        _ => None,
+    };
     let spec = PolygonSpec {
-        fill_color,
+        fill_brush,
         stroke_color,
         linewidth_pt,
         dash_pattern,
@@ -1056,7 +1052,7 @@ fn draw_polygons(
         cap,
         join,
         corner_rounding,
-        marker_fill: fill_color.unwrap_or_else(|| {
+        marker_fill: fill_solid.unwrap_or_else(|| {
             stroke_color.unwrap_or(crate::color::Color::new([0.0, 0.0, 0.0, 1.0]))
         }),
         xform,

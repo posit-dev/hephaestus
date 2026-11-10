@@ -2,9 +2,11 @@
 //! patterns. Re-exports peniko types; `Sampling` is restricted to the modes both
 //! Vello and Blend2D support natively.
 
+pub use peniko::color::{ColorSpaceTag, DynamicColor, Flags, HueDirection, Missing};
 pub use peniko::{
-    Blob, Brush, ColorStop, ColorStops, Extend, Gradient, GradientKind, ImageAlphaType,
-    ImageData as Image, ImageFormat, LinearGradientPosition,
+    Blob, Brush, ColorStop, ColorStops, Extend, Gradient, GradientKind, ImageAlphaType, ImageBrush,
+    ImageData as Image, ImageFormat, ImageQuality, ImageSampler, InterpolationAlphaSpace,
+    LinearGradientPosition, RadialGradientPosition, SweepGradientPosition,
 };
 
 /// Image sampling mode used when an image brush is scaled or rotated.

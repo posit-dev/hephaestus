@@ -44,9 +44,13 @@ pub(crate) const VERSION_MAJOR: u16 = 2;
 /// Only the writer names it: a reader accepts any minor, which is what
 /// makes such a change additive.
 ///
-/// Minor 1 marks no encoding change; it flags that `LinetypeStep`
-/// values are stored in line-width units. Minor-0 documents carry the
-/// same values in pt, so a reader that cares can tell the two apart.
+/// Minor 1 bundles the additive changes since minor 0: it flags that
+/// `LinetypeStep` values are stored in line-width units (minor-0
+/// documents carry the same values in pt, so a reader that cares can
+/// tell the two apart), and it is the first minor that can carry a
+/// `brsh` chunk, `Brush` values and columns, and the spacing
+/// `BreakTarget` variants — all skipped or refused by older readers in
+/// the usual ways.
 #[cfg(feature = "document-write")]
 pub(crate) const VERSION_MINOR: u16 = 1;
 
@@ -97,6 +101,11 @@ pub(crate) const CHUNK_SHAPES: &[u8; 4] = b"shps";
 /// Embedded raster images, PNG-encoded. Ancillary: pixels are payload,
 /// and a reader without the `png` feature skips them by design.
 pub(crate) const CHUNK_IMAGES: &[u8; 4] = b"imgs";
+/// The interned brush table, referenced from fill channel values.
+/// Ancillary: a document without brush fills writes an empty table,
+/// and a reader that skips the chunk leaves brush references
+/// unresolved — the same degradation a missing image produces.
+pub(crate) const CHUNK_BRUSHES: &[u8; 4] = b"brsh";
 
 /// Whether an unknown chunk with this tag must be refused rather than
 /// skipped. See the module docs.
@@ -119,6 +128,7 @@ const KNOWN_TAGS: &[&[u8; 4]] = &[
     CHUNK_FONTS,
     CHUNK_SHAPES,
     CHUNK_IMAGES,
+    CHUNK_BRUSHES,
 ];
 
 /// One chunk's tag and body, as found in a document.

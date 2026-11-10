@@ -18,7 +18,7 @@
 use super::defs::{DefKind, Defs};
 use super::writer::{num, transform_attr};
 use super::{SvgWarning, Warnings};
-use crate::brush::{Image, Sampling};
+use crate::brush::{Image, ImageQuality, Sampling};
 use crate::geometry::Affine;
 
 /// Emit an image, interning its payload so repeated draws share it.
@@ -72,6 +72,65 @@ pub(crate) fn emit(
         out.push('"');
     }
     out.push_str("/>");
+}
+
+/// Intern an image brush's tile as a `<pattern>` definition and return
+/// the id to reference it by, or `None` when there is nothing
+/// embeddable.
+///
+/// `patternUnits="userSpaceOnUse"` places the tile in the space the
+/// brush's pixel space occupies — the same trick
+/// `gradientUnits="userSpaceOnUse"` pulls for gradients, with
+/// `brush_transform` becoming `patternTransform`. The brush semantics —
+/// what a non-`Repeat` extend degrades to, what the sampler alpha means
+/// for the paint — stay with the caller in `paint.rs`; this is only the
+/// element serialization.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn pattern(
+    image: &Image,
+    quality: ImageQuality,
+    brush_transform: Option<Affine>,
+    defs: &mut Defs,
+    doc_prefix: &str,
+    decimals: u8,
+    warnings: &mut Warnings,
+) -> Option<String> {
+    let href = data_url(image, warnings)?;
+    let (w, h) = (f64::from(image.width), f64::from(image.height));
+    let mut body = String::with_capacity(href.len() + 160);
+    body.push_str("<pattern patternUnits=\"userSpaceOnUse\"");
+    attr_num(&mut body, "width", w, decimals);
+    attr_num(&mut body, "height", h, decimals);
+    if let Some(t) = brush_transform {
+        let mut attr = String::new();
+        transform_attr(&mut attr, t, decimals);
+        // `transform_attr` writes ` transform="…"`; the pattern
+        // spelling differs only in the attribute name.
+        body.push_str(&attr.replacen(" transform=", " patternTransform=", 1));
+    }
+    body.push_str("><image");
+    attr_num(&mut body, "width", w, decimals);
+    attr_num(&mut body, "height", h, decimals);
+    // With `width`/`height` at the intrinsic size the default
+    // `xMidYMid meet` happens to be a no-op; `none` makes the mapping
+    // exact by construction rather than by coincidence.
+    body.push_str(" preserveAspectRatio=\"none\"");
+    if quality == ImageQuality::Low {
+        body.push_str(" image-rendering=\"pixelated\"");
+    }
+    body.push_str(" href=\"");
+    body.push_str(&href);
+    body.push_str("\"/></pattern>");
+    Some(defs.intern(DefKind::Pattern, &body, doc_prefix))
+}
+
+/// Append one `name="number"` attribute.
+fn attr_num(out: &mut String, name: &str, v: f64, decimals: u8) {
+    out.push(' ');
+    out.push_str(name);
+    out.push_str("=\"");
+    num(out, v, decimals);
+    out.push('"');
 }
 
 /// Re-encode `image` as a PNG data URL.

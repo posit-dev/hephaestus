@@ -1770,7 +1770,8 @@ impl PlotComposition {
                 // specific output kind for that channel. Canonical
                 // channel→output map:
                 //   x, y, size, *_offset, *_band, *_opacity → Numbers
-                //   fill, stroke                            → Colors
+                //   fill                                    → Fills
+                //   stroke                                  → Colors
                 //   shape                                   → Strings
                 // The static map avoids exposing the geom itself in this
                 // path.
@@ -1832,7 +1833,8 @@ fn expected_output_for_channel(channel: &str) -> Option<super::geom::ExpectedOut
         "x" | "y" | "size" | "linewidth" | "fill_opacity" | "stroke_opacity" | "x_offset"
         | "y_offset" | "x_band" | "y_band" | "dash_offset" | "width" | "height" | "opacity"
         | "anchor_x" | "anchor_y" => Numbers,
-        "fill" | "stroke" => Colors,
+        "fill" => Fills,
+        "stroke" => Colors,
         "shape" | "cap" | "join" | "image" | "fit" | "sampling" => Strings,
         "linetype" => Linetypes,
         _ => return None,
@@ -1857,7 +1859,9 @@ fn matches_expected(expected: super::geom::ExpectedOutput, found: &'static str) 
     use super::geom::ExpectedOutput::*;
     match expected {
         Numbers => found == "Numbers",
-        Colors => found == "Colors",
+        // A brush scale does not exist yet; until one does, a color
+        // scale is the only binding a fill channel can carry.
+        Colors | Fills => found == "Colors",
         Strings => found == "Strings",
         Linetypes => found == "Linetypes",
         Any => true,

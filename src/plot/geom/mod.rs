@@ -26,6 +26,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use crate::brush::{Brush, Gradient, ImageBrush};
 use crate::color::Color;
 use crate::geometry::Rect;
 use crate::plot::image_registry::ImageRegistry;
@@ -185,6 +186,8 @@ impl_channel_from_vec!(Duration);
 impl_channel_from_vec!(Geometry);
 impl_channel_from_vec!(Arc<Geometry>);
 impl_channel_from_vec!(Rel);
+impl_channel_from_vec!(Brush);
+impl_channel_from_vec!(Arc<Brush>);
 
 impl From<std::ops::Range<i64>> for Channel {
     fn from(r: std::ops::Range<i64>) -> Self {
@@ -218,6 +221,10 @@ impl_channel_from_scalar!(Duration);
 impl_channel_from_scalar!(Geometry);
 impl_channel_from_scalar!(Arc<Geometry>);
 impl_channel_from_scalar!(Rel);
+impl_channel_from_scalar!(Brush);
+impl_channel_from_scalar!(Gradient);
+impl_channel_from_scalar!(ImageBrush);
+impl_channel_from_scalar!(Arc<Brush>);
 
 // ── Raw<T> → Channel ──────────────────────────────────────────────────
 //
@@ -261,6 +268,8 @@ impl_channel_from_raw_vec!(DateTime);
 impl_channel_from_raw_vec!(Time);
 impl_channel_from_raw_vec!(Duration);
 impl_channel_from_raw_vec!(Rel);
+impl_channel_from_raw_vec!(Brush);
+impl_channel_from_raw_vec!(Arc<Brush>);
 
 impl From<Raw<std::ops::Range<i64>>> for Channel {
     fn from(r: Raw<std::ops::Range<i64>>) -> Self {
@@ -292,6 +301,10 @@ impl_channel_from_raw_scalar!(DateTime);
 impl_channel_from_raw_scalar!(Time);
 impl_channel_from_raw_scalar!(Duration);
 impl_channel_from_raw_scalar!(Rel);
+impl_channel_from_raw_scalar!(Brush);
+impl_channel_from_raw_scalar!(Gradient);
+impl_channel_from_raw_scalar!(ImageBrush);
+impl_channel_from_raw_scalar!(Arc<Brush>);
 
 // ─── ChannelDecl ─────────────────────────────────────────────────────────────
 
@@ -321,6 +334,10 @@ pub enum ExpectedOutput {
     Numbers,
     /// Fill / stroke color.
     Colors,
+    /// Fill paint: a solid color, a gradient, or an image pattern. A
+    /// superset of [`ExpectedOutput::Colors`] — a color scale is a valid
+    /// binding.
+    Fills,
     /// String channel (e.g. shape name, label text).
     Strings,
     /// Dash-pattern channel (linetype).
@@ -566,6 +583,7 @@ pub(crate) fn empty_datacolumn_like(col: &DataColumn) -> DataColumn {
         DataColumn::Linetype(_) => DataColumn::Linetype(Vec::new()),
         DataColumn::Geometry(_) => DataColumn::Geometry(Vec::new()),
         DataColumn::Relative(_) => DataColumn::Relative(Vec::new()),
+        DataColumn::Brush(_) => DataColumn::Brush(Vec::new()),
     }
 }
 

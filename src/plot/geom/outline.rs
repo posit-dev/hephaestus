@@ -365,12 +365,13 @@ impl Default for EndpointMarker {
 /// `PolygonGeom`'s non-ribbon-mode branch and `GeometryGeom`'s polygon
 /// variant. The shared helper builds a single EvenOdd multi-ring path,
 /// optionally rounds the corners of every ring, then emits the fill
-/// (when `fill_color` is set) and a closed stroke (when `stroke_color`
+/// (when `fill_brush` is set) and a closed stroke (when `stroke_color`
 /// is set).
 pub(crate) struct PolygonSpec {
-    /// Brush colour for the EvenOdd-filled interior. `None` skips the
-    /// fill call entirely.
-    pub fill_color: Option<Color>,
+    /// Brush for the EvenOdd-filled interior — a solid colour, a
+    /// gradient, or an image pattern. `None` skips the fill call
+    /// entirely.
+    pub fill_brush: Option<Brush>,
     /// Stroke colour for the closed outline. `None` skips the stroke
     /// call entirely.
     pub stroke_color: Option<Color>,
@@ -443,15 +444,8 @@ pub(crate) fn draw_polygon_fill_and_stroke(
         return;
     }
 
-    if let Some(fc) = spec.fill_color {
-        scene.fill(
-            FillRule::EvenOdd,
-            spec.xform,
-            &Brush::Solid(fc),
-            None,
-            &path,
-            spec.pick,
-        );
+    if let Some(fb) = &spec.fill_brush {
+        scene.fill(FillRule::EvenOdd, spec.xform, fb, None, &path, spec.pick);
     }
     if let Some(sc) = spec.stroke_color {
         let linewidth_px = pt_to_px(spec.linewidth_pt, ctx.dpi);
