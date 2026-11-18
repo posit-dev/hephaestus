@@ -106,7 +106,7 @@ Filling the index during a draw, and building the R-tree lazily on the first que
 
 ## Core types — wrapping kurbo + peniko
 
-Geometry (`Affine`, `Point`, `Rect`, `Size`, `Vec2`, `BezPath`) comes from kurbo. Brushes, gradients, colors, image data, fonts come from peniko / linebender_resource_handle. We re-export them through our own module paths (`hephaestus::geometry::Affine`, not `kurbo::Affine`) so a future swap is a single-line change.
+Geometry (`Affine`, `Point`, `Rect`, `Size`, `Vec2`, `BezPath`) comes from kurbo. Gradients, colors, image data, fonts come from peniko / linebender_resource_handle; the `Brush` enum itself is zygos's (`zygos::brush` — solid / gradient / image plus a declarative vector `Pattern` peniko has no variant for), re-exported through `crate::brush` so channels and scene calls name one type. Backends convert with `Brush::as_peniko()` where peniko can express the paint and tile `Brush::Pattern` themselves. We re-export through our own module paths (`hephaestus::geometry::Affine`, not `kurbo::Affine`) so a future swap is a single-line change.
 
 Where the intersection is narrower than peniko's full surface, we define our own enum (see "intersection rule" above). Otherwise re-export directly — reimplementing affine math or gradient interpolation is not in scope.
 
@@ -130,13 +130,14 @@ Folders (each with its own AGENTS.md):
 Single-file modules (no AGENTS.md, one-line descriptions here):
 
 - `blend.rs` — `BlendMode` / `Compose` / `Mix` enums (intersection of Vello + Blend2D).
-- `brush.rs` — `Brush`, `Image`, `Sampling` (Nearest / Bilinear).
+- `brush.rs` — `Brush` (zygos's: solid / gradient / image / pattern), `FillPattern` / `PatternElement`, `Image`, `Sampling` (Nearest / Bilinear).
 - `color.rs` — re-exports peniko `Color`; owns `ColorSpace` (Oklab / Srgb) and `lerp_color`, the one place two colors get blended. Every blend names its space; `ColorSpace::default()` is Oklab.
 - `geometry.rs` — re-exports kurbo `Affine`, `Point`, `Rect`, `Size`, `Vec2`.
 - `image_registry.rs` — `ImageRegistry`: the name → image map `ImageGeom` and markdown image tags resolve against. At the crate root for the same reason `linetype.rs` is — `text::rich` resolves image tags while shaping, and `text/` must not depend on `plot/`; `plot::ImageRegistry` re-exports it. A name it does not hold is read as a location (a file path, or an `http(s)` URL behind `image-url`) and cached, which is what makes a markdown `![](logo.png)` need no setup while leaving a registered name authoritative for a build with no filesystem.
 - `linetype.rs` — the named `solid` / `dashed` / `dotted` / `dashdot` constructors plus `draw_linetype_with_markers`, the arc-length walk that stamps marker shapes along a polyline, and `walk_linetype_variable`, the attribute-aware walk for variable-width / variable-colour curves (pattern units resolve against the local width; dashes come out as attributed sub-polylines, markers at the local width and colour). At the crate root rather than under `plot/geom/` because rich-text block borders express their strokes as linetypes too, and `text/` must not depend on `plot/`; `plot::geom::linetype` re-exports it. The `LinetypeStep` enum itself lives in `zygos` and is re-exported through `style_vocab.rs` — it's shared vocabulary like `Color`, so a scale can carry a column of dash patterns without depending on the renderer that walks them.
 - `mesh.rs` — `Mesh`: flat 2D triangle list with per-vertex colour. Used by `primitives::ribbon` and consumed by `SceneBuilder::draw_mesh`.
-- `path.rs` — `Path` (kurbo `BezPath` wrapper) and `FillRule` (intersection enum).
+- `path.rs` — `Path` (kurbo `BezPath` wrapper), `bounding_box`, and `FillRule` (intersection enum).
+- `pattern.rs` — vector fill patterns on the rasterising backends: `bound` (default role binding), `tile_recording` (a `FillPattern` tile as scene ops), and `fill_tiled`, the clip + per-tile replay decomposition the Vello backends call from `fill`. The vector backends share `bound` but emit native patterns instead — see `backend/svg/paint.rs` and `backend/pdf/paint.rs`.
 - `png.rs` — aliases for the PNG entry points in `image/` (`png` feature).
 - `shape.rs` — `Shape` / `ShapeRegistry` / `ShapeStyle`: named glyphs / paths for scatterplot markers and line endpoint terminators.
 - `stroke.rs` — re-exports kurbo `Stroke`, `Cap`, `Join`. Stroke alignment and variable-width strokes are not in scope.

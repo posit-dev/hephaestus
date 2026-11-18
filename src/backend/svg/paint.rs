@@ -2,7 +2,7 @@
 //! entries referenced by `url(#…)`.
 
 use super::defs::{DefKind, Defs};
-use super::writer::{num, transform_attr};
+use super::writer::{is_identity, num, transform_attr};
 use super::{SvgWarning, Warnings};
 use crate::brush::{Brush, Extend, Gradient, GradientKind, ImageBrush};
 use crate::color::Color;
@@ -52,6 +52,288 @@ pub(crate) fn resolve(
         Brush::Image(ib) => {
             image_pattern(ib, brush_transform, defs, doc_prefix, decimals, warnings)
         }
+        Brush::Pattern(p) => {
+            vector_pattern(p, brush_transform, defs, doc_prefix, decimals, warnings)
+        }
+    }
+}
+
+/// Intern a vector fill pattern as a `<pattern>` element and return the
+/// `url(#…)` that references it.
+///
+/// The tile viewport is `spacing` wide and high, anchored at
+/// `tile_rect`'s origin, with `patternUnits="userSpaceOnUse"` so tile
+/// coordinates live in the referencing element's user space — the same
+/// contract the gradient emitters use. `pattern.transform` and
+/// `brush_transform` compose into `patternTransform`. Content is clipped
+/// to the viewport by the renderer, which is exact when the tile rect
+/// and the spacing rect coincide and trims overlapping tiles otherwise.
+fn vector_pattern(
+    p: &crate::brush::FillPattern,
+    brush_transform: Option<Affine>,
+    defs: &mut Defs,
+    doc_prefix: &str,
+    decimals: u8,
+    warnings: &mut Warnings,
+) -> Paint {
+    use crate::brush::PatternElement;
+    let p = crate::pattern::bound(p);
+    let dec = decimals;
+    let mut body = String::from("<pattern patternUnits=\"userSpaceOnUse\" x=\"");
+    num(&mut body, p.tile_rect.x0, dec);
+    body.push_str("\" y=\"");
+    num(&mut body, p.tile_rect.y0, dec);
+    body.push_str("\" width=\"");
+    num(&mut body, p.spacing.x, dec);
+    body.push_str("\" height=\"");
+    num(&mut body, p.spacing.y, dec);
+    body.push('"');
+    let pt = brush_transform.unwrap_or(Affine::IDENTITY) * p.transform;
+    if !is_identity(pt) {
+        body.push_str(" patternTransform=\"matrix(");
+        for v in pt.as_coeffs() {
+            num(&mut body, v, dec);
+            body.push(' ');
+        }
+        body.pop();
+        body.push_str(")\"");
+    }
+    body.push('>');
+    let tile_h = p.tile_rect.height();
+    for el in &p.elements {
+        match el {
+            PatternElement::Path { path, fill, stroke } => {
+                path_el(
+                    &mut body,
+                    path,
+                    fill.as_ref(),
+                    stroke.as_deref(),
+                    defs,
+                    doc_prefix,
+                    dec,
+                    warnings,
+                );
+            }
+            PatternElement::Shape {
+                name,
+                at,
+                size,
+                paint,
+            } => shape_el(
+                &mut body,
+                name,
+                *at,
+                size * tile_h,
+                paint,
+                defs,
+                doc_prefix,
+                dec,
+                warnings,
+            ),
+            PatternElement::Text {
+                content,
+                at,
+                size,
+                family,
+                paint,
+            } => text_el(
+                &mut body,
+                content,
+                *at,
+                size * tile_h,
+                family.as_deref(),
+                paint,
+                defs,
+                doc_prefix,
+                dec,
+                warnings,
+            ),
+        }
+    }
+    body.push_str("</pattern>");
+    let id = defs.intern(DefKind::Pattern, &body, doc_prefix);
+    Paint {
+        value: format!("url(#{id})"),
+        opacity: None,
+    }
+}
+
+/// An element's paint, resolved like any other brush except that a
+/// nested pattern is skipped — one level of `<pattern>` is enough.
+fn element_paint(
+    b: &Brush,
+    defs: &mut Defs,
+    doc_prefix: &str,
+    decimals: u8,
+    warnings: &mut Warnings,
+) -> Option<Paint> {
+    match b {
+        Brush::Solid(c) => Some(solid(*c)),
+        Brush::Gradient(g) => Some(gradient(g, None, defs, doc_prefix, decimals, warnings)),
+        Brush::Image(ib) => Some(image_pattern(
+            ib, None, defs, doc_prefix, decimals, warnings,
+        )),
+        Brush::Pattern(_) => {
+            warnings.note(SvgWarning::UnsupportedPatternElement);
+            None
+        }
+    }
+}
+
+/// Emit one tile path as a `<path>`, filled and/or stroked.
+#[allow(clippy::too_many_arguments)]
+fn path_el(
+    out: &mut String,
+    path: &crate::path::Path,
+    fill: Option<&crate::brush::PatternPaint>,
+    stroke: Option<&(crate::stroke::Stroke, crate::brush::PatternPaint)>,
+    defs: &mut Defs,
+    doc_prefix: &str,
+    decimals: u8,
+    warnings: &mut Warnings,
+) {
+    use crate::brush::PatternPaint;
+    let d = super::path::to_d(path, decimals);
+    if d.is_empty() {
+        return;
+    }
+    out.push_str("<path d=\"");
+    out.push_str(&d);
+    out.push('"');
+    let fill_paint = match fill {
+        Some(PatternPaint::Fixed(b)) => element_paint(b, defs, doc_prefix, decimals, warnings),
+        // Bound patterns carry `Fixed` only; anything else is a skip.
+        _ => None,
+    };
+    match (fill, fill_paint) {
+        (Some(_), Some(paint)) => {
+            super::write_fill_attrs_to(out, &paint, crate::path::FillRule::NonZero, decimals)
+        }
+        (Some(_), None) => out.push_str(" fill=\"none\""),
+        (None, _) => out.push_str(" fill=\"none\""),
+    }
+    if let Some((style, PatternPaint::Fixed(b))) = stroke {
+        if let Some(paint) = element_paint(b, defs, doc_prefix, decimals, warnings) {
+            super::write_stroke_attrs_to(out, style, &paint, decimals, warnings);
+        }
+    }
+    out.push_str("/>");
+}
+
+/// Emit a text element as a real `<text>`, keeping the pattern editable:
+/// the family is named rather than resolved, so the viewer shapes it.
+/// `at` is the baseline origin, which is exactly what SVG's `y` is, and
+/// `size` is the em size in tile units, which is what `font-size` takes.
+#[allow(clippy::too_many_arguments)]
+fn text_el(
+    out: &mut String,
+    content: &str,
+    at: crate::geometry::Point,
+    size: f64,
+    family: Option<&str>,
+    paint: &crate::brush::PatternPaint,
+    defs: &mut Defs,
+    doc_prefix: &str,
+    decimals: u8,
+    warnings: &mut Warnings,
+) {
+    let crate::brush::PatternPaint::Fixed(b) = paint else {
+        return;
+    };
+    let Some(p) = element_paint(b, defs, doc_prefix, decimals, warnings) else {
+        return;
+    };
+    out.push_str("<text x=\"");
+    num(out, at.x, decimals);
+    out.push_str("\" y=\"");
+    num(out, at.y, decimals);
+    out.push_str("\" font-size=\"");
+    num(out, size, decimals);
+    out.push('"');
+    if let Some(f) = family {
+        out.push_str(" font-family=\"");
+        super::writer::escape_attr(out, f);
+        out.push('"');
+    }
+    out.push_str(" fill=\"");
+    out.push_str(&p.value);
+    out.push('"');
+    if let Some(a) = p.opacity {
+        out.push_str(" fill-opacity=\"");
+        num(out, a as f64, decimals.max(3));
+        out.push('"');
+    }
+    out.push('>');
+    super::writer::escape_text(out, content);
+    out.push_str("</text>");
+}
+
+/// Emit a shape element as one `<path>` per subpath, stamped at `at`
+/// scaled to `height`, in the pattern's own coordinates.
+#[allow(clippy::too_many_arguments)]
+fn shape_el(
+    out: &mut String,
+    name: &str,
+    at: crate::geometry::Point,
+    height: f64,
+    paint: &crate::brush::PatternPaint,
+    defs: &mut Defs,
+    doc_prefix: &str,
+    decimals: u8,
+    warnings: &mut Warnings,
+) {
+    use crate::shape::{ShapeKind, ShapeStyle};
+    let crate::brush::PatternPaint::Fixed(b) = paint else {
+        return;
+    };
+    let shapes = crate::shape::ShapeRegistry::with_builtins();
+    let Some(shape) = shapes.get(name) else {
+        warnings.note(SvgWarning::UnsupportedPatternElement);
+        return;
+    };
+    let ShapeKind::Paths { paths, style } = shape.kind() else {
+        warnings.note(SvgWarning::UnsupportedPatternElement);
+        return;
+    };
+    let bbox = shape.bounding_box();
+    if !(bbox.height() > 0.0 && height.is_finite() && height > 0.0) {
+        return;
+    }
+    let scale = height / bbox.height();
+    let anchor = shape.anchor();
+    let xform = Affine::translate(at.to_vec2())
+        * Affine::scale(scale)
+        * Affine::translate((-anchor.x, -anchor.y));
+    for path in paths {
+        let d = super::path::to_d(path, decimals);
+        if d.is_empty() {
+            continue;
+        }
+        out.push_str("<path d=\"");
+        out.push_str(&d);
+        out.push('"');
+        super::writer::transform_attr(out, xform, decimals);
+        match style {
+            ShapeStyle::Fill => {
+                if let Some(paint) = element_paint(b, defs, doc_prefix, decimals, warnings) {
+                    super::write_fill_attrs_to(
+                        out,
+                        &paint,
+                        crate::path::FillRule::NonZero,
+                        decimals,
+                    );
+                }
+            }
+            ShapeStyle::Stroke => {
+                if let Some(paint) = element_paint(b, defs, doc_prefix, decimals, warnings) {
+                    // The width lands scaled by `xform`; divide it back
+                    // out so the stamp matches the replay backends.
+                    let stroke = crate::stroke::Stroke::new(height * 0.125 / scale);
+                    super::write_stroke_attrs_to(out, &stroke, &paint, decimals, warnings);
+                }
+            }
+        }
+        out.push_str("/>");
     }
 }
 
@@ -217,6 +499,67 @@ fn attrs(out: &mut String, decimals: u8, pairs: &[(&str, f64)]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_vector_pattern_is_interned_with_its_tile_as_markup() {
+        let mut defs = Defs::default();
+        let mut warnings = Warnings::default();
+        let brush = Brush::Pattern(std::sync::Arc::new(
+            crate::brush::fill_pattern("stripe", Brush::Solid(Color::BLACK)).unwrap(),
+        ));
+        let p = resolve(&brush, None, &mut defs, "", 3, &mut warnings);
+        assert!(p.value.starts_with("url(#pt"), "{}", p.value);
+        let mut out = String::new();
+        defs.write(&mut out, None);
+        assert!(out.contains("patternUnits=\"userSpaceOnUse\""), "{out}");
+        // One stroked tile line: a path with no fill and a stroke.
+        assert!(out.contains("fill=\"none\""), "{out}");
+        assert!(out.contains("stroke=\"#000000\""), "{out}");
+        // The stripe's 45° rotation lands in patternTransform.
+        assert!(out.contains("patternTransform=\"matrix("), "{out}");
+        assert!(!warnings.contains(&SvgWarning::UnsupportedPatternElement));
+    }
+
+    #[test]
+    fn an_identical_pattern_shares_one_def() {
+        let mut defs = Defs::default();
+        let mut warnings = Warnings::default();
+        let brush = || {
+            Brush::Pattern(std::sync::Arc::new(
+                crate::brush::fill_pattern("crosshatch", Brush::Solid(Color::BLACK)).unwrap(),
+            ))
+        };
+        let a = resolve(&brush(), None, &mut defs, "", 3, &mut warnings);
+        let b = resolve(&brush(), None, &mut defs, "", 3, &mut warnings);
+        assert_eq!(a.value, b.value);
+    }
+
+    #[test]
+    fn a_text_element_becomes_a_text_element() {
+        let mut defs = Defs::default();
+        let mut warnings = Warnings::default();
+        let pattern = crate::brush::FillPattern::new(
+            vec![crate::brush::PatternElement::Text {
+                content: std::sync::Arc::from("ab"),
+                at: crate::geometry::Point::new(0.5, 0.8),
+                size: 0.8,
+                family: Some(std::sync::Arc::from("serif")),
+                paint: crate::brush::PatternPaint::Foreground,
+            }],
+            crate::geometry::Rect::new(0.0, 0.0, 1.0, 1.0),
+            crate::geometry::Vec2::new(1.0, 1.0),
+        );
+        let brush = Brush::Pattern(std::sync::Arc::new(pattern));
+        let p = resolve(&brush, None, &mut defs, "", 3, &mut warnings);
+        assert!(p.value.starts_with("url(#"));
+        let mut out = String::new();
+        defs.write(&mut out, None);
+        assert!(
+            out.contains("<text x=\"0.5\" y=\"0.8\" font-size=\"0.8\" font-family=\"serif\" fill=\"#000000\">ab</text>"),
+            "{out}"
+        );
+        assert!(!warnings.contains(&SvgWarning::UnsupportedPatternElement));
+    }
 
     #[test]
     fn a_solid_color_is_hex_with_alpha_kept_separate() {

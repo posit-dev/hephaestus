@@ -80,6 +80,11 @@ pub enum PdfWarning {
     GlyphNotDrawable,
     /// A coordinate was not finite and was written as zero.
     NonFiniteCoordinate,
+    /// A fill pattern's element was skipped: text inside a pattern (a
+    /// tile has no font context), a non-solid element paint, a
+    /// glyph-backed or unknown shape, or a pattern nested inside a
+    /// pattern's element.
+    UnsupportedPatternElement,
     /// More layers were popped than were pushed.
     UnbalancedLayers,
 }

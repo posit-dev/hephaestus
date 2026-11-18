@@ -123,6 +123,7 @@ Each is reported through `PdfScene::warnings()`, deduplicated by variant, and ea
 | `Compose` ≠ `SrcOver` | composited as `SrcOver`. PDF's imaging model fixes source-over; `/BM` selects a blend function, not a Porter-Duff operator. This one is genuinely inexpressible, unlike SVG's, where a restructured filter tree is a known path. |
 | asymmetric stroke caps | the start cap wins. PDF has one line-cap setting. Unreachable from `plot/`. |
 | `Brush::Image` with a pad or reflect sampler | repeated instead. A tiling pattern only repeats, which is exactly the `Repeat` sampler; anything else repeats too, reported as `UnsupportedExtend`. |
+| `Brush::Pattern` with a text element, a non-solid element paint, a glyph-backed or unknown shape, or a nested pattern | that element is skipped, reported as `UnsupportedPatternElement`. The tile otherwise becomes a `/PatternType 1` tiling pattern — the same machinery an image brush uses, with vector content. Element paints are limited to solids because a gradient inside a tile would need its shading matrix composed through the outer pattern's (see "the pattern-matrix trap"), and a nested pattern has no answer at all. |
 | PNG bitmap strike without `png` | that glyph is not drawn. |
 | glyph with neither outlines nor a color form | not drawn, and reported. |
 

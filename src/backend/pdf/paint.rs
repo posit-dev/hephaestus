@@ -105,6 +105,194 @@ pub(crate) fn resolve(
         Brush::Solid(c) => solid(*c),
         Brush::Gradient(g) => gradient(g, brush_transform, space, res, decimals, warnings),
         Brush::Image(ib) => image_brush(ib, brush_transform, space, res, decimals, warnings),
+        Brush::Pattern(p) => vector_pattern(p, brush_transform, space, res, decimals, warnings),
+    }
+}
+
+/// Intern a vector fill pattern as a tiling pattern and return the
+/// operators that select it.
+///
+/// The tile is the pattern's own coordinate space: `/BBox` is
+/// `tile_rect`, `/XStep` / `/YStep` the spacing, and the content stream
+/// is the tile's elements written directly in tile coordinates. The
+/// `/Matrix` carries the same composition a shading pattern's does —
+/// see the module AGENTS.md — with the pattern's own transform
+/// innermost. Element paints are limited to solids: a gradient or
+/// image inside a tile would need its own matrix composition through
+/// the outer pattern's, and a nested pattern has no answer at all;
+/// both are skipped with a warning, as are text elements (a tile has
+/// no font context) and shapes outside the built-in registry.
+fn vector_pattern(
+    p: &crate::brush::FillPattern,
+    brush_transform: Option<Affine>,
+    space: PaintSpace,
+    res: &mut Resources,
+    decimals: u8,
+    warnings: &mut Warnings,
+) -> Paint {
+    use crate::brush::PatternElement;
+    let p = crate::pattern::bound(p);
+    let tr = &p.tile_rect;
+    let mut dict = String::from("/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [");
+    for v in [tr.x0, tr.y0, tr.x1, tr.y1] {
+        num(&mut dict, v, decimals);
+        dict.push(' ');
+    }
+    dict.pop();
+    dict.push_str("] /XStep ");
+    num(&mut dict, p.spacing.x, decimals);
+    dict.push_str(" /YStep ");
+    num(&mut dict, p.spacing.y, decimals);
+    dict.push_str(" /Matrix [");
+    let m = space.pattern_base
+        * space.transform
+        * brush_transform.unwrap_or(Affine::IDENTITY)
+        * p.transform;
+    matrix(&mut dict, m, decimals);
+    dict.pop();
+    dict.push_str("] /Resources ");
+    dict.push_str(RES_REF);
+
+    let mut content = String::new();
+    let mut non_finite = false;
+    let tile_h = tr.height();
+    for el in &p.elements {
+        match el {
+            PatternElement::Path { path, fill, stroke } => {
+                if let Some(crate::brush::PatternPaint::Fixed(b)) = fill {
+                    element_paint_op(&mut content, b, false, res, decimals, warnings);
+                    super::content::write_path(&mut content, path, decimals, &mut non_finite);
+                    content.push_str(super::content::fill_op(crate::path::FillRule::NonZero));
+                }
+                if let Some(s) = stroke {
+                    if let crate::brush::PatternPaint::Fixed(b) = &s.1 {
+                        element_paint_op(&mut content, b, true, res, decimals, warnings);
+                        super::content::write_stroke_state(&mut content, &s.0, decimals);
+                        super::content::write_path(&mut content, path, decimals, &mut non_finite);
+                        content.push_str("S\n");
+                    }
+                }
+            }
+            PatternElement::Shape {
+                name,
+                at,
+                size,
+                paint,
+            } => shape_op(
+                &mut content,
+                name,
+                *at,
+                size * tile_h,
+                paint,
+                res,
+                decimals,
+                warnings,
+                &mut non_finite,
+            ),
+            PatternElement::Text { .. } => {
+                warnings.note(PdfWarning::UnsupportedPatternElement);
+            }
+        }
+    }
+    if non_finite {
+        warnings.note(PdfWarning::NonFiniteCoordinate);
+    }
+    let key = format!("vtile:{dict}|{content}");
+    let name = res.intern_stream(ResKind::Pattern, &key, &dict, content.into_bytes(), None);
+    Paint {
+        fill_ops: format!("/Pattern cs /{name} scn\n"),
+        stroke_ops: format!("/Pattern CS /{name} SCN\n"),
+        alpha: None,
+        mask: None,
+    }
+}
+
+/// Write the color operator for an element's solid paint, with an
+/// `/ExtGState` when its alpha is below 1. Non-solid paints are skipped
+/// with a warning — see [`vector_pattern`].
+fn element_paint_op(
+    out: &mut String,
+    b: &Brush,
+    stroke: bool,
+    res: &mut Resources,
+    decimals: u8,
+    warnings: &mut Warnings,
+) {
+    let Brush::Solid(c) = b else {
+        warnings.note(PdfWarning::UnsupportedPatternElement);
+        return;
+    };
+    let paint = solid(*c);
+    if let Some(a) = paint.alpha {
+        if let Some(body) = ext_gstate(Some(a), Some(a), None, None) {
+            let name = res.intern(ResKind::ExtGState, &body);
+            out.push_str(&format!("/{name} gs\n"));
+        }
+    }
+    out.push_str(if stroke {
+        &paint.stroke_ops
+    } else {
+        &paint.fill_ops
+    });
+    let _ = decimals;
+}
+
+/// Write a shape element stamped at `at` scaled to `height`.
+#[allow(clippy::too_many_arguments)]
+fn shape_op(
+    out: &mut String,
+    name: &str,
+    at: crate::geometry::Point,
+    height: f64,
+    paint: &crate::brush::PatternPaint,
+    res: &mut Resources,
+    decimals: u8,
+    warnings: &mut Warnings,
+    non_finite: &mut bool,
+) {
+    use crate::shape::{ShapeKind, ShapeStyle};
+    let crate::brush::PatternPaint::Fixed(b) = paint else {
+        return;
+    };
+    let shapes = crate::shape::ShapeRegistry::with_builtins();
+    let Some(shape) = shapes.get(name) else {
+        warnings.note(PdfWarning::UnsupportedPatternElement);
+        return;
+    };
+    let ShapeKind::Paths { paths, style } = shape.kind() else {
+        warnings.note(PdfWarning::UnsupportedPatternElement);
+        return;
+    };
+    let bbox = shape.bounding_box();
+    if !(bbox.height() > 0.0 && height.is_finite() && height > 0.0) {
+        return;
+    }
+    let scale = height / bbox.height();
+    let anchor = shape.anchor();
+    let xform = Affine::translate(at.to_vec2())
+        * Affine::scale(scale)
+        * Affine::translate((-anchor.x, -anchor.y));
+    for path in paths {
+        let placed = xform * path.clone();
+        match style {
+            ShapeStyle::Fill => {
+                element_paint_op(out, b, false, res, decimals, warnings);
+                super::content::write_path(out, &placed, decimals, non_finite);
+                out.push_str(super::content::fill_op(crate::path::FillRule::NonZero));
+            }
+            ShapeStyle::Stroke => {
+                element_paint_op(out, b, true, res, decimals, warnings);
+                // The path data is already transformed, so the width
+                // needs no compensation.
+                super::content::write_stroke_state(
+                    out,
+                    &crate::stroke::Stroke::new(height * 0.125),
+                    decimals,
+                );
+                super::content::write_path(out, &placed, decimals, non_finite);
+                out.push_str("S\n");
+            }
+        }
     }
 }
 
@@ -498,6 +686,81 @@ pub(crate) fn ext_gstate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_vector_pattern_is_interned_as_a_tiling_pattern() {
+        let mut res = Resources::default();
+        let mut warnings = Warnings::default();
+        let brush = Brush::Pattern(std::sync::Arc::new(
+            crate::brush::fill_pattern("crosshatch", Brush::Solid(Color::BLACK)).unwrap(),
+        ));
+        let p = resolve(
+            &brush,
+            None,
+            space(Affine::IDENTITY),
+            &mut res,
+            3,
+            &mut warnings,
+        );
+        assert_eq!(p.fill_ops, "/Pattern cs /P0 scn\n");
+        assert_eq!(p.stroke_ops, "/Pattern CS /P0 SCN\n");
+        assert!(!warnings.contains(&PdfWarning::UnsupportedPatternElement));
+    }
+
+    #[test]
+    fn an_identical_vector_pattern_shares_one_stream() {
+        let mut res = Resources::default();
+        let mut warnings = Warnings::default();
+        let brush = || {
+            Brush::Pattern(std::sync::Arc::new(
+                crate::brush::fill_pattern("stripe", Brush::Solid(Color::BLACK)).unwrap(),
+            ))
+        };
+        let a = resolve(
+            &brush(),
+            None,
+            space(Affine::IDENTITY),
+            &mut res,
+            3,
+            &mut warnings,
+        );
+        let b = resolve(
+            &brush(),
+            None,
+            space(Affine::IDENTITY),
+            &mut res,
+            3,
+            &mut warnings,
+        );
+        assert_eq!(a.fill_ops, b.fill_ops);
+    }
+
+    #[test]
+    fn a_text_element_is_skipped_with_a_warning() {
+        let mut res = Resources::default();
+        let mut warnings = Warnings::default();
+        let pattern = crate::brush::FillPattern::new(
+            vec![crate::brush::PatternElement::Text {
+                content: std::sync::Arc::from("•"),
+                at: crate::geometry::Point::new(0.5, 0.5),
+                size: 0.8,
+                family: None,
+                paint: crate::brush::PatternPaint::Foreground,
+            }],
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            crate::geometry::Vec2::new(1.0, 1.0),
+        );
+        let brush = Brush::Pattern(std::sync::Arc::new(pattern));
+        resolve(
+            &brush,
+            None,
+            space(Affine::IDENTITY),
+            &mut res,
+            3,
+            &mut warnings,
+        );
+        assert!(warnings.contains(&PdfWarning::UnsupportedPatternElement));
+    }
 
     fn stops(v: &[(f32, Color)]) -> Vec<(f32, Color)> {
         v.to_vec()

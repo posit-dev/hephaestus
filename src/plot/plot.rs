@@ -2567,7 +2567,7 @@ mod tests {
         let o = text_outline_from(&el, &palette, 144.0).expect("outline");
         // 2 pt at 144 dpi = 4 px.
         assert!((o.stroke.width - 4.0).abs() < 1e-9, "{}", o.stroke.width);
-        assert_eq!(o.brush, crate::brush::Brush::Solid(palette.accent));
+        assert!(o.brush.key_eq(&crate::brush::Brush::Solid(palette.accent)));
     }
 
     #[test]

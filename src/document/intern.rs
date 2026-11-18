@@ -140,7 +140,7 @@ struct BrushKey(Arc<Brush>);
 #[cfg(feature = "document-write")]
 impl PartialEq for BrushKey {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0) || crate::scales::value::brush_key_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.0, &other.0) || self.0.key_eq(&other.0)
     }
 }
 
@@ -150,7 +150,7 @@ impl Eq for BrushKey {}
 #[cfg(feature = "document-write")]
 impl std::hash::Hash for BrushKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        crate::scales::value::brush_key_hash(&self.0, state);
+        self.0.key_hash(state);
     }
 }
 

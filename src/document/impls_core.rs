@@ -19,13 +19,13 @@ use super::codec::{Encode, Writer};
 #[cfg(feature = "document-read")]
 use super::DocumentError;
 use crate::brush::{
-    Brush, ColorSpaceTag, ColorStop, ColorStops, DynamicColor, Extend, Flags, Gradient,
-    GradientKind, HueDirection, Image as ImageData, ImageAlphaType, ImageBrush, ImageFormat,
-    ImageQuality, ImageSampler, InterpolationAlphaSpace, LinearGradientPosition, Missing,
-    RadialGradientPosition, SweepGradientPosition,
+    Brush, ColorSpaceTag, ColorStop, ColorStops, DynamicColor, Extend, FillPattern, Flags,
+    Gradient, GradientKind, HueDirection, Image as ImageData, ImageAlphaType, ImageBrush,
+    ImageFormat, ImageQuality, ImageSampler, InterpolationAlphaSpace, LinearGradientPosition,
+    Missing, PatternElement, PatternPaint, RadialGradientPosition, SweepGradientPosition,
 };
 use crate::color::{Color, ColorSpace};
-use crate::geometry::{Point, Rect, Size, Vec2};
+use crate::geometry::{Affine, Point, Rect, Size, Vec2};
 use crate::path::{Path, PathEl};
 use crate::scales::geometry::{Geometry, Polygon};
 use crate::scales::value::{DataColumn, Value};
@@ -258,6 +258,141 @@ impl_codec! {
         0 => Solid(c),
         1 => Gradient(g),
         2 => Image(i),
+        3 => Pattern(p),
+    }
+
+    enum PatternPaint {
+        0 => Foreground,
+        1 => Background,
+        2 => Fixed(b),
+    }
+
+    struct FillPattern { elements, tile_rect, spacing, transform }
+}
+
+// `Affine` has no field accessors, so it goes as its six coefficients.
+#[cfg(feature = "document-write")]
+impl Encode for Affine {
+    fn encode(&self, w: &mut Writer) {
+        for c in self.as_coeffs() {
+            c.encode(w);
+        }
+    }
+}
+
+#[cfg(feature = "document-read")]
+impl Decode for Affine {
+    fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
+        let mut coeffs = [0.0; 6];
+        for c in &mut coeffs {
+            *c = f64::decode(r)?;
+        }
+        Ok(Affine::new(coeffs))
+    }
+}
+
+// The macro's enum form takes tuple variants only; `PatternElement`'s
+// struct variants are written by hand. A stroke rides as its two fields
+// because the codec has no tuple impl, and `Box` is skipped for the same
+// reason `Stroke`'s SmallVec is: the container is an implementation
+// detail.
+#[cfg(feature = "document-write")]
+impl Encode for PatternElement {
+    fn encode(&self, w: &mut Writer) {
+        match self {
+            PatternElement::Path { path, fill, stroke } => {
+                w.varint(0);
+                path.encode(w);
+                fill.encode(w);
+                stroke.is_some().encode(w);
+                if let Some(s) = stroke {
+                    s.0.encode(w);
+                    s.1.encode(w);
+                }
+            }
+            PatternElement::Shape {
+                name,
+                at,
+                size,
+                paint,
+            } => {
+                w.varint(1);
+                name.encode(w);
+                at.encode(w);
+                size.encode(w);
+                paint.encode(w);
+            }
+            PatternElement::Text {
+                content,
+                at,
+                size,
+                family,
+                paint,
+            } => {
+                w.varint(2);
+                content.encode(w);
+                at.encode(w);
+                size.encode(w);
+                family.encode(w);
+                paint.encode(w);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "document-read")]
+impl Decode for PatternElement {
+    fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
+        let offset = r.pos();
+        Ok(match r.varint()? {
+            0 => {
+                let path = Path::decode(r)?;
+                let fill = Option::<PatternPaint>::decode(r)?;
+                let stroke = if bool::decode(r)? {
+                    Some(Box::new((Stroke::decode(r)?, PatternPaint::decode(r)?)))
+                } else {
+                    None
+                };
+                PatternElement::Path { path, fill, stroke }
+            }
+            1 => PatternElement::Shape {
+                name: Arc::<str>::decode(r)?,
+                at: Point::decode(r)?,
+                size: f64::decode(r)?,
+                paint: PatternPaint::decode(r)?,
+            },
+            2 => PatternElement::Text {
+                content: Arc::<str>::decode(r)?,
+                at: Point::decode(r)?,
+                size: f64::decode(r)?,
+                family: Option::<Arc<str>>::decode(r)?,
+                paint: PatternPaint::decode(r)?,
+            },
+            tag => {
+                return Err(DocumentError::BadDiscriminant {
+                    type_name: "PatternElement",
+                    tag,
+                    offset,
+                })
+            }
+        })
+    }
+}
+
+// A pattern inside a brush round-trips by value, like `Arc<[LinetypeStep]>`:
+// the brush itself is interned, so two rows sharing a pattern still write
+// it once — what is lost is only the pointer identity of the `Arc`.
+#[cfg(feature = "document-write")]
+impl Encode for Arc<FillPattern> {
+    fn encode(&self, w: &mut Writer) {
+        (**self).encode(w);
+    }
+}
+
+#[cfg(feature = "document-read")]
+impl Decode for Arc<FillPattern> {
+    fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
+        Ok(Arc::new(FillPattern::decode(r)?))
     }
 }
 
@@ -922,6 +1057,51 @@ mod tests {
         assert_eq!(i.sampler.y_extend, Extend::Pad);
         assert_eq!(i.sampler.quality, ImageQuality::Low);
         assert_eq!(i.sampler.alpha, 0.75);
+    }
+
+    #[test]
+    fn a_pattern_brush_round_trips_with_its_tile_intact() {
+        use crate::brush::{FillPattern, PatternElement};
+        let mut path = Path::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((1.0, 0.0));
+        // Nest a pattern inside an element's paint, so the test fails if
+        // the codec stops one recursion short.
+        let nested = crate::brush::fill_pattern("stripe", Brush::Solid(Color::BLACK)).unwrap();
+        let p = FillPattern::new(
+            vec![
+                PatternElement::Path {
+                    path,
+                    fill: Some(PatternPaint::Fixed(Brush::Pattern(Arc::new(nested)))),
+                    stroke: Some(Box::new((
+                        Stroke::new(0.125).with_caps(Cap::Round),
+                        PatternPaint::Fixed(Brush::Solid(rgba(1.0, 0.0, 0.0, 0.5))),
+                    ))),
+                },
+                PatternElement::Shape {
+                    name: Arc::from("circle"),
+                    at: Point::new(0.5, 0.5),
+                    size: 0.25,
+                    paint: PatternPaint::Background,
+                },
+                PatternElement::Text {
+                    content: Arc::from("•"),
+                    at: Point::new(0.5, 0.75),
+                    size: 0.5,
+                    family: Some(Arc::from("sans-serif")),
+                    paint: PatternPaint::Fixed(Brush::Gradient(
+                        Gradient::new_linear((0.0, 0.0), (1.0, 1.0))
+                            .with_stops([Color::BLACK, Color::WHITE]),
+                    )),
+                },
+            ],
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            Vec2::new(0.5, 0.5),
+        )
+        .with_transform(Affine::rotate(0.5));
+        let b = Brush::Pattern(Arc::new(p));
+        let out = roundtrip(&b);
+        assert!(crate::scales::value::brush_key_eq(&b, &out));
     }
 
     #[test]
