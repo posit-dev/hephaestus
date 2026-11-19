@@ -9,7 +9,7 @@ exclude = ["crates/hephaestus-wasm", "crates/hephaestus-svg-wasm"]
 
 [package]
 name = "hephaestus"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 # What this crate's own source needs. The `vello`, `vello_hybrid` and
 # `parley` dependency trees all declare 1.88, so a build that includes any of
