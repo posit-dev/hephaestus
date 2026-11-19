@@ -19,11 +19,13 @@ use super::codec::{Encode, Writer};
 #[cfg(feature = "document-read")]
 use super::DocumentError;
 use crate::brush::{
-    Brush, ColorSpaceTag, ColorStop, ColorStops, DynamicColor, Extend, FillPattern, Flags,
-    Gradient, GradientKind, HueDirection, Image as ImageData, ImageAlphaType, ImageBrush,
-    ImageFormat, ImageQuality, ImageSampler, InterpolationAlphaSpace, LinearGradientPosition,
-    Missing, PatternElement, PatternPaint, RadialGradientPosition, SweepGradientPosition,
+    Brush, ColorSpaceTag, ColorStop, ColorStops, DynamicColor, Extend, FillPattern, Gradient,
+    GradientKind, HueDirection, Image as ImageData, ImageAlphaType, ImageBrush, ImageFormat,
+    ImageQuality, ImageSampler, InterpolationAlphaSpace, LinearGradientPosition, PatternElement,
+    PatternPaint, RadialGradientPosition, SweepGradientPosition,
 };
+#[cfg(feature = "document-read")]
+use crate::brush::{Flags, Missing};
 use crate::color::{Color, ColorSpace};
 use crate::geometry::{Affine, Point, Rect, Size, Vec2};
 use crate::path::{Path, PathEl};

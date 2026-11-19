@@ -366,8 +366,8 @@ fn patch_block_tracks(panel: Track, axis: Axis) -> Vec<Track> {
 
 fn composition_col_tracks(c: &Composition) -> Vec<Track> {
     let mut out = Vec::with_capacity(c.cols * TABLE_COLS);
-    for col in 0..c.cols {
-        let panel = c.widths[col].clone();
+    for width in &c.widths {
+        let panel = width.clone();
         for i in 1..=TABLE_COLS_U16 {
             out.push(if i == PANEL_COL {
                 panel.clone()
@@ -381,8 +381,8 @@ fn composition_col_tracks(c: &Composition) -> Vec<Track> {
 
 fn composition_row_tracks(c: &Composition) -> Vec<Track> {
     let mut out = Vec::with_capacity(c.rows * TABLE_ROWS);
-    for row in 0..c.rows {
-        let panel = c.heights[row].clone();
+    for height in &c.heights {
+        let panel = height.clone();
         for r in 1..=TABLE_ROWS_U16 {
             out.push(if r == PANEL_ROW {
                 panel.clone()
