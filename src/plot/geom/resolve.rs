@@ -229,6 +229,94 @@ pub(crate) fn resolve_color_channel_or_theme(
     resolve_color_channel(channel, scale, i).or(theme_default)
 }
 
+/// Resolve a fill channel to a brush. A color becomes a solid brush; a
+/// [`Value::Brush`] passes through unchanged. Returns `None` when unset
+/// or when the resolved value is neither — the same contract as
+/// [`resolve_color_channel`], with a wider output type.
+pub(crate) fn resolve_brush_channel(
+    channel: Option<&Channel>,
+    scale: Option<&Scale>,
+    i: usize,
+) -> Option<Brush> {
+    match &*resolve_value(channel, scale, i)? {
+        Value::Color(c) => Some(Brush::Solid(*c)),
+        Value::Brush(b) => Some((**b).clone()),
+        _ => None,
+    }
+}
+
+/// Like [`resolve_brush_channel`] but falls back to a theme-provided
+/// solid when the channel resolves to `None`. See
+/// [`resolve_color_channel_or_theme`] for why the theme colour arrives
+/// pre-resolved.
+pub(crate) fn resolve_brush_channel_or_theme(
+    channel: Option<&Channel>,
+    scale: Option<&Scale>,
+    i: usize,
+    theme_default: Option<Color>,
+) -> Option<Brush> {
+    resolve_brush_channel(channel, scale, i).or_else(|| theme_default.map(Brush::Solid))
+}
+
+/// Replace a brush's alpha with `alpha` — the `fill_opacity` companion
+/// applied to a brush fill. Solid: the color's alpha; gradient: every
+/// stop's alpha; image: the sampler's multiplier; pattern: every
+/// element's `Fixed` paint, recursively (roles bind later, to paints
+/// that carry their own alpha).
+pub(crate) fn brush_override_alpha(brush: Option<Brush>, alpha: Option<f64>) -> Option<Brush> {
+    fn override_in(b: &Brush, a: f32) -> Brush {
+        use crate::brush::PatternElement as El;
+        match b {
+            Brush::Solid(c) => {
+                let [r, g, blue, _] = c.components;
+                Brush::Solid(Color::new([r, g, blue, a]))
+            }
+            Brush::Gradient(g) => {
+                let mut g = g.clone();
+                for stop in g.stops.iter_mut() {
+                    stop.color.components[3] = a;
+                }
+                Brush::Gradient(g)
+            }
+            Brush::Image(i) => {
+                let mut i = i.clone();
+                i.sampler.alpha = a;
+                Brush::Image(i)
+            }
+            Brush::Pattern(p) => {
+                use crate::brush::PatternPaint;
+                let mut p = (**p).clone();
+                // Roles bind later, to paints that carry their own alpha;
+                // the override reaches `Fixed` paints only.
+                let override_paint = |paint: &mut PatternPaint| {
+                    if let PatternPaint::Fixed(b) = paint {
+                        *b = override_in(b, a);
+                    }
+                };
+                for el in &mut p.elements {
+                    match el {
+                        El::Path { fill, stroke, .. } => {
+                            if let Some(f) = fill {
+                                override_paint(f);
+                            }
+                            if let Some(s) = stroke {
+                                override_paint(&mut s.1);
+                            }
+                        }
+                        El::Shape { paint, .. } | El::Text { paint, .. } => {
+                            override_paint(paint);
+                        }
+                    }
+                }
+                Brush::Pattern(std::sync::Arc::new(p))
+            }
+        }
+    }
+    let b = brush?;
+    let Some(a) = alpha else { return Some(b) };
+    Some(override_in(&b, a as f32))
+}
+
 /// Resolve an optional numeric channel. Returns `None` when the channel
 /// is unset or the resolved value isn't numeric; the caller decides
 /// what absence means.

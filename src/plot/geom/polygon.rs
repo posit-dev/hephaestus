@@ -90,11 +90,12 @@ use super::outline::{
 };
 use super::project::{project_and_densify_one, PathOptions, PathVertex, VertexAttrs};
 use super::resolve::{
-    channel_color_space, channel_varies_across, draw_stroke_with_linetype, emit_vertex_marker,
-    offset_px, override_alpha, pt_to_px, resolve_angle_channel, resolve_cap_channel,
-    resolve_color_channel, resolve_color_channel_or_theme, resolve_join_channel,
-    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
-    resolve_vertex_marker, ChannelBind, PositionMap, VertexMarkerChannels, VertexMarkerScales,
+    brush_override_alpha, channel_color_space, channel_varies_across, draw_stroke_with_linetype,
+    emit_vertex_marker, offset_px, override_alpha, pt_to_px, resolve_angle_channel,
+    resolve_brush_channel_or_theme, resolve_cap_channel, resolve_color_channel,
+    resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
+    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_vertex_marker,
+    ChannelBind, PositionMap, VertexMarkerChannels, VertexMarkerScales,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext, Keys};
@@ -115,7 +116,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("x_band", ExpectedOutput::Numbers),
     ("y_band", ExpectedOutput::Numbers),
     ("ring", ExpectedOutput::Any),
-    ("fill", ExpectedOutput::Colors),
+    ("fill", ExpectedOutput::Fills),
     ("stroke", ExpectedOutput::Colors),
     ("fill_opacity", ExpectedOutput::Numbers),
     ("stroke_opacity", ExpectedOutput::Numbers),
@@ -498,8 +499,8 @@ fn draw_one_polygon_mark(
 
     let i0 = mark.first_row;
 
-    let fill_color = override_alpha(
-        resolve_color_channel_or_theme(
+    let fill_brush = brush_override_alpha(
+        resolve_brush_channel_or_theme(
             fill_ch,
             fill_scale,
             i0,
@@ -526,7 +527,7 @@ fn draw_one_polygon_mark(
         ),
         resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i0),
     );
-    if fill_color.is_none() && stroke_color.is_none() {
+    if fill_brush.is_none() && stroke_color.is_none() {
         return;
     }
 
@@ -767,7 +768,7 @@ fn draw_one_polygon_mark(
     // below, open, while the fill still comes from the untrimmed
     // rings here.
     let spec = PolygonSpec {
-        fill_color,
+        fill_brush,
         stroke_color: if ribbon_mode || trims_active {
             None
         } else {

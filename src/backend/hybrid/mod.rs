@@ -118,6 +118,18 @@ impl SceneBuilder for HybridScene {
         path: &Path,
         pick_id: PickId,
     ) {
+        if let Brush::Pattern(p) = brush {
+            crate::pattern::fill_tiled(
+                &mut self.ops,
+                rule,
+                transform,
+                p,
+                brush_transform,
+                path,
+                pick_id,
+            );
+            return;
+        }
         self.ops
             .fill(rule, transform, brush, brush_transform, path, pick_id);
     }
@@ -203,6 +215,7 @@ impl Writer<'_> {
                 image.sampler.x_extend,
                 image.sampler.y_extend,
             ),
+            Brush::Pattern(_) => None,
         }
     }
 

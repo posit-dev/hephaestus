@@ -930,6 +930,50 @@ fn a_translucent_image_gains_a_soft_mask() {
     assert_well_formed(&encode_pdf(&s));
 }
 
+#[test]
+fn an_image_brush_tiles_a_fill_through_a_tiling_pattern() {
+    use hephaestus::brush::{Extend, ImageBrush};
+    let mut s = scene();
+    let brush = Brush::Image(ImageBrush::new(checkerboard(255)).with_extend(Extend::Repeat));
+    s.fill(
+        FillRule::NonZero,
+        Affine::IDENTITY,
+        &brush,
+        None,
+        &rect_path(Rect::new(0.0, 0.0, 40.0, 40.0)),
+        PickId::Skip,
+    );
+    let pdf = text(&encode_pdf(&s));
+    assert!(pdf.contains("/PatternType 1"), "{pdf}");
+    assert!(pdf.contains("/XStep 4"), "{pdf}");
+    assert!(pdf.contains("/Pattern cs"), "{pdf}");
+    assert_eq!(
+        pdf.matches("/Subtype /Image").count(),
+        1,
+        "the tile image is embedded once: {pdf}"
+    );
+    assert!(s.warnings().is_empty(), "{:?}", s.warnings());
+    assert_well_formed(&encode_pdf(&s));
+}
+
+/// A pad or reflect sampler is more than a tiling pattern can express,
+/// so the fill repeats and reports.
+#[test]
+fn a_padding_image_brush_repeats_and_says_so() {
+    use hephaestus::brush::ImageBrush;
+    let mut s = scene();
+    let brush = Brush::Image(ImageBrush::new(checkerboard(255)));
+    s.fill(
+        FillRule::NonZero,
+        Affine::IDENTITY,
+        &brush,
+        None,
+        &rect_path(Rect::new(0.0, 0.0, 40.0, 40.0)),
+        PickId::Skip,
+    );
+    assert!(s.warnings().contains(&PdfWarning::UnsupportedExtend));
+}
+
 // ─── Meshes ─────────────────────────────────────────────────────────────────
 
 fn triangle() -> Mesh {

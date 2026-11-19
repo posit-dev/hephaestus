@@ -77,7 +77,6 @@
 
 use std::f64::consts::TAU;
 
-use crate::brush::Brush;
 use crate::geometry::{Affine, Point};
 use crate::path::FillRule;
 use crate::primitives::{
@@ -87,10 +86,11 @@ use crate::primitives::{
 use crate::scene::SceneBuilder;
 
 use super::resolve::{
-    band_width_at, channel_varies_per_row, draw_stroke_with_linetype, override_alpha, pt_to_px,
-    resolve_angle_channel, resolve_cap_channel, resolve_color_channel_or_theme,
-    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, smallest_nonzero, PositionMap,
+    band_width_at, brush_override_alpha, channel_varies_per_row, draw_stroke_with_linetype,
+    override_alpha, pt_to_px, resolve_angle_channel, resolve_brush_channel_or_theme,
+    resolve_cap_channel, resolve_color_channel_or_theme, resolve_join_channel,
+    resolve_linetype_channel, resolve_number_channel, resolve_number_channel_or, resolve_pick_id,
+    smallest_nonzero, PositionMap,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
@@ -124,7 +124,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("radius2_band", ExpectedOutput::Numbers),
     ("theta", ExpectedOutput::Numbers),
     ("theta2", ExpectedOutput::Numbers),
-    ("fill", ExpectedOutput::Colors),
+    ("fill", ExpectedOutput::Fills),
     ("stroke", ExpectedOutput::Colors),
     ("fill_opacity", ExpectedOutput::Numbers),
     ("stroke_opacity", ExpectedOutput::Numbers),
@@ -352,15 +352,15 @@ impl Geom for WedgeGeom {
             }
 
             // ── Resolve styling. ──
-            let fill_color = override_alpha(
-                resolve_color_channel_or_theme(fill_ch, fill_scale, i, fill_theme),
+            let fill_brush = brush_override_alpha(
+                resolve_brush_channel_or_theme(fill_ch, fill_scale, i, fill_theme),
                 resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i),
             );
             let stroke_color = override_alpha(
                 resolve_color_channel_or_theme(stroke_ch, stroke_scale, i, stroke_theme),
                 resolve_number_channel(stroke_opacity_ch, stroke_opacity_scale, i),
             );
-            if fill_color.is_none() && stroke_color.is_none() {
+            if fill_brush.is_none() && stroke_color.is_none() {
                 continue;
             }
 
@@ -444,15 +444,8 @@ impl Geom for WedgeGeom {
                 Affine::rotate_about(-angle, centre)
             };
 
-            if let Some(fc) = fill_color {
-                scene.fill(
-                    FillRule::NonZero,
-                    xform,
-                    &Brush::Solid(fc),
-                    None,
-                    &path,
-                    pick,
-                );
+            if let Some(fb) = &fill_brush {
+                scene.fill(FillRule::NonZero, xform, fb, None, &path, pick);
             }
             if let Some(sc) = stroke_color {
                 let linewidth_pt = resolve_number_channel_or(

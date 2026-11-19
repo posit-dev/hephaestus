@@ -59,8 +59,9 @@ pub enum SvgWarning {
     /// A radial gradient had a non-zero focal radius, written as the
     /// SVG 2 `fr` attribute that older consumers ignore.
     RadialFocalRadius,
-    /// An image brush was used as a fill or stroke paint.
-    ImageBrushUnsupported,
+    /// An image brush's sampler asked to pad or reflect at the edges.
+    /// An SVG `<pattern>` only tiles, so the image repeats instead.
+    UnsupportedExtend,
     /// A coordinate was not finite and was written as zero.
     NonFiniteCoordinate,
     /// More layers were pushed than popped; the difference was closed
@@ -82,6 +83,9 @@ pub enum SvgWarning {
     /// `@font-face` cannot address a member of. Its text still renders
     /// in whatever the viewer resolves the family to.
     FontNotEmbeddable,
+    /// A fill pattern's element was skipped: a glyph-backed or
+    /// unknown shape, or a pattern nested inside a pattern's element.
+    UnsupportedPatternElement,
 }
 
 /// Warnings collected during a frame, deduplicated by variant.
@@ -941,7 +945,12 @@ pub fn write_svg(path: impl AsRef<std::path::Path>, scene: &SvgScene) -> io::Res
 }
 
 /// Append `fill` and its companion attributes.
-fn write_fill_attrs_to(out: &mut String, paint: &paint::Paint, rule: FillRule, decimals: u8) {
+pub(crate) fn write_fill_attrs_to(
+    out: &mut String,
+    paint: &paint::Paint,
+    rule: FillRule,
+    decimals: u8,
+) {
     out.push_str(" fill=\"");
     out.push_str(&paint.value);
     out.push('"');
@@ -1061,7 +1070,7 @@ fn axis_aligned_rect(path: &Path, transform: Affine) -> Option<crate::geometry::
 }
 
 /// Append the stroke attributes for `stroke`, omitting SVG defaults.
-fn write_stroke_attrs_to(
+pub(crate) fn write_stroke_attrs_to(
     out: &mut String,
     stroke: &crate::stroke::Stroke,
     paint: &paint::Paint,

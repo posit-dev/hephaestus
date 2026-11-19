@@ -58,121 +58,151 @@ macro_rules! builtin {
 builtin!(
     /// Bezier circle at [`REFERENCE_RADIUS`]. Area ≈ 2.01 — reference for
     /// area-equalization of the other closed point shapes.
-    circle, "circle"
+    circle,
+    "circle"
 );
 builtin!(
     /// Square, half-side 0.71. Area-matched to [`circle`].
-    square, "square"
+    square,
+    "square"
 );
 builtin!(
     /// Diamond (square rotated 45°), half-diagonal 0.89. Area-matched.
-    diamond, "diamond"
+    diamond,
+    "diamond"
 );
 builtin!(
     /// Triangle pointing up, circumradius 0.92.
-    triangle_up, "triangle-up"
+    triangle_up,
+    "triangle-up"
 );
 builtin!(
     /// Triangle pointing down, circumradius 0.92.
-    triangle_down, "triangle-down"
+    triangle_down,
+    "triangle-down"
 );
 builtin!(
     /// 5-point star, outer radius 0.95, inner 0.38.
-    star, "star"
+    star,
+    "star"
 );
 builtin!(
     /// X — two diagonal strokes through the origin.
-    cross, "cross"
+    cross,
+    "cross"
 );
 builtin!(
     /// + — two axis-aligned strokes through the origin.
-    plus, "plus"
+    plus,
+    "plus"
 );
 builtin!(
     /// Asterisk — three line segments at 60° increments.
-    asterisk, "asterisk"
+    asterisk,
+    "asterisk"
 );
 builtin!(
     /// Two triangles meeting at the origin (left and right).
-    bowtie, "bowtie"
+    bowtie,
+    "bowtie"
 );
 builtin!(
     /// Horizontal line segment from `(-0.8, 0)` to `(0.8, 0)`.
-    hline, "hline"
+    hline,
+    "hline"
 );
 builtin!(
     /// Vertical line segment from `(0, -0.8)` to `(0, 0.8)`.
-    vline, "vline"
+    vline,
+    "vline"
 );
 builtin!(
     /// Square divided into 4 triangles pointing inward (composite — 4 subpaths).
-    square_cross, "square-cross"
+    square_cross,
+    "square-cross"
 );
 builtin!(
     /// Circle divided into 4 quarter pieces by a `+`-shaped gap (composite — 4 subpaths).
-    circle_plus, "circle-plus"
+    circle_plus,
+    "circle-plus"
 );
 builtin!(
     /// Square divided into 4 corner squares by a `+`-shaped gap (composite — 4 subpaths).
-    square_plus, "square-plus"
+    square_plus,
+    "square-plus"
 );
 builtin!(
     /// Open V: two strokes meeting at the tip. Anchor at the tip.
-    arrow_open, "arrow-open"
+    arrow_open,
+    "arrow-open"
 );
 builtin!(
     /// Filled isoceles triangle. Anchor at the back of the body.
-    arrow_closed, "arrow-closed"
+    arrow_closed,
+    "arrow-closed"
 );
 builtin!(
     /// TikZ-style stealth: concave-back filled triangle. Anchor at notch apex.
-    arrow_stealth, "arrow-stealth"
+    arrow_stealth,
+    "arrow-stealth"
 );
 builtin!(
     /// LaTeX `\to`-style: slightly concave-back filled triangle.
-    arrow_latex, "arrow-latex"
+    arrow_latex,
+    "arrow-latex"
 );
 builtin!(
     /// Narrow filled triangle (~5:1 aspect).
-    arrow_thin, "arrow-thin"
+    arrow_thin,
+    "arrow-thin"
 );
 builtin!(
     /// Asymmetric barb / half-arrow (top half only).
-    arrow_wedge, "arrow-wedge"
+    arrow_wedge,
+    "arrow-wedge"
 );
 builtin!(
     /// Two strokes opening outward — classic fletching/tail look.
-    arrow_fishtail, "arrow-fishtail"
+    arrow_fishtail,
+    "arrow-fishtail"
 );
 builtin!(
     /// Wider-angle Y.
-    arrow_fork, "arrow-fork"
+    arrow_fork,
+    "arrow-fork"
 );
 builtin!(
     /// Stylised fletching — three chevrons along the shaft (6 subpaths).
-    arrow_feather, "arrow-feather"
+    arrow_feather,
+    "arrow-feather"
 );
 builtin!(
     /// Perpendicular bar.
-    arrow_bar, "arrow-bar"
+    arrow_bar,
+    "arrow-bar"
 );
 builtin!(
     /// Bar with two right-angle returns (`[`-shape).
-    arrow_bracket, "arrow-bracket"
+    arrow_bracket,
+    "arrow-bracket"
 );
 builtin!(
     /// Perpendicular X.
-    arrow_cross, "arrow-cross"
+    arrow_cross,
+    "arrow-cross"
 );
 builtin!(
     /// Small filled circle terminator.
-    arrow_dot, "arrow-dot"
+    arrow_dot,
+    "arrow-dot"
 );
 builtin!(
     /// Small filled square terminator.
-    arrow_square, "arrow-square"
+    arrow_square,
+    "arrow-square"
 );
 builtin!(
     /// Small filled diamond terminator.
-    arrow_diamond, "arrow-diamond"
+    arrow_diamond,
+    "arrow-diamond"
 );

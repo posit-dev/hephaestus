@@ -427,7 +427,7 @@ mod tests {
             Point::new(1.0, 3.0),
         ];
         let brush = triangle_gradient_brush(&pts, &[RED, RED, RED]);
-        assert_eq!(brush, Brush::Solid(RED));
+        assert!(brush.key_eq(&Brush::Solid(RED)));
     }
 
     #[test]
@@ -653,7 +653,7 @@ mod tests {
             Point::new(4.0, 2.0),
             Point::new(4.0, 0.0),
         ];
-        assert_eq!(quad_gradient_brush(&pts, &[GREEN; 4]), Brush::Solid(GREEN));
+        assert!(quad_gradient_brush(&pts, &[GREEN; 4]).key_eq(&Brush::Solid(GREEN)));
     }
 
     #[test]

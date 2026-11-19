@@ -20,17 +20,20 @@ use super::codec::{Decode, Reader};
 use super::codec::{Encode, Writer};
 #[cfg(feature = "document-read")]
 use super::DocumentError;
-use crate::plot::scale::{
-    BreaksSpec, LabelSpec, MinorBreaksSpec, Scale, ScaleRegistry, ScaleTypeKind,
-};
+#[cfg(feature = "document-read")]
+use crate::plot::scale::LabelSpec;
+use crate::plot::scale::{BreaksSpec, MinorBreaksSpec, Scale, ScaleRegistry, ScaleTypeKind};
 use crate::scales::break_target::BreakTarget;
-use crate::scales::breaks::{CalendarUnit, TemporalInterval, DEFAULT_BREAK_COUNT};
+#[cfg(feature = "document-read")]
+use crate::scales::breaks::DEFAULT_BREAK_COUNT;
+use crate::scales::breaks::{CalendarUnit, TemporalInterval};
 use crate::scales::direction::Direction;
 use crate::scales::input::InputRange;
 use crate::scales::locale::Locale;
 use crate::scales::output::OutputRange;
 use crate::scales::scale_type::TemporalUnit;
 use crate::scales::transform::{Transform, TransformKind};
+#[cfg(feature = "document-read")]
 use crate::scales::value::Value;
 
 impl_codec! {
@@ -117,6 +120,8 @@ impl_codec! {
     enum BreakTarget {
         0 => Count(n),
         1 => Spacing(pt),
+        2 => MaxSpacing(pt),
+        3 => MinSpacing(pt),
     }
 }
 

@@ -15,7 +15,7 @@ use crate::stroke::Stroke;
 use crate::style_vocab::FontSpec;
 
 /// One captured draw operation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Op {
     Fill {
         rule: FillRule,
@@ -60,7 +60,7 @@ pub enum Op {
 }
 
 /// Owned counterpart of `GlyphRun<'_>` for storage in `Op::DrawGlyphs`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct OwnedGlyphRun {
     pub font: super::Font,
     pub font_size: f32,
@@ -78,6 +78,115 @@ pub struct OwnedGlyphRun {
     /// otherwise make `DrawGlyphs` dominate the enum's size.
     pub source: Option<Box<OwnedTextSource>>,
     pub pick_id: PickId,
+}
+
+/// `Brush` has no `PartialEq` (float fields throughout), so ops compare
+/// brushes with zygos's structural [`Brush::key_eq`].
+impl PartialEq for Op {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Op::Fill {
+                    rule: r1,
+                    transform: t1,
+                    brush: b1,
+                    brush_transform: bt1,
+                    path: p1,
+                    pick_id: i1,
+                },
+                Op::Fill {
+                    rule: r2,
+                    transform: t2,
+                    brush: b2,
+                    brush_transform: bt2,
+                    path: p2,
+                    pick_id: i2,
+                },
+            ) => r1 == r2 && t1 == t2 && b1.key_eq(b2) && bt1 == bt2 && p1 == p2 && i1 == i2,
+            (
+                Op::Stroke {
+                    stroke: s1,
+                    transform: t1,
+                    brush: b1,
+                    brush_transform: bt1,
+                    path: p1,
+                    pick_id: i1,
+                },
+                Op::Stroke {
+                    stroke: s2,
+                    transform: t2,
+                    brush: b2,
+                    brush_transform: bt2,
+                    path: p2,
+                    pick_id: i2,
+                },
+            ) => s1 == s2 && t1 == t2 && b1.key_eq(b2) && bt1 == bt2 && p1 == p2 && i1 == i2,
+            (
+                Op::DrawImage {
+                    image: im1,
+                    transform: t1,
+                    sampling: s1,
+                    alpha: a1,
+                    pick_id: i1,
+                },
+                Op::DrawImage {
+                    image: im2,
+                    transform: t2,
+                    sampling: s2,
+                    alpha: a2,
+                    pick_id: i2,
+                },
+            ) => im1 == im2 && t1 == t2 && s1 == s2 && a1 == a2 && i1 == i2,
+            (Op::DrawGlyphs(g1), Op::DrawGlyphs(g2)) => g1 == g2,
+            (
+                Op::DrawMesh {
+                    mesh: m1,
+                    transform: t1,
+                    pick_id: i1,
+                },
+                Op::DrawMesh {
+                    mesh: m2,
+                    transform: t2,
+                    pick_id: i2,
+                },
+            ) => m1 == m2 && t1 == t2 && i1 == i2,
+            (
+                Op::PushLayer {
+                    blend: b1,
+                    alpha: a1,
+                    transform: t1,
+                    clip: c1,
+                },
+                Op::PushLayer {
+                    blend: b2,
+                    alpha: a2,
+                    transform: t2,
+                    clip: c2,
+                },
+            ) => b1 == b2 && a1 == a2 && t1 == t2 && c1 == c2,
+            (Op::PopLayer, Op::PopLayer) => true,
+            (Op::PushPickScope { scope: s1 }, Op::PushPickScope { scope: s2 }) => s1 == s2,
+            (Op::PopPickScope, Op::PopPickScope) => true,
+            _ => false,
+        }
+    }
+}
+
+/// See [`Op`]'s impl for why brushes compare with [`Brush::key_eq`].
+impl PartialEq for OwnedGlyphRun {
+    fn eq(&self, other: &Self) -> bool {
+        self.font == other.font
+            && self.font_size == other.font_size
+            && self.transform == other.transform
+            && self.glyph_transform == other.glyph_transform
+            && self.brush.key_eq(&other.brush)
+            && self.brush_alpha == other.brush_alpha
+            && self.hint == other.hint
+            && self.glyphs == other.glyphs
+            && self.style == other.style
+            && self.source == other.source
+            && self.pick_id == other.pick_id
+    }
 }
 
 /// Owned counterpart of `TextSource<'_>` for storage in `Op::DrawGlyphs`.
@@ -408,7 +517,7 @@ mod tests {
             }] => {
                 assert_eq!(*rule, FillRule::EvenOdd);
                 assert_eq!(*transform, Affine::translate((5.0, 6.0)));
-                assert_eq!(*b, brush);
+                assert!(b.key_eq(&brush));
                 assert_eq!(*brush_transform, Some(Affine::scale(2.0)));
                 assert_eq!(p.elements(), path.elements());
                 assert_eq!(*pick_id, PickId::Id(11));
@@ -442,7 +551,7 @@ mod tests {
             }] => {
                 assert_eq!(s.width, 2.5);
                 assert_eq!(s.start_cap, crate::stroke::Cap::Square);
-                assert_eq!(*b, brush);
+                assert!(b.key_eq(&brush));
                 assert!(brush_transform.is_none());
                 assert_eq!(p.elements(), path.elements());
                 assert_eq!(*pick_id, PickId::Block);
@@ -519,7 +628,7 @@ mod tests {
                 assert_eq!(owned.font_size, 14.0);
                 assert_eq!(owned.transform, Affine::translate((2.0, 3.0)));
                 assert_eq!(owned.glyph_transform, Some(Affine::scale(0.5)));
-                assert_eq!(owned.brush, brush);
+                assert!(owned.brush.key_eq(&brush));
                 assert_eq!(owned.brush_alpha, 0.75);
                 assert!(owned.hint);
                 assert_eq!(owned.glyphs.len(), 2);

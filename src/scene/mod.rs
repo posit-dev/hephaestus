@@ -27,6 +27,15 @@ pub trait SceneBuilder {
     /// Fill `path` with `brush`. `transform` applies to the path; `brush_transform`
     /// optionally transforms the brush coordinates (e.g. to rotate a gradient).
     ///
+    /// A [`Brush::Pattern`] is tiled across the fill: the vector
+    /// backends emit a native pattern (SVG `<pattern>`, PDF tiling
+    /// pattern), and the rasterising backends replay the tile clipped
+    /// to the path (see [`crate::pattern`]). Text elements are shaped
+    /// when the tile is built — SVG keeps them as real `<text>` — and
+    /// skipped only on PDF, where a tile has no font context. (A
+    /// pattern as a *glyph* paint is the rasterising backends' one
+    /// gap — see [`Self::draw_glyphs`].)
+    ///
     /// `pick_id` is the authoring layer's handle for whatever this draws.
     /// A scene that hit-tests records it; a rasteriser ignores it, and the
     /// vector backends surface it (SVG emits `data-pick-id`). Pass
@@ -42,6 +51,11 @@ pub trait SceneBuilder {
     );
 
     /// Stroke `path` with `brush`. See [`Self::fill`] for `pick_id` semantics.
+    ///
+    /// A [`Brush::Pattern`] paints the stroke only on the vector
+    /// backends; the rasterising backends stroke nothing for it (a
+    /// pattern-clipped stroke is a fill of the stroked outline, which
+    /// the tile replay does not tessellate).
     fn stroke(
         &mut self,
         stroke: &crate::stroke::Stroke,
@@ -66,6 +80,11 @@ pub trait SceneBuilder {
     /// Draw a run of positioned glyphs. Shaping/layout is the caller's
     /// responsibility — this crate consumes already-placed glyphs.
     /// See [`Self::fill`] for `pick_id` semantics.
+    ///
+    /// A [`Brush::Pattern`] paints the glyphs only on the vector
+    /// backends; the rasterising backends draw nothing for it, as with
+    /// [`Self::stroke`] — the tile replay decomposes path fills, not
+    /// glyph runs.
     fn draw_glyphs(&mut self, run: &GlyphRun<'_>, pick_id: PickId);
 
     /// Draw a 2D triangle mesh with per-vertex colour. `transform`

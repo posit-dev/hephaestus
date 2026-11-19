@@ -60,17 +60,16 @@
 //! under non-linear projections should reach for `PolygonGeom`
 //! directly.
 
-use crate::brush::Brush;
 use crate::geometry::{Affine, Point, Rect};
 use crate::path::FillRule;
 use crate::primitives::{polygon as polygon_path, rect as rect_path, rounded_rect, PolygonOptions};
 use crate::scene::SceneBuilder;
 
 use super::resolve::{
-    channel_varies_per_row, draw_stroke_with_linetype, override_alpha, pt_to_px,
-    resolve_angle_channel, resolve_cap_channel, resolve_color_channel_or_theme,
-    resolve_join_channel, resolve_linetype_channel, resolve_number_channel,
-    resolve_number_channel_or, resolve_pick_id, PositionMap,
+    brush_override_alpha, channel_varies_per_row, draw_stroke_with_linetype, override_alpha,
+    pt_to_px, resolve_angle_channel, resolve_brush_channel_or_theme, resolve_cap_channel,
+    resolve_color_channel_or_theme, resolve_join_channel, resolve_linetype_channel,
+    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, PositionMap,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
@@ -104,7 +103,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("x2_band", ExpectedOutput::Numbers),
     ("y2_band", ExpectedOutput::Numbers),
     ("corner_radius", ExpectedOutput::Numbers),
-    ("fill", ExpectedOutput::Colors),
+    ("fill", ExpectedOutput::Fills),
     ("stroke", ExpectedOutput::Colors),
     ("fill_opacity", ExpectedOutput::Numbers),
     ("stroke_opacity", ExpectedOutput::Numbers),
@@ -354,8 +353,8 @@ impl Geom for RectGeom {
             }
 
             // ── Resolve styling. ──
-            let fill_color = override_alpha(
-                resolve_color_channel_or_theme(fill_ch, fill_scale, i, fill_theme),
+            let fill_brush = brush_override_alpha(
+                resolve_brush_channel_or_theme(fill_ch, fill_scale, i, fill_theme),
                 resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i),
             );
             let stroke_color = override_alpha(
@@ -449,15 +448,8 @@ impl Geom for RectGeom {
                 Affine::rotate_about(-angle, rotation_centre)
             };
 
-            if let Some(fc) = fill_color {
-                scene.fill(
-                    FillRule::NonZero,
-                    xform,
-                    &Brush::Solid(fc),
-                    None,
-                    &path,
-                    pick,
-                );
+            if let Some(fb) = &fill_brush {
+                scene.fill(FillRule::NonZero, xform, fb, None, &path, pick);
             }
             if let Some(sc) = stroke_color {
                 draw_stroke_with_linetype(
@@ -560,6 +552,85 @@ mod tests {
             }
         }
         None
+    }
+
+    #[test]
+    fn a_constant_gradient_fill_reaches_the_scene_as_a_gradient() {
+        use crate::brush::Gradient;
+        use crate::color::Color;
+        let g = RectGeom::builder()
+            .set("x", vec![0.1_f64])
+            .set("y", vec![0.1_f64])
+            .set("x2", vec![0.4_f64])
+            .set("y2", vec![0.4_f64])
+            .set(
+                "fill",
+                Gradient::new_linear((0.0, 0.0), (10.0, 0.0))
+                    .with_stops([Color::BLACK, Color::WHITE]),
+            )
+            .build();
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(GeomRect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let brush = scene.ops.iter().find_map(|op| match op {
+            Op::Fill { brush, .. } => Some(brush),
+            _ => None,
+        });
+        assert!(
+            matches!(brush, Some(crate::brush::Brush::Gradient(_))),
+            "expected a gradient brush, got {brush:?}"
+        );
+    }
+
+    #[test]
+    fn a_per_row_image_pattern_fill_flows_through_a_raw_column() {
+        use crate::brush::{Blob, Brush, Extend, Image, ImageAlphaType, ImageBrush, ImageFormat};
+        use crate::plot::geom::Raw;
+        let tile = || {
+            ImageBrush::new(Image {
+                data: Blob::from(vec![255u8, 0, 0, 255]),
+                format: ImageFormat::Rgba8,
+                alpha_type: ImageAlphaType::Alpha,
+                width: 1,
+                height: 1,
+            })
+            .with_extend(Extend::Repeat)
+        };
+        let g = RectGeom::builder()
+            .set("x", vec![0.1_f64, 0.5])
+            .set("y", vec![0.1_f64, 0.5])
+            .set("x2", vec![0.4_f64, 0.9])
+            .set("y2", vec![0.4_f64, 0.9])
+            .set(
+                "fill",
+                Raw(vec![Brush::Image(tile()), Brush::Image(tile())]),
+            )
+            .build();
+        let shapes = shapes();
+        let scales = DirectScaleResolver::new();
+        let mut scene = RecordingScene::default();
+        g.draw(
+            &mut scene,
+            &ctx(GeomRect::new(0.0, 0.0, 100.0, 100.0), &shapes, &scales),
+        );
+        let fills = scene
+            .ops
+            .iter()
+            .filter(|op| {
+                matches!(
+                    op,
+                    Op::Fill {
+                        brush: crate::brush::Brush::Image(_),
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(fills, 2, "one image-pattern fill per row");
     }
 
     #[test]

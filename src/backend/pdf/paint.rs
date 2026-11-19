@@ -5,10 +5,10 @@
 //! because both a fill and a stroke can carry one, and `sh` cannot
 //! stroke. One mechanism serves both.
 
-use super::res::{ResKind, Resources};
+use super::res::{ResKind, Resources, RES_REF};
 use super::writer::{matrix, num, COLOR_DECIMALS};
 use super::{PdfWarning, Warnings};
-use crate::brush::{Brush, Extend, Gradient, GradientKind};
+use crate::brush::{Brush, Extend, Gradient, GradientKind, ImageBrush, ImageQuality, Sampling};
 use crate::color::Color;
 use crate::geometry::{Affine, Rect};
 
@@ -104,12 +104,265 @@ pub(crate) fn resolve(
     match brush {
         Brush::Solid(c) => solid(*c),
         Brush::Gradient(g) => gradient(g, brush_transform, space, res, decimals, warnings),
-        Brush::Image(_) => {
-            // An image brush needs a tiling pattern; until that lands,
-            // saying so beats painting the wrong color silently.
-            warnings.note(PdfWarning::ImageBrushUnsupported);
-            Paint::none()
+        Brush::Image(ib) => image_brush(ib, brush_transform, space, res, decimals, warnings),
+        Brush::Pattern(p) => vector_pattern(p, brush_transform, space, res, decimals, warnings),
+    }
+}
+
+/// Intern a vector fill pattern as a tiling pattern and return the
+/// operators that select it.
+///
+/// The tile is the pattern's own coordinate space: `/BBox` is
+/// `tile_rect`, `/XStep` / `/YStep` the spacing, and the content stream
+/// is the tile's elements written directly in tile coordinates. The
+/// `/Matrix` carries the same composition a shading pattern's does —
+/// see the module AGENTS.md — with the pattern's own transform
+/// innermost. Element paints are limited to solids: a gradient or
+/// image inside a tile would need its own matrix composition through
+/// the outer pattern's, and a nested pattern has no answer at all;
+/// both are skipped with a warning, as are text elements (a tile has
+/// no font context) and shapes outside the built-in registry.
+fn vector_pattern(
+    p: &crate::brush::FillPattern,
+    brush_transform: Option<Affine>,
+    space: PaintSpace,
+    res: &mut Resources,
+    decimals: u8,
+    warnings: &mut Warnings,
+) -> Paint {
+    use crate::brush::PatternElement;
+    let p = crate::pattern::bound(p);
+    let tr = &p.tile_rect;
+    let mut dict = String::from("/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [");
+    for v in [tr.x0, tr.y0, tr.x1, tr.y1] {
+        num(&mut dict, v, decimals);
+        dict.push(' ');
+    }
+    dict.pop();
+    dict.push_str("] /XStep ");
+    num(&mut dict, p.spacing.x, decimals);
+    dict.push_str(" /YStep ");
+    num(&mut dict, p.spacing.y, decimals);
+    dict.push_str(" /Matrix [");
+    let m = space.pattern_base
+        * space.transform
+        * brush_transform.unwrap_or(Affine::IDENTITY)
+        * p.transform;
+    matrix(&mut dict, m, decimals);
+    dict.pop();
+    dict.push_str("] /Resources ");
+    dict.push_str(RES_REF);
+
+    let mut content = String::new();
+    let mut non_finite = false;
+    let tile_h = tr.height();
+    for el in &p.elements {
+        match el {
+            PatternElement::Path { path, fill, stroke } => {
+                // `q`/`Q` scopes the element's graphics state: an
+                // ExtGState alpha or a stroke width set here must not
+                // leak into the tile's later elements.
+                content.push_str("q\n");
+                if let Some(crate::brush::PatternPaint::Fixed(b)) = fill {
+                    element_paint_op(&mut content, b, false, res, warnings);
+                    super::content::write_path(&mut content, path, decimals, &mut non_finite);
+                    content.push_str(super::content::fill_op(crate::path::FillRule::NonZero));
+                }
+                if let Some(s) = stroke {
+                    if let crate::brush::PatternPaint::Fixed(b) = &s.1 {
+                        element_paint_op(&mut content, b, true, res, warnings);
+                        super::content::write_stroke_state(&mut content, &s.0, decimals);
+                        super::content::write_path(&mut content, path, decimals, &mut non_finite);
+                        content.push_str("S\n");
+                    }
+                }
+                content.push_str("Q\n");
+            }
+            PatternElement::Shape {
+                name,
+                at,
+                size,
+                paint,
+            } => {
+                // Scoped like the path arm above.
+                content.push_str("q\n");
+                shape_op(
+                    &mut content,
+                    name,
+                    *at,
+                    size * tile_h,
+                    paint,
+                    res,
+                    decimals,
+                    warnings,
+                    &mut non_finite,
+                );
+                content.push_str("Q\n");
+            }
+            PatternElement::Text { .. } => {
+                warnings.note(PdfWarning::UnsupportedPatternElement);
+            }
         }
+    }
+    if non_finite {
+        warnings.note(PdfWarning::NonFiniteCoordinate);
+    }
+    let key = format!("vtile:{dict}|{content}");
+    let name = res.intern_stream(ResKind::Pattern, &key, &dict, content.into_bytes(), None);
+    Paint {
+        fill_ops: format!("/Pattern cs /{name} scn\n"),
+        stroke_ops: format!("/Pattern CS /{name} SCN\n"),
+        alpha: None,
+        mask: None,
+    }
+}
+
+/// Write the color operator for an element's solid paint, with an
+/// `/ExtGState` when its alpha is below 1. Non-solid paints are skipped
+/// with a warning — see [`vector_pattern`].
+fn element_paint_op(
+    out: &mut String,
+    b: &Brush,
+    stroke: bool,
+    res: &mut Resources,
+    warnings: &mut Warnings,
+) {
+    let Brush::Solid(c) = b else {
+        warnings.note(PdfWarning::UnsupportedPatternElement);
+        return;
+    };
+    let paint = solid(*c);
+    if let Some(a) = paint.alpha {
+        if let Some(body) = ext_gstate(Some(a), Some(a), None, None) {
+            let name = res.intern(ResKind::ExtGState, &body);
+            out.push_str(&format!("/{name} gs\n"));
+        }
+    }
+    out.push_str(if stroke {
+        &paint.stroke_ops
+    } else {
+        &paint.fill_ops
+    });
+}
+
+/// Write a shape element stamped at `at` scaled to `height`.
+#[allow(clippy::too_many_arguments)]
+fn shape_op(
+    out: &mut String,
+    name: &str,
+    at: crate::geometry::Point,
+    height: f64,
+    paint: &crate::brush::PatternPaint,
+    res: &mut Resources,
+    decimals: u8,
+    warnings: &mut Warnings,
+    non_finite: &mut bool,
+) {
+    use crate::shape::{ShapeKind, ShapeStyle};
+    let crate::brush::PatternPaint::Fixed(b) = paint else {
+        return;
+    };
+    let shapes = crate::shape::ShapeRegistry::with_builtins();
+    let Some(shape) = shapes.get(name) else {
+        warnings.note(PdfWarning::UnsupportedPatternElement);
+        return;
+    };
+    let ShapeKind::Paths { paths, style } = shape.kind() else {
+        warnings.note(PdfWarning::UnsupportedPatternElement);
+        return;
+    };
+    let bbox = shape.bounding_box();
+    if !(bbox.height() > 0.0 && height.is_finite() && height > 0.0) {
+        return;
+    }
+    let scale = height / bbox.height();
+    let anchor = shape.anchor();
+    let xform = Affine::translate(at.to_vec2())
+        * Affine::scale(scale)
+        * Affine::translate((-anchor.x, -anchor.y));
+    for path in paths {
+        let placed = xform * path.clone();
+        match style {
+            ShapeStyle::Fill => {
+                element_paint_op(out, b, false, res, warnings);
+                super::content::write_path(out, &placed, decimals, non_finite);
+                out.push_str(super::content::fill_op(crate::path::FillRule::NonZero));
+            }
+            ShapeStyle::Stroke => {
+                element_paint_op(out, b, true, res, warnings);
+                // The path data is already transformed, so the width
+                // needs no compensation.
+                super::content::write_stroke_state(
+                    out,
+                    &crate::stroke::Stroke::new(height * 0.125),
+                    decimals,
+                );
+                super::content::write_path(out, &placed, decimals, non_finite);
+                out.push_str("S\n");
+            }
+        }
+    }
+}
+
+/// Intern an image brush as a tiling pattern and return the operators
+/// that select it.
+///
+/// The tile is the image's own pixel space: `/BBox`, `/XStep` and
+/// `/YStep` are all the image size, and the content stream maps the
+/// unit square onto it exactly as `draw_image` does. The `/Matrix`
+/// carries the same composition a shading pattern's does — see the
+/// module AGENTS.md. Only `Repeat` is exact: a tiling pattern always
+/// repeats, so a pad or reflect sampler repeats instead and says so.
+fn image_brush(
+    ib: &ImageBrush,
+    brush_transform: Option<Affine>,
+    space: PaintSpace,
+    res: &mut Resources,
+    decimals: u8,
+    warnings: &mut Warnings,
+) -> Paint {
+    let sampler = &ib.sampler;
+    if sampler.x_extend != Extend::Repeat || sampler.y_extend != Extend::Repeat {
+        warnings.note(PdfWarning::UnsupportedExtend);
+    }
+    let sampling = match sampler.quality {
+        ImageQuality::Low => Sampling::Nearest,
+        _ => Sampling::Bilinear,
+    };
+    let Some(xobject) = super::image::intern(&ib.image, sampling, res, warnings) else {
+        return Paint::none();
+    };
+    let (w, h) = (f64::from(ib.image.width), f64::from(ib.image.height));
+    let mut dict = String::from("/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [");
+    for v in [0.0, 0.0, w, h] {
+        num(&mut dict, v, decimals);
+        dict.push(' ');
+    }
+    dict.pop();
+    dict.push_str("] /XStep ");
+    num(&mut dict, w, decimals);
+    dict.push_str(" /YStep ");
+    num(&mut dict, h, decimals);
+    dict.push_str(" /Matrix [");
+    let m = space.pattern_base * space.transform * brush_transform.unwrap_or(Affine::IDENTITY);
+    matrix(&mut dict, m, decimals);
+    dict.pop();
+    dict.push_str("] /Resources ");
+    dict.push_str(RES_REF);
+    let mut content = String::from("q\n");
+    super::content::write_placement(
+        &mut content,
+        super::image::unit_to_pixels(&ib.image),
+        decimals,
+    );
+    content.push_str(&format!("/{xobject} Do\nQ\n"));
+    let key = format!("tile:{dict}|{content}");
+    let name = res.intern_stream(ResKind::Pattern, &key, &dict, content.into_bytes(), None);
+    Paint {
+        fill_ops: format!("/Pattern cs /{name} scn\n"),
+        stroke_ops: format!("/Pattern CS /{name} SCN\n"),
+        alpha: (sampler.alpha < 1.0).then(|| sampler.alpha.clamp(0.0, 1.0)),
+        mask: None,
     }
 }
 
@@ -442,6 +695,133 @@ pub(crate) fn ext_gstate(
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_vector_pattern_is_interned_as_a_tiling_pattern() {
+        let mut res = Resources::default();
+        let mut warnings = Warnings::default();
+        let brush = Brush::Pattern(std::sync::Arc::new(
+            crate::brush::fill_pattern("crosshatch", Brush::Solid(Color::BLACK)).unwrap(),
+        ));
+        let p = resolve(
+            &brush,
+            None,
+            space(Affine::IDENTITY),
+            &mut res,
+            3,
+            &mut warnings,
+        );
+        assert_eq!(p.fill_ops, "/Pattern cs /P0 scn\n");
+        assert_eq!(p.stroke_ops, "/Pattern CS /P0 SCN\n");
+        assert!(!warnings.contains(&PdfWarning::UnsupportedPatternElement));
+    }
+
+    #[test]
+    fn an_identical_vector_pattern_shares_one_stream() {
+        let mut res = Resources::default();
+        let mut warnings = Warnings::default();
+        let brush = || {
+            Brush::Pattern(std::sync::Arc::new(
+                crate::brush::fill_pattern("stripe", Brush::Solid(Color::BLACK)).unwrap(),
+            ))
+        };
+        let a = resolve(
+            &brush(),
+            None,
+            space(Affine::IDENTITY),
+            &mut res,
+            3,
+            &mut warnings,
+        );
+        let b = resolve(
+            &brush(),
+            None,
+            space(Affine::IDENTITY),
+            &mut res,
+            3,
+            &mut warnings,
+        );
+        assert_eq!(a.fill_ops, b.fill_ops);
+    }
+
+    #[test]
+    fn an_element_alpha_does_not_leak_into_the_next_element() {
+        let mut res = Resources::default();
+        let mut warnings = Warnings::default();
+        let path = |x0: f64| {
+            let mut p = crate::path::Path::new();
+            p.move_to((x0, 0.0));
+            p.line_to((x0 + 0.5, 0.0));
+            p.line_to((x0 + 0.5, 1.0));
+            p.close_path();
+            p
+        };
+        let translucent = crate::brush::PatternElement::Path {
+            path: path(0.0),
+            fill: Some(crate::brush::PatternPaint::Fixed(Brush::Solid(Color::new(
+                [1.0, 0.0, 0.0, 0.5],
+            )))),
+            stroke: None,
+        };
+        let opaque = crate::brush::PatternElement::Path {
+            path: path(0.5),
+            fill: Some(crate::brush::PatternPaint::Fixed(Brush::Solid(
+                Color::BLACK,
+            ))),
+            stroke: None,
+        };
+        let brush = Brush::Pattern(std::sync::Arc::new(crate::brush::FillPattern::new(
+            vec![translucent, opaque],
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            crate::geometry::Vec2::new(1.0, 1.0),
+        )));
+        resolve(
+            &brush,
+            None,
+            space(Affine::IDENTITY),
+            &mut res,
+            3,
+            &mut warnings,
+        );
+        let mut objects = super::super::writer::Objects::new();
+        let res_ref = objects.alloc();
+        let root = objects.alloc();
+        res.write(&mut objects, false, res_ref, "");
+        let file = String::from_utf8_lossy(&objects.finish(root)).into_owned();
+        // Each element's graphics state is scoped: the translucent
+        // element's ExtGState cannot reach the opaque one.
+        let saves = file.matches("q\n").count();
+        let restores = file.matches("Q\n").count();
+        assert_eq!(saves, restores, "unbalanced q/Q: {file}");
+        assert!(file.contains("Q\nq\n"), "elements are not scoped: {file}");
+    }
+
+    #[test]
+    fn a_text_element_is_skipped_with_a_warning() {
+        let mut res = Resources::default();
+        let mut warnings = Warnings::default();
+        let pattern = crate::brush::FillPattern::new(
+            vec![crate::brush::PatternElement::Text {
+                content: std::sync::Arc::from("•"),
+                at: crate::geometry::Point::new(0.5, 0.5),
+                size: 0.8,
+                family: None,
+                paint: crate::brush::PatternPaint::Foreground,
+            }],
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            crate::geometry::Vec2::new(1.0, 1.0),
+        );
+        let brush = Brush::Pattern(std::sync::Arc::new(pattern));
+        resolve(
+            &brush,
+            None,
+            space(Affine::IDENTITY),
+            &mut res,
+            3,
+            &mut warnings,
+        );
+        assert!(warnings.contains(&PdfWarning::UnsupportedPatternElement));
+    }
+
     fn stops(v: &[(f32, Color)]) -> Vec<(f32, Color)> {
         v.to_vec()
     }
@@ -562,6 +942,113 @@ mod tests {
             &mut warnings,
         );
         assert_eq!(r.fill_ops, "/Pattern cs /P1 scn\n");
+    }
+
+    /// A 2×1 red/blue image to tile.
+    fn checker() -> ImageBrush {
+        use crate::brush::{Blob, Image, ImageAlphaType, ImageFormat};
+        ImageBrush::new(Image {
+            data: Blob::from(vec![255, 0, 0, 255, 0, 0, 255, 255]),
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha,
+            width: 2,
+            height: 1,
+        })
+    }
+
+    #[test]
+    fn a_repeating_image_brush_is_interned_as_a_tiling_pattern() {
+        let mut res = Resources::default();
+        let mut warnings = Warnings::default();
+        let brush = Brush::Image(checker().with_extend(Extend::Repeat));
+        let p = resolve(
+            &brush,
+            None,
+            space(Affine::IDENTITY),
+            &mut res,
+            3,
+            &mut warnings,
+        );
+        // The image XObject is interned first, so the pattern is P1.
+        assert_eq!(p.fill_ops, "/Pattern cs /P1 scn\n");
+        assert_eq!(p.stroke_ops, "/Pattern CS /P1 SCN\n");
+        assert_eq!(p.alpha, None, "the default sampler is opaque");
+        assert!(!warnings.contains(&PdfWarning::UnsupportedExtend));
+
+        // The same brush under the same transform reuses the pattern.
+        let q = resolve(
+            &brush,
+            None,
+            space(Affine::IDENTITY),
+            &mut res,
+            3,
+            &mut warnings,
+        );
+        assert_eq!(q.fill_ops, p.fill_ops);
+
+        // Under a different transform it is a different pattern, which
+        // is correct: the matrix carries the transform.
+        let r = resolve(
+            &brush,
+            None,
+            space(Affine::translate((5.0, 0.0))),
+            &mut res,
+            3,
+            &mut warnings,
+        );
+        assert_ne!(r.fill_ops, p.fill_ops);
+
+        let mut objects = super::super::writer::Objects::new();
+        let res_ref = objects.alloc();
+        let root = objects.alloc();
+        let dict = res.write(&mut objects, false, res_ref, "");
+        assert!(dict.contains("/Pattern << /P1 "), "{dict}");
+        let file = String::from_utf8_lossy(&objects.finish(root)).into_owned();
+        assert!(file.contains("/PatternType 1"), "{file}");
+        assert!(file.contains("/XStep 2"), "{file}");
+        assert!(file.contains("/X0 Do"), "{file}");
+    }
+
+    #[test]
+    fn a_non_repeating_image_brush_tiles_and_says_so() {
+        let mut res = Resources::default();
+        let mut warnings = Warnings::default();
+        // The default sampler pads, which a tiling pattern cannot
+        // express.
+        let p = resolve(
+            &Brush::Image(checker()),
+            None,
+            space(Affine::IDENTITY),
+            &mut res,
+            3,
+            &mut warnings,
+        );
+        assert!(p.fill_ops.starts_with("/Pattern cs"), "{}", p.fill_ops);
+        assert!(warnings.contains(&PdfWarning::UnsupportedExtend));
+    }
+
+    #[test]
+    fn an_unembeddable_image_brush_paints_nothing() {
+        use crate::brush::{Blob, Image, ImageAlphaType, ImageFormat};
+        let mut res = Resources::default();
+        let mut warnings = Warnings::default();
+        let brush = Brush::Image(ImageBrush::new(Image {
+            data: Blob::from(vec![0, 0, 0]),
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha,
+            width: 2,
+            height: 1,
+        }));
+        let p = resolve(
+            &brush,
+            None,
+            space(Affine::IDENTITY),
+            &mut res,
+            3,
+            &mut warnings,
+        );
+        assert_eq!(p.alpha, Some(0.0));
+        assert!(warnings.contains(&PdfWarning::UnembeddableImage));
     }
 
     #[test]

@@ -2975,8 +2975,8 @@ mod tests {
         assert_eq!(s.format(&Value::Number(1.5)), "1.5");
         assert_eq!(s.format(&Value::Number(0.0)), "0");
         assert_eq!(s.format(&Value::Number(0.123456789)), "0.123456789");
-        // No sig-fig snap: the value prints as-is.
-        assert_eq!(s.format(&Value::Number(0.1 + 0.2)), "0.30000000000000004");
+        // Accumulated float error is snapped away before printing.
+        assert_eq!(s.format(&Value::Number(0.1 + 0.2)), "0.3");
         // Labels are presentation: U+2212, not a hyphen.
         assert_eq!(s.format(&Value::Number(-2.5)), "\u{2212}2.5");
         // Non-finite values pass through.

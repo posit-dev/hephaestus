@@ -108,11 +108,18 @@ impl SceneBuilder for VelloScene {
         brush: &Brush,
         brush_transform: Option<Affine>,
         path: &Path,
-        _pick_id: PickId,
+        pick_id: PickId,
     ) {
+        if let Brush::Pattern(p) = brush {
+            crate::pattern::fill_tiled(self, rule, transform, p, brush_transform, path, pick_id);
+            return;
+        }
+        let Some(brush) = brush.as_peniko() else {
+            return;
+        };
         let fill_rule = convert::fill_rule(rule);
         self.inner
-            .fill(fill_rule, transform, brush, brush_transform, path);
+            .fill(fill_rule, transform, &brush, brush_transform, path);
     }
 
     fn stroke(
@@ -124,8 +131,11 @@ impl SceneBuilder for VelloScene {
         path: &Path,
         _pick_id: PickId,
     ) {
+        let Some(brush) = brush.as_peniko() else {
+            return;
+        };
         self.inner
-            .stroke(stroke, transform, brush, brush_transform, path);
+            .stroke(stroke, transform, &brush, brush_transform, path);
     }
 
     fn draw_image(
@@ -154,13 +164,16 @@ impl SceneBuilder for VelloScene {
             Some(stroke) => peniko::StyleRef::from(stroke),
             None => peniko::StyleRef::from(peniko::Fill::NonZero),
         };
+        let Some(brush) = run.brush.as_peniko() else {
+            return;
+        };
         let builder = self
             .inner
             .draw_glyphs(run.font.data())
             .font_size(run.font_size)
             .transform(run.transform)
             .glyph_transform(run.glyph_transform)
-            .brush(run.brush)
+            .brush(&brush)
             .brush_alpha(run.brush_alpha)
             .hint(run.hint);
         builder.draw(

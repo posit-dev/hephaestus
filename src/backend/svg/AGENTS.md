@@ -55,7 +55,8 @@ Each is reported through `SvgScene::warnings()`, deduplicated by variant, and ea
 | `Compose` ≠ `SrcOver` | emitted as `SrcOver`. See below. |
 | asymmetric stroke caps | the start cap wins. SVG has one `stroke-linecap`. Unreachable from `plot/` — `Stroke::with_caps` sets both. |
 | radial `start_radius` ≠ 0 | written as SVG 2's `fr`, which older consumers drop. |
-| `Brush::Image` as paint | nothing drawn. Needs `<pattern>`; nothing in-crate constructs one. |
+| `Brush::Image` with a pad or reflect sampler | tiled instead. An SVG `<pattern>` only repeats, which is exactly the `Repeat` sampler; anything else repeats too, reported as `UnsupportedExtend`. |
+| `Brush::Pattern` with a glyph-backed or unknown shape, or a nested pattern | that element is skipped, reported as `UnsupportedPatternElement`. Everything else is native: the tile becomes a `<pattern>` def with `patternUnits="userSpaceOnUse"`, text stays a real `<text>` naming its family (the viewer shapes it, so a pattern font never reaches the `@font-face` registry), and a gradient or image element resolves through the same paint machinery as any other brush. |
 | image without `png` | nothing drawn. |
 | glyph run with no source | outlines, or nothing if the face has no monochrome contours. |
 | `embed_fonts` on a font *collection* | not embedded, and reported. `@font-face` cannot name a face inside a collection, so a `ttcf` blob in a data URL loads in no browser. macOS resolves `sans-serif` to a 2.4 MB collection, so this is the ordinary case rather than an exotic one. |

@@ -188,7 +188,7 @@ thiserror = "2"
 # algorithms, and colorspace-aware interpolation. Re-exported as
 # `hephaestus::scales` and `hephaestus::color`; the `geom-*` and datetime
 # feature gates above forward to it.
-zygos = "0.4"
+zygos = "0.5"
 
 # vello + wgpu are pulled in with default-features disabled so each platform
 # only compiles the one GPU backend it actually uses. The shared baseline is
@@ -299,6 +299,28 @@ required-features = ["svg", "vello", "png"]
 [[example]]
 name = "pdf_export"
 required-features = ["pdf", "vello", "png"]
+
+# Fill channels carrying gradients and image patterns, exported as both
+# SVG and PNG so the two render paths can be compared.
+[[example]]
+name = "brush_fill"
+required-features = ["svg", "vello", "png"]
+
+[[example]]
+name = "pattern_fill"
+required-features = ["svg", "vello", "png"]
+
+[[example]]
+name = "pattern_text"
+required-features = ["svg", "vello", "png"]
+
+[[example]]
+name = "pattern_origin"
+required-features = ["svg", "vello", "png"]
+
+[[example]]
+name = "axis_title_inside"
+required-features = ["vello", "png"]
 
 [[example]]
 name = "hello_hybrid"
@@ -582,6 +604,10 @@ required-features = ["vello", "png", "jpeg", "tiff", "webp"]
 
 [[example]]
 name = "window"
+required-features = ["vello", "window"]
+
+[[example]]
+name = "break_spacing"
 required-features = ["vello", "window"]
 
 [[example]]

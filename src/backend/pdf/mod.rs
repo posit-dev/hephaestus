@@ -58,7 +58,9 @@ pub enum PdfWarning {
     /// A sweep gradient was flattened to a solid color. PDF has no
     /// conic shading short of a PostScript calculator function.
     SweepGradient,
-    /// A gradient asked to repeat or reflect; PDF shadings only pad.
+    /// A gradient asked to repeat or reflect (PDF shadings only pad),
+    /// or an image brush's sampler asked to pad or reflect (a tiling
+    /// pattern only repeats). The paint falls back to the mode PDF has.
     UnsupportedExtend,
     /// A layer, or a color glyph's paint graph, asked for a compositing
     /// operator other than source-over. PDF's imaging model fixes
@@ -68,8 +70,6 @@ pub enum PdfWarning {
     /// A stroke set different start and end caps. PDF has one line-cap
     /// setting.
     AsymmetricCaps,
-    /// An image brush was used as a fill or stroke paint.
-    ImageBrushUnsupported,
     /// An image's pixels were in a layout this backend cannot embed.
     UnembeddableImage,
     /// A color glyph's bitmap strike is PNG-compressed, which this
@@ -80,6 +80,11 @@ pub enum PdfWarning {
     GlyphNotDrawable,
     /// A coordinate was not finite and was written as zero.
     NonFiniteCoordinate,
+    /// A fill pattern's element was skipped: text inside a pattern (a
+    /// tile has no font context), a non-solid element paint, a
+    /// glyph-backed or unknown shape, or a pattern nested inside a
+    /// pattern's element.
+    UnsupportedPatternElement,
     /// More layers were popped than were pushed.
     UnbalancedLayers,
 }

@@ -27,6 +27,7 @@ pub mod layout;
 pub mod linetype;
 pub mod mesh;
 pub mod path;
+pub mod pattern;
 pub mod pick;
 pub mod plot;
 pub mod primitives;

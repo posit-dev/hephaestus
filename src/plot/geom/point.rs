@@ -85,9 +85,10 @@ use crate::stroke::Stroke;
 use std::sync::Arc;
 
 use super::resolve::{
-    band_width_at, channel_varies_per_row, override_alpha, pt_to_px, resolve_angle_channel,
-    resolve_color_channel_or_theme, resolve_number_channel, resolve_number_channel_or,
-    resolve_pick_id, resolve_str_channel_or, smallest_nonzero, PositionMap,
+    band_width_at, brush_override_alpha, channel_varies_per_row, override_alpha, pt_to_px,
+    resolve_angle_channel, resolve_brush_channel_or_theme, resolve_color_channel_or_theme,
+    resolve_number_channel, resolve_number_channel_or, resolve_pick_id, resolve_str_channel_or,
+    smallest_nonzero, PositionMap,
 };
 use super::state::{finalize_state, require_x_and_siblings, GeomState, KeysStrategy};
 use super::{BuildableGeom, Channel, ExpectedOutput, Geom, GeomBuilder, GeomContext};
@@ -118,7 +119,7 @@ const CHANNELS: &[(&str, ExpectedOutput)] = &[
     ("y_offset", ExpectedOutput::Numbers),
     ("x_band", ExpectedOutput::Numbers),
     ("y_band", ExpectedOutput::Numbers),
-    ("fill", ExpectedOutput::Colors),
+    ("fill", ExpectedOutput::Fills),
     ("stroke", ExpectedOutput::Colors),
     ("fill_opacity", ExpectedOutput::Numbers),
     ("stroke_opacity", ExpectedOutput::Numbers),
@@ -306,8 +307,8 @@ impl Geom for PointGeom {
             }
 
             // ── Channel resolves ──
-            let fill_color = override_alpha(
-                resolve_color_channel_or_theme(fill_ch, fill_scale, i, fill_theme),
+            let fill_brush = brush_override_alpha(
+                resolve_brush_channel_or_theme(fill_ch, fill_scale, i, fill_theme),
                 resolve_number_channel(fill_opacity_ch, fill_opacity_scale, i),
             );
             let stroke_color = override_alpha(
@@ -385,15 +386,8 @@ impl Geom for PointGeom {
                     for sub in paths {
                         match style {
                             ShapeStyle::Fill => {
-                                if let Some(fc) = fill_color {
-                                    scene.fill(
-                                        FillRule::NonZero,
-                                        xform,
-                                        &Brush::Solid(fc),
-                                        None,
-                                        sub,
-                                        pick,
-                                    );
+                                if let Some(fb) = &fill_brush {
+                                    scene.fill(FillRule::NonZero, xform, fb, None, sub, pick);
                                 }
                                 if let Some(sc) = stroke_color {
                                     let st = Stroke::new(stroke_width_local);
@@ -415,7 +409,7 @@ impl Geom for PointGeom {
                     em_bbox,
                     em_origin,
                 } => {
-                    let Some(fc) = fill_color else { continue };
+                    let Some(fb) = &fill_brush else { continue };
                     // Normalise glyph height to the vector-shape bbox
                     // convention so vector and glyph markers at the same
                     // "size" render at comparable visual extent. The
@@ -438,13 +432,12 @@ impl Geom for PointGeom {
                         x: 0.0,
                         y: 0.0,
                     }];
-                    let brush = Brush::Solid(fc);
                     let run = GlyphRun {
                         font,
                         font_size: effective_font_size_px as f32,
                         transform: Affine::translate((px + centring_px.x, py + centring_px.y)),
                         glyph_transform: None,
-                        brush: &brush,
+                        brush: fb,
                         brush_alpha: 1.0,
                         hint: false,
                         glyphs: &glyphs,
@@ -861,7 +854,7 @@ mod tests {
         assert!(by_name["y"].data_bound);
         assert!(!by_name["fill"].data_bound);
         assert_eq!(by_name["x"].expected_output, ExpectedOutput::Numbers);
-        assert_eq!(by_name["fill"].expected_output, ExpectedOutput::Colors);
+        assert_eq!(by_name["fill"].expected_output, ExpectedOutput::Fills);
         assert_eq!(by_name["shape"].expected_output, ExpectedOutput::Strings);
     }
 

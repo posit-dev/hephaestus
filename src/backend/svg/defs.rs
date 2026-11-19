@@ -19,10 +19,8 @@ pub(crate) enum DefKind {
     /// A `<radialGradient>`.
     RadialGradient,
     /// A `<pattern>` wrapping an image brush.
-    #[allow(dead_code)] // used once image brushes land
     Pattern,
     /// An `<image>` referenced by `<use>`.
-    #[allow(dead_code)] // used once raster images land
     Image,
 }
 
