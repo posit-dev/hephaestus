@@ -307,6 +307,22 @@ name = "brush_fill"
 required-features = ["svg", "vello", "png"]
 
 [[example]]
+name = "pattern_fill"
+required-features = ["svg", "vello", "png"]
+
+[[example]]
+name = "pattern_text"
+required-features = ["svg", "vello", "png"]
+
+[[example]]
+name = "pattern_origin"
+required-features = ["svg", "vello", "png"]
+
+[[example]]
+name = "axis_title_inside"
+required-features = ["vello", "png"]
+
+[[example]]
 name = "hello_hybrid"
 required-features = ["vello-hybrid", "png"]
 
