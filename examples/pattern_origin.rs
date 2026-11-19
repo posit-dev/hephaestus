@@ -46,7 +46,7 @@ fn main() {
 
     let ink = Brush::Solid(rgb8(60, 60, 60));
     let draw = |scene: &mut dyn SceneBuilder, per_shape: bool| {
-        for (i, shape) in shapes.iter().enumerate() {
+        for shape in &shapes {
             // The right-hand panel is the same shapes shifted over.
             let xform = Affine::translate((if per_shape { 400.0 } else { 0.0 }, 0.0));
             let anchor = per_shape.then(|| {
@@ -63,7 +63,6 @@ fn main() {
             );
             let stroke = hephaestus::stroke::Stroke::new(1.5);
             scene.stroke(&stroke, xform, &ink, None, shape, PickId::Skip);
-            let _ = i;
         }
     };
 

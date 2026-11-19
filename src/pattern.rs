@@ -16,6 +16,7 @@ use crate::pick::{PickId, PickScope};
 use crate::scene::{recording::RecordingScene, GlyphRun, SceneBuilder};
 use crate::shape::{Shape, ShapeKind, ShapeRegistry, ShapeStyle};
 use crate::stroke::Stroke;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Bind a pattern's paint roles to the backend defaults: `Foreground` to
 /// opaque black, `Background` to transparent. Authors of the plot layer
@@ -42,7 +43,6 @@ pub fn bound(pattern: &FillPattern) -> FillPattern {
 pub fn tile_recording(pattern: &FillPattern) -> RecordingScene {
     let pattern = bound(pattern);
     let tile_h = pattern.tile_rect.height();
-    let shapes = ShapeRegistry::with_builtins();
     let mut rec = RecordingScene::new();
     for el in &pattern.elements {
         match el {
@@ -72,7 +72,7 @@ pub fn tile_recording(pattern: &FillPattern) -> RecordingScene {
                 let PatternPaint::Fixed(b) = paint else {
                     continue;
                 };
-                let Some(shape) = shapes.get(name.as_ref()) else {
+                let Some(shape) = builtin_shapes().get(name.as_ref()) else {
                     continue;
                 };
                 stamp_shape(&mut rec, shape, *at, size * tile_h, b);
@@ -106,6 +106,39 @@ pub fn tile_recording(pattern: &FillPattern) -> RecordingScene {
             }
         }
     }
+    rec
+}
+
+/// The process-shared built-in shape registry. Constructing it costs
+/// ~14 µs, which a tile recording cannot pay per call — pattern fills
+/// record a tile once per distinct pattern at most.
+fn builtin_shapes() -> &'static ShapeRegistry {
+    static REGISTRY: OnceLock<ShapeRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(ShapeRegistry::with_builtins)
+}
+
+/// The tile recording for `pattern`, cached by `Arc` identity: a scene
+/// that fills many rows with the same shared pattern records the tile —
+/// shaping and all — once. Keyed on identity rather than content
+/// because a cheap per-call check is the point; two equal-but-separate
+/// patterns simply record twice.
+fn cached_tile(pattern: &Arc<FillPattern>) -> Arc<RecordingScene> {
+    const CAP: usize = 8;
+    type Entry = (Arc<FillPattern>, Arc<RecordingScene>);
+    static CACHE: OnceLock<Mutex<Vec<Entry>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ix) = guard.iter().position(|(p, _)| Arc::ptr_eq(p, pattern)) {
+        let entry = guard.remove(ix);
+        let rec = entry.1.clone();
+        guard.push(entry);
+        return rec;
+    }
+    let rec = Arc::new(tile_recording(pattern));
+    if guard.len() == CAP {
+        guard.remove(0);
+    }
+    guard.push((pattern.clone(), rec.clone()));
     rec
 }
 
@@ -146,14 +179,21 @@ fn stamp_shape(rec: &mut RecordingScene, shape: &Shape, at: Point, height: f64, 
 /// native pattern instead (see `backend/svg` and `backend/pdf`).
 ///
 /// A singular pattern transform — one the tiling cannot be inverted
-/// through — paints nothing. Picking reports the filled region, not
+/// through — paints nothing, as does a non-positive or non-finite
+/// spacing (the tile index range would be unbounded). Singularity is an
+/// absolute test on the composed transform's determinant (|det| ≤
+/// 1e-12), so a legitimate but tiny scale — below roughly 1e-6 per
+/// axis — reads as singular and also paints nothing. The tile
+/// recording is cached by `Arc` identity, so a per-row fill column
+/// sharing one pattern records its tile — shaping and all — once.
+/// Picking reports the filled region, not
 /// individual tiles: tile ops carry [`PickId::Skip`], and an invisible
 /// fill of the whole path carries `pick_id`.
 pub fn fill_tiled(
     scene: &mut dyn SceneBuilder,
     rule: FillRule,
     transform: Affine,
-    pattern: &FillPattern,
+    pattern: &Arc<FillPattern>,
     brush_transform: Option<Affine>,
     path: &Path,
     pick_id: PickId,
@@ -190,9 +230,15 @@ pub fn fill_tiled(
         return;
     }
 
-    let tile = tile_recording(pattern);
     let tr = &pattern.tile_rect;
     let [sx, sy] = [pattern.spacing.x, pattern.spacing.y];
+    // Dividing the area by the spacing finds the tile range; a spacing
+    // that is zero, negative, or non-finite would make that range
+    // empty at best and unbounded at worst.
+    if !(sx > 0.0 && sx.is_finite() && sy > 0.0 && sy.is_finite()) {
+        return;
+    }
+    let tile = cached_tile(pattern);
     let i0 = ((area.x0 - tr.x0) / sx).floor() as i64;
     let i1 = ((area.x1 - tr.x0) / sx).ceil() as i64;
     let j0 = ((area.y0 - tr.y0) / sy).floor() as i64;
@@ -398,10 +444,10 @@ mod tests {
         // Unit tile pitched at 1×1 with no rotation, so a rect from
         // 0.5 to 3.5 × 0.5 to 2.5 touches 4×3 = 12 tiles of one stroke
         // each.
-        let p = FillPattern {
+        let p = Arc::new(FillPattern {
             transform: Affine::IDENTITY,
             ..p
-        };
+        });
         let mut rec = RecordingScene::new();
         let target = square(0.5, 0.5, 3.5, 2.5);
         fill_tiled(
@@ -432,9 +478,11 @@ mod tests {
 
     #[test]
     fn a_singular_transform_paints_nothing() {
-        let p = fill_pattern("stripe", Brush::Solid(Color::BLACK))
-            .unwrap()
-            .with_transform(Affine::scale(0.0));
+        let p = Arc::new(
+            fill_pattern("stripe", Brush::Solid(Color::BLACK))
+                .unwrap()
+                .with_transform(Affine::scale(0.0)),
+        );
         let mut rec = RecordingScene::new();
         fill_tiled(
             &mut rec,
@@ -446,5 +494,27 @@ mod tests {
             PickId::Skip,
         );
         assert!(rec.ops.is_empty());
+    }
+
+    #[test]
+    fn a_degenerate_spacing_paints_nothing() {
+        let p = fill_pattern("stripe", Brush::Solid(Color::BLACK)).unwrap();
+        for spacing in [(0.0, 1.0), (-1.0, 1.0), (f64::NAN, 1.0)] {
+            let p = Arc::new(FillPattern {
+                spacing: crate::geometry::Vec2::new(spacing.0, spacing.1),
+                ..p.clone()
+            });
+            let mut rec = RecordingScene::new();
+            fill_tiled(
+                &mut rec,
+                FillRule::NonZero,
+                Affine::IDENTITY,
+                &p,
+                None,
+                &square(0.0, 0.0, 10.0, 10.0),
+                PickId::Skip,
+            );
+            assert!(rec.ops.is_empty(), "spacing {spacing:?}: {rec:?}");
+        }
     }
 }

@@ -159,36 +159,46 @@ fn vector_pattern(
     for el in &p.elements {
         match el {
             PatternElement::Path { path, fill, stroke } => {
+                // `q`/`Q` scopes the element's graphics state: an
+                // ExtGState alpha or a stroke width set here must not
+                // leak into the tile's later elements.
+                content.push_str("q\n");
                 if let Some(crate::brush::PatternPaint::Fixed(b)) = fill {
-                    element_paint_op(&mut content, b, false, res, decimals, warnings);
+                    element_paint_op(&mut content, b, false, res, warnings);
                     super::content::write_path(&mut content, path, decimals, &mut non_finite);
                     content.push_str(super::content::fill_op(crate::path::FillRule::NonZero));
                 }
                 if let Some(s) = stroke {
                     if let crate::brush::PatternPaint::Fixed(b) = &s.1 {
-                        element_paint_op(&mut content, b, true, res, decimals, warnings);
+                        element_paint_op(&mut content, b, true, res, warnings);
                         super::content::write_stroke_state(&mut content, &s.0, decimals);
                         super::content::write_path(&mut content, path, decimals, &mut non_finite);
                         content.push_str("S\n");
                     }
                 }
+                content.push_str("Q\n");
             }
             PatternElement::Shape {
                 name,
                 at,
                 size,
                 paint,
-            } => shape_op(
-                &mut content,
-                name,
-                *at,
-                size * tile_h,
-                paint,
-                res,
-                decimals,
-                warnings,
-                &mut non_finite,
-            ),
+            } => {
+                // Scoped like the path arm above.
+                content.push_str("q\n");
+                shape_op(
+                    &mut content,
+                    name,
+                    *at,
+                    size * tile_h,
+                    paint,
+                    res,
+                    decimals,
+                    warnings,
+                    &mut non_finite,
+                );
+                content.push_str("Q\n");
+            }
             PatternElement::Text { .. } => {
                 warnings.note(PdfWarning::UnsupportedPatternElement);
             }
@@ -215,7 +225,6 @@ fn element_paint_op(
     b: &Brush,
     stroke: bool,
     res: &mut Resources,
-    decimals: u8,
     warnings: &mut Warnings,
 ) {
     let Brush::Solid(c) = b else {
@@ -234,7 +243,6 @@ fn element_paint_op(
     } else {
         &paint.fill_ops
     });
-    let _ = decimals;
 }
 
 /// Write a shape element stamped at `at` scaled to `height`.
@@ -276,12 +284,12 @@ fn shape_op(
         let placed = xform * path.clone();
         match style {
             ShapeStyle::Fill => {
-                element_paint_op(out, b, false, res, decimals, warnings);
+                element_paint_op(out, b, false, res, warnings);
                 super::content::write_path(out, &placed, decimals, non_finite);
                 out.push_str(super::content::fill_op(crate::path::FillRule::NonZero));
             }
             ShapeStyle::Stroke => {
-                element_paint_op(out, b, true, res, decimals, warnings);
+                element_paint_op(out, b, true, res, warnings);
                 // The path data is already transformed, so the width
                 // needs no compensation.
                 super::content::write_stroke_state(
@@ -733,6 +741,58 @@ mod tests {
             &mut warnings,
         );
         assert_eq!(a.fill_ops, b.fill_ops);
+    }
+
+    #[test]
+    fn an_element_alpha_does_not_leak_into_the_next_element() {
+        let mut res = Resources::default();
+        let mut warnings = Warnings::default();
+        let path = |x0: f64| {
+            let mut p = crate::path::Path::new();
+            p.move_to((x0, 0.0));
+            p.line_to((x0 + 0.5, 0.0));
+            p.line_to((x0 + 0.5, 1.0));
+            p.close_path();
+            p
+        };
+        let translucent = crate::brush::PatternElement::Path {
+            path: path(0.0),
+            fill: Some(crate::brush::PatternPaint::Fixed(Brush::Solid(Color::new(
+                [1.0, 0.0, 0.0, 0.5],
+            )))),
+            stroke: None,
+        };
+        let opaque = crate::brush::PatternElement::Path {
+            path: path(0.5),
+            fill: Some(crate::brush::PatternPaint::Fixed(Brush::Solid(
+                Color::BLACK,
+            ))),
+            stroke: None,
+        };
+        let brush = Brush::Pattern(std::sync::Arc::new(crate::brush::FillPattern::new(
+            vec![translucent, opaque],
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            crate::geometry::Vec2::new(1.0, 1.0),
+        )));
+        resolve(
+            &brush,
+            None,
+            space(Affine::IDENTITY),
+            &mut res,
+            3,
+            &mut warnings,
+        );
+        let mut objects = super::super::writer::Objects::new();
+        let res_ref = objects.alloc();
+        let root = objects.alloc();
+        res.write(&mut objects, false, res_ref, "");
+        let file = String::from_utf8_lossy(&objects.finish(root)).into_owned();
+        // Each element's graphics state is scoped: the translucent
+        // element's ExtGState cannot reach the opaque one.
+        let saves = file.matches("q\n").count();
+        let restores = file.matches("Q\n").count();
+        assert_eq!(saves, restores, "unbalanced q/Q: {file}");
+        assert!(file.contains("Q\nq\n"), "elements are not scoped: {file}");
     }
 
     #[test]
