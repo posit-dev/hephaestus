@@ -114,8 +114,24 @@ jobs:
               --features "window,$backend,png" --all-targets -- -D warnings
           done
 
-      - name: cargo test --all-features
-        run: cargo test --all-features
+      # GPU-touching tests run one thread per binary: each test spins up its
+      # own wgpu device, and concurrent device/renderer churn against the
+      # Mesa software stack segfaults inside the Vulkan loader. Everything
+      # else keeps the default parallelism.
+      - name: cargo test --all-features, GPU tests serialised
+        run: |
+          set -o pipefail
+          gpu_tests="smoke texture_smoke window_blit mesh hybrid alpha_format rich_text geometry_geom projection_custom image_writers image_geom document_roundtrip"
+          cargo test --all-features --lib
+          for bin in $(ls tests/*.rs | xargs -n1 basename | sed 's/\.rs$//'); do
+            case " $gpu_tests " in
+              *" $bin "*) ;;
+              *) cargo test --all-features --test "$bin" ;;
+            esac
+          done
+          for t in $gpu_tests; do
+            cargo test --all-features --test "$t" -- --test-threads=1
+          done
 
   # `vello`, `vello_hybrid` and `parley` all declare 1.88, so that is the floor
   # for any build that includes them, whatever `rust-version` says. The jobs above all run on
