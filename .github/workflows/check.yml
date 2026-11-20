@@ -360,6 +360,11 @@ jobs:
 
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          # Pin the version: the action resolves "latest" through a GitHub API
+          # call and silently falls back to an ancient default when that call
+          # fails, which is a build break presented as a flake.
+          version: v0.15.1
 
       # wasm-pack uses a `wasm-opt` from PATH and downloads its own copy only
       # when it finds none. That download failing is not an error to it — it
@@ -434,6 +439,11 @@ jobs:
 
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          # Pin the version: the action resolves "latest" through a GitHub API
+          # call and silently falls back to an ancient default when that call
+          # fails, which is a build break presented as a flake.
+          version: v0.15.1
 
       # Same reasoning as the `client` job: wasm-pack warns rather than fails
       # when its own wasm-opt download does not arrive, and silently ships an
