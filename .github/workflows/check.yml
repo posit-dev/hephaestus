@@ -40,7 +40,7 @@ jobs:
       - name: Install Mesa Vulkan drivers and fontconfig
         run: |
           sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools libfontconfig1-dev
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools libfontconfig1-dev gdb jq
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -114,8 +114,18 @@ jobs:
               --features "window,$backend,png" --all-targets -- -D warnings
           done
 
+      # TEMPORARY DEBUG: run each test binary under gdb so a segfault prints a
+      # native backtrace instead of a bare signal 11.
       - name: cargo test --all-features
-        run: cargo test --all-features
+        run: |
+          set -o pipefail
+          cargo test --all-features --no-run --message-format=json 2>/dev/null \
+            | jq -r 'select(.profile.test == true) | .executable' \
+            | while read -r exe; do
+                echo "== $exe"
+                gdb -batch -ex run -ex 'thread apply all bt' -ex quit --args "$exe" \
+                  || { echo "CRASHED: $exe"; exit 1; }
+              done
 
   # `vello`, `vello_hybrid` and `parley` all declare 1.88, so that is the floor
   # for any build that includes them, whatever `rust-version` says. The jobs above all run on
