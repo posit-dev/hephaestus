@@ -5,11 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.5.2
+
+### Fixed
+
+- The release workflow's test run serialises the GPU-touching test binaries, as `check.yml` already does: concurrent wgpu device churn against the Mesa software stack segfaults inside the Vulkan loader, which killed the 0.5.1 release's test suite before it could publish. Packaging-only change; the crate is identical to 0.5.0.
+
 ## 0.5.1
 
 ### Fixed
 
-- The release workflow's SVG-client job installs `libfontconfig1-dev` before building the document fixture: the current runner image no longer ships it, and a native build of the crate links fontconfig on Linux through parley/fontique. Packaging-only change; the crate is identical to 0.5.0.
+- The release workflow's SVG-client job installs `libfontconfig1-dev` before building the document fixture: the current runner image no longer ships it, and a native build of the crate links fontconfig on Linux through parley/fontique. Packaging-only change; the crate is identical to 0.5.0. This version never published to crates.io: the release failed before the publish step.
 
 ## 0.5.0
 
