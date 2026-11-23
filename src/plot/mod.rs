@@ -31,6 +31,7 @@ pub mod pick;
 pub mod plot;
 pub mod projection;
 pub mod scale;
+pub mod table;
 pub mod theme;
 pub mod value;
 
@@ -53,4 +54,5 @@ pub use scale::{
     AxisSide, BinEdgeError, BreakTarget, InputRange, LabelSpec, LegendSide, OutputRange, Scale,
     ScaleRegistry, ScaleTypeKind, Transform, TransformKind,
 };
+pub use table::{Table, TableColumn, TableRowGroup, TableSpanner};
 pub use value::{DataColumn, Date, DateTime, Duration, LinetypeStep, Time, Value};

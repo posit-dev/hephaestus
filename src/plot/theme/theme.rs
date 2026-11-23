@@ -17,6 +17,7 @@ use super::geom::GeomTheme;
 use super::legend::LegendTheme;
 use super::length::{Length, Margin};
 use super::palette::{Palette, ThemeColor};
+use super::table::TableTheme;
 use crate::scales::Locale;
 
 /// Default gap between stacked legends on the same plot side, pt.
@@ -115,6 +116,14 @@ pub struct Theme {
     pub strip_text: Sided<TextElement>,
     /// Inner padding inside the strip rect.
     pub strip_padding: Margin,
+
+    // ── Table chrome ───────────────────────────────────────────────
+    /// Default table theme — heading block, body rows, stub, rules.
+    pub table: TableTheme,
+    /// Named table variants. A `Table` can opt into one via
+    /// `Table::theme_variant("name")`; the table resolves through
+    /// that variant instead of `theme.table`.
+    pub table_variants: HashMap<String, TableTheme>,
 
     // ── Geom defaults ──────────────────────────────────────────────
     /// Per-geom default style values. Each geom reads from this when
@@ -294,6 +303,8 @@ impl Default for Theme {
                 ..TextElement::default()
             }),
             strip_padding: Margin::all(Length::Abs(HALF_LINE_PT)),
+            table: TableTheme::default(),
+            table_variants: HashMap::new(),
             geom: GeomTheme::default(),
             locale: Locale::default(),
             rich_text: std::sync::Arc::new(crate::text::rich::RichTextStyleSheet::new()),
@@ -338,6 +349,13 @@ impl Theme {
         self
     }
 
+    /// Register a named table variant. A `Table` can opt into the
+    /// variant via `Table::theme_variant("name")`.
+    pub fn with_table_variant(mut self, name: impl Into<String>, variant: TableTheme) -> Self {
+        self.table_variants.insert(name.into(), variant);
+        self
+    }
+
     /// Apply a [`ThemePart`] override onto self, returning a new
     /// `Theme`. `Some(...)` / `Set(...)` fields on `part` win;
     /// `None` / `Inherit` fields keep `self`'s value.
@@ -362,6 +380,15 @@ impl Theme {
         variant
             .and_then(|name| self.legend_variants.get(name))
             .unwrap_or(&self.legend)
+    }
+
+    /// Resolve the [`TableTheme`] for a table that opted into the
+    /// given variant name. Falls back to the default `table` when
+    /// the variant isn't registered.
+    pub fn table_for(&self, variant: Option<&str>) -> &TableTheme {
+        variant
+            .and_then(|name| self.table_variants.get(name))
+            .unwrap_or(&self.table)
     }
 }
 
@@ -424,6 +451,13 @@ pub struct ThemePart {
     /// Optional strip-padding override.
     pub strip_padding: Option<Margin>,
 
+    /// Optional table override.
+    pub table: Option<TableTheme>,
+    /// Optional named table variants — merged into the existing map
+    /// (a variant key in `part` replaces the entry of the same name
+    /// in `self`).
+    pub table_variants: HashMap<String, TableTheme>,
+
     /// Optional geom defaults override (replaces the whole
     /// `GeomTheme` wholesale).
     pub geom: Option<GeomTheme>,
@@ -469,11 +503,15 @@ impl ThemePart {
         set_field!(strip_background);
         set_field!(strip_text);
         set_field!(strip_padding);
+        set_field!(table);
         set_field!(geom);
         set_field!(locale);
         set_field!(rich_text);
         for (k, v) in &self.legend_variants {
             theme.legend_variants.insert(k.clone(), v.clone());
+        }
+        for (k, v) in &self.table_variants {
+            theme.table_variants.insert(k.clone(), v.clone());
         }
     }
 }

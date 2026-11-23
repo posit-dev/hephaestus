@@ -40,6 +40,8 @@ pub mod kind {
     pub const LEGEND: &str = "legend";
     /// One geom, numbered by its `GeomId`.
     pub const GEOM: &str = "geom";
+    /// One table, named by its patch id.
+    pub const TABLE: &str = "table";
     /// A distinguishable piece of chrome — see [`PlotPart`](super::PlotPart).
     pub const PART: &str = "part";
     /// An ordinal within a part: a break index, a legend row, a key.
@@ -85,6 +87,19 @@ pub enum PlotPart {
     Title,
     Subtitle,
     Caption,
+    // Table.
+    TableTitle,
+    TableSubtitle,
+    TableCaption,
+    TableSpanner,
+    TableColumnLabel,
+    TableStubHead,
+    TableStub,
+    TableCell,
+    TableRowGroup,
+    TableSummary,
+    TableFootnote,
+    TableRule,
 }
 
 impl PlotPart {
@@ -114,6 +129,18 @@ impl PlotPart {
             PlotPart::Title => "title",
             PlotPart::Subtitle => "subtitle",
             PlotPart::Caption => "caption",
+            PlotPart::TableTitle => "table_title",
+            PlotPart::TableSubtitle => "table_subtitle",
+            PlotPart::TableCaption => "table_caption",
+            PlotPart::TableSpanner => "table_spanner",
+            PlotPart::TableColumnLabel => "table_column_label",
+            PlotPart::TableStubHead => "table_stub_head",
+            PlotPart::TableStub => "table_stub",
+            PlotPart::TableCell => "table_cell",
+            PlotPart::TableRowGroup => "table_row_group",
+            PlotPart::TableSummary => "table_summary",
+            PlotPart::TableFootnote => "table_footnote",
+            PlotPart::TableRule => "table_rule",
         }
     }
 
@@ -202,6 +229,14 @@ pub fn region_scope(slot: Slot) -> PickScope {
 /// A region placed with `place_at` rather than into the fixed anatomy.
 pub fn named_region_scope(name: &str) -> PickScope {
     PickScope::group(kind::REGION).with_name(name)
+}
+
+/// One table, named by its patch id. A table holds no plots, so its
+/// scope replaces `plot` in the grammar: `composition → table →
+/// region → part → item`, where the item index is `row * ncols + col`
+/// of the cell's grid position.
+pub fn table_scope(patch_id: &str) -> PickScope {
+    PickScope::group(kind::TABLE).with_name(patch_id)
 }
 
 /// One geom within a plot.

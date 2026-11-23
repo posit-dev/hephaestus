@@ -294,6 +294,11 @@ required-features = ["vello", "png"]
 name = "svg_export"
 required-features = ["svg", "vello", "png"]
 
+# A table beside a plot, as both SVG and PNG — `svg` for the vector half.
+[[example]]
+name = "table"
+required-features = ["svg", "vello", "png"]
+
 # The same shape as `svg_export`, and for the same reason: the PDF and
 # the PNG come from one composition so the pair can be compared.
 [[example]]

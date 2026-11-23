@@ -180,6 +180,7 @@ impl CompositionTemplate {
 /// composition-level chrome keyed by composition id.
 struct RebuildCtx<'a> {
     plots: &'a HashMap<String, Vec<Plot>>,
+    tables: &'a HashMap<String, crate::plot::table::Table>,
     registry: &'a ScaleRegistry,
     dpi: f64,
     theme: &'a Theme,
@@ -204,6 +205,7 @@ impl CompositionTemplate {
     #[cfg(feature = "document-read")]
     pub(crate) fn bare(&self) -> Composition {
         let plots = HashMap::new();
+        let tables = HashMap::new();
         let chrome = HashMap::new();
         let registry = ScaleRegistry::new();
         let theme = Theme::default();
@@ -211,6 +213,7 @@ impl CompositionTemplate {
         let images = std::sync::Arc::new(crate::image_registry::ImageRegistry::new());
         self.rebuild(&RebuildCtx {
             plots: &plots,
+            tables: &tables,
             registry: &registry,
             // The bare form is never measured, so any dpi does.
             dpi: 96.0,
@@ -238,7 +241,7 @@ impl ElementTemplate {
     fn rebuild(&self, ctx: &RebuildCtx<'_>) -> Element {
         match self {
             ElementTemplate::NamedPatch(id) => {
-                let patch = wire_into_patch(id, ctx.plots, ctx.registry, ctx.dpi, ctx.theme);
+                let patch = wire_into_patch(id, ctx);
                 Element::Patch(patch)
             }
             ElementTemplate::Spacer => Element::Patch(spacer()),
@@ -255,13 +258,11 @@ impl ElementTemplate {
 /// in [`MaxMergeMeasure`](crate::layout::MaxMergeMeasure) so a
 /// region's track sizes to fit *every* contributing plot's
 /// requirement, not just the last one.
-fn wire_into_patch(
-    id: &str,
-    plots: &HashMap<String, Vec<Plot>>,
-    registry: &ScaleRegistry,
-    dpi: f64,
-    comp_theme: &Theme,
-) -> Patch {
+fn wire_into_patch(id: &str, ctx: &RebuildCtx<'_>) -> Patch {
+    let plots = ctx.plots;
+    let registry = ctx.registry;
+    let dpi = ctx.dpi;
+    let comp_theme = ctx.theme;
     let plot_list = plots.get(id);
     {
         if let Some(list) = plot_list {
@@ -269,6 +270,17 @@ fn wire_into_patch(
                 return wire_merged_patch(id, list, registry, dpi, comp_theme);
             }
         }
+    }
+    if let Some(table) = ctx.tables.get(id) {
+        // A table's theme override merges over the composition theme
+        // the same way a plot's does, so its measured space matches
+        // what the draw pass styles.
+        let effective = match table.theme_override_ref() {
+            Some(part) => comp_theme.merge(part),
+            None => comp_theme.clone(),
+        };
+        let patch = apply_plot_chrome(Patch::new(id), comp_theme);
+        return table.wire_panel(patch, &effective, dpi, ctx.images);
     }
     let _ = registry;
     let _ = dpi;
@@ -854,6 +866,12 @@ pub struct PlotComposition {
     /// patches overlap or an unclipped plot spills — is what the caller
     /// set up rather than whatever the hash seed produced this run.
     pub(crate) plot_order: Vec<String>,
+    /// Tables attached to each patch id. A patch holds at most one
+    /// table — a table fills its panel, so two would overpaint.
+    pub(crate) tables: HashMap<String, crate::plot::table::Table>,
+    /// Patch ids of attached tables in first-attach order, for the
+    /// same reason as [`Self::plot_order`].
+    pub(crate) table_order: Vec<String>,
     /// Composition-level chrome by composition id. The unprefixed
     /// builder / mutator methods target the root's entry, keyed on
     /// `root_id`; the `_at` / `_for` variants address any named
@@ -904,6 +922,8 @@ impl PlotComposition {
             theme: Arc::new(Theme::default()),
             plots: HashMap::new(),
             plot_order: Vec::new(),
+            tables: HashMap::new(),
+            table_order: Vec::new(),
             chrome: HashMap::new(),
             chrome_order: Vec::new(),
             root_id,
@@ -934,6 +954,8 @@ impl PlotComposition {
         theme: Arc<Theme>,
         plots: HashMap<String, Vec<Plot>>,
         plot_order: Vec<String>,
+        tables: HashMap<String, crate::plot::table::Table>,
+        table_order: Vec<String>,
         chrome: HashMap<String, CompositionChrome>,
         chrome_order: Vec<String>,
     ) -> Self {
@@ -948,6 +970,8 @@ impl PlotComposition {
             theme,
             plots,
             plot_order,
+            tables,
+            table_order,
             chrome,
             chrome_order,
             root_id,
@@ -1551,6 +1575,59 @@ impl PlotComposition {
         }
     }
 
+    // ── Tables ────────────────────────────────────────────────────────
+
+    /// Attach a table bound to its patch id. Chainable builder form of
+    /// [`Self::attach_table`].
+    pub fn with_table(mut self, table: crate::plot::table::Table) -> Self {
+        self.attach_table(table);
+        self
+    }
+
+    /// Attach a table bound to its patch id. A patch holds at most one
+    /// table — a second attach replaces the first. Flips the layout's
+    /// dirty flag.
+    pub fn attach_table(&mut self, table: crate::plot::table::Table) {
+        let id = table.patch_id().to_string();
+        if !self.tables.contains_key(&id) {
+            self.table_order.push(id.clone());
+        }
+        self.tables.insert(id, table);
+        self.layout_dirty = true;
+    }
+
+    /// Detach the table attached to `patch_id`, if any. Flips the
+    /// layout's dirty flag.
+    pub fn detach_table(&mut self, patch_id: &str) -> Option<crate::plot::table::Table> {
+        let removed = self.tables.remove(patch_id);
+        self.table_order.retain(|id| id != patch_id);
+        if removed.is_some() {
+            self.layout_dirty = true;
+        }
+        removed
+    }
+
+    /// Borrow the table attached to `patch_id`, if any.
+    pub fn table(&self, patch_id: &str) -> Option<&crate::plot::table::Table> {
+        self.tables.get(patch_id)
+    }
+
+    /// Iterate over `(patch_id, table)` pairs in attach order.
+    pub fn tables(&self) -> impl Iterator<Item = (&str, &crate::plot::table::Table)> + '_ {
+        self.table_order
+            .iter()
+            .filter_map(|id| self.tables.get(id).map(|t| (id.as_str(), t)))
+    }
+
+    /// Mutate the table at `patch_id` through a closure. Flags the
+    /// global layout dirty bit. No-op when no table is attached there.
+    pub fn update_table(&mut self, patch_id: &str, f: impl FnOnce(&mut crate::plot::table::Table)) {
+        if let Some(t) = self.tables.get_mut(patch_id) {
+            f(t);
+            self.layout_dirty = true;
+        }
+    }
+
     // ── Render ────────────────────────────────────────────────────────
 
     /// Force a re-solve on the next render regardless of dirty state.
@@ -1591,6 +1668,7 @@ impl PlotComposition {
         if self.layout_dirty || self.last_layout.is_none() {
             let comp = self.template.rebuild(&RebuildCtx {
                 plots: &self.plots,
+                tables: &self.tables,
                 registry: &self.scales,
                 dpi,
                 theme: &self.theme,
@@ -1703,6 +1781,21 @@ impl PlotComposition {
             if plot.is_clipped() {
                 plot.draw_frame_into(scene, layout, &self.scales, dpi, effective);
             }
+        }
+
+        // Phase 5b: tables. A table fills its own patch's panel, so it
+        // never contends with another patch's geoms; drawing after the
+        // frames keeps a spilling unclipped geom from a neighbouring
+        // plot under the table's text.
+        for id in &self.table_order {
+            let Some(table) = self.tables.get(id) else {
+                continue;
+            };
+            let effective = match table.theme_override_ref() {
+                Some(part) => Arc::new(self.theme.merge(part)),
+                None => Arc::clone(&self.theme),
+            };
+            table.draw_into(scene, layout, &effective, dpi, &self.images);
         }
 
         // Phase 6: every plot's labels — legends, title / subtitle /

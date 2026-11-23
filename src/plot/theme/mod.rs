@@ -31,6 +31,7 @@ pub mod geom;
 pub mod legend;
 pub mod length;
 pub mod palette;
+pub mod table;
 #[allow(clippy::module_inception)]
 pub mod theme;
 
@@ -43,7 +44,7 @@ pub use axis::{
     DEFAULT_AXIS_TITLE_SIZE_PT, DEFAULT_MINOR_TICK_LENGTH_PT, DEFAULT_TICK_GAP_PT,
     DEFAULT_TICK_LENGTH_PT, DEFAULT_TITLE_GAP_PT,
 };
-pub use cascade::{PerChannel, Sided};
+pub use cascade::{Alternating, PerChannel, Sided};
 pub use element::{
     line_concrete_defaults, rect_concrete_defaults, text_concrete_defaults, AlignTo, Element,
     HAlign, LineElement, RectElement, Rotation, TextElement, VAlign, DEFAULT_LINEWIDTH_PT,
@@ -59,4 +60,8 @@ pub use geom::{
 pub use legend::{BarTheme, Direction, KeyTheme, LegendTheme, ResolvedDirection};
 pub use length::{pt, rel, Length, Margin};
 pub use palette::{Palette, ThemeColor};
+pub use table::{
+    HeadingRole, ResolvedTableCells, RulePosition, TableCellTheme, TableHeading, TableRules,
+    TableTheme,
+};
 pub use theme::{SharedTheme, Theme, ThemePart, DEFAULT_LEGEND_GAP_PT, DEFAULT_LEGEND_SPACING_PT};

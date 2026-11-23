@@ -58,6 +58,15 @@ pub enum PlotError {
     ///
     /// [`LegendSide::InPanel`]: crate::scales::chrome::LegendSide::InPanel
     InPanelLegendUnsupported,
+    /// A table row's width doesn't match the declared column count.
+    TableRowWidth {
+        /// The patch the table is bound to.
+        patch: String,
+        /// The row's actual length.
+        got: usize,
+        /// The declared column count.
+        expected: usize,
+    },
 }
 
 impl std::fmt::Display for PlotError {
@@ -76,6 +85,14 @@ impl std::fmt::Display for PlotError {
             PlotError::InPanelLegendUnsupported => write!(
                 f,
                 "an in-panel legend anchors to a panel rect, which this target doesn't have"
+            ),
+            PlotError::TableRowWidth {
+                patch,
+                got,
+                expected,
+            } => write!(
+                f,
+                "a row in the table at {patch:?} has {got} values but the table declares {expected} columns"
             ),
         }
     }

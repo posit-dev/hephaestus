@@ -29,11 +29,11 @@ use crate::brush::Sampling;
 use crate::plot::geom::ImageFit;
 use crate::plot::theme::legend::Direction as LegendDirection;
 use crate::plot::theme::{
-    AlignTo, AxisTheme, BarTheme, Element, FontFamily, FontFeature, FontSpec, FontStyle,
-    FontVariation, FontWeight, FontWidth, GeomTheme, ImageDefaults, KeyTheme, LegendTheme,
-    LineDefaults, LineElement, PerAxis, PerChannel, PointDefaults, RectElement, Rotation,
-    ShapeDefaults, Sided, TextDefaults, TextElement, TextFitDefaults, Theme, ThemePart,
-    TitleLocation,
+    AlignTo, Alternating, AxisTheme, BarTheme, Element, FontFamily, FontFeature, FontSpec,
+    FontStyle, FontVariation, FontWeight, FontWidth, GeomTheme, ImageDefaults, KeyTheme,
+    LegendTheme, LineDefaults, LineElement, PerAxis, PerChannel, PointDefaults, RectElement,
+    Rotation, ShapeDefaults, Sided, TableCellTheme, TableHeading, TableRules, TableTheme,
+    TextDefaults, TextElement, TextFitDefaults, Theme, ThemePart, TitleLocation,
 };
 use crate::text::rich::style::Direction as RichDirection;
 use crate::text::rich::{
@@ -55,6 +55,7 @@ impl_codec! {
 
     record PerChannel<T> { all, by_channel }
     record Sided<T> { all, by_channel, by_channel_side }
+    record Alternating<T> { all, odd, even }
 }
 
 // ─── Fonts ───────────────────────────────────────────────────────────────────
@@ -227,6 +228,29 @@ impl_codec! {
     record KeyTheme { frame, width, height, spacing }
     record BarTheme { length, width, frame }
     record LegendTheme { background, title, margin, padding, direction, axis, key, bar }
+}
+
+// ─── Table ─────────────────────────────────────────────────────────
+
+impl_codec! {
+    record TableCellTheme { text, background }
+    record TableHeading { all, spanner, column_label, stub_head }
+    record TableRules { all, horizontal, vertical, header, outer }
+    record TableTheme {
+        title,
+        subtitle,
+        caption,
+        heading,
+        body,
+        stub,
+        rules,
+        cell_padding,
+        margin,
+        footnote,
+        columns,
+        row_group,
+        summary,
+    }
 }
 
 // ─── Geom defaults ───────────────────────────────────────────────────────────
@@ -529,6 +553,8 @@ impl_codec! {
         strip_background,
         strip_text,
         strip_padding,
+        table,
+        table_variants,
         geom,
         locale,
         rich_text,
@@ -558,6 +584,8 @@ impl_codec! {
         strip_background,
         strip_text,
         strip_padding,
+        table,
+        table_variants,
         geom,
         locale,
         rich_text,
