@@ -223,6 +223,10 @@ jobs:
       # publish rather than only in CI.
       - name: Build the document fixture
         run: |
+          # Native build of the crate: parley/fontique links fontconfig on
+          # Linux, and the runner image no longer ships the dev package.
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev
           cargo run --example document_save --features document-write
           cp examples/document.hep crates/hephaestus-svg-wasm/www/
 

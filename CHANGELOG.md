@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.5.1
+
+### Fixed
+
+- The release workflow's SVG-client job installs `libfontconfig1-dev` before building the document fixture: the current runner image no longer ships it, and a native build of the crate links fontconfig on Linux through parley/fontique. Packaging-only change; the crate is identical to 0.5.0.
+
 ## 0.5.0
 
 ### Added
