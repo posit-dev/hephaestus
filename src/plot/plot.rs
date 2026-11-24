@@ -82,6 +82,13 @@ pub enum PlotError {
         /// The patch the table is bound to.
         patch: String,
     },
+    /// Two cells in one grid row name different body-row ordinals.
+    TableRowOrdinal {
+        /// The patch the table is bound to.
+        patch: String,
+        /// The grid row in disagreement.
+        row: u16,
+    },
 }
 
 impl std::fmt::Display for PlotError {
@@ -112,6 +119,10 @@ impl std::fmt::Display for PlotError {
             PlotError::TableSpecOutOfRange { patch } => write!(
                 f,
                 "the table at {patch:?} blesses more columns or rows than its cells occupy"
+            ),
+            PlotError::TableRowOrdinal { patch, row } => write!(
+                f,
+                "two cells in the table at {patch:?} share grid row {row} but name different row ordinals"
             ),
         }
     }

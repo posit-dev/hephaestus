@@ -185,6 +185,14 @@ pub struct TableTheme {
     /// Outer margin around the whole table, added on top of the shared
     /// [`Theme::margin`](crate::plot::theme::Theme::margin).
     pub margin: Margin,
+    /// Horizontal anchoring of the whole table within its panel when
+    /// the panel is wider than the table. With `Auto` composition
+    /// tracks the panel is the table's size and this has no effect.
+    pub halign: super::element::HAlign,
+    /// Vertical anchoring of the whole table within its panel when the
+    /// panel is taller than the table. With `Auto` composition tracks
+    /// the panel is the table's size and this has no effect.
+    pub valign: super::element::VAlign,
 }
 
 impl Default for TableTheme {
@@ -287,6 +295,8 @@ impl Default for TableTheme {
                 Length::Abs(8.0),
             ),
             margin: Margin::ZERO,
+            halign: super::element::HAlign::Start,
+            valign: super::element::VAlign::Top,
         }
     }
 }

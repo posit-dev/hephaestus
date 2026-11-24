@@ -222,6 +222,8 @@ fn collect_table_theme_families(
         rules: _,
         cell_padding: _,
         margin: _,
+        halign: _,
+        valign: _,
     } = theme;
     for el in [title, subtitle, caption, footnote] {
         text_element(el, named, generic);

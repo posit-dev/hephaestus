@@ -253,6 +253,8 @@ impl_codec! {
         columns,
         row_group,
         summary,
+        halign,
+        valign,
     }
 }
 

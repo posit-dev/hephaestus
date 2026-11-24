@@ -52,7 +52,7 @@ use crate::plot::plot::PlotError;
 use crate::plot::theme::{
     rect_concrete_defaults, text_concrete_defaults, Element, FontFamily, FontStyle, FontWeight,
     FontWidth, HAlign, HeadingRole, Length, RectElement, ResolvedTableCells, RulePosition,
-    TableCellTheme, TableTheme, TextElement, Theme, ThemeColor, ThemePart,
+    TableCellTheme, TableTheme, TextElement, Theme, ThemeColor, ThemePart, VAlign,
 };
 use crate::scales::Value;
 use crate::scene::SceneBuilder;
@@ -348,6 +348,21 @@ impl Table {
         }) {
             return Err(PlotError::TableSpecOutOfRange { patch });
         }
+        // Cells sharing a grid row must agree on the row ordinal: it
+        // drives striping parity and pick identity, so a disagreement
+        // would corrupt both silently. Keyed on the cell's top edge —
+        // a rowspanned cell names only the row it starts in.
+        let mut ordinals = std::collections::HashMap::new();
+        for c in &self.cells {
+            if let Some(ordinal) = c.kind.item() {
+                if ordinals
+                    .insert(c.row, ordinal)
+                    .is_some_and(|o| o != ordinal)
+                {
+                    return Err(PlotError::TableRowOrdinal { patch, row: c.row });
+                }
+            }
+        }
         // Pairwise rectangle intersection rather than a bitmap: grid
         // coordinates are u16, so a bitmap costs up to 4 GiB on a
         // sparse grid far from the origin, and walking every covered
@@ -443,18 +458,28 @@ impl Table {
         let inner = self.build_grid(theme, registry, dpi, images);
         let solved = inner.solve_at(panel.width(), dpi);
 
-        // Normalize: the solver anchors the content-sized grid inside
-        // its container, so shift every rect to put the table's
-        // top-left at the panel's.
+        // Anchor the solved table inside the panel: the theme's whole-
+        // table `halign` / `valign` place the content bounding box
+        // against the panel. With `Auto` composition tracks the panel
+        // is the table's size and every anchor lands on the top-left.
         let Some(bbox) = solved.bounding_box() else {
             scene.pop_pick_scope();
             scene.pop_pick_scope();
             return;
         };
-        let offset = crate::geometry::Vec2::new(panel.x0 - bbox.x0, panel.y0 - bbox.y0);
-        let translate = |r: Rect| r + offset;
-
         let table_theme = theme.table_for(self.theme_variant.as_deref());
+        let dx = match table_theme.halign {
+            HAlign::Start | HAlign::Justify => 0.0,
+            HAlign::Center => (panel.width() - bbox.width()) / 2.0,
+            HAlign::End => panel.width() - bbox.width(),
+        };
+        let dy = match table_theme.valign {
+            VAlign::Top | VAlign::Baseline => 0.0,
+            VAlign::Middle => (panel.height() - bbox.height()) / 2.0,
+            VAlign::Bottom => panel.height() - bbox.height(),
+        };
+        let offset = crate::geometry::Vec2::new(panel.x0 - bbox.x0 + dx, panel.y0 - bbox.y0 + dy);
+        let translate = |r: Rect| r + offset;
 
         // Backgrounds first, under every rule and label.
         for cell in &solved.cells {
@@ -515,7 +540,13 @@ impl Table {
                 HAlign::Center => content.x0 + (content.width() - run_w) / 2.0,
                 HAlign::End => (content.x1 - run_w).max(content.x0),
             };
-            let y = content.y0 + (content.height() - line_h).max(0.0) / 2.0;
+            // Baseline reads as top here, the same fallback the
+            // rect-anchored chrome text path uses.
+            let y = match cell.valign {
+                VAlign::Top | VAlign::Baseline => content.y0,
+                VAlign::Middle => content.y0 + (content.height() - line_h).max(0.0) / 2.0,
+                VAlign::Bottom => (content.y1 - line_h).max(content.y0),
+            };
             scene.push_pick_scope(&part_scope(cell.kind.part()));
             if let Some(item) = cell.kind.item() {
                 scene.push_pick_scope(&item_scope(item));
@@ -1288,6 +1319,18 @@ fn parse_halign(s: &str) -> Option<HAlign> {
     })
 }
 
+/// Alignment name → [`VAlign`], with `center` / `centre` as aliases
+/// of `middle`.
+fn parse_valign(s: &str) -> Option<VAlign> {
+    Some(match s.to_ascii_lowercase().as_str() {
+        "top" => VAlign::Top,
+        "middle" | "center" | "centre" => VAlign::Middle,
+        "baseline" => VAlign::Baseline,
+        "bottom" => VAlign::Bottom,
+        _ => return None,
+    })
+}
+
 /// An aesthetic of a cell that a value can drive. Covers the whole
 /// cell-level theme surface — [`RectElement`] and the text-run fields
 /// of [`TextElement`] — keyed by the scale output type each maps from:
@@ -1296,10 +1339,10 @@ fn parse_halign(s: &str) -> Option<HAlign> {
 /// weight, string-producing for the font axes and alignment, booleans
 /// for decorations, a linetype for the border dash.
 ///
-/// Deliberately not covered: `valign` / `angle` / `margin` (slot-level
-/// fields the cell draw path doesn't read), OpenType features and
-/// variation axes (structured tag data no scale output maps to), and
-/// oblique angles (a style plus a number — two values).
+/// Deliberately not covered: `angle` / `margin` (slot-level fields the
+/// cell draw path doesn't read), OpenType features and variation axes
+/// (structured tag data no scale output maps to), and oblique angles
+/// (a style plus a number — two values).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableScaledAesthetic {
     // ── Background (RectElement) ──
@@ -1359,6 +1402,11 @@ pub enum TableScaledAesthetic {
     /// `center` / `end` / `justify` (`left` / `right` accepted as
     /// aliases).
     Align,
+    /// Vertical alignment — string-producing scales: `top` /
+    /// `middle` / `baseline` / `bottom` (`center` accepted as an
+    /// alias of `middle`). `Baseline` reads as `Top` in a cell, the
+    /// same fallback rect-anchored chrome text uses.
+    Valign,
 }
 
 impl TableCell {
@@ -1517,6 +1565,9 @@ impl TableCell {
                 TableScaledAesthetic::Align => mapped.as_str().and_then(parse_halign).map(|a| {
                     text.align = Some(a);
                 }),
+                TableScaledAesthetic::Valign => mapped.as_str().and_then(parse_valign).map(|v| {
+                    text.valign = Some(v);
+                }),
             };
             any |= applied.is_some();
         }
@@ -1611,6 +1662,7 @@ impl TableCell {
                 run: None,
                 background,
                 align: HAlign::Start,
+                valign: VAlign::Middle,
                 color: crate::color::Color::TRANSPARENT,
                 outline: None,
                 padding_px,
@@ -1620,6 +1672,7 @@ impl TableCell {
             .align
             .or(el.align)
             .expect("text_concrete_defaults sets align");
+        let valign = el.valign.expect("text_concrete_defaults sets valign");
         let style = text_style_from(&el, root_pt);
         let color = el
             .color
@@ -1635,6 +1688,7 @@ impl TableCell {
             run: Some(run),
             background,
             align,
+            valign,
             color,
             outline,
             padding_px,
@@ -1651,6 +1705,7 @@ struct StyledCell {
     run: Option<ChromeRun>,
     background: Option<crate::plot::theme::RectElement>,
     align: HAlign,
+    valign: VAlign,
     color: crate::color::Color,
     outline: Option<crate::plot::chrome::text::TextOutline>,
     /// Cell padding in pixels, `(top, right, bottom, left)`.
@@ -1710,6 +1765,7 @@ impl InnerGrid {
                 run: styled.run,
                 background: styled.background,
                 align: styled.align,
+                valign: styled.valign,
                 color: styled.color,
                 outline: styled.outline,
                 padding_px: styled.padding_px,
@@ -1718,20 +1774,13 @@ impl InnerGrid {
         SolvedTable::from_cells(cells)
     }
 
-    /// The table's natural size at an unconstrained width: the solved
-    /// bounding box of every cell.
+    /// The table's intrinsic minimum size: content-sized tracks at
+    /// their content size, a percent-width column floored at the
+    /// absolute part of its extent — it resolves against the panel
+    /// being measured, which is what the caller is asking for.
     fn natural_size(&self, dpi: f64) -> (f64, f64) {
-        let layout = self.grid.solve(Size::new(1.0e7, 1.0e7), dpi);
-        let mut bbox: Option<Rect> = None;
-        for (id, _) in &self.entries {
-            if let Some(r) = layout.rect(*id) {
-                bbox = Some(match bbox {
-                    Some(b) => b.union(r),
-                    None => r,
-                });
-            }
-        }
-        bbox.map(|b| (b.width(), b.height())).unwrap_or((0.0, 0.0))
+        let size = self.grid.natural_size(dpi);
+        (size.width, size.height)
     }
 }
 
@@ -1742,6 +1791,7 @@ struct SolvedCell {
     run: Option<ChromeRun>,
     background: Option<crate::plot::theme::RectElement>,
     align: HAlign,
+    valign: VAlign,
     color: crate::color::Color,
     outline: Option<crate::plot::chrome::text::TextOutline>,
     padding_px: (f64, f64, f64, f64),

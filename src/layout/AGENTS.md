@@ -4,7 +4,7 @@ Grid-only, zero-dependency layout solver. Compose n×m grids recursively, solve 
 
 ## What this module does
 
-The public API covers: n × m grids, content leaves with an intrinsic-size protocol, recursive nesting with row / column placement and spans, per-edge insets in physical or relative units, the `respect` flag (from R grid's `grid.layout(respect = TRUE)`) for cross-axis fr coupling, opt-in iteration for content whose width depends on its height, and `Extent::TrackOf` cross-grid references (used by `composition/` to mirror chrome tracks across nested compositions).
+The public API covers: n × m grids, content leaves with an intrinsic-size protocol, recursive nesting with row / column placement and spans, per-edge insets in physical or relative units, the `respect` flag (from R grid's `grid.layout(respect = TRUE)`) for cross-axis fr coupling, opt-in iteration for content whose width depends on its height, `Extent::TrackOf` cross-grid references (used by `composition/` to mirror chrome tracks across nested compositions), and `Grid::natural_size` — the grid's intrinsic minimum size (`Fixed` absolute with percent floored at zero, `Auto` at content, `Fr` at `Σf × max(minᵢ/fᵢ)` so rendering there squeezes no track below its minimum), the same two-pass `Measure` walk the solver runs, exposed for hosts that size their canvas to the content.
 
 Layout is unconditional — built into every cargo profile, no feature flag.
 

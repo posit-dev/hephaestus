@@ -1022,3 +1022,104 @@ fn nested_respect_slack_feeds_uncapped_fr_sibling() {
     approx_eq(flex.x0, 100.0, 0.5, "flex sibling starts after sub-grid");
     approx_eq(flex.x1, 400.0, 0.5, "flex sibling absorbs the slack");
 }
+
+// ─── Natural size ────────────────────────────────────────────────────
+
+#[test]
+fn natural_size_of_auto_and_fixed_tracks() {
+    // Auto tracks take their content, Fixed their absolute extent,
+    // percent terms floor at zero.
+    let mut root = Grid::new(
+        [
+            Track::Auto,
+            Track::Fixed(Extent::px(50.0)),
+            Track::Fixed(Extent::percent(0.5)),
+        ],
+        [Track::Auto],
+    );
+    root.place_mut(
+        Placement::at(1, 1),
+        Cell::measured(FixedSize { w: 30.0, h: 20.0 }).id(CellId(1)),
+    );
+    let size = root.natural_size(96.0);
+    approx_eq(size.width, 80.0, 1e-9, "auto 30 + fixed 50 + percent 0");
+    approx_eq(size.height, 20.0, 1e-9, "content height");
+}
+
+#[test]
+fn natural_size_fr_reports_the_largest_minimum_share() {
+    // Two Fr(1.0) tracks, one holding 40-wide content: each claims
+    // the wider track's minimum, so neither squeezes below it at
+    // render.
+    let mut root = Grid::new([Track::Fr(1.0), Track::Fr(1.0)], [Track::Fr(1.0)]);
+    root.place_mut(
+        Placement::at(1, 1),
+        Cell::measured(FixedSize { w: 40.0, h: 10.0 }).id(CellId(1)),
+    );
+    root.place_mut(Placement::at(1, 2), Grid::cell().id(CellId(2)));
+    let size = root.natural_size(96.0);
+    approx_eq(size.width, 80.0, 1e-9, "2 × max(40, 0)");
+    approx_eq(size.height, 10.0, 1e-9, "row minimum");
+
+    // Unequal weights: the 2-weight track needs 40, the 1-weight 10;
+    // the binding demand is 40/2 = 20 per fr, so 3 fr × 20 = 60.
+    let mut root = Grid::new([Track::Fr(2.0), Track::Fr(1.0)], [Track::Auto]);
+    root.place_mut(
+        Placement::at(1, 1),
+        Cell::measured(FixedSize { w: 40.0, h: 10.0 }).id(CellId(1)),
+    );
+    root.place_mut(
+        Placement::at(1, 2),
+        Cell::measured(FixedSize { w: 10.0, h: 10.0 }).id(CellId(2)),
+    );
+    let size = root.natural_size(96.0);
+    approx_eq(size.width, 60.0, 1e-9, "3 × max(40/2, 10/1)");
+}
+
+#[test]
+fn natural_size_recurses_into_nested_grids() {
+    let inner = || {
+        let mut g = Grid::new([Track::Auto], [Track::Auto]);
+        g.place_mut(
+            Placement::at(1, 1),
+            Cell::measured(FixedSize { w: 25.0, h: 15.0 }).id(CellId(1)),
+        );
+        g
+    };
+    let mut root = Grid::new([Track::Auto, Track::Fixed(Extent::px(10.0))], [Track::Auto]);
+    root.place_mut(Placement::at(1, 1).span(1, 2), inner());
+    let size = root.natural_size(96.0);
+    // Spanning two columns, it grows no single one of them; the Fixed
+    // one still counts. It occupies one row, so its height counts.
+    approx_eq(size.width, 10.0, 1e-9, "span contributes no column");
+    approx_eq(
+        size.height,
+        15.0,
+        1e-9,
+        "single-row span contributes its height",
+    );
+
+    let mut root = Grid::new([Track::Auto], [Track::Auto]);
+    root.place_mut(Placement::at(1, 1), inner());
+    let size = root.natural_size(96.0);
+    approx_eq(size.width, 25.0, 1e-9, "nested width");
+    approx_eq(size.height, 15.0, 1e-9, "nested height");
+}
+
+#[test]
+fn natural_size_counts_placement_insets() {
+    // An inset with an explicit size pins the track, as the
+    // anatomical chrome bands do.
+    let mut root = Grid::new([Track::Auto, Track::Auto], [Track::Auto]);
+    root.place_mut(
+        Placement::at(1, 1).inset(Inset::default().width(Extent::pt(11.0))),
+        Grid::cell().id(CellId(1)),
+    );
+    root.place_mut(
+        Placement::at(1, 2),
+        Cell::measured(FixedSize { w: 20.0, h: 5.0 }).id(CellId(2)),
+    );
+    let size = root.natural_size(96.0);
+    let pt = 96.0 / 72.0;
+    approx_eq(size.width, 11.0 * pt + 20.0, 1e-6, "inset band + content");
+}

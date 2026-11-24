@@ -1640,6 +1640,46 @@ impl PlotComposition {
 
     // ── Render ────────────────────────────────────────────────────────
 
+    /// The composition's intrinsic minimum size at `dpi` — what the
+    /// content asks for, rebuilt through the same wiring a render uses.
+    /// Per track kind:
+    ///
+    /// - `Auto` tracks → measured content (a table's full natural size;
+    ///   chrome's measured bands).
+    /// - `Fr` tracks → `Σf × max(minᵢ/fᵢ)` over their cells' content
+    ///   minimums: the smallest allotment in which no `Fr` track falls
+    ///   below its minimum. Rendering at the returned size squeezes
+    ///   nothing; the slack lands in the least-demanding tracks. For
+    ///   table-only compositions the minimum *is* the natural size, so
+    ///   the stock `grid()` / `beside()` / `stack()` constructors work
+    ///   unchanged for shrink-wrapping.
+    /// - `Fixed` tracks → their absolute extent; percent terms
+    ///   contribute 0 to the floor.
+    /// - Plot panels → 0. A plot panel expands from nothing, so for
+    ///   plot-containing compositions the answer is a floor (chrome,
+    ///   axes, titles), not a useful render size. For table
+    ///   compositions the minimum is exact.
+    ///
+    /// The writer recipe: `view.natural_size(dpi)` → render at the
+    /// returned size and the same dpi → no slack, no clipping.
+    ///
+    /// # Panics
+    ///
+    /// On any [`CompositionError`], like [`Composition::solve`].
+    pub fn natural_size(&self, dpi: f64) -> Size {
+        let comp = self.template.rebuild(&RebuildCtx {
+            plots: &self.plots,
+            tables: &self.tables,
+            registry: &self.scales,
+            dpi,
+            theme: &self.theme,
+            chrome: &self.chrome,
+            shapes: &self.shapes,
+            images: &self.images,
+        });
+        comp.natural_size(dpi)
+    }
+
     /// Force a re-solve on the next render regardless of dirty state.
     /// Useful after mutating a plot via lower-level primitives that
     /// bypass `update_plot`.

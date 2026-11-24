@@ -381,7 +381,17 @@ pub(crate) fn shape_run(
             marker,
         });
     }
-    let total_height = stack_blocks(&mut layouts);
+    // An empty document shapes no blocks. It still reserves one base
+    // line box — the same space the plain shaper reserves for "" —
+    // and zero width; without the empty guard the `hr` placeholder
+    // below would conjure a 20 em width out of nothing.
+    let total_height = if layouts.is_empty() {
+        let mut empty = shape_block_layout("", &[], &[], base_style, base_brush, palette, dpi);
+        empty.break_all_lines(None);
+        empty.height()
+    } else {
+        stack_blocks(&mut layouts)
+    };
     // Natural width = max of (left + shape_width + right) across
     // non-Rule blocks (Rule blocks have empty text → zero shape
     // width; they stretch to whatever surrounding content
@@ -405,18 +415,20 @@ pub(crate) fn shape_run(
     // Zero natural width (e.g. a document containing nothing but
     // an hr) falls back to a reasonable placeholder — the base
     // text em × 20, roughly a typical column.
-    let hr_placeholder = if natural_width > 0.0 {
-        natural_width
-    } else {
-        pt_to_px(base_style.size_pt as f64 * 20.0, dpi)
-    };
-    for bl in &mut layouts {
-        if matches!(bl.kind, BlockKind::Rule) {
-            let content = (hr_placeholder - bl.left_px - bl.right_inset_px).max(1.0);
-            bl.shape_width_px = content;
+    if layouts.iter().any(|bl| matches!(bl.kind, BlockKind::Rule)) {
+        let hr_placeholder = if natural_width > 0.0 {
+            natural_width
+        } else {
+            pt_to_px(base_style.size_pt as f64 * 20.0, dpi)
+        };
+        for bl in &mut layouts {
+            if matches!(bl.kind, BlockKind::Rule) {
+                let content = (hr_placeholder - bl.left_px - bl.right_inset_px).max(1.0);
+                bl.shape_width_px = content;
+            }
         }
+        natural_width = natural_width.max(hr_placeholder);
     }
-    natural_width = natural_width.max(hr_placeholder);
 
     RichTextRun {
         blocks: RefCell::new(layouts),

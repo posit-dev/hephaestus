@@ -55,6 +55,7 @@ impl_codec! {
         19 => BorderWidthRight,
         20 => BorderWidthBottom,
         21 => BorderWidthLeft,
+        22 => Valign,
     }
 
     enum CellAesthetic {

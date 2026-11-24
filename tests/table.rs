@@ -561,6 +561,318 @@ fn an_unregistered_scaled_name_draws_nothing_and_validates() {
 }
 
 #[test]
+fn markdown_cells_size_to_content_not_the_container() {
+    // Regression: an empty cell shaped through the rich pipeline
+    // reported a 20 em natural width (the hr placeholder, applied
+    // unconditionally), so a theme opting table text into markdown
+    // ballooned the column to fill the patch.
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let table = |markdown: bool| {
+        let mut theme = hephaestus::plot::theme::Theme::default();
+        theme.text.markdown = Some(markdown);
+        PlotComposition::new(&comp())
+            .theme(theme)
+            .with_table(Table::new(&comp(), "summary").cells([
+                cell(ColumnLabel, 0, 0, ""),
+                cell(ColumnLabel, 0, 1, "y"),
+                cell(Stub { row: 0 }, 1, 0, "a").span(2, 1),
+                cell(Body { row: 0 }, 1, 1, "10.5"),
+                cell(Body { row: 1 }, 2, 1, "20.25"),
+            ]))
+    };
+    // The x the "y" column label draws at, in each rendering.
+    let label_x = |view: &mut PlotComposition| {
+        let mut scene = RecordingScene::new();
+        view.render(&mut scene, Size::new(400.0, 200.0), 96.0);
+        scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::DrawGlyphs(run) => {
+                    let c = run.transform.as_coeffs();
+                    let source = run.source.as_ref()?;
+                    (source.text == "y")
+                        .then(|| c[4] + f64::from(run.glyphs.first().map(|g| g.x).unwrap_or(0.0)))
+                }
+                _ => None,
+            })
+            .next()
+            .expect("the y label drew")
+    };
+    let plain = label_x(&mut table(false));
+    let markdown = label_x(&mut table(true));
+    assert!(
+        (plain - markdown).abs() < 0.5,
+        "markdown must not change the cell box: plain x = {plain}, markdown x = {markdown}"
+    );
+}
+
+#[test]
+fn a_bottom_valigned_label_draws_at_the_bottom_of_its_cell() {
+    // A column label spanning two rows moves to the cell's bottom edge
+    // under `valign: Bottom` (gt's column-label alignment); the default
+    // `Middle` centers it.
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let table = |valign| {
+        let mut theme = hephaestus::plot::theme::Theme::default();
+        let Element::Set(text) = &mut theme.table.heading.column_label.text else {
+            unreachable!("the default theme sets column-label text")
+        };
+        text.valign = Some(valign);
+        PlotComposition::new(&comp())
+            .theme(theme)
+            .with_table(Table::new(&comp(), "summary").cells([
+                cell(ColumnLabel, 0, 0, "lbl").span(2, 1),
+                cell(Body { row: 0 }, 0, 1, "1"),
+                cell(Body { row: 1 }, 1, 1, "2"),
+            ]))
+    };
+    let label_y = |view: &mut PlotComposition| {
+        let mut scene = RecordingScene::new();
+        view.render(&mut scene, Size::new(400.0, 300.0), 96.0);
+        scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::DrawGlyphs(run) => {
+                    let c = run.transform.as_coeffs();
+                    let source = run.source.as_ref()?;
+                    (source.text == "lbl")
+                        .then(|| c[5] + f64::from(run.glyphs.first().map(|g| g.y).unwrap_or(0.0)))
+                }
+                _ => None,
+            })
+            .next()
+            .expect("the label drew")
+    };
+    let middle = label_y(&mut table(hephaestus::plot::theme::VAlign::Middle));
+    let bottom = label_y(&mut table(hephaestus::plot::theme::VAlign::Bottom));
+    assert!(
+        bottom > middle + 5.0,
+        "bottom alignment moves the label down: middle y = {middle}, bottom y = {bottom}"
+    );
+}
+
+#[test]
+fn a_string_valign_aesthetic_moves_the_cells_text() {
+    // The per-cell form of valign: a fixed string aesthetic on one
+    // spanning label, matched against the same label themed Bottom.
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let label_y = |label: TableCell| {
+        let mut view =
+            PlotComposition::new(&comp()).with_table(Table::new(&comp(), "summary").cells([
+                label,
+                cell(Body { row: 0 }, 0, 1, "1"),
+                cell(Body { row: 1 }, 1, 1, "2"),
+            ]));
+        let mut scene = RecordingScene::new();
+        view.render(&mut scene, Size::new(400.0, 300.0), 96.0);
+        scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::DrawGlyphs(run) => {
+                    let c = run.transform.as_coeffs();
+                    let source = run.source.as_ref()?;
+                    (source.text == "lbl")
+                        .then(|| c[5] + f64::from(run.glyphs.first().map(|g| g.y).unwrap_or(0.0)))
+                }
+                _ => None,
+            })
+            .next()
+            .expect("the label drew")
+    };
+    let plain = label_y(cell(ColumnLabel, 0, 0, "lbl").span(2, 1));
+    let bottom = label_y(
+        cell(ColumnLabel, 0, 0, "lbl")
+            .span(2, 1)
+            .fixed(hephaestus::plot::TableScaledAesthetic::Valign, "bottom"),
+    );
+    assert!(
+        bottom > plain + 5.0,
+        "the valign aesthetic moves the label: default y = {plain}, bottom y = {bottom}"
+    );
+}
+
+#[test]
+fn whole_table_anchoring_centers_the_table_in_an_oversized_panel() {
+    // With a fixed-size (Fr) patch larger than the table, the theme's
+    // whole-table halign/valign anchor the solved grid in the panel;
+    // the defaults (Start/Top) leave it at the top-left.
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let table = |anchor: Option<(
+        hephaestus::plot::theme::HAlign,
+        hephaestus::plot::theme::VAlign,
+    )>| {
+        let mut theme = hephaestus::plot::theme::Theme::default();
+        if let Some((h, v)) = anchor {
+            theme.table.halign = h;
+            theme.table.valign = v;
+        }
+        PlotComposition::new(&comp())
+            .theme(theme)
+            .with_table(Table::new(&comp(), "summary").cells([
+                cell(ColumnLabel, 0, 0, "A"),
+                cell(Body { row: 0 }, 1, 0, "1"),
+            ]))
+    };
+    let table_bbox = |view: &mut PlotComposition| {
+        let mut scene = RecordingScene::new();
+        view.render(&mut scene, Size::new(800.0, 400.0), 96.0);
+        scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Stroke { path, .. } => Some(hephaestus::path::bounding_box(path)),
+                _ => None,
+            })
+            .reduce(|a, b| a.union(b))
+            .expect("the table drew rules")
+    };
+    let default = table_bbox(&mut table(None));
+    let centered = table_bbox(&mut table(Some((
+        hephaestus::plot::theme::HAlign::Center,
+        hephaestus::plot::theme::VAlign::Middle,
+    ))));
+    // The patch is the left half of an 800×400 canvas: centered means
+    // the bbox's center lands on the patch's center (within a few px
+    // of padding asymmetry); default leaves it hard against the edge.
+    assert!(
+        (default.x0 - 12.0).abs() < 6.0,
+        "default anchors top-left: x0 = {}",
+        default.x0
+    );
+    let cx = (centered.x0 + centered.x1) / 2.0;
+    let cy = (centered.y0 + centered.y1) / 2.0;
+    assert!(
+        (cx - 200.0).abs() < 6.0,
+        "centered horizontally in the 400px patch: cx = {cx}"
+    );
+    assert!(
+        (cy - 200.0).abs() < 6.0,
+        "centered vertically in the 400px patch: cy = {cy}"
+    );
+}
+
+#[test]
+fn natural_size_matches_the_rendered_extent() {
+    // The query answers through the same wiring render uses: rendering
+    // at the returned size clips nothing and squeezes no track below
+    // its content minimum — the table fills its patch exactly, and the
+    // slack `Fr` semantics leaves sits in the empty spare patch.
+    let mut view = build();
+    let size = view.natural_size(96.0);
+    let mut scene = RecordingScene::new();
+    view.render(&mut scene, size, 96.0);
+    let drawn = scene
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Stroke { path, .. } | Op::Fill { path, .. } => {
+                Some(hephaestus::path::bounding_box(path))
+            }
+            _ => None,
+        })
+        .reduce(|a, b| a.union(b))
+        .expect("the table drew");
+    assert!(drawn.x1 <= size.width + 0.5, "no horizontal clipping");
+    assert!(drawn.y1 <= size.height + 0.5, "no vertical clipping");
+    // The table's patch gets exactly the table's footprint (both Fr
+    // columns claim the wider one's minimum), and the table fills it.
+    assert!(
+        (drawn.x1 - size.width / 2.0).abs() < 1.0,
+        "the table fills its own patch: drawn x1 {}, patch edge {}",
+        drawn.x1,
+        size.width / 2.0
+    );
+    assert!(
+        (drawn.height() - size.height).abs() < 1.0,
+        "no vertical slack: drawn {}, queried {}",
+        drawn.height(),
+        size.height
+    );
+}
+
+#[test]
+fn natural_size_sums_a_grid_of_tables() {
+    // A 2×2 composition of tables on the stock (Fr) tracks reports the
+    // sum of the four footprints.
+    use TableCellKind::*;
+    let one = |id: &str| {
+        let comp = || hephaestus::composition::grid(1, 1, vec![Patch::new(id).into()]);
+        Table::new(&comp(), id).cells([
+            cell(ColumnLabel, 0, 0, "A"),
+            cell(Body { row: 0 }, 1, 0, "1"),
+        ])
+    };
+    let comp = || {
+        hephaestus::composition::grid(
+            2,
+            2,
+            vec![
+                Patch::new("a").into(),
+                Patch::new("b").into(),
+                Patch::new("c").into(),
+                Patch::new("d").into(),
+            ],
+        )
+    };
+    let single_comp = || hephaestus::composition::grid(1, 1, vec![Patch::new("a").into()]);
+    let single = PlotComposition::new(&single_comp()).with_table(one("a"));
+    let quad = PlotComposition::new(&comp())
+        .with_table(one("a"))
+        .with_table(one("b"))
+        .with_table(one("c"))
+        .with_table(one("d"));
+    let s1 = single.natural_size(96.0);
+    let s4 = quad.natural_size(96.0);
+    assert!(
+        (s4.width - 2.0 * s1.width).abs() < 1.0,
+        "two columns of tables: {s1:?} vs {s4:?}"
+    );
+    assert!(
+        (s4.height - 2.0 * s1.height).abs() < 1.0,
+        "two rows of tables: {s1:?} vs {s4:?}"
+    );
+}
+
+#[test]
+fn natural_size_scales_with_dpi() {
+    let lo = build().natural_size(96.0);
+    let hi = build().natural_size(192.0);
+    assert!((hi.width - 2.0 * lo.width).abs() < 1.0);
+    assert!((hi.height - 2.0 * lo.height).abs() < 1.0);
+}
+
+#[test]
+fn natural_size_floors_flexible_content() {
+    use TableCellKind::*;
+    // A plot panel expands from nothing: the composition reports its
+    // chrome only. A percent table column contributes the absolute
+    // part of its extent — here, nothing.
+    let comp = || beside(Patch::new("t"), Patch::new("p"));
+    let percent_table = Table::new(&comp(), "t")
+        .cells([
+            cell(Body { row: 0 }, 0, 0, "x"),
+            cell(Body { row: 0 }, 0, 1, "y"),
+        ])
+        .column_width(0, hephaestus::layout::Extent::percent(0.5));
+    let with_plot = PlotComposition::new(&comp())
+        .with_table(percent_table)
+        .with_plot(hephaestus::plot::Plot::new(&comp(), "p"));
+    let size = with_plot.natural_size(96.0);
+    let bare = build().natural_size(96.0);
+    assert!(
+        size.width < bare.width,
+        "percent column + zero panel floor below a real table: {size:?}"
+    );
+}
+
+#[test]
 fn a_patch_holding_both_a_plot_and_a_table_validates() {
     let comp = || beside(Patch::new("summary"), Patch::new("spare"));
     let view = PlotComposition::new(&comp())
@@ -580,6 +892,19 @@ fn a_patch_holding_both_a_plot_and_a_table_validates() {
         )),
         "validate reports the overpainted patch: {issues:?}"
     );
+}
+
+#[test]
+#[should_panic(expected = "share grid row 1 but name different row ordinals")]
+fn disagreeing_row_ordinals_in_one_grid_row_are_refused() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let mut view =
+        PlotComposition::new(&comp()).with_table(Table::new(&comp(), "summary").cells([
+            cell(Body { row: 0 }, 1, 0, "1"),
+            cell(Body { row: 1 }, 1, 1, "2"),
+        ]));
+    draw_calls(&mut view, 800, 600);
 }
 
 #[test]

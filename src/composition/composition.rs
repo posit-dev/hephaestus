@@ -414,6 +414,37 @@ impl Composition {
         Element::Composition(self).try_solve(size, dpi)
     }
 
+    /// The composition's intrinsic minimum size: `Fixed` tracks at
+    /// their absolute size (percent terms floor at zero), `Auto` and
+    /// `Fr` tracks at their content minimum. See
+    /// [`Grid::natural_size`](crate::layout::Grid::natural_size) for the
+    /// per-track semantics.
+    ///
+    /// # Panics
+    ///
+    /// On any [`CompositionError`], like [`Self::solve`]. Use
+    /// [`Self::try_natural_size`] to inspect it instead.
+    pub fn natural_size(self, dpi: f64) -> Size {
+        match self.try_natural_size(dpi) {
+            Ok(size) => size,
+            Err(e) => panic!("composition error: {e} — use try_natural_size to handle this"),
+        }
+    }
+
+    /// Like [`Self::natural_size`] but returns an error instead of
+    /// panicking.
+    pub fn try_natural_size(self, dpi: f64) -> Result<Size, CompositionError> {
+        let element = Element::Composition(self);
+        element.check_construction()?;
+        let mut state = BuildState::new();
+        let root_id = state.alloc_id();
+        let grid = match element {
+            Element::Patch(p) => build_single_patch(p, root_id, &mut state)?,
+            Element::Composition(c) => build_composition_grid(c, root_id, &mut state, None)?,
+        };
+        Ok(grid.natural_size(dpi))
+    }
+
     /// The first construction error recorded by the builders, if any.
     /// [`Self::try_solve`] surfaces the same thing; this reports it
     /// without solving.
