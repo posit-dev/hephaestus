@@ -23,7 +23,7 @@ use crate::layout::{Measure, WidthHint};
 use crate::path::{FillRule, Path};
 use crate::pick::PickId;
 use crate::plot::chrome::axis::axis_side_to_channel_side;
-use crate::plot::chrome::linear_axis::{pt_to_px, stroke_from_rect_border};
+use crate::plot::chrome::linear_axis::pt_to_px;
 use crate::plot::chrome::text::{draw_text_element_in_rect, rotated_bbox, text_style_from};
 use crate::plot::pick::{part_scope, PlotPart};
 use crate::plot::theme::HAlign;
@@ -328,7 +328,7 @@ pub fn draw_strip(
     let bg_path = bg.as_ref().map(|el| strip_background_path(el, rect, dpi));
     if let (Some(el), Some(path)) = (bg.as_ref(), bg_path.as_ref()) {
         scene.push_pick_scope(&part_scope(PlotPart::StripBackground));
-        paint_strip_background(scene, el, path, theme, dpi);
+        paint_strip_background(scene, el, path, rect, theme, dpi);
         scene.pop_pick_scope();
     }
 
@@ -467,15 +467,16 @@ fn strip_background_path(bg: &RectElement, rect: Rect, dpi: f64) -> Path {
 }
 
 /// Paint a strip's filled background + optional border using a
-/// pre-built `path`.
+/// pre-built `path` for the fill; the border strokes per side over
+/// `area`.
 fn paint_strip_background(
     scene: &mut dyn SceneBuilder,
     bg: &RectElement,
     path: &Path,
+    area: Rect,
     theme: &Theme,
     dpi: f64,
 ) {
-    let defaults = rect_concrete_defaults();
     if let Some(fill) = bg.fill.clone() {
         let brush = Brush::Solid(fill.resolve(&theme.palette));
         scene.fill(
@@ -487,21 +488,7 @@ fn paint_strip_background(
             PickId::Skip,
         );
     }
-    let lw = bg
-        .linewidth_pt
-        .or(defaults.linewidth_pt)
-        .expect("rect linewidth default")
-        .resolve(1.0);
-    if lw > 0.0 {
-        let stroke = stroke_from_rect_border(bg, dpi);
-        let color = bg
-            .color
-            .clone()
-            .or(defaults.color)
-            .expect("rect color default");
-        let brush = Brush::Solid(color.resolve(&theme.palette));
-        scene.stroke(&stroke, Affine::IDENTITY, &brush, None, path, PickId::Skip);
-    }
+    crate::plot::chrome::panel::stroke_rect_element_sides(scene, bg, &theme.palette, area, dpi);
 }
 
 /// Map an [`AxisSide`] to the matching [`Slot`](crate::composition::Slot)

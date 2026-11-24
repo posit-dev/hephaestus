@@ -177,15 +177,25 @@ pub(crate) fn draw_panel_outline(
     let Some(border) = theme.panel_border.as_set() else {
         return;
     };
-    let outline_path = panel_outline_path(
-        projection,
-        panel,
-        panel_corner_radius_px(theme, dpi),
-        scales.channel_0,
-        scales.channel_1,
-    );
     scene.push_pick_scope(&part_scope(PlotPart::PanelOutline));
-    stroke_rect_element_border(scene, border, &theme.palette, &outline_path, dpi);
+    match projection {
+        Projection::Cartesian => {
+            stroke_rect_element_sides(scene, border, &theme.palette, panel, dpi);
+        }
+        // A non-rectangular outline has no axis-aligned sides;
+        // per-side widths have no meaning on it, so it strokes
+        // uniformly.
+        Projection::Polar(_) | Projection::Custom(_) => {
+            let outline_path = panel_outline_path(
+                projection,
+                panel,
+                panel_corner_radius_px(theme, dpi),
+                scales.channel_0,
+                scales.channel_1,
+            );
+            stroke_rect_element_border(scene, border, &theme.palette, &outline_path, dpi);
+        }
+    }
     scene.pop_pick_scope();
 }
 
@@ -236,6 +246,102 @@ fn stroke_rect_element_border(
         .expect("rect color default");
     let brush = Brush::Solid(color.resolve(palette));
     scene.stroke(&stroke, Affine::IDENTITY, &brush, None, path, PickId::Skip);
+}
+
+/// Resolve a [`RectElement`]'s corner radius to px, with the concrete
+/// default as fallback. Shared by every paint site that wants the
+/// fill path and the border chains to agree on the shape.
+pub(crate) fn rect_element_corner_radius_px(rect: &RectElement, dpi: f64) -> f64 {
+    let defaults = crate::plot::theme::rect_concrete_defaults();
+    let radius_pt = rect
+        .corner_radius
+        .or(defaults.corner_radius)
+        .map(|l| l.resolve(0.0))
+        .unwrap_or(0.0);
+    (radius_pt * dpi / 72.0).max(0.0)
+}
+
+/// Stroke a [`RectElement`]'s border over an axis-aligned rect,
+/// honoring per-side `border_widths_pt`. A uniform border strokes as
+/// one closed path so `corner_radius` cooperates; mixed per-side
+/// widths group into contiguous same-width polyline chains (T → R →
+/// B → L) with sharp corners, the markdown block border's approach.
+/// A side whose width resolves to 0 is not drawn.
+pub(crate) fn stroke_rect_element_sides(
+    scene: &mut dyn SceneBuilder,
+    rect: &RectElement,
+    palette: &crate::plot::theme::Palette,
+    area: Rect,
+    dpi: f64,
+) {
+    use crate::plot::theme::rect_concrete_defaults;
+    let defaults = rect_concrete_defaults();
+    let uniform = rect.linewidth_pt.or(defaults.linewidth_pt);
+    let pt_to_px = dpi / 72.0;
+    let widths_px = rect.side_widths_pt().map(|w| {
+        w.or(uniform)
+            .map(|l| l.resolve(1.0) * pt_to_px)
+            .unwrap_or(0.0)
+    });
+    if widths_px.iter().all(|&w| w <= 0.0) {
+        return;
+    }
+    let color = rect
+        .color
+        .clone()
+        .or(defaults.color)
+        .expect("rect color default");
+    let brush = Brush::Solid(color.resolve(palette));
+
+    if widths_px.iter().all(|&w| w == widths_px[0]) {
+        let radius_px = rect_element_corner_radius_px(rect, dpi);
+        let path: Path = if radius_px > 0.0 {
+            crate::primitives::rounded_rect(area, radius_px)
+        } else {
+            area.to_path(0.0)
+        };
+        let stroke = stroke_from_rect_border(rect, dpi);
+        scene.stroke(&stroke, Affine::IDENTITY, &brush, None, &path, PickId::Skip);
+        return;
+    }
+
+    let linetype = rect
+        .linetype
+        .clone()
+        .or(defaults.linetype)
+        .expect("rect linetype default");
+    // Side i runs from corner i to corner i+1: T, R, B, L.
+    let corners = [
+        crate::geometry::Point::new(area.x0, area.y0),
+        crate::geometry::Point::new(area.x1, area.y0),
+        crate::geometry::Point::new(area.x1, area.y1),
+        crate::geometry::Point::new(area.x0, area.y1),
+    ];
+    let mut i = 0;
+    while i < 4 {
+        let w = widths_px[i];
+        if w <= 0.0 {
+            i += 1;
+            continue;
+        }
+        let mut path = Path::new();
+        path.move_to(corners[i]);
+        let mut j = i;
+        while j < 4 && widths_px[j] == w {
+            path.line_to(corners[(j + 1) % 4]);
+            j += 1;
+        }
+        let stroke = crate::plot::geom::resolve::build_stroke_for_pattern(
+            w,
+            crate::stroke::Cap::Butt,
+            crate::stroke::Join::Miter,
+            &linetype,
+            0.0,
+            dpi,
+        );
+        scene.stroke(&stroke, Affine::IDENTITY, &brush, None, &path, PickId::Skip);
+        i = j;
+    }
 }
 
 /// Iterate the scale's minor and major breaks, stroking each

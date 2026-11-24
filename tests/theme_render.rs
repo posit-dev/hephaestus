@@ -644,3 +644,43 @@ fn polar_axis_title_outline_reaches_the_scene() {
         "themed polar axis-title outline should emit stroked glyph runs"
     );
 }
+
+#[test]
+fn per_side_panel_border_draws_only_the_set_sides() {
+    // A panel border with only top (2pt) and bottom (4pt) set draws
+    // exactly two horizontal chains at those widths.
+    let theme = Theme {
+        panel_border: Element::Set(RectElement {
+            color: Some(ThemeColor::Ink),
+            border_widths_pt: Some([Some(Length::Abs(2.0)), None, Some(Length::Abs(4.0)), None]),
+            ..RectElement::default()
+        }),
+        ..Theme::default()
+    };
+    let (mut view, mut scene) = single_plot_view(theme);
+    render_view(&mut view, &mut scene);
+
+    let panel_strokes: Vec<f64> = scene
+        .ops
+        .iter()
+        .enumerate()
+        .filter(|(i, op)| {
+            matches!(op, Op::Stroke { .. })
+                && scene
+                    .scope_at(*i)
+                    .iter()
+                    .any(|s| s.name() == Some("panel_outline"))
+        })
+        .filter_map(|(_, op)| match op {
+            Op::Stroke { stroke, path, .. } => {
+                let bb = hephaestus::path::bounding_box(path);
+                (bb.height() == 0.0).then_some(stroke.width)
+            }
+            _ => None,
+        })
+        .collect();
+    let pt = DPI / 72.0;
+    assert_eq!(panel_strokes.len(), 2, "top and bottom chains only");
+    assert!(panel_strokes.iter().any(|&w| (w - 2.0 * pt).abs() < 1e-9));
+    assert!(panel_strokes.iter().any(|&w| (w - 4.0 * pt).abs() < 1e-9));
+}
