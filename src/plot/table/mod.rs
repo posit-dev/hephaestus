@@ -125,8 +125,12 @@ pub struct Table {
 }
 
 impl Table {
-    /// Bind a table to `patch_id`. Panics when the composition has no
-    /// patch with that id — see [`Self::try_new`].
+    /// Bind a table to `patch_id`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the composition has no patch with that id — see
+    /// [`Self::try_new`] for the fallible form.
     pub fn new(composition: &Composition, patch_id: impl Into<String>) -> Self {
         match Self::try_new(composition, patch_id) {
             Ok(table) => table,
@@ -294,19 +298,24 @@ impl Table {
 
     /// The grid dimensions the cells imply: `(rows, columns)`.
     fn grid_shape(&self) -> (u16, u16) {
+        // Widened before adding: a hostile document can name a span
+        // running past u16::MAX, which must not panic the reader.
         let nrow = self
             .cells
             .iter()
-            .map(|c| c.row + c.row_span)
+            .map(|c| c.row as u32 + c.row_span as u32)
             .max()
             .unwrap_or(0);
         let ncol = self
             .cells
             .iter()
-            .map(|c| c.col + c.col_span)
+            .map(|c| c.col as u32 + c.col_span as u32)
             .max()
             .unwrap_or(0);
-        (nrow, ncol)
+        (
+            nrow.min(u16::MAX as u32) as u16,
+            ncol.min(u16::MAX as u32) as u16,
+        )
     }
 
     /// Check the grid: spans at least 1, no two cells overlapping, and
@@ -330,15 +339,38 @@ impl Table {
         if self.columns.len() > ncol as usize || self.rows.len() > nrow as usize {
             return Err(PlotError::TableSpecOutOfRange { patch });
         }
-        let mut occupied = vec![false; nrow as usize * ncol as usize];
-        for c in &self.cells {
-            for r in c.row..c.row + c.row_span {
-                for col in c.col..c.col + c.col_span {
-                    let i = r as usize * ncol as usize + col as usize;
-                    if occupied[i] {
-                        return Err(PlotError::TableCellOverlap { patch, row: r, col });
-                    }
-                    occupied[i] = true;
+        // A span running past u16::MAX is refused rather than
+        // saturated: `grid_shape` clamps only because the inner grid's
+        // track vectors can't be longer anyway.
+        if self.cells.iter().any(|c| {
+            c.row as u32 + c.row_span as u32 > u16::MAX as u32
+                || c.col as u32 + c.col_span as u32 > u16::MAX as u32
+        }) {
+            return Err(PlotError::TableSpecOutOfRange { patch });
+        }
+        // Pairwise rectangle intersection rather than a bitmap: grid
+        // coordinates are u16, so a bitmap costs up to 4 GiB on a
+        // sparse grid far from the origin, and walking every covered
+        // position lets one giant span force billions of iterations.
+        // Widened to u32 — `row + row_span` can exceed u16.
+        let extent = |c: &TableCell| {
+            (
+                c.row as u32,
+                c.col as u32,
+                c.row as u32 + c.row_span as u32,
+                c.col as u32 + c.col_span as u32,
+            )
+        };
+        for (i, a) in self.cells.iter().enumerate() {
+            let (ar0, ac0, ar1, ac1) = extent(a);
+            for b in &self.cells[..i] {
+                let (br0, bc0, br1, bc1) = extent(b);
+                if ar0 < br1 && br0 < ar1 && ac0 < bc1 && bc0 < ac1 {
+                    return Err(PlotError::TableCellOverlap {
+                        patch,
+                        row: a.row.max(b.row),
+                        col: a.col.max(b.col),
+                    });
                 }
             }
         }

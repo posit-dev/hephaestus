@@ -842,6 +842,10 @@ pub enum ValidationIssue {
         patch_id: String,
         scale_name: String,
     },
+    /// A patch holds both plots and a table. Wiring keeps the plots
+    /// and the table still draws into the panel they sized, so the
+    /// two overpaint — one or the other has to move.
+    TableOverPlot { patch_id: String },
     /// Chrome was attached to a composition id that no named
     /// composition in the tree carries, so it can never resolve a rect
     /// — an id-targeted chrome call naming a mistyped or detached
@@ -1888,6 +1892,15 @@ impl PlotComposition {
                         }
                     }
                 }
+            }
+        }
+        // A patch holding both plots and a table wires the plots and
+        // still draws the table into their panel — the two overpaint.
+        for id in self.tables.keys() {
+            if self.plots.get(id).is_some_and(|list| !list.is_empty()) {
+                out.push(ValidationIssue::TableOverPlot {
+                    patch_id: id.clone(),
+                });
             }
         }
         // Table cells' scaled aesthetics name scales directly.

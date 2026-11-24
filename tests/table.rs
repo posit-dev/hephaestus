@@ -561,6 +561,28 @@ fn an_unregistered_scaled_name_draws_nothing_and_validates() {
 }
 
 #[test]
+fn a_patch_holding_both_a_plot_and_a_table_validates() {
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let view = PlotComposition::new(&comp())
+        .with_plot(hephaestus::plot::Plot::new(&comp(), "summary"))
+        .with_table(Table::new(&comp(), "summary").cells([cell(
+            TableCellKind::Body { row: 0 },
+            0,
+            0,
+            "a",
+        )]));
+    let issues = view.validate();
+    assert!(
+        issues.iter().any(|issue| matches!(
+            issue,
+            hephaestus::plot::composition::ValidationIssue::TableOverPlot { patch_id }
+                if patch_id == "summary"
+        )),
+        "validate reports the overpainted patch: {issues:?}"
+    );
+}
+
+#[test]
 fn column_parity_stripes_columns() {
     use TableCellKind::*;
     let comp = || beside(Patch::new("summary"), Patch::new("spare"));

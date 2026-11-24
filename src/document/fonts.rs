@@ -126,6 +126,9 @@ pub(crate) fn referenced_families(comp: &PlotComposition) -> (Vec<String>, Vec<G
             if let Some(table_theme) = &part.table {
                 collect_table_theme_families(table_theme, &mut named, &mut generic);
             }
+            for variant in part.table_variants.values() {
+                collect_table_theme_families(variant, &mut named, &mut generic);
+            }
         }
     }
     for plot in comp.plots.values().flatten() {
@@ -201,16 +204,26 @@ fn collect_table_theme_families(
     ) {
         text_element(&row.text, named, generic);
     }
+    // Every text-bearing layer of the cascade: the four free-text
+    // slots, the heading roles, both parity axes, and the layers
+    // resolving over `body.all`. No destructuring — a field added to
+    // `TableTheme` later must fail here loudly, not hide behind `..`.
     let TableTheme {
         title,
         subtitle,
         caption,
+        footnote,
         heading,
         body,
+        columns,
         stub,
-        ..
+        row_group,
+        summary,
+        rules: _,
+        cell_padding: _,
+        margin: _,
     } = theme;
-    for el in [title, subtitle, caption] {
+    for el in [title, subtitle, caption, footnote] {
         text_element(el, named, generic);
     }
     for r in [
@@ -221,7 +234,12 @@ fn collect_table_theme_families(
         &body.all,
         &body.odd,
         &body.even,
+        &columns.all,
+        &columns.odd,
+        &columns.even,
         stub,
+        row_group,
+        summary,
     ] {
         row(r, named, generic);
     }
