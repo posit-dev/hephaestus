@@ -128,7 +128,51 @@ impl_codec! {
     }
 
     record LineElement { color, linewidth_pt, linetype, cap, join }
-    record RectElement { fill, color, linewidth_pt, linetype, corner_radius }
+}
+
+// `RectElement` is hand-written rather than a `record` above: a field
+// was added after the format's first documents, so its decode
+// tolerates the short record, like `AxisTheme`'s.
+#[cfg(feature = "document-write")]
+impl Encode for RectElement {
+    fn encode(&self, w: &mut Writer) {
+        let body = w.detached(|w| {
+            self.fill.encode(w);
+            self.color.encode(w);
+            self.linewidth_pt.encode(w);
+            self.linetype.encode(w);
+            self.corner_radius.encode(w);
+            self.border_widths_pt.encode(w);
+        });
+        w.bytes(&body);
+    }
+}
+
+#[cfg(feature = "document-read")]
+impl Decode for RectElement {
+    fn decode(r: &mut Reader<'_>) -> Result<Self, DocumentError> {
+        let len = r.count()?;
+        let end = r.pos() + len;
+        let out = (|r: &mut Reader<'_>| {
+            Ok(RectElement {
+                fill: Decode::decode(r)?,
+                color: Decode::decode(r)?,
+                linewidth_pt: Decode::decode(r)?,
+                linetype: Decode::decode(r)?,
+                corner_radius: Decode::decode(r)?,
+                // A document written before `border_widths_pt` existed
+                // ends the record here; its rects draw one uniform
+                // border.
+                border_widths_pt: if r.pos() < end {
+                    Decode::decode(r)?
+                } else {
+                    None
+                },
+            })
+        })(r)?;
+        r.skip_to(end, "RectElement")?;
+        Ok(out)
+    }
 }
 
 // ─── Axis ────────────────────────────────────────────────────────────────────

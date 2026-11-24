@@ -669,3 +669,212 @@ fn a_mixed_composition_round_trips_through_a_document() {
         }
     }
 }
+
+#[test]
+fn a_spanner_breaks_the_column_rules_beneath_it() {
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.table.rules.vertical = Element::Set(LineElement {
+            linewidth_pt: Some(hephaestus::plot::theme::Length::Abs(1.0)),
+            ..LineElement::default()
+        });
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+
+    // Walk the ops tracking the part scope: collect the spanner
+    // label's vertical position and every stroked rule's bounds.
+    let mut parts: Vec<Option<String>> = Vec::new();
+    let mut spanner_y = f64::INFINITY;
+    let mut rule_bounds = Vec::new();
+    for op in &ops {
+        match op {
+            Op::PushPickScope { scope } => parts.push(scope.name().map(str::to_owned)),
+            Op::PopPickScope => {
+                parts.pop();
+            }
+            Op::DrawGlyphs(run) => {
+                if parts.iter().any(|n| n.as_deref() == Some("table_spanner")) {
+                    for g in &run.glyphs {
+                        spanner_y = spanner_y.min(f64::from(g.y));
+                    }
+                }
+            }
+            Op::Stroke { path, .. } if parts.iter().any(|n| n.as_deref() == Some("table_rule")) => {
+                rule_bounds.push(hephaestus::path::bounding_box(path));
+            }
+            _ => {}
+        }
+    }
+    assert!(spanner_y.is_finite(), "a spanner label was drawn");
+
+    // One vertical segment per interior column boundary, contiguous
+    // from the stub-head row down — none crossing the spanner row.
+    let vertical: Vec<_> = rule_bounds.iter().filter(|b| b.width() == 0.0).collect();
+    assert_eq!(
+        vertical.len(),
+        3,
+        "one column rule segment per interior boundary"
+    );
+    for b in &vertical {
+        assert!(
+            b.y0 > spanner_y,
+            "a column rule crosses the spanner row: {b:?} vs spanner at y {spanner_y}"
+        );
+    }
+}
+
+/// Stroke segments recorded under a `table_rule` or cell-part scope,
+/// as (bounding box, width, color, part name).
+fn stroke_segments(
+    ops: &[Op],
+) -> Vec<(
+    hephaestus::geometry::Rect,
+    f64,
+    hephaestus::color::Color,
+    String,
+)> {
+    let mut parts: Vec<Option<String>> = Vec::new();
+    let mut out = Vec::new();
+    for op in ops {
+        match op {
+            Op::PushPickScope { scope } => parts.push(scope.name().map(str::to_owned)),
+            Op::PopPickScope => {
+                parts.pop();
+            }
+            Op::Stroke {
+                path,
+                stroke,
+                brush: hephaestus::brush::Brush::Solid(c),
+                ..
+            } => out.push((
+                hephaestus::path::bounding_box(path),
+                stroke.width,
+                *c,
+                parts.last().cloned().flatten().unwrap_or_default(),
+            )),
+            _ => {}
+        }
+    }
+    out
+}
+
+#[test]
+fn a_cell_border_claims_its_four_edges() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let red = hephaestus::color::Color::from_rgb8(255, 0, 0);
+    let table = Table::new(&comp(), "summary").cells([
+        cell(ColumnLabel, 0, 0, "h"),
+        cell(Body { row: 0 }, 1, 0, "a")
+            .fixed(hephaestus::plot::TableScaledAesthetic::BorderColor, red)
+            .fixed(hephaestus::plot::TableScaledAesthetic::BorderWidth, 3.0),
+        cell(Body { row: 1 }, 2, 0, "b"),
+    ]);
+    let mut view = PlotComposition::new(&comp()).with_table(table);
+    let ops = draw_calls(&mut view, 500, 300);
+
+    // Four red segments, one per edge of the bordered cell, drawn at
+    // the scaled width (3pt at 96dpi = 4px) under the cell's part.
+    let red_segments: Vec<_> = stroke_segments(&ops)
+        .into_iter()
+        .filter(|(_, _, c, _)| *c == red)
+        .collect();
+    assert_eq!(red_segments.len(), 4, "one segment per cell edge");
+    for (_, w, _, part) in &red_segments {
+        assert_eq!(*w, 4.0);
+        assert_eq!(part, "table_cell");
+    }
+}
+
+#[test]
+fn a_per_side_theme_border_draws_only_that_side() {
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.table.body.all = TableCellTheme {
+            background: Element::Set(RectElement {
+                color: Some(ThemeColor::Ink),
+                border_widths_pt: Some([
+                    Some(hephaestus::plot::theme::Length::Abs(2.0)),
+                    None,
+                    None,
+                    None,
+                ]),
+                ..RectElement::default()
+            }),
+            ..TableCellTheme::default()
+        };
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+
+    // Every stroke is horizontal: one merged segment per body row
+    // top, including the first, whose 2pt claim outbids the default
+    // header rule on that edge.
+    let segments = stroke_segments(&ops);
+    let rule_segments: Vec<_> = segments
+        .iter()
+        .filter(|(_, _, _, part)| part == "table_rule")
+        .collect();
+    assert!(
+        rule_segments.iter().all(|(bb, _, _, _)| bb.height() == 0.0),
+        "no vertical strokes remain: {rule_segments:?}"
+    );
+    let top_borders: Vec<_> = segments
+        .iter()
+        .filter(|(_, w, _, part)| part == "table_cell" && *w > 2.0)
+        .collect();
+    assert_eq!(top_borders.len(), 4, "one merged top border per body row");
+}
+
+#[test]
+fn a_narrower_cell_border_loses_the_edge_to_a_rule() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let red = hephaestus::color::Color::from_rgb8(255, 0, 0);
+    // The first body row's top edge is the header rule's edge; a
+    // 0.5pt cell border loses to the default 1pt header rule.
+    let table = Table::new(&comp(), "summary").cells([
+        cell(ColumnLabel, 0, 0, "h"),
+        cell(Body { row: 0 }, 1, 0, "a")
+            .fixed(hephaestus::plot::TableScaledAesthetic::BorderColor, red)
+            .fixed(hephaestus::plot::TableScaledAesthetic::BorderWidth, 0.5),
+    ]);
+    let mut view = PlotComposition::new(&comp()).with_table(table);
+    let ops = draw_calls(&mut view, 500, 300);
+
+    let segments = stroke_segments(&ops);
+    // The cell keeps its uncontested left and right edges, and loses
+    // the top to the 1pt header rule and the bottom to the 1pt outer
+    // rule — the wider claim wins each contested edge.
+    let red_segments: Vec<_> = segments.iter().filter(|(_, _, c, _)| *c == red).collect();
+    assert_eq!(red_segments.len(), 2, "only the vertical edges won");
+    assert!(red_segments.iter().all(|(bb, _, _, _)| bb.width() == 0.0));
+    assert!(
+        segments
+            .iter()
+            .any(|(bb, _, _, part)| part == "table_rule" && bb.height() == 0.0),
+        "the header rule still spans the contested edge"
+    );
+}
+
+#[test]
+fn a_per_side_cell_border_draws_only_that_side_on_that_cell() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let red = hephaestus::color::Color::from_rgb8(255, 0, 0);
+    let table = Table::new(&comp(), "summary").cells([
+        cell(Body { row: 0 }, 0, 0, "a")
+            .fixed(hephaestus::plot::TableScaledAesthetic::BorderColor, red)
+            .fixed(hephaestus::plot::TableScaledAesthetic::BorderWidthTop, 2.0),
+        cell(Body { row: 1 }, 1, 0, "b"),
+    ]);
+    let mut view = PlotComposition::new(&comp()).with_table(table);
+    let ops = draw_calls(&mut view, 500, 300);
+
+    let red_segments: Vec<_> = stroke_segments(&ops)
+        .into_iter()
+        .filter(|(_, _, c, _)| *c == red)
+        .collect();
+    assert_eq!(red_segments.len(), 1, "only the top edge claims");
+    let (bb, _, _, _) = &red_segments[0];
+    assert_eq!(bb.height(), 0.0, "the claimed edge is horizontal");
+}

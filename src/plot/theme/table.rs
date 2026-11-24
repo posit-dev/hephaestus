@@ -33,8 +33,12 @@ use super::palette::ThemeColor;
 pub struct TableCellTheme {
     /// Cell text.
     pub text: Element<TextElement>,
-    /// Row background fill. Border fields are ignored — rules are
-    /// themed separately on [`TableRules`].
+    /// Row background fill and cell borders. A border is not stroked
+    /// around the cell's rect: each side claims the grid edge it lies
+    /// on, competing with the neighboring cell's side and with any
+    /// [`TableRules`] line on that edge. The wider claim wins; ties
+    /// break toward the cell over the rule, the heading side over the
+    /// body side, and the top/left cell over the bottom/right one.
     pub background: Element<RectElement>,
 }
 
@@ -128,9 +132,11 @@ impl ResolvedTableCells {
         let background = match (&o.background, &self.background) {
             (Element::Blank, _) => None,
             (Element::Set(v), base) => {
-                let base = base
-                    .clone()
-                    .unwrap_or_else(crate::plot::theme::rect_concrete_defaults);
+                // An empty base, not the concrete defaults: the
+                // override sets exactly what it names, and the
+                // defaults' 1pt border would otherwise conjure a
+                // border on every side the override left alone.
+                let base = base.clone().unwrap_or_default();
                 Some(v.cascade(&base))
             }
             (Element::Inherit, base) => base.clone(),

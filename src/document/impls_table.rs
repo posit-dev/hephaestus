@@ -51,6 +51,10 @@ impl_codec! {
         15 => Underline,
         16 => Strikethrough,
         17 => Align,
+        18 => BorderWidthTop,
+        19 => BorderWidthRight,
+        20 => BorderWidthBottom,
+        21 => BorderWidthLeft,
     }
 
     enum CellAesthetic {
