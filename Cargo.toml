@@ -536,7 +536,7 @@ name = "theme_geom_defaults"
 required-features = ["vello", "png"]
 
 [[example]]
-name = "theme_plot_background"
+name = "theme_background"
 required-features = ["vello", "png"]
 
 [[example]]

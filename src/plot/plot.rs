@@ -58,14 +58,29 @@ pub enum PlotError {
     ///
     /// [`LegendSide::InPanel`]: crate::scales::chrome::LegendSide::InPanel
     InPanelLegendUnsupported,
-    /// A table row's width doesn't match the declared column count.
-    TableRowWidth {
+    /// Two table cells claim the same grid position.
+    TableCellOverlap {
         /// The patch the table is bound to.
         patch: String,
-        /// The row's actual length.
-        got: usize,
-        /// The declared column count.
-        expected: usize,
+        /// The contested grid row.
+        row: u16,
+        /// The contested grid column.
+        col: u16,
+    },
+    /// A table cell spans zero rows or columns.
+    TableCellSpan {
+        /// The patch the table is bound to.
+        patch: String,
+        /// The offending cell's grid row.
+        row: u16,
+        /// The offending cell's grid column.
+        col: u16,
+    },
+    /// A table's column or row blessings describe more tracks than
+    /// its cells occupy.
+    TableSpecOutOfRange {
+        /// The patch the table is bound to.
+        patch: String,
     },
 }
 
@@ -86,13 +101,17 @@ impl std::fmt::Display for PlotError {
                 f,
                 "an in-panel legend anchors to a panel rect, which this target doesn't have"
             ),
-            PlotError::TableRowWidth {
-                patch,
-                got,
-                expected,
-            } => write!(
+            PlotError::TableCellOverlap { patch, row, col } => write!(
                 f,
-                "a row in the table at {patch:?} has {got} values but the table declares {expected} columns"
+                "two cells in the table at {patch:?} claim grid position ({row}, {col})"
+            ),
+            PlotError::TableCellSpan { patch, row, col } => write!(
+                f,
+                "a cell in the table at {patch:?} spans zero rows or columns (at ({row}, {col}))"
+            ),
+            PlotError::TableSpecOutOfRange { patch } => write!(
+                f,
+                "the table at {patch:?} blesses more columns or rows than its cells occupy"
             ),
         }
     }
@@ -951,11 +970,92 @@ fn expand_within_domain(
 
 // ─── Wire / draw ─────────────────────────────────────────────────────────────
 
+/// Paint a patch's [`Slot::Background`] from `theme.background` —
+/// the patch-wide band covering panel + axes + titles + padding, but not
+/// the outer margin sized by `theme.margin`. `Element::Blank` skips
+/// both fill and border. Shared by [`Plot::draw_patch_background_into`]
+/// and [`Table::draw_into`](crate::plot::table::Table::draw_into) so a
+/// table's patch background is identical to a plot's.
+pub(crate) fn paint_patch_background(
+    patch_id: &str,
+    scene: &mut dyn SceneBuilder,
+    layout: &crate::composition::CompositionLayout,
+    theme: &crate::plot::theme::Theme,
+    dpi: f64,
+) {
+    let Some(bg_slot) = theme.background.as_set() else {
+        return;
+    };
+    // Cascade background through the rect root so partial
+    // overrides pick up theme.rect's border / linewidth fields.
+    let bg = bg_slot.cascade(&theme.rect);
+    let defaults = crate::plot::theme::rect_concrete_defaults();
+    let Some(rect) = layout.get(patch_id, Slot::Background) else {
+        return;
+    };
+    if rect.x1 <= rect.x0 || rect.y1 <= rect.y0 {
+        return;
+    }
+    use crate::geometry::Shape as _;
+    let radius_pt = bg
+        .corner_radius
+        .or(defaults.corner_radius)
+        .map(|l| l.resolve(0.0))
+        .unwrap_or(0.0);
+    let radius_px = (radius_pt * dpi / 72.0).max(0.0);
+    let path: crate::path::Path = if radius_px > 0.0 {
+        crate::primitives::rounded_rect(rect, radius_px)
+    } else {
+        rect.to_path(0.0)
+    };
+    // Fill and border are siblings under one part: "the plot background"
+    // is one target, and a hover does not care which of the two
+    // primitives it landed on.
+    scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Background));
+    scene.push_pick_scope(&crate::plot::pick::part_scope(
+        crate::plot::pick::PlotPart::Background,
+    ));
+    if let Some(fill) = bg.fill {
+        let brush = crate::brush::Brush::Solid(fill.resolve(&theme.palette));
+        scene.fill(
+            crate::path::FillRule::NonZero,
+            crate::geometry::Affine::IDENTITY,
+            &brush,
+            None,
+            &path,
+            crate::pick::PickId::Skip,
+        );
+    }
+    let lw = bg
+        .linewidth_pt
+        .or(defaults.linewidth_pt)
+        .expect("rect linewidth default");
+    let width_pt = lw.resolve(1.0);
+    if width_pt > 0.0 {
+        use crate::stroke::{Cap, Join, Stroke};
+        let stroke = Stroke::new(width_pt * dpi / 72.0)
+            .with_caps(Cap::Butt)
+            .with_join(Join::Miter);
+        let color = bg.color.or(defaults.color).expect("rect color default");
+        let brush = crate::brush::Brush::Solid(color.resolve(&theme.palette));
+        scene.stroke(
+            &stroke,
+            crate::geometry::Affine::IDENTITY,
+            &brush,
+            None,
+            &path,
+            crate::pick::PickId::Skip,
+        );
+    }
+    scene.pop_pick_scope();
+    scene.pop_pick_scope();
+}
+
 impl Plot {
     /// Paint this plot's [`Slot::Background`] from
-    /// `theme.plot_background` — the patch-wide background covering
+    /// `theme.background` — the patch-wide background covering
     /// panel + axes + titles + padding, but not the outer margin
-    /// sized by `theme.plot_margin`. `Element::Blank` skips both
+    /// sized by `theme.margin`. `Element::Blank` skips both
     /// fill and border. Called by the orchestrator in a first pass
     /// across all plots so backgrounds settle before any panel
     /// chrome / geom draws on top.
@@ -967,82 +1067,7 @@ impl Plot {
         dpi: f64,
     ) {
         scene.push_pick_scope(&self.pick_scope());
-        self.draw_patch_background_into_inner(scene, layout, theme, dpi);
-        scene.pop_pick_scope();
-    }
-
-    fn draw_patch_background_into_inner(
-        &self,
-        scene: &mut dyn SceneBuilder,
-        layout: &crate::composition::CompositionLayout,
-        theme: &crate::plot::theme::Theme,
-        dpi: f64,
-    ) {
-        let Some(bg_slot) = theme.plot_background.as_set() else {
-            return;
-        };
-        // Cascade plot_background through the rect root so partial
-        // overrides pick up theme.rect's border / linewidth fields.
-        let bg = bg_slot.cascade(&theme.rect);
-        let defaults = crate::plot::theme::rect_concrete_defaults();
-        let Some(rect) = layout.get(&self.patch_id, Slot::Background) else {
-            return;
-        };
-        if rect.x1 <= rect.x0 || rect.y1 <= rect.y0 {
-            return;
-        }
-        use crate::geometry::Shape as _;
-        let radius_pt = bg
-            .corner_radius
-            .or(defaults.corner_radius)
-            .map(|l| l.resolve(0.0))
-            .unwrap_or(0.0);
-        let radius_px = (radius_pt * dpi / 72.0).max(0.0);
-        let path: crate::path::Path = if radius_px > 0.0 {
-            crate::primitives::rounded_rect(rect, radius_px)
-        } else {
-            rect.to_path(0.0)
-        };
-        // Fill and border are siblings under one part: "the plot
-        // background" is one target, and a hover does not care which of the
-        // two primitives it landed on.
-        scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Background));
-        scene.push_pick_scope(&crate::plot::pick::part_scope(
-            crate::plot::pick::PlotPart::PlotBackground,
-        ));
-        if let Some(fill) = bg.fill {
-            let brush = crate::brush::Brush::Solid(fill.resolve(&theme.palette));
-            scene.fill(
-                crate::path::FillRule::NonZero,
-                crate::geometry::Affine::IDENTITY,
-                &brush,
-                None,
-                &path,
-                crate::pick::PickId::Skip,
-            );
-        }
-        let lw = bg
-            .linewidth_pt
-            .or(defaults.linewidth_pt)
-            .expect("rect linewidth default");
-        let width_pt = lw.resolve(1.0);
-        if width_pt > 0.0 {
-            use crate::stroke::{Cap, Join, Stroke};
-            let stroke = Stroke::new(width_pt * dpi / 72.0)
-                .with_caps(Cap::Butt)
-                .with_join(Join::Miter);
-            let color = bg.color.or(defaults.color).expect("rect color default");
-            let brush = crate::brush::Brush::Solid(color.resolve(&theme.palette));
-            scene.stroke(
-                &stroke,
-                crate::geometry::Affine::IDENTITY,
-                &brush,
-                None,
-                &path,
-                crate::pick::PickId::Skip,
-            );
-        }
-        scene.pop_pick_scope();
+        paint_patch_background(&self.patch_id, scene, layout, theme, dpi);
         scene.pop_pick_scope();
     }
 

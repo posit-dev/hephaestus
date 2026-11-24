@@ -9,7 +9,7 @@
 use hephaestus::composition::{beside, Patch};
 use hephaestus::geometry::Size;
 use hephaestus::plot::theme::{Element, LineElement, RectElement, TableCellTheme, ThemeColor};
-use hephaestus::plot::{PlotComposition, Table};
+use hephaestus::plot::{PlotComposition, Table, TableCell, TableCellKind};
 use hephaestus::scene::recording::{Op, RecordingScene};
 
 /// Render the composition and keep the recorded ops.
@@ -19,24 +19,55 @@ fn draw_calls(comp: &mut PlotComposition, w: u32, h: u32) -> Vec<Op> {
     scene.ops
 }
 
+/// Shorthand for a single-track cell.
+fn cell(kind: TableCellKind, row: u16, col: u16, text: &str) -> TableCell {
+    TableCell::new(kind, row, col, text)
+}
+
 /// A table exercising the structural slice: a stub column, a spanner,
-/// a title block and a caption.
+/// a title block and a caption — arranged by hand, as a producer
+/// would: hephaestus owns no arrangement.
+///
+/// Grid (4 columns):
+///   row 0: title (span 4)
+///   row 1: subtitle (span 4)
+///   row 2: spanner over cols 1–2
+///   row 3: stub head + column labels
+///   rows 4–7: stub + body cells
+///   row 8: caption (span 4)
+fn fixture() -> Vec<TableCell> {
+    use TableCellKind::*;
+    let mut cells = vec![
+        cell(Title, 0, 0, "Ticker summary").span(1, 4),
+        cell(Subtitle, 1, 0, "Four sessions").span(1, 4),
+        cell(Spanner, 2, 1, "Session").span(1, 2),
+        cell(StubHead, 3, 0, "Ticker"),
+        cell(ColumnLabel, 3, 1, "Close"),
+        cell(ColumnLabel, 3, 2, "Change"),
+        cell(ColumnLabel, 3, 3, "Volume"),
+    ];
+    let rows = [
+        ("ACME", "72.41", "+1.2%", "1.24M"),
+        ("BRWN", "18.05", "-0.4%", "842K"),
+        ("CRSN", "203.77", "+3.9%", "2.01M"),
+        ("DLTA", "55.92", "+0.1%", "391K"),
+    ];
+    for (r, (ticker, close, change, volume)) in rows.iter().enumerate() {
+        let grid_row = 4 + r as u16;
+        cells.push(cell(Stub { row: r }, grid_row, 0, ticker));
+        cells.push(cell(Body { row: r }, grid_row, 1, close));
+        cells.push(cell(Body { row: r }, grid_row, 2, change));
+        cells.push(cell(Body { row: r }, grid_row, 3, volume));
+    }
+    cells.push(cell(Caption, 8, 0, "Source: simulated").span(1, 4));
+    cells
+}
+
 fn build() -> PlotComposition {
     let comp = || beside(Patch::new("summary"), Patch::new("spare"));
     let table = Table::new(&comp(), "summary")
-        .title("Ticker summary")
-        .subtitle("Four sessions")
-        .column("ticker", "Ticker")
-        .column("close", "Close")
-        .column("change", "Change")
-        .column("volume", "Volume")
-        .stub_column("ticker")
-        .spanner("Session", 0, ["close", "change"])
-        .row(["ACME", "72.41", "+1.2%", "1.24M"])
-        .row(["BRWN", "18.05", "-0.4%", "842K"])
-        .row(["CRSN", "203.77", "+3.9%", "2.01M"])
-        .row(["DLTA", "55.92", "+0.1%", "391K"])
-        .caption("Source: simulated");
+        .cells(fixture())
+        .stub_column(0);
     PlotComposition::new(&comp()).with_table(table)
 }
 
@@ -81,13 +112,80 @@ fn a_themed_stripe_paints_one_background_per_even_row_cell() {
     let ops = draw_calls(&mut view, 700, 400);
 
     // Two even rows of four cells. (The patch background is a rect
-    // fill too, but over `plot_background`'s own path — distinguished
+    // fill too, but over `background`'s own path — distinguished
     // below by brush color.)
     let stripe_fills = ops
         .iter()
         .filter(|op| matches!(op, Op::Fill { brush: hephaestus::brush::Brush::Solid(c), .. } if *c != hephaestus::color::Color::WHITE))
         .count();
     assert_eq!(stripe_fills, 2 * 4, "one stripe fill per even-row cell");
+}
+
+/// Bounding box of the patch background — the one white fill in the
+/// default theme.
+fn patch_background_bounds(ops: &[Op]) -> hephaestus::geometry::Rect {
+    ops.iter()
+        .find_map(|op| match op {
+            Op::Fill {
+                brush: hephaestus::brush::Brush::Solid(c),
+                path,
+                ..
+            } if *c == hephaestus::color::Color::WHITE => {
+                Some(hephaestus::path::bounding_box(path))
+            }
+            _ => None,
+        })
+        .expect("a white patch background fill")
+}
+
+#[test]
+fn the_shared_margin_applies_to_a_table_patch() {
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.margin =
+            hephaestus::plot::theme::Margin::all(hephaestus::plot::theme::Length::Abs(24.0));
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+    let bg = patch_background_bounds(&ops);
+
+    // 24pt at 96dpi is 32px; the background sits inside the margin band.
+    let px = 24.0 * 96.0 / 72.0;
+    assert!((bg.x0 - px).abs() < 1e-6, "left edge at the margin: {bg:?}");
+    assert!((bg.y0 - px).abs() < 1e-6, "top edge at the margin: {bg:?}");
+    assert!(
+        (bg.y1 - (400.0 - px)).abs() < 1e-6,
+        "bottom edge inside the margin: {bg:?}"
+    );
+}
+
+#[test]
+fn the_table_margin_adds_to_the_shared_margin() {
+    let shared_only = {
+        let mut view = build();
+        view.update_theme(|theme| {
+            theme.margin =
+                hephaestus::plot::theme::Margin::all(hephaestus::plot::theme::Length::Abs(24.0));
+        });
+        patch_background_bounds(&draw_calls(&mut view, 700, 400))
+    };
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.margin =
+            hephaestus::plot::theme::Margin::all(hephaestus::plot::theme::Length::Abs(24.0));
+        theme.table.margin =
+            hephaestus::plot::theme::Margin::all(hephaestus::plot::theme::Length::Abs(12.0));
+    });
+    let combined = patch_background_bounds(&draw_calls(&mut view, 700, 400));
+
+    // The table's own 12pt (16px at 96dpi) grows the margin band on
+    // top of the shared one. Only the top / bottom / left edges are
+    // asserted: the table's column sizes itself to content, so the
+    // added right margin moves the patch boundary instead of the
+    // background's right edge.
+    let px = 12.0 * 96.0 / 72.0;
+    assert!((combined.x0 - (shared_only.x0 + px)).abs() < 1e-6);
+    assert!((combined.y0 - (shared_only.y0 + px)).abs() < 1e-6);
+    assert!((combined.y1 - (shared_only.y1 - px)).abs() < 1e-6);
 }
 
 #[test]
@@ -110,16 +208,24 @@ fn blanking_a_rule_removes_its_stroke() {
 
 #[test]
 fn multi_level_spanners_render_without_overlap_panics() {
+    use TableCellKind::*;
     let comp = || hephaestus::composition::grid(1, 1, vec![Patch::new("t").into()]);
-    let table = Table::new(&comp(), "t")
-        .column("id", "Id")
-        .column("a", "A")
-        .column("b", "B")
-        .column("c", "C")
-        .spanner("ab", 0, ["a", "b"])
-        .spanner("abc", 1, ["a", "b", "c"])
-        .row(["r1", "1", "2", "3"])
-        .row(["r2", "4", "5", "6"]);
+    let table = Table::new(&comp(), "t").cells([
+        cell(Spanner, 0, 1, "abc").span(1, 3),
+        cell(Spanner, 1, 1, "ab").span(1, 2),
+        cell(ColumnLabel, 2, 0, "Id"),
+        cell(ColumnLabel, 2, 1, "A"),
+        cell(ColumnLabel, 2, 2, "B"),
+        cell(ColumnLabel, 2, 3, "C"),
+        cell(Body { row: 0 }, 3, 0, "r1"),
+        cell(Body { row: 0 }, 3, 1, "1"),
+        cell(Body { row: 0 }, 3, 2, "2"),
+        cell(Body { row: 0 }, 3, 3, "3"),
+        cell(Body { row: 1 }, 4, 0, "r2"),
+        cell(Body { row: 1 }, 4, 1, "4"),
+        cell(Body { row: 1 }, 4, 2, "5"),
+        cell(Body { row: 1 }, 4, 3, "6"),
+    ]);
     let mut view = PlotComposition::new(&comp()).with_table(table);
     let ops = draw_calls(&mut view, 400, 300);
     // Two spanners + four labels + eight body cells.
@@ -131,30 +237,33 @@ fn multi_level_spanners_render_without_overlap_panics() {
 }
 
 #[test]
-fn a_row_of_the_wrong_width_is_refused() {
+fn overlapping_cells_are_refused() {
     let comp = || hephaestus::composition::grid(1, 1, vec![Patch::new("t").into()]);
-    let result = std::panic::catch_unwind(|| {
-        Table::new(&comp(), "t").column("a", "A").row(["1", "2"]);
-    });
-    assert!(result.is_err());
+    let table = Table::new(&comp(), "t").cells([
+        cell(TableCellKind::Body { row: 0 }, 0, 0, "a"),
+        cell(TableCellKind::Body { row: 0 }, 0, 0, "b"),
+    ]);
+    let mut view = PlotComposition::new(&comp()).with_table(table);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        draw_calls(&mut view, 400, 300);
+    }));
+    assert!(result.is_err(), "overlapping cells must panic at wire time");
 }
 
 #[test]
-fn a_cell_style_paints_exactly_one_background() {
+fn a_fixed_fill_paints_exactly_one_background() {
+    use TableCellKind::*;
     let comp = || beside(Patch::new("summary"), Patch::new("spare"));
-    let highlight = TableCellTheme {
-        background: Element::Set(RectElement {
-            fill: Some(ThemeColor::Accent),
-            ..RectElement::default()
-        }),
-        ..TableCellTheme::default()
-    };
-    let table = Table::new(&comp(), "summary")
-        .column("id", "Id")
-        .column("value", "Value")
-        .row(["a", "1.0"])
-        .row(["b", "2.5"])
-        .cell_style(1, "value", highlight.clone());
+    let accent = ThemeColor::Accent.resolve(&hephaestus::plot::theme::Palette::default());
+    let table = Table::new(&comp(), "summary").cells([
+        cell(ColumnLabel, 0, 0, "Id"),
+        cell(ColumnLabel, 0, 1, "Value"),
+        cell(Body { row: 0 }, 1, 0, "a"),
+        cell(Body { row: 0 }, 1, 1, "1.0"),
+        cell(Body { row: 1 }, 2, 0, "b"),
+        cell(Body { row: 1 }, 2, 1, "2.5")
+            .fixed(hephaestus::plot::TableScaledAesthetic::Fill, accent),
+    ]);
     let mut view = PlotComposition::new(&comp()).with_table(table);
     let ops = draw_calls(&mut view, 500, 300);
     let fills = ops
@@ -162,59 +271,145 @@ fn a_cell_style_paints_exactly_one_background() {
         .filter(|op| matches!(op, Op::Fill { brush: hephaestus::brush::Brush::Solid(c), .. } if *c != hephaestus::color::Color::WHITE))
         .count();
     assert_eq!(fills, 1, "only the highlighted cell paints a fill");
-
-    // A row style paints the whole row (both cells), and the cell
-    // override beats it field-for-field — here it replaces the row's
-    // fill with its own, so the row contributes one fill, not two.
-    let table = Table::new(&comp(), "summary")
-        .column("id", "Id")
-        .column("value", "Value")
-        .row(["a", "1.0"])
-        .row(["b", "2.5"])
-        .row_style(1, highlight.clone())
-        .cell_style(1, "id", TableCellTheme::default());
-    let mut view = PlotComposition::new(&comp()).with_table(table);
-    let ops = draw_calls(&mut view, 500, 300);
-    let fills = ops
-        .iter()
-        .filter(|op| matches!(op, Op::Fill { brush: hephaestus::brush::Brush::Solid(c), .. } if *c != hephaestus::color::Color::WHITE))
-        .count();
-    assert_eq!(fills, 2, "the row style fills its row's cells");
 }
 
 #[test]
-fn a_cell_style_can_hide_text() {
+fn a_scaled_text_size_resizes_the_cells_text() {
+    use TableCellKind::*;
     let comp = || beside(Patch::new("summary"), Patch::new("spare"));
-    let table = Table::new(&comp(), "summary")
-        .column("id", "Id")
-        .row(["a"])
-        .cell_style(
-            0,
-            "id",
-            TableCellTheme {
-                text: Element::Blank,
-                ..TableCellTheme::default()
-            },
-        );
-    let mut view = PlotComposition::new(&comp()).with_table(table);
+    let table = Table::new(&comp(), "summary").cells([
+        cell(Body { row: 0 }, 0, 0, "small"),
+        cell(Body { row: 1 }, 1, 0, "large").scaled(
+            hephaestus::plot::TableScaledAesthetic::TextSize,
+            10.0_f64,
+            "sizes",
+        ),
+    ]);
+    let mut view = PlotComposition::new(&comp())
+        .add_scale(
+            "sizes",
+            hephaestus::plot::scale::continuous(0.0..=10.0).range_numbers([8.0, 20.0]),
+        )
+        .with_table(table);
     let ops = draw_calls(&mut view, 500, 300);
-    let runs = ops
+    let sizes: Vec<f32> = ops
         .iter()
-        .filter(|op| matches!(op, Op::DrawGlyphs(_)))
-        .count();
-    assert_eq!(runs, 1, "the column label draws; the blanked cell does not");
+        .filter_map(|op| match op {
+            Op::DrawGlyphs(run) => Some(run.font_size),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sizes.len(), 2);
+    assert!(
+        sizes[1] > sizes[0] * 1.5,
+        "the scaled cell's text is much larger: {sizes:?}"
+    );
+}
+
+#[test]
+fn a_string_scale_drives_the_font_axes() {
+    use hephaestus::plot::TableScaledAesthetic::FontStyle;
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let table = Table::new(&comp(), "summary").cells([
+        cell(Body { row: 0 }, 0, 0, "plain").scaled(FontStyle, "plain", "styles"),
+        cell(Body { row: 1 }, 1, 0, "fancy").scaled(FontStyle, "fancy", "styles"),
+    ]);
+    let mut view = PlotComposition::new(&comp())
+        .add_scale(
+            "styles",
+            hephaestus::plot::scale::discrete([
+                hephaestus::scales::Value::from("plain"),
+                hephaestus::scales::Value::from("fancy"),
+            ])
+            .range_strings(["normal", "italic"].map(std::sync::Arc::from)),
+        )
+        .with_table(table);
+    let ops = draw_calls(&mut view, 500, 300);
+    let styles: Vec<String> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::DrawGlyphs(run) => Some(format!("{:?}", run.font)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(styles.len(), 2, "one run per cell");
+    assert_ne!(
+        styles[0], styles[1],
+        "the two cells shape with different font styles"
+    );
+}
+
+#[test]
+fn a_string_alignment_shifts_the_text() {
+    use hephaestus::plot::TableScaledAesthetic::Align;
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let with_align = |align: &str| {
+        let mut view = PlotComposition::new(&comp()).with_table(
+            Table::new(&comp(), "summary")
+                // A pinned track gives the alignment slack to distribute.
+                .column_width(0, hephaestus::layout::Extent::px(200.0))
+                .cells([cell(Body { row: 0 }, 0, 0, "cell").fixed(Align, align.to_string())]),
+        );
+        let ops = draw_calls(&mut view, 500, 300);
+        ops.iter()
+            .find_map(|op| match op {
+                Op::DrawGlyphs(run) => run.glyphs.first().map(|g| g.x),
+                _ => None,
+            })
+            .expect("a glyph run")
+    };
+    let start = with_align("start");
+    let end = with_align("end");
+    assert!(
+        end > start,
+        "end-aligned text sits further right: start {start}, end {end}"
+    );
+}
+
+#[test]
+fn a_later_aesthetic_binding_wins() {
+    use hephaestus::plot::TableScaledAesthetic::Fill;
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    // Scaled first, then raw over it: the raw value wins.
+    let table = Table::new(&comp(), "summary").cells([cell(Body { row: 0 }, 0, 0, "a")
+        .scaled_fill(0.0_f64, "heat")
+        .fixed(Fill, hephaestus::color::rgb8(0, 128, 0))]);
+    let mut view = PlotComposition::new(&comp())
+        .add_scale(
+            "heat",
+            hephaestus::plot::scale::continuous(0.0..=10.0).range_colors([
+                hephaestus::color::rgb8(255, 0, 0),
+                hephaestus::color::rgb8(0, 0, 255),
+            ]),
+        )
+        .with_table(table);
+    let ops = draw_calls(&mut view, 500, 300);
+    let fills = non_white_fills(&ops);
+    assert_eq!(fills, vec![hephaestus::color::rgb8(0, 128, 0)]);
 }
 
 #[test]
 fn row_groups_summaries_and_footnotes_render_in_order() {
+    use TableCellKind::*;
     let comp = || beside(Patch::new("summary"), Patch::new("spare"));
-    let table = Table::new(&comp(), "summary")
-        .column("id", "Id")
-        .column("value", "Value")
-        .row_group("first", [["a", "1.0"], ["b", "2.0"]])
-        .row_group("second", [["c", "3.0"]])
-        .summary_row(["All", "6.0"])
-        .footnote("A note.");
+    let table = Table::new(&comp(), "summary").cells([
+        cell(ColumnLabel, 0, 0, "Id"),
+        cell(ColumnLabel, 0, 1, "Value"),
+        cell(RowGroup, 1, 0, "first").span(1, 2),
+        cell(Body { row: 0 }, 2, 0, "a"),
+        cell(Body { row: 0 }, 2, 1, "1.0"),
+        cell(Body { row: 1 }, 3, 0, "b"),
+        cell(Body { row: 1 }, 3, 1, "2.0"),
+        cell(RowGroup, 4, 0, "second").span(1, 2),
+        cell(Body { row: 2 }, 5, 0, "c"),
+        cell(Body { row: 2 }, 5, 1, "3.0"),
+        cell(Summary { row: 0 }, 6, 0, "All"),
+        cell(Summary { row: 0 }, 6, 1, "6.0"),
+        cell(Footnote, 7, 0, "A note.").span(1, 2),
+    ]);
     let mut view = PlotComposition::new(&comp()).with_table(table);
     let ops = draw_calls(&mut view, 500, 400);
     // One label row (2) + two group headers + six body cells + two
@@ -226,17 +421,161 @@ fn row_groups_summaries_and_footnotes_render_in_order() {
     assert_eq!(runs, 2 + 2 + 6 + 2 + 1);
 }
 
+/// Two body cells with a scale-driven fill: one at each end of a
+/// continuous red→blue ramp.
+fn scaled_fill_view() -> PlotComposition {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let table = Table::new(&comp(), "summary").cells([
+        cell(ColumnLabel, 0, 0, "Id"),
+        cell(ColumnLabel, 0, 1, "Value"),
+        cell(Body { row: 0 }, 1, 0, "a"),
+        cell(Body { row: 0 }, 1, 1, "1.0").scaled_fill(0.0_f64, "heat"),
+        cell(Body { row: 1 }, 2, 0, "b"),
+        cell(Body { row: 1 }, 2, 1, "2.0").scaled_fill(10.0_f64, "heat"),
+    ]);
+    PlotComposition::new(&comp())
+        .add_scale(
+            "heat",
+            hephaestus::plot::scale::continuous(0.0..=10.0).range_colors([
+                hephaestus::color::rgb8(255, 0, 0),
+                hephaestus::color::rgb8(0, 0, 255),
+            ]),
+        )
+        .with_table(table)
+}
+
+/// Non-white solid fill colors, in draw order.
+fn non_white_fills(ops: &[Op]) -> Vec<hephaestus::color::Color> {
+    ops.iter()
+        .filter_map(|op| match op {
+            Op::Fill {
+                brush: hephaestus::brush::Brush::Solid(c),
+                ..
+            } if *c != hephaestus::color::Color::WHITE => Some(*c),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_scaled_fill_maps_the_value_through_the_registry() {
+    let ops = draw_calls(&mut scaled_fill_view(), 500, 300);
+    let fills = non_white_fills(&ops);
+    assert_eq!(
+        fills,
+        vec![
+            hephaestus::color::rgb8(255, 0, 0),
+            hephaestus::color::rgb8(0, 0, 255)
+        ],
+        "the two cells paint the ramp's endpoints"
+    );
+}
+
+#[test]
+fn a_scaled_color_recolors_the_cells_text() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let table = Table::new(&comp(), "summary").cells([
+        cell(Body { row: 0 }, 0, 0, "plain"),
+        cell(Body { row: 1 }, 1, 0, "scaled").scaled_color(10.0_f64, "heat"),
+    ]);
+    let mut view = PlotComposition::new(&comp())
+        .add_scale(
+            "heat",
+            hephaestus::plot::scale::continuous(0.0..=10.0).range_colors([
+                hephaestus::color::rgb8(255, 0, 0),
+                hephaestus::color::rgb8(0, 0, 255),
+            ]),
+        )
+        .with_table(table);
+    let ops = draw_calls(&mut view, 500, 300);
+    let brushes: Vec<&hephaestus::brush::Brush> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::DrawGlyphs(run) => Some(&run.brush),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(brushes.len(), 2);
+    assert!(
+        matches!(brushes[0], hephaestus::brush::Brush::Solid(c) if *c == hephaestus::color::Color::BLACK),
+        "the plain cell keeps the theme's ink"
+    );
+    assert!(
+        matches!(brushes[1], hephaestus::brush::Brush::Solid(c) if *c == hephaestus::color::rgb8(0, 0, 255)),
+        "the scaled cell draws in the ramp's end color"
+    );
+}
+
+#[test]
+fn a_raw_aesthetic_beats_the_theme_cascade() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let accent = ThemeColor::Accent.resolve(&hephaestus::plot::theme::Palette::default());
+    // Body row ordinal 1 is even parity, so the themed stripe below
+    // would paint this cell; the raw aesthetic wins over the cascade.
+    let mut view = PlotComposition::new(&comp()).with_table(
+        Table::new(&comp(), "summary").cells([cell(Body { row: 1 }, 0, 0, "a")
+            .fixed(hephaestus::plot::TableScaledAesthetic::Fill, accent)]),
+    );
+    view.update_theme(|theme| {
+        theme.table.body.even = TableCellTheme {
+            background: Element::Set(RectElement {
+                fill: Some(ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.05)),
+                ..RectElement::default()
+            }),
+            ..TableCellTheme::default()
+        };
+    });
+    let ops = draw_calls(&mut view, 500, 300);
+    let fills = non_white_fills(&ops);
+    assert_eq!(fills.len(), 1, "the raw aesthetic wins; only it paints");
+    assert_eq!(
+        fills[0], accent,
+        "the fill is the raw accent, not the stripe"
+    );
+}
+
+#[test]
+fn an_unregistered_scaled_name_draws_nothing_and_validates() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let table = Table::new(&comp(), "summary")
+        .cells([cell(Body { row: 0 }, 0, 0, "a").scaled_fill(1.0_f64, "nope")]);
+    let mut view = PlotComposition::new(&comp()).with_table(table);
+    let issues = view.validate();
+    assert!(
+        issues.iter().any(|issue| matches!(
+            issue,
+            hephaestus::plot::composition::ValidationIssue::TableMissingScale { scale_name, .. }
+                if scale_name == "nope"
+        )),
+        "validate reports the unknown scale: {issues:?}"
+    );
+    let ops = draw_calls(&mut view, 500, 300);
+    assert!(
+        non_white_fills(&ops).is_empty(),
+        "an unresolvable binding paints nothing"
+    );
+}
+
 #[test]
 fn column_parity_stripes_columns() {
+    use TableCellKind::*;
     let comp = || beside(Patch::new("summary"), Patch::new("spare"));
-    let mut view = PlotComposition::new(&comp()).with_table(
-        Table::new(&comp(), "summary")
-            .column("a", "A")
-            .column("b", "B")
-            .column("c", "C")
-            .row(["1", "2", "3"])
-            .row(["4", "5", "6"]),
-    );
+    let mut view =
+        PlotComposition::new(&comp()).with_table(Table::new(&comp(), "summary").cells([
+            cell(ColumnLabel, 0, 0, "A"),
+            cell(ColumnLabel, 0, 1, "B"),
+            cell(ColumnLabel, 0, 2, "C"),
+            cell(Body { row: 0 }, 1, 0, "1"),
+            cell(Body { row: 0 }, 1, 1, "2"),
+            cell(Body { row: 0 }, 1, 2, "3"),
+            cell(Body { row: 1 }, 2, 0, "4"),
+            cell(Body { row: 1 }, 2, 1, "5"),
+            cell(Body { row: 1 }, 2, 2, "6"),
+        ]));
     view.update_theme(|theme| {
         theme.table.columns.even = TableCellTheme {
             background: Element::Set(RectElement {
@@ -264,43 +603,28 @@ fn column_parity_stripes_columns() {
 fn a_mixed_composition_round_trips_through_a_document() {
     use hephaestus::document::{read_composition, write_composition, ReadContext, WriteOptions};
     use hephaestus::plot::{scale, Plot, PointGeom};
+    use TableCellKind::*;
 
     let build_mixed = || {
         let comp = || beside(Patch::new("summary"), Patch::new("points"));
-        let table = Table::new(&comp(), "summary")
-            .title("Summary")
-            .column("id", "Id")
-            .column("value", "Value")
-            .spanner("all", 0, ["id", "value"])
-            .row_group("grp", [["a", "1.0"]])
-            .row(["b", "2.5"])
-            .summary_row(["All", "3.5"])
-            .footnote("Note.")
-            // Per-row and per-cell overrides must travel too.
-            .row_style(
-                1,
-                TableCellTheme {
-                    background: Element::Set(RectElement {
-                        fill: Some(ThemeColor::Accent),
-                        ..RectElement::default()
-                    }),
-                    ..TableCellTheme::default()
-                },
-            )
-            .cell_style(
-                0,
-                "value",
-                TableCellTheme {
-                    text: Element::Set(hephaestus::plot::theme::TextElement {
-                        font: hephaestus::plot::theme::FontSpec {
-                            weight: Some(hephaestus::plot::theme::FontWeight::BOLD),
-                            ..hephaestus::plot::theme::FontSpec::default()
-                        },
-                        ..hephaestus::plot::theme::TextElement::default()
-                    }),
-                    ..TableCellTheme::default()
-                },
-            );
+        let accent = ThemeColor::Accent.resolve(&hephaestus::plot::theme::Palette::default());
+        let table = Table::new(&comp(), "summary").cells([
+            cell(Title, 0, 0, "Summary").span(1, 2),
+            cell(Spanner, 1, 0, "all").span(1, 2),
+            cell(ColumnLabel, 2, 0, "Id"),
+            cell(ColumnLabel, 2, 1, "Value"),
+            cell(RowGroup, 3, 0, "grp").span(1, 2),
+            cell(Body { row: 0 }, 4, 0, "a"),
+            // Scaled and raw aesthetics must travel too.
+            cell(Body { row: 0 }, 4, 1, "1.0").scaled_fill(1.0_f64, "heat"),
+            cell(Body { row: 1 }, 5, 0, "b"),
+            cell(Body { row: 1 }, 5, 1, "2.5")
+                .fixed(hephaestus::plot::TableScaledAesthetic::Fill, accent)
+                .scaled_color(2.0_f64, "heat"),
+            cell(Summary { row: 0 }, 6, 0, "All"),
+            cell(Summary { row: 0 }, 6, 1, "3.5"),
+            cell(Footnote, 7, 0, "Note.").span(1, 2),
+        ]);
         let mut plot = Plot::new(&comp(), "points").bind("x", "t").bind("y", "v");
         plot.add_geom(
             PointGeom::builder()
@@ -313,6 +637,13 @@ fn a_mixed_composition_round_trips_through_a_document() {
         PlotComposition::new(&comp())
             .add_scale("t", scale::continuous(0.0..=2.0))
             .add_scale("v", scale::continuous(0.0..=3.0))
+            .add_scale(
+                "heat",
+                scale::continuous(0.0..=2.0).range_colors([
+                    hephaestus::color::rgb8(255, 255, 255),
+                    hephaestus::color::rgb8(200, 30, 30),
+                ]),
+            )
             .with_table(table)
             .with_plot(plot)
     };

@@ -176,7 +176,8 @@ pub struct TableTheme {
     pub rules: TableRules,
     /// Inner padding of every cell.
     pub cell_padding: Margin,
-    /// Outer margin around the whole table.
+    /// Outer margin around the whole table, added on top of the shared
+    /// [`Theme::margin`](crate::plot::theme::Theme::margin).
     pub margin: Margin,
 }
 

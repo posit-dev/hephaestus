@@ -91,7 +91,7 @@ pub enum AlignTo {
     #[default]
     Panel,
     /// Align to the full plot interior (everything inside
-    /// `plot_margin` + `plot_padding`, including axis chrome and
+    /// `margin` + `padding`, including axis chrome and
     /// legends). A centered title sits over the whole figure.
     /// Mirrors ggplot2's `plot.title.position = "plot"`.
     Plot,

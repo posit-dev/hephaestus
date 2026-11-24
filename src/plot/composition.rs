@@ -280,13 +280,13 @@ fn wire_into_patch(id: &str, ctx: &RebuildCtx<'_>) -> Patch {
             None => comp_theme.clone(),
         };
         let patch = apply_plot_chrome(Patch::new(id), comp_theme);
-        return table.wire_panel(patch, &effective, dpi, ctx.images);
+        return table.wire_panel(patch, &effective, registry, dpi, ctx.images);
     }
     let _ = registry;
     let _ = dpi;
     // Unattached patches, or non-text builds: just attach a Panel
     // slot so the layout still places a rect for that patch. The
-    // outer margin band is still sized from `theme.plot_margin` so
+    // outer margin band is still sized from `theme.margin` so
     // an empty patch sits within the same chrome rhythm as a
     // populated one.
     let p = apply_plot_chrome(Patch::new(id), comp_theme);
@@ -298,9 +298,9 @@ fn wire_into_patch(id: &str, ctx: &RebuildCtx<'_>) -> Patch {
 
 /// Stitch the theme's outer-chrome fields onto the patch:
 ///
-/// - `theme.plot_margin` → `Patch::margin` (outermost ring tracks).
-/// - `theme.plot_padding` → `Patch::padding` (second-ring tracks).
-/// - `theme.plot_background` → if `Set`, drop an empty cell into
+/// - `theme.margin` → `Patch::margin` (outermost ring tracks).
+/// - `theme.padding` → `Patch::padding` (second-ring tracks).
+/// - `theme.background` → if `Set`, drop an empty cell into
 ///   `Slot::Background` so the solver emits a rect for it (the cell
 ///   has no size opinion of its own; the slot's anatomical span
 ///   takes whatever the surrounding tracks allow). When `Blank`,
@@ -311,7 +311,7 @@ fn apply_plot_chrome(patch: Patch, theme: &Theme) -> Patch {
     use crate::layout::{Cell, Extent, Inset};
     let root_pt = crate::plot::chrome::root_text_pt(theme);
     let margin_inset = {
-        let (mt, mr, mb, ml) = theme.plot_margin.resolve(root_pt);
+        let (mt, mr, mb, ml) = theme.margin.resolve(root_pt);
         (mt != 0.0 || mr != 0.0 || mb != 0.0 || ml != 0.0).then(|| {
             Inset::default()
                 .top(Extent::pt(mt))
@@ -321,7 +321,7 @@ fn apply_plot_chrome(patch: Patch, theme: &Theme) -> Patch {
         })
     };
     let padding_inset = {
-        let (pt, pr, pb, pl) = theme.plot_padding.resolve(root_pt);
+        let (pt, pr, pb, pl) = theme.padding.resolve(root_pt);
         (pt != 0.0 || pr != 0.0 || pb != 0.0 || pl != 0.0).then(|| {
             Inset::default()
                 .top(Extent::pt(pt))
@@ -337,7 +337,7 @@ fn apply_plot_chrome(patch: Patch, theme: &Theme) -> Patch {
     if let Some(inset) = padding_inset {
         patch = patch.padding(inset);
     }
-    if theme.plot_background.as_set().is_some() {
+    if theme.background.as_set().is_some() {
         patch = patch.slot(Slot::Background, Cell::empty());
     }
     patch
@@ -487,7 +487,7 @@ pub(crate) struct CompositionChrome {
     pub(crate) legends: Vec<crate::plot::chrome::legend::Legend>,
     pub(crate) next_legend_id: u32,
     /// Whether to paint the composition's own [`Slot::Background`]
-    /// band from the theme's `plot_background`. Opt-in per
+    /// band from the theme's `background`. Opt-in per
     /// composition: the element is `Set` in the default theme, and
     /// every nesting level painting it unprompted would stack
     /// backgrounds across the whole tree.
@@ -528,7 +528,7 @@ impl CompositionChrome {
         // the solver emits a rect for the band, painted in the draw
         // phase from the effective theme. Mirrors the per-patch path
         // in `wire_into_patch`, including the theme's `Blank` veto.
-        if self.background && theme.plot_background.as_set().is_some() {
+        if self.background && theme.background.as_set().is_some() {
             c = c.slot(Slot::Background, Cell::empty());
         }
 
@@ -593,7 +593,7 @@ impl CompositionChrome {
     }
 
     /// Paint the composition's own background band from the theme's
-    /// `plot_background`, behind the facets. Mirrors the per-patch
+    /// `background`, behind the facets. Mirrors the per-patch
     /// painter in [`Plot::draw_patch_background_into`]; the caller has
     /// already pushed the composition's pick scope.
     fn draw_background_into(
@@ -606,7 +606,7 @@ impl CompositionChrome {
     ) {
         use crate::composition::Slot;
 
-        let Some(bg_slot) = theme.plot_background.as_set() else {
+        let Some(bg_slot) = theme.background.as_set() else {
             return;
         };
         // Cascade through the rect root so partial overrides pick up
@@ -633,7 +633,7 @@ impl CompositionChrome {
         };
         scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Background));
         scene.push_pick_scope(&crate::plot::pick::part_scope(
-            crate::plot::pick::PlotPart::PlotBackground,
+            crate::plot::pick::PlotPart::Background,
         ));
         if let Some(fill) = bg.fill {
             let brush = crate::brush::Brush::Solid(fill.resolve(&theme.palette));
@@ -835,6 +835,12 @@ pub enum ValidationIssue {
         scale_name: String,
         expected: super::geom::ExpectedOutput,
         found: &'static str,
+    },
+    /// A table cell's scaled aesthetic names a scale that isn't in the
+    /// registry.
+    TableMissingScale {
+        patch_id: String,
+        scale_name: String,
     },
     /// Chrome was attached to a composition id that no named
     /// composition in the tree carries, so it can never resolve a rect
@@ -1339,7 +1345,7 @@ impl PlotComposition {
     }
 
     /// Paint the root composition's own background band, filled and
-    /// bordered from the theme's `plot_background` and spanning every
+    /// bordered from the theme's `background` and spanning every
     /// facet. Chainable builder form of [`Self::background_at`].
     pub fn background(mut self) -> Self {
         self.root_chrome_mut().background = true;
@@ -1347,7 +1353,7 @@ impl PlotComposition {
     }
 
     /// Paint the background band of the composition named `id`, filled
-    /// and bordered from the effective theme's `plot_background` and
+    /// and bordered from the effective theme's `background` and
     /// spanning that composition's facets. Opt-in per composition:
     /// the element is `Set` in the default theme, so every nesting
     /// level painting it unprompted would stack backgrounds across
@@ -1708,9 +1714,9 @@ impl PlotComposition {
         }
 
         // Phase 1: patch backgrounds. Every plot lays down its
-        // `Slot::Background` fill from `theme.plot_background`.
+        // `Slot::Background` fill from `theme.background`.
         // Slot::Background's rect already excludes the margin band
-        // sized via `theme.plot_margin` — the patch anatomy
+        // sized via `theme.margin` — the patch anatomy
         // automatically gives the margin space without any manual
         // translation.
         // Each plot's effective theme is resolved once here and shared
@@ -1795,7 +1801,7 @@ impl PlotComposition {
                 Some(part) => Arc::new(self.theme.merge(part)),
                 None => Arc::clone(&self.theme),
             };
-            table.draw_into(scene, layout, &effective, dpi, &self.images);
+            table.draw_into(scene, layout, &effective, &self.scales, dpi, &self.images);
         }
 
         // Phase 6: every plot's labels — legends, title / subtitle /
@@ -1878,6 +1884,21 @@ impl PlotComposition {
                                 scale_name: scale_name.to_string(),
                                 expected,
                                 found,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        // Table cells' scaled aesthetics name scales directly.
+        for table in self.tables.values() {
+            for cell in table.cells_ref() {
+                for (_, aesthetic) in &cell.aesthetics {
+                    if let crate::plot::table::CellAesthetic::Scaled(_, name) = aesthetic {
+                        if !self.scales.contains(name) {
+                            out.push(ValidationIssue::TableMissingScale {
+                                patch_id: table.patch_id().to_string(),
+                                scale_name: name.clone(),
                             });
                         }
                     }
@@ -2538,7 +2559,7 @@ mod tests {
 
         // The vocabulary this fixture should light up.
         for want in [
-            PlotPart::PlotBackground,
+            PlotPart::Background,
             PlotPart::PanelBackground,
             PlotPart::GridMajor,
             PlotPart::AxisTick,

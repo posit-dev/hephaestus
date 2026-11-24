@@ -60,24 +60,29 @@ pub struct Theme {
     ///   panel column only, so a centered title sits over the
     ///   plotting area regardless of left-axis chrome width.
     /// - [`AlignTo::Plot`] — they span the full plot interior
-    ///   (everything inside `plot_margin` + `plot_padding`,
+    ///   (everything inside `margin` + `padding`,
     ///   including axis chrome and legends), so a centered title
     ///   sits over the whole figure.
     ///
     /// Drives all three text slots as a unit — ggplot2's
     /// `plot.title.position` model.
     pub plot_text_align_to: AlignTo,
-    /// Plot background rect — fills the entire plot area behind every
-    /// other element.
-    pub plot_background: Element<RectElement>,
-    /// Margin around the plot's outer edge. Sizes the patch anatomy's
-    /// outermost ring of tracks; sits **outside** [`Self::plot_background`].
-    pub plot_margin: Margin,
-    /// Padding inside the plot background, between the background's
-    /// edge and the start of chrome (title, axes, legends). Sizes the
-    /// second-from-outermost ring of tracks; sits **inside**
-    /// [`Self::plot_background`].
-    pub plot_padding: Margin,
+    /// Background rect of every patch, shared by plots and tables —
+    /// fills the whole patch area (panel / table grid, chrome and
+    /// padding; everything inside [`Self::margin`]) behind every other
+    /// element.
+    pub background: Element<RectElement>,
+    /// Margin around every patch's outer edge, shared by plots and
+    /// tables. Sizes the patch anatomy's outermost ring of tracks; sits
+    /// **outside** [`Self::background`]. A table adds its own
+    /// [`TableTheme::margin`] on top of this shared band.
+    pub margin: Margin,
+    /// Padding inside the background of every patch, shared by plots
+    /// and tables: the breathing room between the background's edge
+    /// and the start of content (title, axes, legends, the table grid).
+    /// Sizes the second-from-outermost ring of tracks; sits **inside**
+    /// [`Self::background`].
+    pub padding: Margin,
 
     // ── Panel chrome ───────────────────────────────────────────────
     /// Panel background — the plotting area's fill.
@@ -153,7 +158,7 @@ impl Default for Theme {
     /// - 11pt base text, black on white.
     /// - White plot background, no border. 5.5pt inner padding
     ///   (ggplot2's `plot.margin` — *padding* in hephaestus
-    ///   terminology, since [`Self::plot_margin`] is the
+    ///   terminology, since [`Self::margin`] is the
     ///   composition gap *outside* the background).
     /// - Grey92 panel fill with no border.
     /// - White grid lines — only visible where they cross the grey
@@ -242,16 +247,16 @@ impl Default for Theme {
             // White plot canvas behind everything. Border is
             // suppressed by zero linewidth — the chrome renderer
             // short-circuits when linewidth resolves to 0.
-            plot_background: Element::Set(RectElement {
+            background: Element::Set(RectElement {
                 fill: Some(ThemeColor::Paper),
                 color: None,
                 linewidth_pt: Some(Length::Abs(0.0)),
                 ..RectElement::default()
             }),
-            plot_margin: Margin::ZERO,
+            margin: Margin::ZERO,
             // ggplot2's `plot.margin` translates to our padding —
             // the breathing room *inside* the plot background.
-            plot_padding: Margin::all(Length::Abs(HALF_LINE_PT)),
+            padding: Margin::all(Length::Abs(HALF_LINE_PT)),
 
             // Grey92 panel fill, no border — the panel reads as a
             // tinted region within the white canvas.
@@ -414,12 +419,12 @@ pub struct ThemePart {
     pub plot_caption: Option<Element<TextElement>>,
     /// Optional plot-text-align-to override.
     pub plot_text_align_to: Option<AlignTo>,
-    /// Optional plot-background override.
-    pub plot_background: Option<Element<RectElement>>,
-    /// Optional plot-margin override.
-    pub plot_margin: Option<Margin>,
+    /// Optional background override.
+    pub background: Option<Element<RectElement>>,
+    /// Optional patch-margin override.
+    pub margin: Option<Margin>,
     /// Optional plot-padding override.
-    pub plot_padding: Option<Margin>,
+    pub padding: Option<Margin>,
 
     /// Optional panel-background override.
     pub panel_background: Option<Element<RectElement>>,
@@ -489,9 +494,9 @@ impl ThemePart {
         set_field!(plot_subtitle);
         set_field!(plot_caption);
         set_field!(plot_text_align_to);
-        set_field!(plot_background);
-        set_field!(plot_margin);
-        set_field!(plot_padding);
+        set_field!(background);
+        set_field!(margin);
+        set_field!(padding);
         set_field!(panel_background);
         set_field!(panel_border);
         set_field!(panel_grid_major);

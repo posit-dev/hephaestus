@@ -18,7 +18,7 @@ use hephaestus::geometry::Size;
 use hephaestus::image::PngCompression;
 use hephaestus::plot::chrome::axis::{Axis, AxisPlacement};
 use hephaestus::plot::theme::{Element, RectElement, TableCellTheme, Theme, ThemeColor};
-use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom, Table};
+use hephaestus::plot::{scale, Plot, PlotComposition, PointGeom, Table, TableCell, TableCellKind};
 use hephaestus::scales::chrome::AxisSide;
 use hephaestus::scene::SceneBuilder;
 use hephaestus::Renderer;
@@ -30,49 +30,79 @@ fn main() {
 
     let comp = || beside(Patch::new("summary"), Patch::new("price"));
 
-    let table = Table::new(&comp(), "summary")
-        .title("Ticker summary")
-        .subtitle("Four sessions, latest close")
-        .column("ticker", "Ticker")
-        .column("close", "Close")
-        .column("change", "Δ day")
-        .column("volume", "Volume")
-        .stub_column("ticker")
-        .spanner("Session", 0, ["close", "change"])
-        .row_group(
+    // The table is a grid of positioned cells — arrangement (stub
+    // first, spanner runs, group headers interleaved) is the
+    // producer's job. Grid, 4 columns (0 = stub):
+    //   0 title · 1 subtitle · 2 spanner · 3 labels
+    //   4 group header · 5–6 body · 7 group header · 8–9 body
+    //   10 summary · 11 caption · 12 footnote
+    use TableCellKind::*;
+    let cell = |kind, row, col, text: &str| TableCell::new(kind, row, col, text);
+    let groups = [
+        (
             "Large cap",
             [
                 ["ACME", "72.41", "+1.2%", "1.24M"],
                 ["BRWN", "18.05", "−0.4%", "842K"],
             ],
-        )
-        .row_group(
+        ),
+        (
             "Mid cap",
             [
                 ["CRSN", "203.77", "+3.9%", "2.01M"],
                 ["DLTA", "55.92", "+0.1%", "391K"],
             ],
+        ),
+    ];
+    let mut cells = vec![
+        cell(Title, 0, 0, "Ticker summary").span(1, 4),
+        cell(Subtitle, 1, 0, "Four sessions, latest close").span(1, 4),
+        cell(Spanner, 2, 1, "Session").span(1, 2),
+        cell(StubHead, 3, 0, "Ticker"),
+        cell(ColumnLabel, 3, 1, "Close"),
+        cell(ColumnLabel, 3, 2, "Δ day"),
+        cell(ColumnLabel, 3, 3, "Volume"),
+    ];
+    let mut grid_row = 4u16;
+    let mut body_row = 0usize;
+    let accent = ThemeColor::Accent.resolve(&hephaestus::plot::theme::Palette::default());
+    for (label, rows) in &groups {
+        cells.push(cell(RowGroup, grid_row, 0, label).span(1, 4));
+        grid_row += 1;
+        for row in rows {
+            cells.push(cell(Stub { row: body_row }, grid_row, 0, row[0]));
+            for (c, value) in row[1..].iter().enumerate() {
+                let body_cell = cell(Body { row: body_row }, grid_row, 1 + c as u16, value);
+                // One highlighted cell: fixed accent text, above every
+                // theme layer — body row 2, grid column 2.
+                let body_cell = if body_row == 2 && c == 1 {
+                    body_cell.fixed(hephaestus::plot::TableScaledAesthetic::Color, accent)
+                } else {
+                    body_cell
+                };
+                cells.push(body_cell);
+            }
+            grid_row += 1;
+            body_row += 1;
+        }
+    }
+    cells.push(cell(Summary { row: 0 }, grid_row, 0, "All"));
+    for (c, value) in ["—", "+4.8%", "4.48M"].iter().enumerate() {
+        cells.push(cell(Summary { row: 0 }, grid_row, 1 + c as u16, value));
+    }
+    grid_row += 1;
+    cells.push(cell(Caption, grid_row, 0, "Source: simulated data").span(1, 4));
+    cells.push(
+        cell(
+            Footnote,
+            grid_row + 1,
+            0,
+            "Change is against the previous close.",
         )
-        .summary_row(["All", "—", "+4.8%", "4.48M"])
-        .footnote("Change is against the previous close.")
-        // One highlighted cell: bold accent text, above every theme
-        // layer.
-        .cell_style(
-            2,
-            "change",
-            hephaestus::plot::theme::TableCellTheme {
-                text: Element::Set(hephaestus::plot::theme::TextElement {
-                    font: hephaestus::plot::theme::FontSpec {
-                        weight: Some(hephaestus::plot::theme::FontWeight::BOLD),
-                        ..hephaestus::plot::theme::FontSpec::default()
-                    },
-                    color: Some(ThemeColor::Accent),
-                    ..hephaestus::plot::theme::TextElement::default()
-                }),
-                ..hephaestus::plot::theme::TableCellTheme::default()
-            },
-        )
-        .caption("Source: simulated data");
+        .span(1, 4),
+    );
+
+    let table = Table::new(&comp(), "summary").cells(cells).stub_column(0);
 
     let xs: Vec<f64> = (0..40).map(|i| i as f64 * 2.5).collect();
     let ys: Vec<f64> = xs

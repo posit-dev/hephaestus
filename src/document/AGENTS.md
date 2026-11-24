@@ -4,7 +4,7 @@ Capture a `PlotComposition` to bytes and rebuild it elsewhere. See `src/AGENTS.m
 
 ## What this module does
 
-A plot exists only as live Rust objects, and `PlotComposition::render` turns one into draw calls for a single pixel size. A document is the durable form: the plot's **configuration**, with nothing size-dependent baked in. The reader gets a live `PlotComposition` back and calls `render` itself, so resizing reflows — axes re-lay-out, text re-wraps, ticks recompute, a table's inner grid re-solves at the new width — instead of stretching a frozen image. Tables travel in the critical `TABL` chunk as their declared parts (columns, spanners, string rows), one per patch id.
+A plot exists only as live Rust objects, and `PlotComposition::render` turns one into draw calls for a single pixel size. A document is the durable form: the plot's **configuration**, with nothing size-dependent baked in. The reader gets a live `PlotComposition` back and calls `render` itself, so resizing reflows — axes re-lay-out, text re-wraps, ticks recompute, a table's inner grid re-solves at the new width — instead of stretching a frozen image. Tables travel in the critical `TABL` chunk as their positioned cells (row, col, spans, kind, text) plus the grid-indexed column and row blessings, one per patch id.
 
 The design decision that follows from that: **nothing shaped or measured is written.** Text travels as source strings plus style descriptors; `TextRun`, `RichTextRun`, `AxisMeasure`, `LegendMeasure` and every cache are rebuilt on load. Wrap width is whatever the layout solver allocates, so shaped output is size-specific — writing it would defeat the format's whole purpose.
 

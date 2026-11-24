@@ -3,16 +3,36 @@
 //! tables and plots mix freely in one layout and travel together in a
 //! plot document.
 //!
-//! A table is declared as columns, optional spanners, and body rows of
-//! plain strings — number formatting is the producer's job, which is
-//! what keeps the model writer-agnostic (ggsql's `TABULATE` maps onto
-//! it near-mechanically). Styling comes entirely from
-//! [`TableTheme`](crate::plot::theme::TableTheme): the draw path reads
-//! only resolved theme values.
+//! A table is a **grid of positioned [`TableCell`]s the caller
+//! arranges**: every cell carries its grid position, its spans, and a
+//! [`TableCellKind`] saying what it is structurally. Hephaestus owns no
+//! arrangement — stub-to-front reordering, spanner runs, row-group
+//! interleaving are the producer's job (ggsql's table layout solves
+//! exactly this and hands over a solved grid, the way its HTML writer
+//! iterates one). Number formatting is likewise the producer's job:
+//! cells hold plain strings. Styling comes entirely from
+//! [`TableTheme`](crate::plot::theme::TableTheme), driven by cell
+//! *kinds* — a column label is a `ColumnLabel` cell, not "whatever is
+//! in row 0" — and the draw path reads only resolved theme values.
+//!
+//! Cell aesthetics are set per cell as [`CellAesthetic`] values —
+//! **fixed** (`Raw`, an output-space value that bypasses scales, like a
+//! geom's `Raw(...)` channel) or **scaled** (a value plus a scale name,
+//! mapped through the composition's `ScaleRegistry` exactly as a geom
+//! channel is). The value is typically the cell's own, but any cell can
+//! carry any value, so one cell can style an entire row's cells. Cell
+//! aesthetics sit above the structural theme; both kinds travel in plot
+//! documents.
+//!
+//! Columns and rows can additionally be *blessed* with structural
+//! metadata ([`TableColumn::role`], [`TableRow::role`]). This is inert
+//! at render time — styling stays kind-driven — and exists so the
+//! producer's structural claims travel with the table (documents
+//! included) for consumers that introspect structure, and for future
+//! behavior like sticky rows in scrolling tables.
 //!
 //! Internally a table is one measured cell in the patch's
-//! [`Slot::Panel`]. Its own geometry — column widths, spanner
-//! colspans, label rowspans — is solved by a private inner
+//! [`Slot::Panel`]. Its own geometry is solved by a private inner
 //! [`crate::layout::Grid`] with `Auto` / `Fixed` tracks, the same
 //! technique the legend's discrete stack uses. With `Auto` composition
 //! tracks the table sizes itself to its content; with `Fr` tracks it
@@ -30,83 +50,78 @@ use crate::plot::chrome::text::{rich_chrome_for, text_outline_from, text_style_f
 use crate::plot::pick::{item_scope, part_scope, table_scope, PlotPart};
 use crate::plot::plot::PlotError;
 use crate::plot::theme::{
-    rect_concrete_defaults, text_concrete_defaults, HAlign, HeadingRole, ResolvedTableCells,
-    RulePosition, TableCellTheme, TableTheme, Theme, ThemePart,
+    rect_concrete_defaults, text_concrete_defaults, Element, FontFamily, FontStyle, FontWeight,
+    FontWidth, HAlign, HeadingRole, Length, RectElement, ResolvedTableCells, RulePosition,
+    TableCellTheme, TableTheme, TextElement, Theme, ThemeColor, ThemePart,
 };
+use crate::scales::Value;
 use crate::scene::SceneBuilder;
 use crate::stroke::Stroke;
 
-/// One column of a [`Table`], in display order after stub columns have
-/// moved to the front.
-#[derive(Debug, Clone, PartialEq)]
+/// The structural blessing of one grid column. Structural metadata,
+/// not styling: `role` is the producer's claim about the column's
+/// place in the table's structure, carried (documents included) for
+/// consumers that introspect structure and for future behavior like
+/// sticky columns — the renderer's styling stays kind-driven and never
+/// reads it. `width` is the one render-visible field, and it is
+/// layout, not styling.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TableColumn {
-    /// Stable key — spanners and rows address columns by name.
-    pub name: String,
-    /// Displayed column label.
-    pub label: String,
-    /// Cell alignment for this column's label and body cells. `None`
-    /// falls back to the theme's resolved alignment for the role.
-    pub align: Option<HAlign>,
     /// Column width. `None` sizes to content; `Some` pins the track —
     /// an [`Extent`] with a `percent` component resolves against the
     /// panel's width.
     pub width: Option<Extent>,
-    /// Stub columns render before every other column and style through
-    /// the theme's stub layer.
-    pub stub: bool,
+    /// The column's structural role. Inert at render time.
+    pub role: TableColumnRole,
 }
 
-/// A label spanning several columns, one heading row per level. Level
-/// 0 sits directly above the column labels; higher levels stack above
-/// it. Spanners over non-contiguous columns split into one cell per
-/// contiguous run.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TableSpanner {
-    /// Displayed label.
-    pub label: String,
-    /// Heading level — 0 is nearest the column labels.
-    pub level: u16,
-    /// Names of the columns the span covers.
-    pub columns: Vec<String>,
+/// The structural role of a grid column — the column-level parallel
+/// of [`TableRowRole`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TableColumnRole {
+    /// An ordinary data column.
+    #[default]
+    Body,
+    /// A stub column, holding row labels.
+    Stub,
 }
 
-/// A row group: a full-width header row inserted above the group's
-/// first body row. A group covers the rows from `start` up to the
-/// next group's `start` (or the end of the body); rows before the
-/// first group's `start` are ungrouped.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TableRowGroup {
-    /// Displayed group label.
-    pub label: String,
-    /// 0-based body row the group starts at.
-    pub start: usize,
+/// The structural blessing of one grid row. Inert metadata: nothing at
+/// render time reads the role — styling stays kind-driven, and the
+/// header rule derives from header-cell kinds. The claim travels with
+/// the table so a consumer never has to infer row structure by
+/// inspecting cells (sticky headers / footers in scrolling tables).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TableRow {
+    /// The row's structural role.
+    pub role: TableRowRole,
 }
 
-/// A table bound to a named patch. See the module docs for the model;
-/// the builder methods below are the canonical construction path.
+/// The structural role of a grid row.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TableRowRole {
+    /// An ordinary body row.
+    #[default]
+    Body,
+    /// A header row (title block, spanners, column labels).
+    Header,
+    /// A footer row (summaries, caption, footnotes).
+    Footer,
+}
+
+/// A table bound to a named patch: a grid of positioned [`TableCell`]s
+/// the caller arranges. See the module docs for the model.
 #[derive(Debug, Clone)]
 pub struct Table {
     patch_id: Arc<str>,
+    cells: Vec<TableCell>,
+    /// Grid-column-indexed structural blessings. May be shorter than
+    /// the derived column count; missing entries use the default.
     columns: Vec<TableColumn>,
-    spanners: Vec<TableSpanner>,
-    rows: Vec<Vec<String>>,
-    /// Row groups, ordered by `start`.
-    row_groups: Vec<TableRowGroup>,
-    /// Summary rows, drawn after the body rows.
-    summary_rows: Vec<Vec<String>>,
-    /// Footnotes, one full-width row each, below the caption.
-    footnotes: Vec<String>,
-    title: Option<String>,
-    subtitle: Option<String>,
-    caption: Option<String>,
+    /// Grid-row-indexed structural blessings, same padding rule.
+    rows: Vec<TableRow>,
     theme_override: Option<ThemePart>,
     theme_variant: Option<String>,
-    /// Per-body-row style overrides, layered above the row's parity
-    /// layer in the cascade.
-    row_styles: std::collections::HashMap<usize, crate::plot::theme::TableCellTheme>,
-    /// Per-cell style overrides, keyed by (body row, column name) —
-    /// the outermost layer of the cascade.
-    cell_styles: std::collections::HashMap<(usize, String), crate::plot::theme::TableCellTheme>,
 }
 
 impl Table {
@@ -132,74 +147,35 @@ impl Table {
         }
         Ok(Self {
             patch_id: Arc::from(patch_id),
+            cells: Vec::new(),
             columns: Vec::new(),
-            spanners: Vec::new(),
             rows: Vec::new(),
-            row_groups: Vec::new(),
-            summary_rows: Vec::new(),
-            footnotes: Vec::new(),
-            title: None,
-            subtitle: None,
-            caption: None,
             theme_override: None,
             theme_variant: None,
-            row_styles: std::collections::HashMap::new(),
-            cell_styles: std::collections::HashMap::new(),
         })
     }
 
-    /// Build a table from already-decoded parts, validating the way
-    /// the builder methods would: the patch must exist and every row
-    /// must match the column count. This is the document reader's
-    /// reconstruction path; callers assembling a table by hand want
-    /// the builder methods.
+    /// Build a table from already-decoded parts, running the same
+    /// grid validation as [`Table::validate`]. This is the document
+    /// reader's reconstruction path; callers assembling a table by
+    /// hand want the builder methods.
     #[cfg(feature = "document-read")]
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn from_parts(
+    pub(crate) fn from_cells(
         composition: &Composition,
         patch_id: String,
+        cells: Vec<TableCell>,
         columns: Vec<TableColumn>,
-        spanners: Vec<TableSpanner>,
-        rows: Vec<Vec<String>>,
-        row_groups: Vec<TableRowGroup>,
-        summary_rows: Vec<Vec<String>>,
-        footnotes: Vec<String>,
-        title: Option<String>,
-        subtitle: Option<String>,
-        caption: Option<String>,
+        rows: Vec<TableRow>,
         theme_override: Option<ThemePart>,
         theme_variant: Option<String>,
-        row_styles: std::collections::HashMap<usize, crate::plot::theme::TableCellTheme>,
-        cell_styles: std::collections::HashMap<(usize, String), crate::plot::theme::TableCellTheme>,
     ) -> Result<Self, PlotError> {
-        if let Some(row) = rows.iter().find(|r| r.len() != columns.len()) {
-            return Err(PlotError::TableRowWidth {
-                patch: patch_id,
-                got: row.len(),
-                expected: columns.len(),
-            });
-        }
-        if let Some(row) = summary_rows.iter().find(|r| r.len() != columns.len()) {
-            return Err(PlotError::TableRowWidth {
-                patch: patch_id,
-                got: row.len(),
-                expected: columns.len(),
-            });
-        }
         let mut table = Self::try_new(composition, patch_id)?;
+        table.cells = cells;
         table.columns = columns;
-        table.spanners = spanners;
         table.rows = rows;
-        table.row_groups = row_groups;
-        table.summary_rows = summary_rows;
-        table.footnotes = footnotes;
-        table.title = title;
-        table.subtitle = subtitle;
-        table.caption = caption;
         table.theme_override = theme_override;
         table.theme_variant = theme_variant;
-        table.row_styles = row_styles;
-        table.cell_styles = cell_styles;
+        table.validate()?;
         Ok(table)
     }
 
@@ -208,131 +184,69 @@ impl Table {
         &self.patch_id
     }
 
-    /// Append a column with the given name and label.
-    pub fn column(mut self, name: impl Into<String>, label: impl Into<String>) -> Self {
-        self.columns.push(TableColumn {
-            name: name.into(),
-            label: label.into(),
-            align: None,
-            width: None,
-            stub: false,
-        });
+    /// Add a positioned cell. The caller arranges the grid; the table
+    /// validates spans and overlaps at wire time.
+    pub fn cell(mut self, cell: TableCell) -> Self {
+        self.cells.push(cell);
         self
     }
 
-    /// Append a fully-specified column.
-    pub fn column_full(mut self, column: TableColumn) -> Self {
+    /// Add several positioned cells at once.
+    pub fn cells(mut self, cells: impl IntoIterator<Item = TableCell>) -> Self {
+        self.cells.extend(cells);
+        self
+    }
+
+    /// Append a grid column's structural blessing. Columns are
+    /// grid-indexed: the first `column` call describes grid column 0.
+    pub fn column(mut self, column: TableColumn) -> Self {
         self.columns.push(column);
         self
     }
 
-    /// Mark the named column as a stub column. Stub columns render
-    /// first, regardless of declaration order. Panics when no column
-    /// carries the name.
-    pub fn stub_column(mut self, name: &str) -> Self {
-        let col = self
-            .columns
-            .iter_mut()
-            .find(|c| c.name == name)
-            .unwrap_or_else(|| panic!("no column named {name:?}"));
-        col.stub = true;
+    /// Pin grid column `col`'s width, growing the blessing vec with
+    /// defaults as needed. `None` sizes to content.
+    pub fn column_width(mut self, col: usize, width: Extent) -> Self {
+        self.columns
+            .resize_with(self.columns.len().max(col + 1), TableColumn::default);
+        self.columns[col].width = Some(width);
         self
     }
 
-    /// Add a spanner over the named columns at `level` (0 is nearest
-    /// the column labels).
-    pub fn spanner(
-        mut self,
-        label: impl Into<String>,
-        level: u16,
-        columns: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
-        self.spanners.push(TableSpanner {
-            label: label.into(),
-            level,
-            columns: columns.into_iter().map(Into::into).collect(),
-        });
+    /// Bless grid column `col` with a structural role — inert metadata
+    /// carried for consumers, never a styling input.
+    pub fn column_role(mut self, col: usize, role: TableColumnRole) -> Self {
+        self.columns
+            .resize_with(self.columns.len().max(col + 1), TableColumn::default);
+        self.columns[col].role = role;
         self
     }
 
-    /// Append a body row. Values pair with the declared columns in
-    /// declaration order. Panics when the row's length differs from
-    /// the column count.
-    pub fn row(mut self, values: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        let row: Vec<String> = values.into_iter().map(Into::into).collect();
-        assert_eq!(
-            row.len(),
-            self.columns.len(),
-            "row has {} values but the table declares {} columns",
-            row.len(),
-            self.columns.len(),
-        );
-        self.rows.push(row);
+    /// Bless grid column `col` as a stub. Builder form of
+    /// [`Table::column_role`] with [`TableColumnRole::Stub`].
+    pub fn stub_column(self, col: usize) -> Self {
+        self.column_role(col, TableColumnRole::Stub)
+    }
+
+    /// Bless grid row `row` with a structural role — inert metadata
+    /// carried for consumers, never a styling input.
+    pub fn row_role(mut self, row: usize, role: TableRowRole) -> Self {
+        self.rows
+            .resize_with(self.rows.len().max(row + 1), TableRow::default);
+        self.rows[row].role = role;
         self
     }
 
-    /// Begin a row group: append the group's rows and draw a
-    /// full-width group header above them. Groups must be appended in
-    /// order; every following [`Table::row`] joins the latest group.
-    pub fn row_group(
-        mut self,
-        label: impl Into<String>,
-        rows: impl IntoIterator<Item = impl IntoIterator<Item = impl Into<String>>>,
-    ) -> Self {
-        let start = self.rows.len();
-        for row in rows {
-            self = self.row(row);
-        }
-        assert!(
-            self.rows.len() > start,
-            "a row group must contain at least one row"
-        );
-        self.row_groups.push(TableRowGroup {
-            label: label.into(),
-            start,
-        });
-        self
+    /// Bless grid row `row` as a header row. Builder form of
+    /// [`Table::row_role`] with [`TableRowRole::Header`].
+    pub fn header_row(self, row: usize) -> Self {
+        self.row_role(row, TableRowRole::Header)
     }
 
-    /// Append a summary row, drawn after the body rows and styled
-    /// through the theme's `summary` layer. Same width rule as
-    /// [`Table::row`].
-    pub fn summary_row(mut self, values: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        let row: Vec<String> = values.into_iter().map(Into::into).collect();
-        assert_eq!(
-            row.len(),
-            self.columns.len(),
-            "summary row has {} values but the table declares {} columns",
-            row.len(),
-            self.columns.len(),
-        );
-        self.summary_rows.push(row);
-        self
-    }
-
-    /// Append a footnote — a full-width row below the caption, styled
-    /// through the theme's `footnote` element.
-    pub fn footnote(mut self, s: impl Into<String>) -> Self {
-        self.footnotes.push(s.into());
-        self
-    }
-
-    /// Set the table's title, drawn above the heading block.
-    pub fn title(mut self, s: impl Into<String>) -> Self {
-        self.title = Some(s.into());
-        self
-    }
-
-    /// Set the table's subtitle, drawn below the title.
-    pub fn subtitle(mut self, s: impl Into<String>) -> Self {
-        self.subtitle = Some(s.into());
-        self
-    }
-
-    /// Set the table's caption, drawn below the body.
-    pub fn caption(mut self, s: impl Into<String>) -> Self {
-        self.caption = Some(s.into());
-        self
+    /// Bless grid row `row` as a footer row. Builder form of
+    /// [`Table::row_role`] with [`TableRowRole::Footer`].
+    pub fn footer_row(self, row: usize) -> Self {
+        self.row_role(row, TableRowRole::Footer)
     }
 
     /// Install a sparse theme override merged over the composition's
@@ -349,75 +263,23 @@ impl Table {
         self
     }
 
-    /// Style one body row above the theme's cascade — bold text, a
-    /// background, or any other [`TableCellTheme`] field, applied to
-    /// every cell of the row (stub cells included). Layers above the
-    /// row's parity layer; a [`Table::cell_style`] on the same row
-    /// wins field-for-field.
-    pub fn row_style(mut self, row: usize, style: crate::plot::theme::TableCellTheme) -> Self {
-        self.row_styles.insert(row, style);
-        self
-    }
-
-    /// Style one body cell, addressed by its 0-based body row and its
-    /// column's name. The outermost layer of the cascade: every field
-    /// it sets wins over the row, the parity layer, and the theme.
-    pub fn cell_style(
-        mut self,
-        row: usize,
-        column: &str,
-        style: crate::plot::theme::TableCellTheme,
-    ) -> Self {
-        self.cell_styles.insert((row, column.to_string()), style);
-        self
-    }
-
     // ── Accessors (the document codec reads through these) ───────────
 
-    /// The declared columns, in declaration order (stub flags
-    /// included; display order puts stubs first).
+    /// The positioned cells, in insertion order.
+    pub fn cells_ref(&self) -> &[TableCell] {
+        &self.cells
+    }
+
+    /// The grid-column structural blessings (may be shorter than the
+    /// derived column count).
     pub fn columns(&self) -> &[TableColumn] {
         &self.columns
     }
 
-    /// The declared spanners.
-    pub fn spanners(&self) -> &[TableSpanner] {
-        &self.spanners
-    }
-
-    /// The body rows, each pairing with [`Self::columns`] by position.
-    pub fn rows(&self) -> &[Vec<String>] {
+    /// The grid-row structural blessings (may be shorter than the
+    /// derived row count).
+    pub fn rows(&self) -> &[TableRow] {
         &self.rows
-    }
-
-    /// The row groups, ordered by start row.
-    pub fn row_groups(&self) -> &[TableRowGroup] {
-        &self.row_groups
-    }
-
-    /// The summary rows, drawn after the body.
-    pub fn summary_rows(&self) -> &[Vec<String>] {
-        &self.summary_rows
-    }
-
-    /// The footnotes, one row each below the caption.
-    pub fn footnotes(&self) -> &[String] {
-        &self.footnotes
-    }
-
-    /// The table's title, if set.
-    pub fn title_ref(&self) -> Option<&str> {
-        self.title.as_deref()
-    }
-
-    /// The table's subtitle, if set.
-    pub fn subtitle_ref(&self) -> Option<&str> {
-        self.subtitle.as_deref()
-    }
-
-    /// The table's caption, if set.
-    pub fn caption_ref(&self) -> Option<&str> {
-        self.caption.as_deref()
     }
 
     /// The table's sparse theme override, if set.
@@ -430,46 +292,92 @@ impl Table {
         self.theme_variant.as_deref()
     }
 
-    /// The per-row style overrides, keyed by 0-based body row.
-    pub fn row_styles(
-        &self,
-    ) -> &std::collections::HashMap<usize, crate::plot::theme::TableCellTheme> {
-        &self.row_styles
+    /// The grid dimensions the cells imply: `(rows, columns)`.
+    fn grid_shape(&self) -> (u16, u16) {
+        let nrow = self
+            .cells
+            .iter()
+            .map(|c| c.row + c.row_span)
+            .max()
+            .unwrap_or(0);
+        let ncol = self
+            .cells
+            .iter()
+            .map(|c| c.col + c.col_span)
+            .max()
+            .unwrap_or(0);
+        (nrow, ncol)
     }
 
-    /// The per-cell style overrides, keyed by (0-based body row,
-    /// column name).
-    pub fn cell_styles(
-        &self,
-    ) -> &std::collections::HashMap<(usize, String), crate::plot::theme::TableCellTheme> {
-        &self.cell_styles
+    /// Check the grid: spans at least 1, no two cells overlapping, and
+    /// the blessing vecs no longer than the grid they describe.
+    /// `wire_panel` panics on a violation (a malformed grid is a
+    /// programming error); the document reader returns it.
+    pub(crate) fn validate(&self) -> Result<(), PlotError> {
+        let patch = self.patch_id.to_string();
+        if let Some(c) = self
+            .cells
+            .iter()
+            .find(|c| c.row_span == 0 || c.col_span == 0)
+        {
+            return Err(PlotError::TableCellSpan {
+                patch,
+                row: c.row,
+                col: c.col,
+            });
+        }
+        let (nrow, ncol) = self.grid_shape();
+        if self.columns.len() > ncol as usize || self.rows.len() > nrow as usize {
+            return Err(PlotError::TableSpecOutOfRange { patch });
+        }
+        let mut occupied = vec![false; nrow as usize * ncol as usize];
+        for c in &self.cells {
+            for r in c.row..c.row + c.row_span {
+                for col in c.col..c.col + c.col_span {
+                    let i = r as usize * ncol as usize + col as usize;
+                    if occupied[i] {
+                        return Err(PlotError::TableCellOverlap { patch, row: r, col });
+                    }
+                    occupied[i] = true;
+                }
+            }
+        }
+        Ok(())
     }
 
     // ── Layout and drawing ───────────────────────────────────────────
 
     /// Attach the table's measured panel cell to `patch`. The outer
-    /// margin band is sized from the table theme's `margin`.
+    /// margin band is the shared `theme.margin` plus the table
+    /// theme's own `margin`.
     pub(crate) fn wire_panel(
         &self,
         patch: Patch,
         theme: &Theme,
+        registry: &crate::plot::scale::ScaleRegistry,
         dpi: f64,
         images: &Arc<crate::image_registry::ImageRegistry>,
     ) -> Patch {
         let table_theme = theme.table_for(self.theme_variant.as_deref());
         let root_pt = root_text_pt(theme);
+        // `apply_plot_chrome` has already set the patch margin from
+        // `theme.margin`; `Patch::margin` replaces rather than
+        // accumulates, so the combined band is rebuilt here from both.
+        let (st, sr, sb, sl) = theme.margin.resolve(root_pt);
         let (mt, mr, mb, ml) = table_theme.margin.resolve(root_pt);
         let pt_to_px = dpi / 72.0;
         let mut patch = patch;
         let inset = crate::layout::Inset::default()
-            .top(Extent::px(mt * pt_to_px))
-            .right(Extent::px(mr * pt_to_px))
-            .bottom(Extent::px(mb * pt_to_px))
-            .left(Extent::px(ml * pt_to_px));
+            .top(Extent::px((st + mt) * pt_to_px))
+            .right(Extent::px((sr + mr) * pt_to_px))
+            .bottom(Extent::px((sb + mb) * pt_to_px))
+            .left(Extent::px((sl + ml) * pt_to_px));
         patch = patch.margin(inset);
-        let cells = self.build_cells();
+        if let Err(e) = self.validate() {
+            panic!("{e}");
+        }
         let measure = TableMeasure {
-            inner: self.build_grid(&cells, theme, dpi, images),
+            inner: self.build_grid(theme, registry, dpi, images),
         };
         patch.slot(Slot::Panel, Cell::measured(measure))
     }
@@ -481,6 +389,7 @@ impl Table {
         scene: &mut dyn SceneBuilder,
         layout: &crate::composition::CompositionLayout,
         theme: &Theme,
+        registry: &crate::plot::scale::ScaleRegistry,
         dpi: f64,
         images: &Arc<crate::image_registry::ImageRegistry>,
     ) {
@@ -495,60 +404,11 @@ impl Table {
         // The patch background, exactly as a plot would paint it —
         // phase 1 of the render loop only walks plots, so a table
         // paints its own.
-        if let Some(bg_slot) = theme.plot_background.as_set() {
-            if let Some(rect) = layout.get(&self.patch_id, Slot::Background) {
-                if rect.x1 > rect.x0 && rect.y1 > rect.y0 {
-                    let bg = bg_slot.cascade(&theme.rect);
-                    let defaults = rect_concrete_defaults();
-                    let radius_pt = bg
-                        .corner_radius
-                        .or(defaults.corner_radius)
-                        .map(|l| l.resolve(0.0))
-                        .unwrap_or(0.0);
-                    let radius_px = (radius_pt * dpi / 72.0).max(0.0);
-                    let path: crate::path::Path = if radius_px > 0.0 {
-                        crate::primitives::rounded_rect(rect, radius_px)
-                    } else {
-                        rect.to_path(0.0)
-                    };
-                    scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Background));
-                    scene.push_pick_scope(&part_scope(PlotPart::PlotBackground));
-                    if let Some(fill) = &bg.fill {
-                        scene.fill(
-                            FillRule::NonZero,
-                            Affine::IDENTITY,
-                            &crate::brush::Brush::Solid(fill.resolve(&theme.palette)),
-                            None,
-                            &path,
-                            PickId::Skip,
-                        );
-                    }
-                    let lw = bg
-                        .linewidth_pt
-                        .or(defaults.linewidth_pt)
-                        .expect("rect linewidth default");
-                    if lw.resolve(1.0) > 0.0 {
-                        let stroke = Stroke::new(lw.resolve(1.0) * dpi / 72.0);
-                        let color = bg.color.or(defaults.color).expect("rect color default");
-                        scene.stroke(
-                            &stroke,
-                            Affine::IDENTITY,
-                            &crate::brush::Brush::Solid(color.resolve(&theme.palette)),
-                            None,
-                            &path,
-                            PickId::Skip,
-                        );
-                    }
-                    scene.pop_pick_scope();
-                    scene.pop_pick_scope();
-                }
-            }
-        }
+        crate::plot::plot::paint_patch_background(&self.patch_id, scene, layout, theme, dpi);
 
         scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Panel));
 
-        let cells = self.build_cells();
-        let inner = self.build_grid(&cells, theme, dpi, images);
+        let inner = self.build_grid(theme, registry, dpi, images);
         let solved = inner.solve_at(panel.width(), dpi);
 
         // Normalize: the solver anchors the content-sized grid inside
@@ -738,241 +598,17 @@ impl Table {
         }
     }
 
-    /// The columns in display order — stubs first, declaration order
-    /// preserved within each group.
-    fn display_columns(&self) -> Vec<&TableColumn> {
-        self.columns
-            .iter()
-            .filter(|c| c.stub)
-            .chain(self.columns.iter().filter(|c| !c.stub))
-            .collect()
-    }
-
-    /// Lay out every cell's grid position and role, without any theme
-    /// input. Row 0 is the topmost heading row; see the struct docs
-    /// for the stacking order.
-    fn build_cells(&self) -> Vec<CellSpec> {
-        let cols = self.display_columns();
-        let ncol = cols.len().max(1) as u16;
-        let mut cells = Vec::new();
-        let mut row = 0u16;
-
-        // Title / subtitle rows span the full width.
-        for (text, kind) in [
-            (&self.title, CellKind::Title),
-            (&self.subtitle, CellKind::Subtitle),
-        ] {
-            if let Some(text) = text {
-                cells.push(CellSpec {
-                    text: text.clone(),
-                    row,
-                    col: 0,
-                    row_span: 1,
-                    col_span: ncol,
-                    kind,
-                    align: None,
-                    column: None,
-                });
-                row += 1;
-            }
-        }
-
-        // ── Heading block ──
-        //
-        // `n_levels` spanner rows, highest level on top, then the
-        // column-label row. A spanner at level `l` occupies row
-        // `n_levels - 1 - l` and stretches down over the rows of lower
-        // levels none of its columns participate in. A column label
-        // stretches up to just below the lowest spanner covering it.
-        let max_level = self.spanners.iter().map(|s| s.level).max();
-        let n_levels = max_level.map(|l| l + 1).unwrap_or(0);
-        let header_top = row;
-        let label_row = header_top + n_levels;
-
-        // Per-column lowest covering spanner level.
-        let col_spanner_at = |col: &str, level: u16| -> Option<&TableSpanner> {
-            self.spanners
-                .iter()
-                .find(|s| s.level == level && s.columns.iter().any(|c| c == col))
-        };
-        let col_min_level = |col: &str| -> Option<u16> {
-            (0..n_levels).find(|l| col_spanner_at(col, *l).is_some())
-        };
-
-        // Spanner cells, split into contiguous runs.
-        for level in (0..n_levels).rev() {
-            let grid_row = header_top + (n_levels - 1 - level);
-            let mut c = 0usize;
-            while c < cols.len() {
-                let Some(spanner) = col_spanner_at(&cols[c].name, level) else {
-                    c += 1;
-                    continue;
-                };
-                // The contiguous run of columns sharing this spanner.
-                let start = c;
-                while c < cols.len()
-                    && col_spanner_at(&cols[c].name, level)
-                        .is_some_and(|s| std::ptr::eq(s, spanner))
-                {
-                    c += 1;
-                }
-                // Stretch down over lower levels none of the run's
-                // columns participate in.
-                let lower = (0..level).rev().find(|l| {
-                    cols[start..c]
-                        .iter()
-                        .any(|col| col_spanner_at(&col.name, *l).is_some())
-                });
-                let bottom_row = match lower {
-                    Some(l) => header_top + (n_levels - 1 - l),
-                    None => label_row,
-                };
-                cells.push(CellSpec {
-                    text: spanner.label.clone(),
-                    row: grid_row,
-                    col: start as u16,
-                    row_span: bottom_row - grid_row,
-                    col_span: (c - start) as u16,
-                    kind: CellKind::Spanner,
-                    align: None,
-                    column: None,
-                });
-            }
-        }
-
-        // Column labels (and the stub head, an empty corner cell when
-        // any stub column exists).
-        for (c, col) in cols.iter().enumerate() {
-            let start = match col_min_level(&col.name) {
-                Some(l) => header_top + (n_levels - l),
-                None => header_top,
-            };
-            let kind = if col.stub {
-                CellKind::StubHead
-            } else {
-                CellKind::ColumnLabel
-            };
-            cells.push(CellSpec {
-                text: col.label.clone(),
-                row: start,
-                col: c as u16,
-                row_span: label_row + 1 - start,
-                col_span: 1,
-                kind,
-                align: col.align,
-                column: None,
-            });
-        }
-        row = label_row + 1;
-
-        // ── Body, with row-group headers interleaved ──
-        let mut groups = self.row_groups.iter().peekable();
-        for (r, body_row) in self.rows.iter().enumerate() {
-            if groups.peek().is_some_and(|g| g.start == r) {
-                let group = groups.next().expect("peeked");
-                cells.push(CellSpec {
-                    text: group.label.clone(),
-                    row,
-                    col: 0,
-                    row_span: 1,
-                    col_span: ncol,
-                    kind: CellKind::RowGroup,
-                    align: None,
-                    column: None,
-                });
-                row += 1;
-            }
-            // Rows are declared against declaration order; re-index to
-            // display order.
-            for (c, col) in cols.iter().enumerate() {
-                let decl_idx = self
-                    .columns
-                    .iter()
-                    .position(|d| d.name == col.name)
-                    .expect("display column must exist in declaration order");
-                let kind = if col.stub {
-                    CellKind::Stub { row: r }
-                } else {
-                    CellKind::Body { row: r }
-                };
-                cells.push(CellSpec {
-                    text: body_row[decl_idx].clone(),
-                    row,
-                    col: c as u16,
-                    row_span: 1,
-                    col_span: 1,
-                    kind,
-                    align: col.align,
-                    column: Some(col.name.clone()),
-                });
-            }
-            row += 1;
-        }
-
-        // ── Summary rows ──
-        for (sr, summary) in self.summary_rows.iter().enumerate() {
-            for (c, col) in cols.iter().enumerate() {
-                let decl_idx = self
-                    .columns
-                    .iter()
-                    .position(|d| d.name == col.name)
-                    .expect("display column must exist in declaration order");
-                cells.push(CellSpec {
-                    text: summary[decl_idx].clone(),
-                    row,
-                    col: c as u16,
-                    row_span: 1,
-                    col_span: 1,
-                    kind: CellKind::Summary { row: sr },
-                    align: col.align,
-                    column: Some(col.name.clone()),
-                });
-            }
-            row += 1;
-        }
-
-        // Caption, then one full-width row per footnote.
-        if let Some(text) = &self.caption {
-            cells.push(CellSpec {
-                text: text.clone(),
-                row,
-                col: 0,
-                row_span: 1,
-                col_span: ncol,
-                kind: CellKind::Caption,
-                align: None,
-                column: None,
-            });
-            row += 1;
-        }
-        for note in &self.footnotes {
-            cells.push(CellSpec {
-                text: note.clone(),
-                row,
-                col: 0,
-                row_span: 1,
-                col_span: ncol,
-                kind: CellKind::Footnote,
-                align: None,
-                column: None,
-            });
-            row += 1;
-        }
-
-        cells
-    }
-
-    /// Build the inner grid for a set of laid-out cells: column tracks
-    /// from the columns' width overrides, `Auto` everywhere else, one
+    /// Build the inner grid from the positioned cells: column tracks
+    /// from the columns' width blessings, `Auto` everywhere else, one
     /// measured leaf per cell.
     fn build_grid(
         &self,
-        cells: &[CellSpec],
         theme: &Theme,
+        registry: &crate::plot::scale::ScaleRegistry,
         dpi: f64,
         images: &Arc<crate::image_registry::ImageRegistry>,
     ) -> InnerGrid {
-        let cols = self.display_columns();
+        let (n_rows, n_cols) = self.grid_shape();
         let table_theme = theme.table_for(self.theme_variant.as_deref());
         let root_pt = root_text_pt(theme);
         let pt_to_px = dpi / 72.0;
@@ -981,42 +617,29 @@ impl Table {
             (t * pt_to_px, r * pt_to_px, b * pt_to_px, l * pt_to_px)
         };
 
-        let col_tracks: Vec<Track> = cols
-            .iter()
-            .map(|c| match &c.width {
-                Some(w) => Track::Fixed(w.clone()),
-                None => Track::Auto,
-            })
+        let col_tracks: Vec<Track> = (0..n_cols as usize)
+            .map(
+                |c| match self.columns.get(c).and_then(|col| col.width.clone()) {
+                    Some(w) => Track::Fixed(w),
+                    None => Track::Auto,
+                },
+            )
             .collect();
-        let n_rows = cells.iter().map(|c| c.row + c.row_span).max().unwrap_or(0);
         let row_tracks = vec![Track::Auto; n_rows as usize];
 
+        let cells = &self.cells;
         let mut grid = Grid::new(col_tracks, row_tracks);
         let mut entries = Vec::with_capacity(cells.len());
         for (i, spec) in cells.iter().enumerate() {
             let id = CellId(i as u64 + 1);
-            // Row and cell overrides apply to body and stub cells only;
-            // heading and free-text cells style through the theme.
-            let (row_style, cell_style) = match spec.kind {
-                CellKind::Body { row } | CellKind::Stub { row } => {
-                    let row_style = self.row_styles.get(&row);
-                    let cell_style = spec
-                        .column
-                        .as_ref()
-                        .and_then(|c| self.cell_styles.get(&(row, c.clone())));
-                    (row_style, cell_style)
-                }
-                _ => (None, None),
-            };
             let styled = spec.shape(
                 table_theme,
                 theme,
+                registry,
                 root_pt,
                 dpi,
                 padding_px,
                 images,
-                row_style,
-                cell_style,
             );
             let (w, h) = styled.natural_size();
             grid.place_mut(
@@ -1030,79 +653,393 @@ impl Table {
 }
 
 /// What a cell is, structurally. Decides which theme layer styles it
-/// and which pick part it reports.
+/// and which pick part it reports — a column label is a `ColumnLabel`
+/// cell, not "whatever is in row 0".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CellKind {
+pub enum TableCellKind {
+    /// The table's title.
     Title,
+    /// The table's subtitle.
     Subtitle,
+    /// The table's caption.
     Caption,
+    /// A label spanning several columns, grouping them under one
+    /// heading.
     Spanner,
+    /// A column's heading label.
     ColumnLabel,
+    /// The stub's own header cell — the corner cell above the stub
+    /// columns.
     StubHead,
+    /// A row-label cell in a stub column.
     Stub {
-        /// 0-based body row index.
+        /// 0-based body row ordinal.
         row: usize,
     },
+    /// A data value.
     Body {
-        /// 0-based body row index.
+        /// 0-based body row ordinal.
         row: usize,
     },
+    /// A full-width group label above a group of body rows.
     RowGroup,
+    /// A summary value, drawn after the body.
     Summary {
-        /// 0-based summary row index.
+        /// 0-based summary row ordinal.
         row: usize,
     },
+    /// A footnote.
     Footnote,
 }
 
-impl CellKind {
+impl TableCellKind {
     /// The pick part this cell reports.
-    fn part(&self) -> PlotPart {
+    pub(crate) fn part(&self) -> PlotPart {
         match self {
-            CellKind::Title => PlotPart::TableTitle,
-            CellKind::Subtitle => PlotPart::TableSubtitle,
-            CellKind::Caption => PlotPart::TableCaption,
-            CellKind::Spanner => PlotPart::TableSpanner,
-            CellKind::ColumnLabel => PlotPart::TableColumnLabel,
-            CellKind::StubHead => PlotPart::TableStubHead,
-            CellKind::Stub { .. } => PlotPart::TableStub,
-            CellKind::Body { .. } => PlotPart::TableCell,
-            CellKind::RowGroup => PlotPart::TableRowGroup,
-            CellKind::Summary { .. } => PlotPart::TableSummary,
-            CellKind::Footnote => PlotPart::TableFootnote,
+            TableCellKind::Title => PlotPart::TableTitle,
+            TableCellKind::Subtitle => PlotPart::TableSubtitle,
+            TableCellKind::Caption => PlotPart::TableCaption,
+            TableCellKind::Spanner => PlotPart::TableSpanner,
+            TableCellKind::ColumnLabel => PlotPart::TableColumnLabel,
+            TableCellKind::StubHead => PlotPart::TableStubHead,
+            TableCellKind::Stub { .. } => PlotPart::TableStub,
+            TableCellKind::Body { .. } => PlotPart::TableCell,
+            TableCellKind::RowGroup => PlotPart::TableRowGroup,
+            TableCellKind::Summary { .. } => PlotPart::TableSummary,
+            TableCellKind::Footnote => PlotPart::TableFootnote,
         }
     }
 
     /// The pick item ordinal for body, stub and summary cells — the
-    /// 0-based index within its section. Heading and free-text cells
+    /// 0-based ordinal within its section. Heading and free-text cells
     /// carry no item.
-    fn item(&self) -> Option<u32> {
+    pub(crate) fn item(&self) -> Option<u32> {
         match self {
-            CellKind::Stub { row } | CellKind::Body { row } | CellKind::Summary { row } => {
-                Some(*row as u32)
-            }
+            TableCellKind::Stub { row }
+            | TableCellKind::Body { row }
+            | TableCellKind::Summary { row } => Some(*row as u32),
             _ => None,
         }
     }
 }
 
-/// A cell's position and role in the table grid, before any theme or
-/// shaping is applied.
+/// One cell of a [`Table`]: its grid position, its spans, its
+/// structural kind, and its text. Positions are 0-based grid
+/// coordinates; spans are in tracks. The caller arranges the grid —
+/// hephaestus validates spans and overlaps but never rearranges.
 #[derive(Debug, Clone)]
-struct CellSpec {
-    text: String,
-    row: u16,
-    col: u16,
-    row_span: u16,
-    col_span: u16,
-    kind: CellKind,
-    align: Option<HAlign>,
-    /// The column's name, for body and stub cells — the key per-cell
-    /// style overrides address. `None` for heading and free-text cells.
-    column: Option<String>,
+pub struct TableCell {
+    /// The cell's text (plain string; markdown when the cell's theme
+    /// element opts in).
+    pub text: String,
+    /// 0-based grid row of the cell's top edge.
+    pub row: u16,
+    /// 0-based grid column of the cell's left edge.
+    pub col: u16,
+    /// Rows the cell spans, at least 1.
+    pub row_span: u16,
+    /// Columns the cell spans, at least 1.
+    pub col_span: u16,
+    /// The cell's structural kind — decides its theme layer and pick
+    /// part.
+    pub kind: TableCellKind,
+    /// Text alignment. `None` falls back to the theme's resolved
+    /// alignment for the kind.
+    pub align: Option<HAlign>,
+    /// Per-cell aesthetic overrides. Each is a fixed ([`CellAesthetic::Raw`])
+    /// or scale-mapped ([`CellAesthetic::Scaled`]) value for one
+    /// [`TableScaledAesthetic`] — the same layer, so the two mix freely,
+    /// and a later binding of the same aesthetic wins. Sits above the
+    /// structural theme.
+    pub aesthetics: Vec<(TableScaledAesthetic, CellAesthetic)>,
 }
 
-impl CellSpec {
+/// One aesthetic value of a cell: fixed or scale-mapped, mirroring the
+/// plot side's constant-vs-mapped channel split.
+#[derive(Debug, Clone)]
+pub enum CellAesthetic {
+    /// A fixed, output-space value — a [`Value::Color`] for the color
+    /// aesthetics, a [`Value::Number`] (pt) for the size ones. Bypasses
+    /// scales, like a `Raw(...)` channel on a geom.
+    Raw(Value),
+    /// A value mapped through the scale registered under this name on
+    /// the composition. Typically the cell's own value, but nothing
+    /// ties it to the text — one cell can carry a row-mates' value, or
+    /// every cell of a row the same one.
+    Scaled(Value, String),
+}
+
+/// Resolve a family name to a [`FontFamily`]: the CSS generic names
+/// map to generic families, anything else is a named family.
+fn parse_font_family(s: &str) -> FontFamily {
+    match s.to_ascii_lowercase().as_str() {
+        "serif" => FontFamily::Serif,
+        "sans-serif" | "sans" => FontFamily::SansSerif,
+        "monospace" | "mono" => FontFamily::Mono,
+        "cursive" => FontFamily::Cursive,
+        "fantasy" => FontFamily::Fantasy,
+        "system-ui" => FontFamily::SystemUi,
+        _ => FontFamily::Named(vec![s.to_string()]),
+    }
+}
+
+/// Kebab-case font-width name → [`FontWidth`].
+fn parse_font_width(s: &str) -> Option<FontWidth> {
+    Some(match s.to_ascii_lowercase().as_str() {
+        "ultra-condensed" => FontWidth::UltraCondensed,
+        "extra-condensed" => FontWidth::ExtraCondensed,
+        "condensed" => FontWidth::Condensed,
+        "semi-condensed" => FontWidth::SemiCondensed,
+        "normal" => FontWidth::Normal,
+        "semi-expanded" => FontWidth::SemiExpanded,
+        "expanded" => FontWidth::Expanded,
+        "extra-expanded" => FontWidth::ExtraExpanded,
+        "ultra-expanded" => FontWidth::UltraExpanded,
+        _ => return None,
+    })
+}
+
+/// Font-style name → [`FontStyle`]. Oblique is not covered: it is a
+/// style plus an angle, which no single value carries.
+fn parse_font_style(s: &str) -> Option<FontStyle> {
+    Some(match s.to_ascii_lowercase().as_str() {
+        "normal" => FontStyle::Normal,
+        "italic" => FontStyle::Italic,
+        _ => return None,
+    })
+}
+
+/// Alignment name → [`HAlign`], with `left` / `right` as aliases.
+fn parse_halign(s: &str) -> Option<HAlign> {
+    Some(match s.to_ascii_lowercase().as_str() {
+        "start" | "left" => HAlign::Start,
+        "center" | "centre" => HAlign::Center,
+        "end" | "right" => HAlign::End,
+        "justify" => HAlign::Justify,
+        _ => return None,
+    })
+}
+
+/// An aesthetic of a cell that a value can drive. Covers the whole
+/// cell-level theme surface — [`RectElement`] and the text-run fields
+/// of [`TextElement`] — keyed by the scale output type each maps from:
+/// color-producing scales for the colors, number-producing for sizes
+/// (pt, or multipliers where the theme field is relative) and font
+/// weight, string-producing for the font axes and alignment, booleans
+/// for decorations, a linetype for the border dash.
+///
+/// Deliberately not covered: `valign` / `angle` / `margin` (slot-level
+/// fields the cell draw path doesn't read), OpenType features and
+/// variation axes (structured tag data no scale output maps to), and
+/// oblique angles (a style plus a number — two values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableScaledAesthetic {
+    // ── Background (RectElement) ──
+    /// Background fill — color-producing scales.
+    Fill,
+    /// Background border color.
+    BorderColor,
+    /// Background border width — number-producing scales, in pt.
+    BorderWidth,
+    /// Background border dash — linetype-producing scales.
+    BorderLinetype,
+    /// Background corner radius — number-producing scales, in pt.
+    CornerRadius,
+
+    // ── Text (TextElement) ──
+    /// Text color.
+    Color,
+    /// Text size — number-producing scales, in pt.
+    TextSize,
+    /// Text outline color.
+    TextOutlineColor,
+    /// Text outline width — number-producing scales, in pt.
+    TextOutlineWidth,
+    /// Font family — string-producing scales. The CSS generic names
+    /// (`serif`, `sans-serif`, `monospace`, `cursive`, `fantasy`,
+    /// `system-ui`) map to generic families; anything else is a named
+    /// family.
+    FontFamily,
+    /// Font weight — number-producing scales, 1–1000.
+    FontWeight,
+    /// Font width — string-producing scales: kebab-case width names
+    /// (`condensed`, `semi-expanded`, `normal`, …).
+    FontWidth,
+    /// Font style — string-producing scales: `normal` or `italic`.
+    FontStyle,
+    /// Line height — number-producing scales, as a multiplier of the
+    /// resolved font size (`Rel` semantics).
+    LineHeight,
+    /// Letter spacing — number-producing scales, in em (`Rel`
+    /// semantics).
+    Tracking,
+    /// Underline — boolean-producing values.
+    Underline,
+    /// Strikethrough — boolean-producing values.
+    Strikethrough,
+    /// Horizontal alignment — string-producing scales: `start` /
+    /// `center` / `end` / `justify` (`left` / `right` accepted as
+    /// aliases).
+    Align,
+}
+
+impl TableCell {
+    /// A single-track cell of `kind` at (`row`, `col`) holding `text`.
+    pub fn new(kind: TableCellKind, row: u16, col: u16, text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            row,
+            col,
+            row_span: 1,
+            col_span: 1,
+            kind,
+            align: None,
+            aesthetics: Vec::new(),
+        }
+    }
+
+    /// Set the cell's spans.
+    pub fn span(mut self, row_span: u16, col_span: u16) -> Self {
+        self.row_span = row_span;
+        self.col_span = col_span;
+        self
+    }
+
+    /// Set the cell's text alignment.
+    pub fn align(mut self, align: HAlign) -> Self {
+        self.align = Some(align);
+        self
+    }
+
+    /// Set one aesthetic of the cell to a fixed, output-space value —
+    /// bypassing scales, like a `Raw(...)` channel on a geom.
+    pub fn fixed(mut self, aesthetic: TableScaledAesthetic, value: impl Into<Value>) -> Self {
+        self.aesthetics
+            .push((aesthetic, CellAesthetic::Raw(value.into())));
+        self
+    }
+
+    /// Drive one aesthetic of the cell from `value`, mapped through
+    /// the scale registered under `scale` on the composition.
+    pub fn scaled(
+        mut self,
+        aesthetic: TableScaledAesthetic,
+        value: impl Into<Value>,
+        scale: impl Into<String>,
+    ) -> Self {
+        self.aesthetics
+            .push((aesthetic, CellAesthetic::Scaled(value.into(), scale.into())));
+        self
+    }
+
+    /// Drive the cell's background fill from `value`, mapped through
+    /// the scale registered under `scale` on the composition.
+    pub fn scaled_fill(self, value: impl Into<Value>, scale: impl Into<String>) -> Self {
+        self.scaled(TableScaledAesthetic::Fill, value, scale)
+    }
+
+    /// Drive the cell's text color from `value`, mapped through the
+    /// scale registered under `scale` on the composition.
+    pub fn scaled_color(self, value: impl Into<Value>, scale: impl Into<String>) -> Self {
+        self.scaled(TableScaledAesthetic::Color, value, scale)
+    }
+
+    /// The cell's aesthetics as one [`TableCellTheme`] layer: raw
+    /// values as given, scaled ones mapped through the registry. A
+    /// scaled binding whose scale name isn't registered — or any
+    /// binding whose value has the wrong shape for the aesthetic —
+    /// contributes nothing, the same as an unresolvable geom channel.
+    fn aesthetics_override(
+        &self,
+        registry: &crate::plot::scale::ScaleRegistry,
+    ) -> Option<TableCellTheme> {
+        if self.aesthetics.is_empty() {
+            return None;
+        }
+        let mut text = TextElement::default();
+        let mut background = RectElement::default();
+        let mut any = false;
+        for (aesthetic, cell_value) in &self.aesthetics {
+            let mapped = match cell_value {
+                CellAesthetic::Raw(v) => v.clone(),
+                CellAesthetic::Scaled(v, name) => match registry.get(name) {
+                    Some(scale) => scale.map(v),
+                    None => continue,
+                },
+            };
+            let applied = match aesthetic {
+                TableScaledAesthetic::Fill => mapped.as_color().map(|c| {
+                    background.fill = Some(ThemeColor::Fixed(c));
+                }),
+                TableScaledAesthetic::BorderColor => mapped.as_color().map(|c| {
+                    background.color = Some(ThemeColor::Fixed(c));
+                }),
+                TableScaledAesthetic::BorderWidth => mapped.as_number().map(|pt| {
+                    background.linewidth_pt = Some(Length::Abs(pt));
+                }),
+                TableScaledAesthetic::BorderLinetype => mapped.as_linetype().map(|steps| {
+                    background.linetype = Some(Arc::from(steps));
+                }),
+                TableScaledAesthetic::CornerRadius => mapped.as_number().map(|pt| {
+                    background.corner_radius = Some(Length::Abs(pt));
+                }),
+                TableScaledAesthetic::Color => mapped.as_color().map(|c| {
+                    text.color = Some(ThemeColor::Fixed(c));
+                }),
+                TableScaledAesthetic::TextSize => mapped.as_number().map(|pt| {
+                    text.size_pt = Some(Length::Abs(pt));
+                }),
+                TableScaledAesthetic::TextOutlineColor => mapped.as_color().map(|c| {
+                    text.text_stroke = Some(ThemeColor::Fixed(c));
+                }),
+                TableScaledAesthetic::TextOutlineWidth => mapped.as_number().map(|pt| {
+                    text.text_linewidth_pt = Some(Length::Abs(pt));
+                }),
+                TableScaledAesthetic::FontFamily => mapped.as_str().map(|s| {
+                    text.font.family = Some(parse_font_family(s));
+                }),
+                TableScaledAesthetic::FontWeight => mapped.as_number().map(|n| {
+                    text.font.weight = Some(FontWeight(n.clamp(1.0, 1000.0) as u16));
+                }),
+                TableScaledAesthetic::FontWidth => {
+                    mapped.as_str().and_then(parse_font_width).map(|w| {
+                        text.font.width = Some(w);
+                    })
+                }
+                TableScaledAesthetic::FontStyle => {
+                    mapped.as_str().and_then(parse_font_style).map(|s| {
+                        text.font.style = Some(s);
+                    })
+                }
+                TableScaledAesthetic::LineHeight => mapped.as_number().map(|m| {
+                    text.lineheight = Some(Length::Rel(m));
+                }),
+                TableScaledAesthetic::Tracking => mapped.as_number().map(|m| {
+                    text.tracking = Some(Length::Rel(m));
+                }),
+                TableScaledAesthetic::Underline => mapped.as_bool().map(|b| {
+                    text.underline = Some(b);
+                }),
+                TableScaledAesthetic::Strikethrough => mapped.as_bool().map(|b| {
+                    text.strikethrough = Some(b);
+                }),
+                TableScaledAesthetic::Align => mapped.as_str().and_then(parse_halign).map(|a| {
+                    text.align = Some(a);
+                }),
+            };
+            any |= applied.is_some();
+        }
+        if !any {
+            return None;
+        }
+        Some(TableCellTheme {
+            text: Element::Set(text),
+            background: Element::Set(background),
+        })
+    }
+}
+
+impl TableCell {
     /// Resolve the cell's theme style and shape its text. This is the
     /// single point where a cell meets the theme; measure and draw
     /// both go through it, so a cell can't reserve a box styled one
@@ -1112,72 +1049,67 @@ impl CellSpec {
         &self,
         table_theme: &TableTheme,
         theme: &Theme,
+        registry: &crate::plot::scale::ScaleRegistry,
         root_pt: f64,
         dpi: f64,
         padding_px: (f64, f64, f64, f64),
         images: &Arc<crate::image_registry::ImageRegistry>,
-        row_style: Option<&TableCellTheme>,
-        cell_style: Option<&TableCellTheme>,
     ) -> StyledCell {
         let (text_el, background) = match self.kind {
-            CellKind::Title => (
+            TableCellKind::Title => (
                 TableTheme::resolved_text_slot(&table_theme.title, &theme.text),
                 None,
             ),
-            CellKind::Subtitle => (
+            TableCellKind::Subtitle => (
                 TableTheme::resolved_text_slot(&table_theme.subtitle, &theme.text),
                 None,
             ),
-            CellKind::Caption => (
+            TableCellKind::Caption => (
                 TableTheme::resolved_text_slot(&table_theme.caption, &theme.text),
                 None,
             ),
-            CellKind::Footnote => (
+            TableCellKind::Footnote => (
                 TableTheme::resolved_text_slot(&table_theme.footnote, &theme.text),
                 None,
             ),
-            CellKind::RowGroup => {
+            TableCellKind::RowGroup => {
                 let r = table_theme.resolved_row_group(&theme.text);
                 (r.text, r.background)
             }
-            CellKind::Summary { .. } => {
+            TableCellKind::Summary { .. } => {
                 let r = table_theme.resolved_summary(&theme.text);
                 (r.text, r.background)
             }
-            CellKind::Spanner => {
+            TableCellKind::Spanner => {
                 let r = table_theme.resolved_heading(HeadingRole::Spanner, &theme.text);
                 (r.text, r.background)
             }
-            CellKind::ColumnLabel => {
+            TableCellKind::ColumnLabel => {
                 let r = table_theme.resolved_heading(HeadingRole::ColumnLabel, &theme.text);
                 (r.text, r.background)
             }
-            CellKind::StubHead => {
+            TableCellKind::StubHead => {
                 let r = table_theme.resolved_heading(HeadingRole::StubHead, &theme.text);
                 (r.text, r.background)
             }
-            CellKind::Stub { row } => {
+            TableCellKind::Stub { row } => {
                 let r = table_theme.resolved_stub(row, &theme.text);
                 (r.text, r.background)
             }
-            CellKind::Body { row } => {
+            TableCellKind::Body { row } => {
                 let r = table_theme.resolved_body(row, self.col as usize, &theme.text);
                 (r.text, r.background)
             }
         };
-        // Per-row and per-cell overrides sit above every structural
-        // layer, row first so the cell wins field-for-field.
-        let (text_el, background) = if row_style.is_some() || cell_style.is_some() {
-            let mut resolved = ResolvedTableCells {
+        // The cell's own aesthetics sit above the structural cascade,
+        // raw and scaled bindings in one layer.
+        let aesthetics = self.aesthetics_override(registry);
+        let (text_el, background) = if let Some(o) = &aesthetics {
+            let resolved = ResolvedTableCells {
                 text: text_el,
                 background,
-            };
-            if let Some(o) = row_style {
-                resolved = resolved.with_override(o);
             }
-            if let Some(o) = cell_style {
-                resolved = resolved.with_override(o);
-            }
+            .with_override(o);
             (resolved.text, resolved.background)
         } else {
             (text_el, background)
@@ -1222,7 +1154,7 @@ impl CellSpec {
 /// A cell with its style resolved and its text shaped — what both the
 /// grid measure and the draw pass consume.
 struct StyledCell {
-    kind: CellKind,
+    kind: TableCellKind,
     /// `None` when the cascade hid the cell's text — the background
     /// and padding still occupy their space.
     run: Option<ChromeRun>,
@@ -1322,7 +1254,7 @@ struct SolvedCell {
     color: crate::color::Color,
     outline: Option<crate::plot::chrome::text::TextOutline>,
     padding_px: (f64, f64, f64, f64),
-    kind: CellKind,
+    kind: TableCellKind,
 }
 
 /// The solved table: cell rects plus derived rule positions, all in
@@ -1347,14 +1279,19 @@ impl SolvedTable {
             .filter(|c| {
                 matches!(
                     c.kind,
-                    CellKind::ColumnLabel | CellKind::StubHead | CellKind::Spanner
+                    TableCellKind::ColumnLabel | TableCellKind::StubHead | TableCellKind::Spanner
                 )
             })
             .map(|c| c.rect.y1)
             .reduce(f64::max);
         let mut body_tops: Vec<f64> = cells
             .iter()
-            .filter(|c| matches!(c.kind, CellKind::Body { .. } | CellKind::Stub { .. }))
+            .filter(|c| {
+                matches!(
+                    c.kind,
+                    TableCellKind::Body { .. } | TableCellKind::Stub { .. }
+                )
+            })
             .map(|c| c.rect.y0)
             .collect();
         body_tops.sort_by(f64::total_cmp);
@@ -1362,7 +1299,12 @@ impl SolvedTable {
         let body_boundaries = body_tops.iter().skip(1).copied().collect();
         let mut col_rights: Vec<f64> = cells
             .iter()
-            .filter(|c| matches!(c.kind, CellKind::Body { .. } | CellKind::Stub { .. }))
+            .filter(|c| {
+                matches!(
+                    c.kind,
+                    TableCellKind::Body { .. } | TableCellKind::Stub { .. }
+                )
+            })
             .map(|c| c.rect.x1)
             .collect();
         col_rights.sort_by(f64::total_cmp);

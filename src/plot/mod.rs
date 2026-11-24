@@ -54,5 +54,8 @@ pub use scale::{
     AxisSide, BinEdgeError, BreakTarget, InputRange, LabelSpec, LegendSide, OutputRange, Scale,
     ScaleRegistry, ScaleTypeKind, Transform, TransformKind,
 };
-pub use table::{Table, TableColumn, TableRowGroup, TableSpanner};
+pub use table::{
+    CellAesthetic, Table, TableCell, TableCellKind, TableColumn, TableColumnRole, TableRow,
+    TableRowRole, TableScaledAesthetic,
+};
 pub use value::{DataColumn, Date, DateTime, Duration, LinetypeStep, Time, Value};

@@ -58,7 +58,7 @@ pub mod kind {
 #[non_exhaustive]
 pub enum PlotPart {
     // Panel and background.
-    PlotBackground,
+    Background,
     PanelBackground,
     GridMajor,
     GridMinor,
@@ -107,7 +107,7 @@ impl PlotPart {
     /// the wire form, so it may be matched on and must not drift.
     pub const fn name(self) -> &'static str {
         match self {
-            PlotPart::PlotBackground => "plot_background",
+            PlotPart::Background => "background",
             PlotPart::PanelBackground => "panel_background",
             PlotPart::GridMajor => "grid_major",
             PlotPart::GridMinor => "grid_minor",
@@ -147,7 +147,7 @@ impl PlotPart {
     /// The part a [`Self::name`] identifier came from.
     pub fn from_name(name: &str) -> Option<Self> {
         Some(match name {
-            "plot_background" => PlotPart::PlotBackground,
+            "background" => PlotPart::Background,
             "panel_background" => PlotPart::PanelBackground,
             "grid_major" => PlotPart::GridMajor,
             "grid_minor" => PlotPart::GridMinor,
@@ -169,13 +169,25 @@ impl PlotPart {
             "title" => PlotPart::Title,
             "subtitle" => PlotPart::Subtitle,
             "caption" => PlotPart::Caption,
+            "table_title" => PlotPart::TableTitle,
+            "table_subtitle" => PlotPart::TableSubtitle,
+            "table_caption" => PlotPart::TableCaption,
+            "table_spanner" => PlotPart::TableSpanner,
+            "table_column_label" => PlotPart::TableColumnLabel,
+            "table_stub_head" => PlotPart::TableStubHead,
+            "table_stub" => PlotPart::TableStub,
+            "table_cell" => PlotPart::TableCell,
+            "table_row_group" => PlotPart::TableRowGroup,
+            "table_summary" => PlotPart::TableSummary,
+            "table_footnote" => PlotPart::TableFootnote,
+            "table_rule" => PlotPart::TableRule,
             _ => return None,
         })
     }
 
     /// Every part, in declaration order.
-    pub const ALL: [PlotPart; 22] = [
-        PlotPart::PlotBackground,
+    pub const ALL: [PlotPart; 34] = [
+        PlotPart::Background,
         PlotPart::PanelBackground,
         PlotPart::GridMajor,
         PlotPart::GridMinor,
@@ -197,6 +209,18 @@ impl PlotPart {
         PlotPart::Title,
         PlotPart::Subtitle,
         PlotPart::Caption,
+        PlotPart::TableTitle,
+        PlotPart::TableSubtitle,
+        PlotPart::TableCaption,
+        PlotPart::TableSpanner,
+        PlotPart::TableColumnLabel,
+        PlotPart::TableStubHead,
+        PlotPart::TableStub,
+        PlotPart::TableCell,
+        PlotPart::TableRowGroup,
+        PlotPart::TableSummary,
+        PlotPart::TableFootnote,
+        PlotPart::TableRule,
     ];
 }
 
@@ -233,8 +257,10 @@ pub fn named_region_scope(name: &str) -> PickScope {
 
 /// One table, named by its patch id. A table holds no plots, so its
 /// scope replaces `plot` in the grammar: `composition → table →
-/// region → part → item`, where the item index is `row * ncols + col`
-/// of the cell's grid position.
+/// region → part → item`, where the item index is the cell's 0-based
+/// ordinal within its section (body row for body and stub cells,
+/// summary row for summary cells); heading and free-text cells carry
+/// no item.
 pub fn table_scope(patch_id: &str) -> PickScope {
     PickScope::group(kind::TABLE).with_name(patch_id)
 }

@@ -109,8 +109,8 @@ fn solid_red_panel_theme() -> Theme {
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[test]
-fn default_theme_plot_background_uses_paper() {
-    // Default theme's plot_background is `Paper` (white at the new
+fn default_theme_background_uses_paper() {
+    // Default theme's background is `Paper` (white at the new
     // ggplot2-style defaults). The orchestrator's phase-1 patch
     // background pass must emit a white fill.
     let theme = Theme::default();
