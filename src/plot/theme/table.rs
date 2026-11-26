@@ -68,34 +68,135 @@ pub enum HeadingRole {
     StubHead,
 }
 
-/// Rules — the lines separating a table's regions. One shared line
-/// element with sparse per-position overrides, in the
-/// [`super::PerChannel`] spirit.
+/// One structural region's rules: the separators between its own rows
+/// and columns, and the frame around it. Every field falls through
+/// when `Inherit`, exactly as on [`TableCellTheme`].
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct TableRules {
-    /// Every rule in the table.
-    pub all: Element<LineElement>,
-    /// Horizontal rules between body rows.
+pub struct RegionRules {
+    /// Interior row separators.
     pub horizontal: Element<LineElement>,
-    /// Vertical rules between columns.
+    /// Interior column separators.
     pub vertical: Element<LineElement>,
-    /// The rule separating the heading block from the body.
-    pub header: Element<LineElement>,
-    /// The rules along the table's outer top and bottom edges.
-    pub outer: Element<LineElement>,
+    /// The region's frame, drawn per border side. `fill` and
+    /// `corner_radius` are unused by rules.
+    pub frame: Element<RectElement>,
 }
 
-/// Which rule position to resolve, for [`TableTheme::resolved_rule`].
+/// Rules — the lines separating a table's regions. Each region owns
+/// its interior separators and a per-side frame, claimed by cell
+/// adjacency rather than by assumed block layout: a region's frame
+/// side claims every edge segment where the region meets a different
+/// region, a void, or the table edge, so interleaved blocks box
+/// themselves without special cases. Where two regions meet, both
+/// facing sides compete per segment — the wider claim wins, and ties
+/// break by specificity: `labels` > `header` > `stub` > `body` >
+/// `footer` > `all`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TableRules {
+    /// The whole-table region. Its `frame` is the box around every
+    /// cell — title and caption included — and the cascade parent of
+    /// every region frame; its interiors never claim and serve only
+    /// as the shared fallback the region interiors cascade over.
+    pub all: RegionRules,
+    /// Title and subtitle.
+    pub header: RegionRules,
+    /// The column-label block: spanners, column labels, the stub head.
+    pub labels: RegionRules,
+    /// The stub column.
+    pub stub: RegionRules,
+    /// Body rows: data cells, row groups, summaries and footnotes.
+    pub body: RegionRules,
+    /// The caption.
+    pub footer: RegionRules,
+}
+
+/// A rule-bearing region of a table, for [`TableRules::region`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleRegion {
+    /// Title and subtitle.
+    Header,
+    /// The column-label block: spanners, column labels, the stub head.
+    Labels,
+    /// The stub column.
+    Stub,
+    /// Body rows: data cells, row groups, summaries and footnotes.
+    Body,
+    /// The caption.
+    Footer,
+    /// The whole table.
+    All,
+}
+
+/// A side of a region's frame, indexing the `[top, right, bottom,
+/// left]` order of [`RectElement::side_widths_pt`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameSide {
+    /// The region's top edge.
+    Top,
+    /// The region's right edge.
+    Right,
+    /// The region's bottom edge.
+    Bottom,
+    /// The region's left edge.
+    Left,
+}
+
+impl FrameSide {
+    /// The side's index into `[top, right, bottom, left]` arrays.
+    pub fn index(self) -> usize {
+        match self {
+            FrameSide::Top => 0,
+            FrameSide::Right => 1,
+            FrameSide::Bottom => 2,
+            FrameSide::Left => 3,
+        }
+    }
+}
+
+/// Interior separator orientation, for [`RulePosition::Interior`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteriorOrientation {
+    /// Between the region's own rows.
+    Horizontal,
+    /// Between the region's own columns.
+    Vertical,
+}
+
+/// Which rule to resolve, for [`TableTheme::resolved_frame_side`] and
+/// [`TableTheme::resolved_interior`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RulePosition {
-    /// The outer top or bottom edge.
-    Outer,
-    /// The heading/body separator.
-    Header,
-    /// Between two body rows.
-    BetweenRows,
-    /// Between two columns.
-    BetweenColumns,
+    /// A side of a region's frame.
+    Frame(RuleRegion, FrameSide),
+    /// A region's interior separators.
+    Interior(RuleRegion, InteriorOrientation),
+}
+
+/// A fully cascaded rule — color, width and dash, ready to stroke.
+/// `Length` stays unresolved so the draw path resolves against the
+/// same default parent as other chrome lines.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedRule {
+    /// Stroke color.
+    pub color: ThemeColor,
+    /// Stroke width in pt.
+    pub linewidth_pt: Length,
+    /// Dash pattern; `None` or empty for a solid rule.
+    pub linetype: Option<std::sync::Arc<[crate::scales::value::LinetypeStep]>>,
+}
+
+impl TableRules {
+    /// The rules of one region.
+    pub fn region(&self, region: RuleRegion) -> &RegionRules {
+        match region {
+            RuleRegion::Header => &self.header,
+            RuleRegion::Labels => &self.labels,
+            RuleRegion::Stub => &self.stub,
+            RuleRegion::Body => &self.body,
+            RuleRegion::Footer => &self.footer,
+            RuleRegion::All => &self.all,
+        }
+    }
 }
 
 /// A fully cascaded cell-region style — the table renderer reads
@@ -274,19 +375,55 @@ impl Default for TableTheme {
                 background: Element::Inherit,
             },
             rules: TableRules {
-                all: Element::Inherit,
-                horizontal: Element::Blank,
-                vertical: Element::Blank,
-                header: Element::Set(LineElement {
-                    color: Some(ThemeColor::Ink),
-                    linewidth_pt: Some(Length::Abs(1.0)),
-                    ..LineElement::default()
-                }),
-                outer: Element::Set(LineElement {
-                    color: Some(ThemeColor::Ink),
-                    linewidth_pt: Some(Length::Abs(1.0)),
-                    ..LineElement::default()
-                }),
+                labels: RegionRules {
+                    frame: Element::Set(RectElement {
+                        color: Some(ThemeColor::Ink),
+                        linewidth_pt: Some(Length::Abs(1.0)),
+                        // The subtitle → labels edge and the heading
+                        // separator; no side rules.
+                        border_widths_pt: Some([
+                            None,
+                            Some(Length::Abs(0.0)),
+                            None,
+                            Some(Length::Abs(0.0)),
+                        ]),
+                        ..RectElement::default()
+                    }),
+                    ..RegionRules::default()
+                },
+                stub: RegionRules {
+                    frame: Element::Set(RectElement {
+                        color: Some(ThemeColor::Ink),
+                        linewidth_pt: Some(Length::Abs(1.0)),
+                        // The bottom edge under the stub column,
+                        // continuing the body's bottom rule; nothing
+                        // else.
+                        border_widths_pt: Some([
+                            Some(Length::Abs(0.0)),
+                            Some(Length::Abs(0.0)),
+                            None,
+                            Some(Length::Abs(0.0)),
+                        ]),
+                        ..RectElement::default()
+                    }),
+                    ..RegionRules::default()
+                },
+                body: RegionRules {
+                    frame: Element::Set(RectElement {
+                        color: Some(ThemeColor::Ink),
+                        linewidth_pt: Some(Length::Abs(1.0)),
+                        // The table's bottom edge; nothing else.
+                        border_widths_pt: Some([
+                            Some(Length::Abs(0.0)),
+                            Some(Length::Abs(0.0)),
+                            None,
+                            Some(Length::Abs(0.0)),
+                        ]),
+                        ..RectElement::default()
+                    }),
+                    ..RegionRules::default()
+                },
+                ..TableRules::default()
             },
             cell_padding: Margin::new(
                 Length::Abs(4.0),
@@ -427,20 +564,56 @@ impl TableTheme {
         self.resolve_row(&self.stub.over(&parity.over(all)), root_text)
     }
 
-    /// Resolve a rule at the given position. `None` means no rule is
-    /// drawn there.
-    /// The header and outer positions cascade through `all` only —
-    /// they are siblings of the interior positions, not
-    /// specializations of them, so hiding interior rules never hides
-    /// the frame.
-    pub fn resolved_rule(&self, position: RulePosition) -> Option<LineElement> {
-        let line = match position {
-            RulePosition::Header => cascade_layers([&self.rules.all, &self.rules.header]),
-            RulePosition::BetweenRows => cascade_layers([&self.rules.all, &self.rules.horizontal]),
-            RulePosition::BetweenColumns => cascade_layers([&self.rules.all, &self.rules.vertical]),
-            RulePosition::Outer => cascade_layers([&self.rules.all, &self.rules.outer]),
+    /// Resolve a region's interior separators, cascading the region
+    /// slot over `all`'s. `None` means no rule is drawn there.
+    pub fn resolved_interior(
+        &self,
+        region: RuleRegion,
+        orientation: InteriorOrientation,
+    ) -> Option<LineElement> {
+        let (parent, slot) = match orientation {
+            InteriorOrientation::Horizontal => (
+                &self.rules.all.horizontal,
+                &self.rules.region(region).horizontal,
+            ),
+            InteriorOrientation::Vertical => (
+                &self.rules.all.vertical,
+                &self.rules.region(region).vertical,
+            ),
         };
-        line.map(|l| l.cascade(&line_concrete_defaults()))
+        cascade_layers([parent, slot]).map(|l| l.cascade(&line_concrete_defaults()))
+    }
+
+    /// Resolve any rule position to a concrete stroke. `None` means no
+    /// rule is drawn there; a rule whose width resolves to zero is not
+    /// drawn either.
+    pub fn resolved_rule(&self, position: RulePosition) -> Option<ResolvedRule> {
+        match position {
+            RulePosition::Frame(region, side) => self.resolved_frame_side(region, side),
+            RulePosition::Interior(region, orientation) => self
+                .resolved_interior(region, orientation)
+                .map(|line| ResolvedRule {
+                    color: line.color.expect("line defaults set a color"),
+                    linewidth_pt: line.linewidth_pt.expect("line defaults set a width"),
+                    linetype: line.linetype,
+                }),
+        }
+    }
+
+    /// Resolve one side of a region's frame, cascading the region
+    /// slot over `all`'s frame. `None` means no rule is drawn there;
+    /// a side whose width resolves to zero is not drawn either.
+    pub fn resolved_frame_side(&self, region: RuleRegion, side: FrameSide) -> Option<ResolvedRule> {
+        let rect = cascade_layers([&self.rules.all.frame, &self.rules.region(region).frame])?;
+        let defaults = line_concrete_defaults();
+        let linewidth_pt = rect.side_widths_pt()[side.index()]
+            .or(defaults.linewidth_pt)
+            .expect("line defaults set a width");
+        Some(ResolvedRule {
+            color: rect.color.or(defaults.color).expect("defaults set a color"),
+            linewidth_pt,
+            linetype: rect.linetype.or(defaults.linetype),
+        })
     }
 
     /// Resolve one of the table's own text slots (title / subtitle /

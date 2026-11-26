@@ -51,8 +51,9 @@ use crate::plot::pick::{item_scope, part_scope, table_scope, PlotPart};
 use crate::plot::plot::PlotError;
 use crate::plot::theme::{
     rect_concrete_defaults, text_concrete_defaults, Element, FontFamily, FontStyle, FontWeight,
-    FontWidth, HAlign, HeadingRole, Length, RectElement, ResolvedTableCells, RulePosition,
-    TableCellTheme, TableTheme, TextElement, Theme, ThemeColor, ThemePart, VAlign,
+    FontWidth, FrameSide, HAlign, HeadingRole, InteriorOrientation, Length, RectElement,
+    ResolvedTableCells, RulePosition, RuleRegion, TableCellTheme, TableTheme, TextElement, Theme,
+    ThemeColor, ThemePart, VAlign,
 };
 use crate::scales::Value;
 use crate::scene::SceneBuilder;
@@ -571,15 +572,16 @@ impl Table {
     }
 
     /// Draw the themed rules, resolved per grid edge rather than as
-    /// full-extent lines. Each interior edge between two cells is
-    /// claimed by exactly one rule position — the heading/body
-    /// separator where a heading cell meets a body cell, a row or
-    /// column separator where two body cells meet — so a spanner's
-    /// interior carries no column rule and a column rule stops where a
-    /// cell spans across it. Body separators draw before the header
-    /// rule and the outer edges: where two rules coincide, the fixed
-    /// chrome paints over the body — the same stacking a scrolling
-    /// body behind a fixed header requires.
+    /// full-extent lines. Every cell kind belongs to a rule region;
+    /// an edge between two cells of one region is claimed by that
+    /// region's interior rule, and an edge where regions meet — or a
+    /// region meets a void or the table edge — by the facing frame
+    /// sides, so blocks box themselves wherever the caller placed
+    /// them and a spanner's interior carries no column rule. Body
+    /// separators draw before the region frames and cell borders:
+    /// where two claims coincide, the more specific one wins — the
+    /// same stacking a scrolling body behind a fixed header
+    /// requires.
     fn draw_rules(
         &self,
         scene: &mut dyn SceneBuilder,
@@ -589,31 +591,40 @@ impl Table {
         theme: &Theme,
         dpi: f64,
     ) {
-        let Some(local_bbox) = solved.bounding_box() else {
+        if solved.bounding_box().is_none() {
             return;
-        };
+        }
         let pt_to_px = dpi / 72.0;
 
         let draw_rule = |scene: &mut dyn SceneBuilder,
                          position: RulePosition,
                          from: crate::geometry::Point,
                          to: crate::geometry::Point| {
-            let Some(line) = table_theme.resolved_rule(position) else {
+            let Some(rule) = table_theme.resolved_rule(position) else {
                 return;
             };
-            let lw = line.linewidth_pt.expect("concrete defaults set width");
-            let width_px = lw.resolve(crate::plot::theme::DEFAULT_LINEWIDTH_PT) * pt_to_px;
+            let width_px = rule
+                .linewidth_pt
+                .resolve(crate::plot::theme::DEFAULT_LINEWIDTH_PT)
+                * pt_to_px;
             if width_px <= 0.0 {
                 return;
             }
-            let color = line.color.expect("concrete defaults set color");
-            let mut stroke = Stroke::new(width_px);
-            if let Some(cap) = line.cap {
-                stroke = stroke.with_caps(cap);
+            // Butt caps and miter joins, matching cell borders: square
+            // ends that don't poke past the edge.
+            let mut stroke = Stroke::new(width_px)
+                .with_caps(crate::stroke::Cap::Butt)
+                .with_join(crate::stroke::Join::Miter);
+            if let Some(pattern) = rule
+                .linetype
+                .as_ref()
+                .filter(|p| crate::linetype::is_marker_free(p))
+            {
+                if let Some(dashes) = crate::linetype::to_kurbo_dashes(pattern, width_px) {
+                    stroke = stroke.with_dashes(0.0, dashes);
+                }
             }
-            if let Some(join) = line.join {
-                stroke = stroke.with_join(join);
-            }
+            let color = rule.color;
             let mut path = crate::path::Path::new();
             path.move_to(from);
             path.line_to(to);
@@ -630,21 +641,25 @@ impl Table {
         };
 
         // Resolve every grid edge to the single border that claims it.
-        // A themed rule and the adjacent cells' borders compete per
-        // edge segment: the wider claim wins, and ties break toward
-        // the more specific claimant — a cell border over a table
-        // rule, the heading side over the body side, the top/left
-        // cell over the bottom/right one. Rules participate only
-        // between gridded cells (heading or body); a cell border
-        // participates anywhere the cell has an edge, so a title can
-        // carry a rule-off line. A spanner's interior carries no
-        // column rule because no cells abut there.
+        // Every cell kind belongs to a rule region (header, labels,
+        // stub, body, footer); a region's interior rule claims edges
+        // between its own cells, and its frame sides claim the edges
+        // where it meets a different region, a void, or the table
+        // edge — so blocks box themselves wherever the caller placed
+        // them, and two regions meeting at an edge compete with their
+        // facing sides. Cell borders participate anywhere a cell has
+        // an edge, so a title can carry a rule-off line. A spanner's
+        // interior carries no column rule because no cells abut there.
+        //
+        // Competition per segment: the wider claim wins; ties break
+        // toward the more specific claimant — a cell border over a
+        // region frame, the labels side over the body side, the
+        // top/left cell over the bottom/right one.
         //
         // Tie-break ranks: lower wins at equal width.
-        const HEADING_CELL: u8 = 0;
+        const LABELS_CELL: u8 = 0;
         const NEAR_CELL: u8 = 1; // the top/left cell of a body edge
         const FAR_CELL: u8 = 2; // the bottom/right cell
-        const RULE: u8 = 3;
 
         /// What the winning claim on a segment draws.
         enum EdgeStyle {
@@ -657,21 +672,35 @@ impl Table {
             },
         }
 
-        // The side a kind's cells rule-participate on: heading or
-        // body. Free-text cells (title, caption, footnotes) carry no
-        // rules, only their own borders.
-        let side = |kind: TableCellKind| -> Option<bool> {
+        let region_of = |kind: TableCellKind| -> RuleRegion {
             match kind {
+                TableCellKind::Title | TableCellKind::Subtitle => RuleRegion::Header,
                 TableCellKind::Spanner | TableCellKind::ColumnLabel | TableCellKind::StubHead => {
-                    Some(true)
+                    RuleRegion::Labels
                 }
-                TableCellKind::Stub { .. }
-                | TableCellKind::Body { .. }
+                TableCellKind::Stub { .. } => RuleRegion::Stub,
+                TableCellKind::Body { .. }
                 | TableCellKind::RowGroup
-                | TableCellKind::Summary { .. } => Some(false),
-                _ => None,
+                | TableCellKind::Summary { .. }
+                | TableCellKind::Footnote => RuleRegion::Body,
+                TableCellKind::Caption => RuleRegion::Footer,
             }
         };
+        // Tie ranks for the regions — the gt attribution: the
+        // subtitle → labels edge belongs to the labels block, the
+        // stub | body edge to the stub.
+        let rank = |region: RuleRegion| -> u8 {
+            match region {
+                RuleRegion::Labels => 3,
+                RuleRegion::Header => 4,
+                RuleRegion::Stub => 5,
+                RuleRegion::Body => 6,
+                RuleRegion::Footer => 7,
+                RuleRegion::All => 8,
+            }
+        };
+
+        let bbox = solved.bounding_box();
 
         // A cell's border claims are read from its resolved background
         // without the concrete defaults — a border exists only where
@@ -691,11 +720,11 @@ impl Table {
         let borders: Vec<_> = solved.cells.iter().map(border_of).collect();
 
         let rule_width = |pos: RulePosition| -> f64 {
-            let Some(line) = table_theme.resolved_rule(pos) else {
-                return 0.0;
-            };
-            let lw = line.linewidth_pt.expect("concrete defaults set width");
-            lw.resolve(crate::plot::theme::DEFAULT_LINEWIDTH_PT) * pt_to_px
+            table_theme.resolved_rule(pos).map_or(0.0, |rule| {
+                rule.linewidth_pt
+                    .resolve(crate::plot::theme::DEFAULT_LINEWIDTH_PT)
+                    * pt_to_px
+            })
         };
 
         // Accumulate the winning claim per elementary segment.
@@ -715,14 +744,19 @@ impl Table {
             };
         }
 
-        // The header block's vertical extent, for classifying voids
-        // between heading cells.
-        let heading_band = solved
-            .cells
-            .iter()
-            .filter(|c| side(c.kind) == Some(true))
-            .map(|c| (c.rect.y0, c.rect.y1))
-            .reduce(|(a0, a1), (b0, b1)| (a0.min(b0), a1.max(b1)));
+        // The labels and body blocks' bounding boxes, for classifying
+        // voids (a spanner that doesn't cover every column): a void
+        // strictly inside a block's box infers that block's region.
+        let region_box = |region: RuleRegion| {
+            solved
+                .cells
+                .iter()
+                .filter(|c| region_of(c.kind) == region)
+                .map(|c| c.rect)
+                .reduce(|a, b| a.union(b))
+        };
+        let labels_box = region_box(RuleRegion::Labels);
+        let body_box = region_box(RuleRegion::Body);
 
         let mut h_segments: Vec<(EdgeStyle, f64, f64, f64)> = Vec::new();
         let mut v_segments: Vec<(EdgeStyle, f64, f64, f64)> = Vec::new();
@@ -756,6 +790,13 @@ impl Table {
                 .chain(&below)
                 .flat_map(|&i| [solved.cells[i].rect.x0, solved.cells[i].rect.x1])
                 .collect();
+            // The whole-table box runs the full table width, whatever
+            // the cells abutting it.
+            let on_box_top = bbox.is_some_and(|b| y == b.y0);
+            let on_box_bottom = bbox.is_some_and(|b| y == b.y1);
+            if let Some(b) = bbox.filter(|_| on_box_top || on_box_bottom) {
+                cuts.extend([b.x0, b.x1]);
+            }
             cuts.sort_by(f64::total_cmp);
             cuts.dedup();
             for w in cuts.windows(2) {
@@ -764,61 +805,86 @@ impl Table {
                     let r = &solved.cells[i].rect;
                     r.x0 <= x0 && r.x1 >= x1
                 };
-                let flag = |i: usize, want: bool| side(solved.cells[i].kind) == Some(want);
-                // The band a segment side belongs to. Voids inside the
-                // header block (a spanner that doesn't cover every
-                // column) count as heading; a free-text cell blocks
-                // rules on its edges entirely.
-                let band_of = |cells: &[usize], infer: bool| -> Option<bool> {
-                    let covering: Vec<usize> =
-                        cells.iter().copied().filter(|&i| cover(i)).collect();
-                    if covering.iter().any(|&i| flag(i, true)) {
-                        Some(true)
-                    } else if covering.iter().any(|&i| flag(i, false)) {
-                        Some(false)
-                    } else if !covering.is_empty() {
-                        None
-                    } else {
-                        infer.then_some(true)
-                    }
+                // The region a segment side belongs to: the most
+                // specific region among the covering cells, or the
+                // inferred region for a void inside a block's band.
+                let band_of = |cells: &[usize], infer: Option<RuleRegion>| {
+                    cells
+                        .iter()
+                        .copied()
+                        .filter(|&i| cover(i))
+                        .map(|i| region_of(solved.cells[i].kind))
+                        .min_by_key(|&r| rank(r))
+                        .or(infer)
                 };
-                let above_band = band_of(
+                // A void strictly inside a block's box infers that
+                // block's region; the direction-aware comparisons
+                // keep the void *outside* the box from inferring
+                // anything.
+                let infer_h = |b: &Option<Rect>, region: RuleRegion, above: bool| {
+                    b.filter(|bb| {
+                        let in_y = if above {
+                            y > bb.y0 && y <= bb.y1
+                        } else {
+                            y >= bb.y0 && y < bb.y1
+                        };
+                        in_y && x0 >= bb.x0 && x1 <= bb.x1
+                    })
+                    .map(|_| region)
+                };
+                let above_region = band_of(
                     &above,
-                    heading_band.is_some_and(|(y0, y1)| y > y0 && y <= y1),
+                    infer_h(&labels_box, RuleRegion::Labels, true)
+                        .or_else(|| infer_h(&body_box, RuleRegion::Body, true)),
                 );
-                let below_band = band_of(
+                let below_region = band_of(
                     &below,
-                    heading_band.is_some_and(|(y0, y1)| y >= y0 && y < y1),
+                    infer_h(&labels_box, RuleRegion::Labels, false)
+                        .or_else(|| infer_h(&body_box, RuleRegion::Body, false)),
                 );
 
                 best = None;
-                // The rule claim: the heading/body separator where the
-                // bands meet, a row separator inside the body, the
-                // outer rule on the table's top and bottom boundary.
-                // Heading-meets-heading carries none.
-                match (above_band, below_band) {
-                    (Some(true), Some(false)) | (Some(false), Some(true)) => {
+                // Same region on both sides: the region's interior
+                // rule. A boundary: each side's facing frame side.
+                match (above_region, below_region) {
+                    (Some(a), Some(b)) if a == b => {
                         consider!(
-                            rule_width(RulePosition::Header),
-                            RULE,
-                            EdgeStyle::Rule(RulePosition::Header),
+                            rule_width(RulePosition::Interior(a, InteriorOrientation::Horizontal)),
+                            rank(a),
+                            EdgeStyle::Rule(RulePosition::Interior(
+                                a,
+                                InteriorOrientation::Horizontal
+                            )),
                         );
                     }
-                    (Some(false), Some(false)) => {
-                        consider!(
-                            rule_width(RulePosition::BetweenRows),
-                            RULE,
-                            EdgeStyle::Rule(RulePosition::BetweenRows),
-                        );
+                    (a, b) => {
+                        for (region, side) in [
+                            a.map(|r| (r, FrameSide::Bottom)),
+                            b.map(|r| (r, FrameSide::Top)),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        {
+                            consider!(
+                                rule_width(RulePosition::Frame(region, side)),
+                                rank(region),
+                                EdgeStyle::Rule(RulePosition::Frame(region, side)),
+                            );
+                        }
                     }
-                    _ => {}
                 }
-                if y == local_bbox.y0 && above.is_empty() || y == local_bbox.y1 && below.is_empty()
-                {
+                // The whole-table box's top and bottom edges, within
+                // the box's own extent.
+                if (on_box_top || on_box_bottom) && bbox.is_some_and(|b| x0 >= b.x0 && x1 <= b.x1) {
+                    let side = if on_box_top {
+                        FrameSide::Top
+                    } else {
+                        FrameSide::Bottom
+                    };
                     consider!(
-                        rule_width(RulePosition::Outer),
-                        RULE,
-                        EdgeStyle::Rule(RulePosition::Outer),
+                        rule_width(RulePosition::Frame(RuleRegion::All, side)),
+                        rank(RuleRegion::All),
+                        EdgeStyle::Rule(RulePosition::Frame(RuleRegion::All, side)),
                     );
                 }
                 // The adjacent cells' border claims, bottom side of
@@ -826,8 +892,8 @@ impl Table {
                 for &i in above.iter().filter(|&&i| cover(i)) {
                     if let Some((widths, color, linetype)) = &borders[i] {
                         let kind = solved.cells[i].kind;
-                        let rank = if side(kind) == Some(true) {
-                            HEADING_CELL
+                        let rank = if region_of(kind) == RuleRegion::Labels {
+                            LABELS_CELL
                         } else {
                             NEAR_CELL
                         };
@@ -846,8 +912,8 @@ impl Table {
                 for &i in below.iter().filter(|&&i| cover(i)) {
                     if let Some((widths, color, linetype)) = &borders[i] {
                         let kind = solved.cells[i].kind;
-                        let rank = if side(kind) == Some(true) {
-                            HEADING_CELL
+                        let rank = if region_of(kind) == RuleRegion::Labels {
+                            LABELS_CELL
                         } else {
                             FAR_CELL
                         };
@@ -899,6 +965,12 @@ impl Table {
                 .chain(&right)
                 .flat_map(|&i| [solved.cells[i].rect.y0, solved.cells[i].rect.y1])
                 .collect();
+            // The whole-table box's left and right edges, full height.
+            let on_box_left = bbox.is_some_and(|b| x == b.x0);
+            let on_box_right = bbox.is_some_and(|b| x == b.x1);
+            if let Some(b) = bbox.filter(|_| on_box_left || on_box_right) {
+                cuts.extend([b.y0, b.y1]);
+            }
             cuts.sort_by(f64::total_cmp);
             cuts.dedup();
             for w in cuts.windows(2) {
@@ -907,16 +979,78 @@ impl Table {
                     let r = &solved.cells[i].rect;
                     r.y0 <= y0 && r.y1 >= y1
                 };
-                let participates = |i: usize| side(solved.cells[i].kind).is_some();
+                let band_of = |cells: &[usize], infer: Option<RuleRegion>| {
+                    cells
+                        .iter()
+                        .copied()
+                        .filter(|&i| cover(i))
+                        .map(|i| region_of(solved.cells[i].kind))
+                        .min_by_key(|&r| rank(r))
+                        .or(infer)
+                };
+                // A void strictly inside a block's box infers that
+                // block's region, direction-aware as on the
+                // horizontal pass.
+                let infer_v = |b: &Option<Rect>, region: RuleRegion, left: bool| {
+                    b.filter(|bb| {
+                        let in_x = if left {
+                            x > bb.x0 && x <= bb.x1
+                        } else {
+                            x >= bb.x0 && x < bb.x1
+                        };
+                        in_x && y0 >= bb.y0 && y1 <= bb.y1
+                    })
+                    .map(|_| region)
+                };
+                let left_region = band_of(
+                    &left,
+                    infer_v(&labels_box, RuleRegion::Labels, true)
+                        .or_else(|| infer_v(&body_box, RuleRegion::Body, true)),
+                );
+                let right_region = band_of(
+                    &right,
+                    infer_v(&labels_box, RuleRegion::Labels, false)
+                        .or_else(|| infer_v(&body_box, RuleRegion::Body, false)),
+                );
 
                 best = None;
-                if left.iter().any(|&i| cover(i) && participates(i))
-                    && right.iter().any(|&i| cover(i) && participates(i))
-                {
+                match (left_region, right_region) {
+                    (Some(a), Some(b)) if a == b => {
+                        consider!(
+                            rule_width(RulePosition::Interior(a, InteriorOrientation::Vertical)),
+                            rank(a),
+                            EdgeStyle::Rule(RulePosition::Interior(
+                                a,
+                                InteriorOrientation::Vertical
+                            )),
+                        );
+                    }
+                    (a, b) => {
+                        for (region, side) in [
+                            a.map(|r| (r, FrameSide::Right)),
+                            b.map(|r| (r, FrameSide::Left)),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        {
+                            consider!(
+                                rule_width(RulePosition::Frame(region, side)),
+                                rank(region),
+                                EdgeStyle::Rule(RulePosition::Frame(region, side)),
+                            );
+                        }
+                    }
+                }
+                if (on_box_left || on_box_right) && bbox.is_some_and(|b| y0 >= b.y0 && y1 <= b.y1) {
+                    let side = if on_box_left {
+                        FrameSide::Left
+                    } else {
+                        FrameSide::Right
+                    };
                     consider!(
-                        rule_width(RulePosition::BetweenColumns),
-                        RULE,
-                        EdgeStyle::Rule(RulePosition::BetweenColumns),
+                        rule_width(RulePosition::Frame(RuleRegion::All, side)),
+                        rank(RuleRegion::All),
+                        EdgeStyle::Rule(RulePosition::Frame(RuleRegion::All, side)),
                     );
                 }
                 // Right side of the left cells, left side of the
@@ -924,8 +1058,8 @@ impl Table {
                 for &i in left.iter().filter(|&&i| cover(i)) {
                     if let Some((widths, color, linetype)) = &borders[i] {
                         let kind = solved.cells[i].kind;
-                        let rank = if side(kind) == Some(true) {
-                            HEADING_CELL
+                        let rank = if region_of(kind) == RuleRegion::Labels {
+                            LABELS_CELL
                         } else {
                             NEAR_CELL
                         };
@@ -944,8 +1078,8 @@ impl Table {
                 for &i in right.iter().filter(|&&i| cover(i)) {
                     if let Some((widths, color, linetype)) = &borders[i] {
                         let kind = solved.cells[i].kind;
-                        let rank = if side(kind) == Some(true) {
-                            HEADING_CELL
+                        let rank = if region_of(kind) == RuleRegion::Labels {
+                            LABELS_CELL
                         } else {
                             FAR_CELL
                         };
@@ -1066,11 +1200,15 @@ impl Table {
         };
         let rule_order = |style: &EdgeStyle| -> u8 {
             match style {
-                EdgeStyle::Rule(RulePosition::BetweenRows) => 0,
-                EdgeStyle::Rule(RulePosition::BetweenColumns) => 1,
-                EdgeStyle::Rule(RulePosition::Header) => 2,
-                EdgeStyle::Rule(RulePosition::Outer) => 3,
-                EdgeStyle::Cell { .. } => 4,
+                EdgeStyle::Rule(RulePosition::Interior(_, InteriorOrientation::Horizontal)) => 0,
+                EdgeStyle::Rule(RulePosition::Interior(_, InteriorOrientation::Vertical)) => 1,
+                EdgeStyle::Rule(RulePosition::Frame(RuleRegion::Labels, _)) => 2,
+                EdgeStyle::Rule(RulePosition::Frame(RuleRegion::Header, _)) => 3,
+                EdgeStyle::Rule(RulePosition::Frame(RuleRegion::Stub, _)) => 4,
+                EdgeStyle::Rule(RulePosition::Frame(RuleRegion::Body, _)) => 5,
+                EdgeStyle::Rule(RulePosition::Frame(RuleRegion::Footer, _)) => 6,
+                EdgeStyle::Rule(RulePosition::Frame(RuleRegion::All, _)) => 7,
+                EdgeStyle::Cell { .. } => 8,
             }
         };
         let mut ordered: Vec<(EdgeStyle, crate::geometry::Point, crate::geometry::Point)> =

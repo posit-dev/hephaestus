@@ -88,13 +88,15 @@ fn a_table_renders_every_cell_and_the_default_rules() {
         "expected one glyph run per cell"
     );
 
-    // The default table theme draws three ink rules: the outer top and
-    // bottom edges and the heading/body separator.
+    // The default table theme draws four rule strokes: the subtitle →
+    // labels edge, the heading/body separator, and the table's bottom
+    // edge as two abutting segments (stub and body claim it per
+    // region).
     let rules = ops
         .iter()
         .filter(|op| matches!(op, Op::Stroke { .. }))
         .count();
-    assert_eq!(rules, 3, "outer top/bottom plus the header rule");
+    assert_eq!(rules, 4, "labels top/bottom plus the split bottom edge");
 }
 
 #[test]
@@ -192,18 +194,14 @@ fn the_table_margin_adds_to_the_shared_margin() {
 fn blanking_a_rule_removes_its_stroke() {
     let mut view = build();
     view.update_theme(|theme| {
-        theme.table.rules.outer = Element::Blank;
-        theme.table.rules.header = Element::Set(LineElement {
-            linewidth_pt: Some(hephaestus::plot::theme::Length::Abs(2.0)),
-            ..LineElement::default()
-        });
+        theme.table.rules.labels.frame = Element::Blank;
     });
     let ops = draw_calls(&mut view, 700, 400);
     let rules = ops
         .iter()
         .filter(|op| matches!(op, Op::Stroke { .. }))
         .count();
-    assert_eq!(rules, 1, "only the header rule survives");
+    assert_eq!(rules, 2, "only the split bottom edge survives");
 }
 
 #[test]
@@ -1021,7 +1019,7 @@ fn a_mixed_composition_round_trips_through_a_document() {
 fn a_spanner_breaks_the_column_rules_beneath_it() {
     let mut view = build();
     view.update_theme(|theme| {
-        theme.table.rules.vertical = Element::Set(LineElement {
+        theme.table.rules.body.vertical = Element::Set(LineElement {
             linewidth_pt: Some(hephaestus::plot::theme::Length::Abs(1.0)),
             ..LineElement::default()
         });
@@ -1054,13 +1052,15 @@ fn a_spanner_breaks_the_column_rules_beneath_it() {
     }
     assert!(spanner_y.is_finite(), "a spanner label was drawn");
 
-    // One vertical segment per interior column boundary, contiguous
-    // from the stub-head row down — none crossing the spanner row.
+    // One vertical segment per interior body-column boundary — the
+    // stub column is its own region, so the stub|body edge is the
+    // stub's frame, not an interior rule — none crossing the spanner
+    // row.
     let vertical: Vec<_> = rule_bounds.iter().filter(|b| b.width() == 0.0).collect();
     assert_eq!(
         vertical.len(),
-        3,
-        "one column rule segment per interior boundary"
+        2,
+        "one column rule per interior body-column boundary: {vertical:?}"
     );
     for b in &vertical {
         assert!(
@@ -1153,9 +1153,9 @@ fn a_per_side_theme_border_draws_only_that_side() {
     });
     let ops = draw_calls(&mut view, 700, 400);
 
-    // Every stroke is horizontal: one merged segment per body row
-    // top, including the first, whose 2pt claim outbids the default
-    // header rule on that edge.
+    // Every rule stroke is horizontal: one merged segment per body
+    // row top, including the first, whose 2pt claim outbids the
+    // default heading separator on that edge.
     let segments = stroke_segments(&ops);
     let rule_segments: Vec<_> = segments
         .iter()
@@ -1163,7 +1163,7 @@ fn a_per_side_theme_border_draws_only_that_side() {
         .collect();
     assert!(
         rule_segments.iter().all(|(bb, _, _, _)| bb.height() == 0.0),
-        "no vertical strokes remain: {rule_segments:?}"
+        "no vertical rule strokes: {rule_segments:?}"
     );
     let top_borders: Vec<_> = segments
         .iter()
@@ -1181,17 +1181,21 @@ fn a_narrower_cell_border_loses_the_edge_to_a_rule() {
     // 0.5pt cell border loses to the default 1pt header rule.
     let table = Table::new(&comp(), "summary").cells([
         cell(ColumnLabel, 0, 0, "h"),
+        cell(ColumnLabel, 0, 1, "i"),
         cell(Body { row: 0 }, 1, 0, "a")
             .fixed(hephaestus::plot::TableScaledAesthetic::BorderColor, red)
             .fixed(hephaestus::plot::TableScaledAesthetic::BorderWidth, 0.5),
+        cell(Body { row: 0 }, 1, 1, "b"),
     ]);
     let mut view = PlotComposition::new(&comp()).with_table(table);
     let ops = draw_calls(&mut view, 500, 300);
 
     let segments = stroke_segments(&ops);
-    // The cell keeps its uncontested left and right edges, and loses
-    // the top to the 1pt header rule and the bottom to the 1pt outer
-    // rule — the wider claim wins each contested edge.
+    // The cell keeps its left and right edges — neither carries a
+    // default rule (the table's side rules are off by default, and
+    // the interior column boundary has none). It loses the top to the
+    // 1pt heading separator and the bottom to the 1pt body bottom —
+    // the wider claim wins each contested edge.
     let red_segments: Vec<_> = segments.iter().filter(|(_, _, c, _)| *c == red).collect();
     assert_eq!(red_segments.len(), 2, "only the vertical edges won");
     assert!(red_segments.iter().all(|(bb, _, _, _)| bb.width() == 0.0));
@@ -1200,6 +1204,206 @@ fn a_narrower_cell_border_loses_the_edge_to_a_rule() {
             .iter()
             .any(|(bb, _, _, part)| part == "table_rule" && bb.height() == 0.0),
         "the header rule still spans the contested edge"
+    );
+}
+
+#[test]
+fn the_frame_bounds_the_gridded_block() {
+    let mut view = build();
+    view.update_theme(|theme| {
+        // Side rules are off by default; box the gridded regions to
+        // see the frame. The default labels/body top-and-bottom rules
+        // stay untouched.
+        let side = || RectElement {
+            color: Some(ThemeColor::Ink),
+            linewidth_pt: Some(hephaestus::plot::theme::Length::Abs(1.0)),
+            ..RectElement::default()
+        };
+        theme.table.rules.labels.frame = Element::Set(side());
+        theme.table.rules.stub.frame = Element::Set(side());
+        theme.table.rules.body.frame = Element::Set(side());
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+
+    // Glyph y extents per part, and the rule segments.
+    let glyph_y = |ops: &[Op], want: &str| {
+        let mut parts: Vec<Option<String>> = Vec::new();
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for op in ops {
+            match op {
+                Op::PushPickScope { scope } => parts.push(scope.name().map(str::to_owned)),
+                Op::PopPickScope => {
+                    parts.pop();
+                }
+                Op::DrawGlyphs(run) if parts.iter().any(|n| n.as_deref() == Some(want)) => {
+                    for g in &run.glyphs {
+                        lo = lo.min(f64::from(g.y));
+                        hi = hi.max(f64::from(g.y));
+                    }
+                }
+                _ => {}
+            }
+        }
+        (lo, hi)
+    };
+    let subtitle = glyph_y(&ops, "table_subtitle");
+    let spanner = glyph_y(&ops, "table_spanner");
+    let body = glyph_y(&ops, "table_cell");
+    let caption = glyph_y(&ops, "table_caption");
+
+    let segments = stroke_segments(&ops);
+    let rules: Vec<_> = segments
+        .iter()
+        .filter(|(_, _, _, part)| part == "table_rule")
+        .collect();
+    let horizontal: Vec<_> = rules
+        .iter()
+        .filter(|(bb, _, _, _)| bb.height() == 0.0)
+        .collect();
+    let vertical: Vec<_> = rules
+        .iter()
+        .filter(|(bb, _, _, _)| bb.width() == 0.0)
+        .collect();
+    let top_y = horizontal
+        .iter()
+        .map(|(bb, _, _, _)| bb.y0)
+        .fold(f64::INFINITY, f64::min);
+    let bottom_y = horizontal
+        .iter()
+        .map(|(bb, _, _, _)| bb.y0)
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    // The frame's top edge is the subtitle → heading edge; its bottom
+    // edge bounds the last body row, leaving the caption outside.
+    assert!(subtitle.1 < top_y, "subtitle above the frame");
+    assert!(top_y < spanner.0, "spanner row inside the frame");
+    assert!(body.1 < bottom_y, "body inside the frame");
+    assert!(bottom_y < caption.0, "caption below the frame");
+
+    // The box's sides are claimed per region — labels beside the
+    // heading rows, stub and body beside theirs — and each side runs
+    // the frame's full height.
+    let (left_x, right_x) = (
+        horizontal
+            .iter()
+            .map(|(bb, _, _, _)| bb.x0)
+            .fold(f64::INFINITY, f64::min),
+        horizontal
+            .iter()
+            .map(|(bb, _, _, _)| bb.x1)
+            .fold(f64::NEG_INFINITY, f64::max),
+    );
+    for side_x in [left_x, right_x] {
+        let mut segs: Vec<_> = vertical
+            .iter()
+            .filter(|(bb, _, _, _)| (bb.x0 - side_x).abs() < 0.5)
+            .collect();
+        assert!(!segs.is_empty(), "a frame side at x {side_x}");
+        segs.sort_by(|a, b| f64::total_cmp(&a.0.y0, &b.0.y0));
+        assert!(
+            (segs[0].0.y0 - top_y).abs() < 0.5,
+            "frame side starts at the top: {segs:?} vs top {top_y}"
+        );
+        assert!(
+            (segs[segs.len() - 1].0.y1 - bottom_y).abs() < 0.5,
+            "frame side ends at the bottom: {segs:?} vs bottom {bottom_y}"
+        );
+        for w in segs.windows(2) {
+            assert!(
+                (w[1].0.y0 - w[0].0.y1).abs() < 0.5,
+                "frame side is contiguous: {segs:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_subtitle_border_claims_the_frame_top() {
+    let red = hephaestus::color::Color::from_rgb8(255, 0, 0);
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let mut cells = fixture();
+    cells[1] = cell(TableCellKind::Subtitle, 1, 0, "Four sessions")
+        .span(1, 4)
+        .fixed(hephaestus::plot::TableScaledAesthetic::BorderColor, red)
+        .fixed(
+            hephaestus::plot::TableScaledAesthetic::BorderWidthBottom,
+            3.0,
+        );
+    let table = Table::new(&comp(), "summary").cells(cells).stub_column(0);
+    let mut view = PlotComposition::new(&comp()).with_table(table);
+    let ops = draw_calls(&mut view, 700, 400);
+
+    // The subtitle's 3pt bottom border outbids the 1pt outer rule on
+    // the whole frame top, so the frame's top edge is the red claim.
+    let segments = stroke_segments(&ops);
+    let red_top: Vec<_> = segments
+        .iter()
+        .filter(|(bb, w, c, part)| {
+            *c == red && bb.height() == 0.0 && *w == 4.0 && part == "table_subtitle"
+        })
+        .collect();
+    assert_eq!(red_top.len(), 1, "one red segment across the frame top");
+    let rule_tops: Vec<_> = segments
+        .iter()
+        .filter(|(bb, _, _, part)| {
+            part == "table_rule" && bb.height() == 0.0 && (bb.y0 - red_top[0].0.y0).abs() < 0.5
+        })
+        .collect();
+    assert!(rule_tops.is_empty(), "the outer rule lost the frame top");
+}
+
+#[test]
+fn a_wide_title_grows_the_columns_it_spans() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let make = |title: &str| {
+        PlotComposition::new(&comp()).with_table(Table::new(&comp(), "summary").cells([
+            cell(Title, 0, 0, title).span(1, 2),
+            cell(ColumnLabel, 1, 0, "h"),
+            cell(ColumnLabel, 1, 1, "i"),
+            cell(Body { row: 0 }, 2, 0, "x"),
+            cell(Body { row: 0 }, 2, 1, "y"),
+        ]))
+    };
+    let narrow = make("T").natural_size(96.0);
+    let wide = make("A very long table title that must not be clipped").natural_size(96.0);
+    assert!(
+        wide.width > narrow.width + 100.0,
+        "the title grows the natural width: {narrow:?} vs {wide:?}"
+    );
+
+    // Rendering at the natural size frames the whole title: the
+    // frame's right edge lands past the title's rightmost glyph.
+    let mut view = make("A very long table title that must not be clipped");
+    let size = view.natural_size(96.0);
+    let mut scene = RecordingScene::new();
+    view.render(&mut scene, size, 96.0);
+    let ops = scene.ops;
+    let mut parts: Vec<Option<String>> = Vec::new();
+    let mut title_right = f64::NEG_INFINITY;
+    for op in &ops {
+        match op {
+            Op::PushPickScope { scope } => parts.push(scope.name().map(str::to_owned)),
+            Op::PopPickScope => {
+                parts.pop();
+            }
+            Op::DrawGlyphs(run) if parts.iter().any(|n| n.as_deref() == Some("table_title")) => {
+                for g in &run.glyphs {
+                    title_right = title_right.max(f64::from(g.x));
+                }
+            }
+            _ => {}
+        }
+    }
+    let frame_right = stroke_segments(&ops)
+        .iter()
+        .filter(|(bb, _, _, part)| part == "table_rule" && bb.height() == 0.0)
+        .map(|(bb, _, _, _)| bb.x1)
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert!(
+        frame_right > title_right,
+        "the frame encloses the title: glyphs to {title_right}, frame to {frame_right}"
     );
 }
 
@@ -1224,4 +1428,363 @@ fn a_per_side_cell_border_draws_only_that_side_on_that_cell() {
     assert_eq!(red_segments.len(), 1, "only the top edge claims");
     let (bb, _, _, _) = &red_segments[0];
     assert_eq!(bb.height(), 0.0, "the claimed edge is horizontal");
+}
+
+#[test]
+fn the_stub_carries_the_separator_as_its_right_border() {
+    let red = hephaestus::color::Color::from_rgb8(255, 0, 0);
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.table.rules.stub.frame = Element::Set(RectElement {
+            color: Some(ThemeColor::Fixed(red)),
+            linewidth_pt: Some(hephaestus::plot::theme::Length::Abs(2.0)),
+            // The right side only.
+            border_widths_pt: Some([
+                Some(hephaestus::plot::theme::Length::Abs(0.0)),
+                None,
+                Some(hephaestus::plot::theme::Length::Abs(0.0)),
+                Some(hephaestus::plot::theme::Length::Abs(0.0)),
+            ]),
+            ..RectElement::default()
+        });
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+    let segments = stroke_segments(&ops);
+    let red_verticals: Vec<_> = segments
+        .iter()
+        .filter(|(bb, _, c, part)| *c == red && bb.width() == 0.0 && part == "table_rule")
+        .collect();
+    assert_eq!(red_verticals.len(), 1, "one red stub right border");
+    // It runs the body rows: from the heading separator to the
+    // table's bottom edge.
+    let horizontal: Vec<_> = segments
+        .iter()
+        .filter(|(bb, _, _, part)| bb.height() == 0.0 && part == "table_rule")
+        .collect();
+    let separator_y = horizontal
+        .iter()
+        .map(|(bb, _, _, _)| bb.y0)
+        .fold(f64::INFINITY, f64::min)
+        .max(0.0);
+    let separator_y = horizontal
+        .iter()
+        .map(|(bb, _, _, _)| bb.y0)
+        .filter(|&y| y > separator_y)
+        .fold(f64::INFINITY, f64::min);
+    let bottom_y = horizontal
+        .iter()
+        .map(|(bb, _, _, _)| bb.y0)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let (bb, w, _, _) = red_verticals[0];
+    assert!((w - 2.0 * 96.0 / 72.0).abs() < 1e-6, "drawn at 2pt");
+    assert!((bb.y0 - separator_y).abs() < 0.5, "starts at the separator");
+    assert!((bb.y1 - bottom_y).abs() < 0.5, "ends at the bottom edge");
+}
+
+#[test]
+fn labels_vertical_rules_draw_inside_the_label_block() {
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.table.rules.labels.vertical = Element::Set(LineElement {
+            linewidth_pt: Some(hephaestus::plot::theme::Length::Abs(1.0)),
+            ..LineElement::default()
+        });
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+    let segments = stroke_segments(&ops);
+    let rules: Vec<_> = segments
+        .iter()
+        .filter(|(_, _, _, part)| part == "table_rule")
+        .collect();
+    // The heading separator is the second horizontal rule from the
+    // top: labels top, separator, then the bottom edge.
+    let mut ys: Vec<f64> = rules
+        .iter()
+        .filter(|(bb, _, _, _)| bb.height() == 0.0)
+        .map(|(bb, _, _, _)| bb.y0)
+        .collect();
+    ys.sort_by(f64::total_cmp);
+    let separator_y = ys[1];
+    let vertical: Vec<_> = rules
+        .iter()
+        .filter(|(bb, _, _, _)| bb.width() == 0.0)
+        .collect();
+    // Three interior column boundaries, none reaching past the
+    // heading separator into the body.
+    assert_eq!(vertical.len(), 3, "column rules inside the label block");
+    for (bb, _, _, _) in &vertical {
+        assert!(
+            bb.y1 <= separator_y + 0.5,
+            "a label column rule reaches the body: {bb:?}"
+        );
+    }
+}
+
+#[test]
+fn header_horizontal_separates_title_and_subtitle() {
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.table.rules.header.horizontal = Element::Set(LineElement {
+            linewidth_pt: Some(hephaestus::plot::theme::Length::Abs(1.0)),
+            ..LineElement::default()
+        });
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+    let glyph_y = |want: &str| {
+        let mut parts: Vec<Option<String>> = Vec::new();
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for op in &ops {
+            match op {
+                Op::PushPickScope { scope } => parts.push(scope.name().map(str::to_owned)),
+                Op::PopPickScope => {
+                    parts.pop();
+                }
+                Op::DrawGlyphs(run) if parts.iter().any(|n| n.as_deref() == Some(want)) => {
+                    for g in &run.glyphs {
+                        lo = lo.min(f64::from(g.y));
+                        hi = hi.max(f64::from(g.y));
+                    }
+                }
+                _ => {}
+            }
+        }
+        (lo, hi)
+    };
+    let title = glyph_y("table_title");
+    let subtitle = glyph_y("table_subtitle");
+    let segments = stroke_segments(&ops);
+    let rules_between: Vec<_> = segments
+        .iter()
+        .filter(|(bb, _, _, part)| {
+            part == "table_rule" && bb.height() == 0.0 && bb.y0 > title.1 && bb.y0 < subtitle.0
+        })
+        .collect();
+    assert_eq!(
+        rules_between.len(),
+        1,
+        "one rule between title and subtitle"
+    );
+}
+
+#[test]
+fn a_labels_row_interleaved_in_the_body_boxes_itself() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let table = Table::new(&comp(), "summary").cells([
+        cell(ColumnLabel, 0, 0, "A"),
+        cell(ColumnLabel, 0, 1, "B"),
+        cell(Body { row: 0 }, 1, 0, "1"),
+        cell(Body { row: 0 }, 1, 1, "2"),
+        // A second heading block in the middle of the body.
+        cell(ColumnLabel, 2, 0, "C"),
+        cell(ColumnLabel, 2, 1, "D"),
+        cell(Body { row: 1 }, 3, 0, "3"),
+        cell(Body { row: 1 }, 3, 1, "4"),
+    ]);
+    let mut view = PlotComposition::new(&comp()).with_table(table);
+    let ops = draw_calls(&mut view, 500, 300);
+    // The default labels frame boxes each block: top and bottom for
+    // the top labels row, top and bottom for the interleaved one,
+    // plus the body's bottom edge.
+    let segments = stroke_segments(&ops);
+    let horizontal: Vec<f64> = {
+        let mut ys: Vec<f64> = segments
+            .iter()
+            .filter(|(bb, _, _, part)| part == "table_rule" && bb.height() == 0.0)
+            .map(|(bb, _, _, _)| bb.y0)
+            .collect();
+        ys.sort_by(f64::total_cmp);
+        ys
+    };
+    assert_eq!(
+        horizontal.len(),
+        5,
+        "two labels boxes plus the body bottom: {horizontal:?}"
+    );
+}
+
+#[test]
+fn the_footer_frames_the_caption_block() {
+    let red = hephaestus::color::Color::from_rgb8(255, 0, 0);
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.table.rules.footer.frame = Element::Set(RectElement {
+            color: Some(ThemeColor::Fixed(red)),
+            linewidth_pt: Some(hephaestus::plot::theme::Length::Abs(3.0)),
+            ..RectElement::default()
+        });
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+    let segments = stroke_segments(&ops);
+    // The 3pt footer top outbids the 1pt body bottom at the
+    // body → caption edge; the footer bottom draws under the caption.
+    let red_horizontals: Vec<f64> = {
+        let mut ys: Vec<f64> = segments
+            .iter()
+            .filter(|(bb, _, c, part)| *c == red && bb.height() == 0.0 && part == "table_rule")
+            .map(|(bb, _, _, _)| bb.y0)
+            .collect();
+        ys.sort_by(f64::total_cmp);
+        ys
+    };
+    assert_eq!(red_horizontals.len(), 2, "footer top and bottom");
+    // No default-ink rule survives at the caption's top edge.
+    let ink_at_top: Vec<_> = segments
+        .iter()
+        .filter(|(bb, _, c, part)| {
+            *c != red
+                && bb.height() == 0.0
+                && part == "table_rule"
+                && (bb.y0 - red_horizontals[0]).abs() < 0.5
+        })
+        .collect();
+    assert!(ink_at_top.is_empty(), "the body bottom lost the edge");
+}
+
+#[test]
+fn footnotes_sit_inside_the_body_box() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let table = Table::new(&comp(), "summary").cells([
+        cell(ColumnLabel, 0, 0, "A"),
+        cell(Body { row: 0 }, 1, 0, "1"),
+        cell(Footnote, 2, 0, "* simulated"),
+    ]);
+    let mut view = PlotComposition::new(&comp()).with_table(table);
+    let ops = draw_calls(&mut view, 500, 300);
+    let mut parts: Vec<Option<String>> = Vec::new();
+    let mut footnote_y = f64::NEG_INFINITY;
+    for op in &ops {
+        match op {
+            Op::PushPickScope { scope } => parts.push(scope.name().map(str::to_owned)),
+            Op::PopPickScope => {
+                parts.pop();
+            }
+            Op::DrawGlyphs(run) if parts.iter().any(|n| n.as_deref() == Some("table_footnote")) => {
+                for g in &run.glyphs {
+                    footnote_y = footnote_y.max(f64::from(g.y));
+                }
+            }
+            _ => {}
+        }
+    }
+    let bottom_y = stroke_segments(&ops)
+        .iter()
+        .filter(|(bb, _, _, part)| part == "table_rule" && bb.height() == 0.0)
+        .map(|(bb, _, _, _)| bb.y0)
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert!(
+        footnote_y < bottom_y,
+        "the body box encloses the footnote: glyph to {footnote_y}, box to {bottom_y}"
+    );
+}
+
+#[test]
+fn all_frame_boxes_the_whole_table() {
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.table.rules.all.frame = Element::Set(RectElement {
+            color: Some(ThemeColor::Ink),
+            linewidth_pt: Some(hephaestus::plot::theme::Length::Abs(1.0)),
+            ..RectElement::default()
+        });
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+    let glyph_y = |want: &str| {
+        let mut parts: Vec<Option<String>> = Vec::new();
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for op in &ops {
+            match op {
+                Op::PushPickScope { scope } => parts.push(scope.name().map(str::to_owned)),
+                Op::PopPickScope => {
+                    parts.pop();
+                }
+                Op::DrawGlyphs(run) if parts.iter().any(|n| n.as_deref() == Some(want)) => {
+                    for g in &run.glyphs {
+                        lo = lo.min(f64::from(g.y));
+                        hi = hi.max(f64::from(g.y));
+                    }
+                }
+                _ => {}
+            }
+        }
+        (lo, hi)
+    };
+    let title = glyph_y("table_title");
+    let caption = glyph_y("table_caption");
+    let segments = stroke_segments(&ops);
+    let rules: Vec<_> = segments
+        .iter()
+        .filter(|(_, _, _, part)| part == "table_rule")
+        .collect();
+    let top_y = rules
+        .iter()
+        .filter(|(bb, _, _, _)| bb.height() == 0.0)
+        .map(|(bb, _, _, _)| bb.y0)
+        .fold(f64::INFINITY, f64::min);
+    let bottom_y = rules
+        .iter()
+        .filter(|(bb, _, _, _)| bb.height() == 0.0)
+        .map(|(bb, _, _, _)| bb.y0)
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert!(top_y < title.0, "the box top sits above the title");
+    assert!(
+        caption.1 < bottom_y,
+        "the box bottom sits below the caption"
+    );
+    // Each side runs title-to-caption. The region frames inherit
+    // `all.frame`'s 1pt through the cascade and win their bands, so a
+    // side comes out as contiguous per-region segments.
+    let side_xs = [
+        rules
+            .iter()
+            .filter(|(bb, _, _, _)| bb.height() == 0.0)
+            .map(|(bb, _, _, _)| bb.x0)
+            .fold(f64::INFINITY, f64::min),
+        rules
+            .iter()
+            .filter(|(bb, _, _, _)| bb.height() == 0.0)
+            .map(|(bb, _, _, _)| bb.x1)
+            .fold(f64::NEG_INFINITY, f64::max),
+    ];
+    for side_x in side_xs {
+        let mut segs: Vec<_> = rules
+            .iter()
+            .filter(|(bb, _, _, _)| bb.width() == 0.0 && (bb.x0 - side_x).abs() < 0.5)
+            .collect();
+        assert!(!segs.is_empty(), "a box side at x {side_x}");
+        segs.sort_by(|a, b| f64::total_cmp(&a.0.y0, &b.0.y0));
+        assert!((segs[0].0.y0 - top_y).abs() < 0.5, "side starts at the top");
+        assert!(
+            (segs[segs.len() - 1].0.y1 - bottom_y).abs() < 0.5,
+            "side ends at the bottom"
+        );
+        for w in segs.windows(2) {
+            assert!(
+                (w[1].0.y0 - w[0].0.y1).abs() < 0.5,
+                "the side is contiguous: {segs:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_region_frame_dashes_via_linetype() {
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.table.rules.body.frame = Element::Set(RectElement {
+            color: Some(ThemeColor::Ink),
+            linewidth_pt: Some(hephaestus::plot::theme::Length::Abs(1.0)),
+            linetype: Some(hephaestus::linetype::dashed()),
+            ..RectElement::default()
+        });
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+    let dashed = ops
+        .iter()
+        .filter(|op| matches!(op, Op::Stroke { stroke, .. } if !stroke.dash_pattern.is_empty()))
+        .count();
+    assert!(dashed > 0, "the body frame draws dashed");
 }

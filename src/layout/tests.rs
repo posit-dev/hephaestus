@@ -277,9 +277,9 @@ fn auto_max_over_children() {
 }
 
 #[test]
-fn auto_multi_span_skipped() {
-    // Two Auto cols, one child spanning both with width 100 → contributes
-    // 0 to both cols (multi-span children are skipped in the width pass).
+fn auto_multi_span_distributes_the_deficit() {
+    // Two Auto cols, one child spanning both with width 100 → the deficit
+    // splits equally: 50 per col.
     let mut root = Grid::new([Track::Auto, Track::Auto], [Track::Fr(1.0)]).id(CellId(0));
     root.place_mut(
         Placement::at(1, 1)
@@ -289,7 +289,114 @@ fn auto_multi_span_skipped() {
     );
     let layout = root.solve(Size::new(400.0, 100.0), 96.0);
     let r = layout.rect(CellId(0)).unwrap();
-    approx_eq(r.x1 - r.x0, 0.0, 0.5, "both auto cols zero");
+    approx_eq(r.x1 - r.x0, 100.0, 0.5, "auto cols share the span");
+}
+
+#[test]
+fn auto_multi_span_with_fr_in_span_is_skipped() {
+    // [Auto, Fr] with a child spanning both: the Fr absorbs slack at solve
+    // time, so the child grows no Auto track.
+    let mut root = Grid::new([Track::Auto, Track::Fr(1.0)], [Track::Fr(1.0)]).id(CellId(0));
+    root.place_mut(
+        Placement::at(1, 1)
+            .span(1, 2)
+            .inset(Inset::default().width(Extent::px(100.0))),
+        Grid::cell(),
+    );
+    let layout = root.solve(Size::new(400.0, 100.0), 96.0);
+    let r = layout.rect(CellId(0)).unwrap();
+    approx_eq(r.x1 - r.x0, 400.0, 0.5, "the fr track fills the canvas");
+}
+
+#[test]
+fn auto_multi_span_over_fixed_only_contributes_nothing() {
+    // A Fixed track can't grow; a span over only Fixed tracks keeps its
+    // pinned size.
+    let mut root = Grid::new(
+        [
+            Track::Fixed(Extent::px(30.0)),
+            Track::Fixed(Extent::px(30.0)),
+        ],
+        [Track::Fr(1.0)],
+    )
+    .id(CellId(0));
+    root.place_mut(
+        Placement::at(1, 1)
+            .span(1, 2)
+            .inset(Inset::default().width(Extent::px(100.0))),
+        Grid::cell(),
+    );
+    let layout = root.solve(Size::new(400.0, 100.0), 96.0);
+    let r = layout.rect(CellId(0)).unwrap();
+    approx_eq(r.x1 - r.x0, 60.0, 0.5, "fixed tracks stay pinned");
+}
+
+#[test]
+fn auto_multi_span_deficit_counts_existing_track_sizes() {
+    // The spanning child (width 100) spans an Auto col already holding 40
+    // and a Fixed 20 col: deficit 100 - 40 - 20 = 40 lands on the Auto col.
+    let mut root = Grid::new(
+        [Track::Auto, Track::Fixed(Extent::px(20.0))],
+        [Track::Fr(1.0)],
+    )
+    .id(CellId(0));
+    root.place_mut(
+        Placement::at(1, 1).inset(Inset::default().width(Extent::px(40.0))),
+        Grid::cell(),
+    );
+    root.place_mut(
+        Placement::at(1, 1)
+            .span(1, 2)
+            .inset(Inset::default().width(Extent::px(100.0))),
+        Grid::cell(),
+    );
+    let layout = root.solve(Size::new(400.0, 100.0), 96.0);
+    let r = layout.rect(CellId(0)).unwrap();
+    approx_eq(r.x1 - r.x0, 100.0, 0.5, "deficit over existing sizes");
+}
+
+#[test]
+fn auto_row_span_distributes_the_deficit() {
+    // Two Auto rows, one child spanning both with height 80 → 40 per row.
+    let mut root = Grid::new([Track::Fr(1.0)], [Track::Auto, Track::Auto]).id(CellId(0));
+    root.place_mut(
+        Placement::at(1, 1)
+            .span(2, 1)
+            .inset(Inset::default().height(Extent::px(80.0))),
+        Grid::cell(),
+    );
+    let layout = root.solve(Size::new(100.0, 400.0), 96.0);
+    let r = layout.rect(CellId(0)).unwrap();
+    approx_eq(r.y1 - r.y0, 80.0, 0.5, "auto rows share the span");
+}
+
+#[test]
+fn overlapping_spans_distribute_in_ascending_span_order() {
+    // A span-2 child (width 60) over cols 1–2 and a span-3 child (width
+    // 120) over cols 1–3. The smaller span resolves first (30 per col),
+    // then the wider one's deficit (120 - 30 - 30 = 60) splits over all
+    // three: 20 each → col sizes 50, 50, 20.
+    let mut root =
+        Grid::new([Track::Auto, Track::Auto, Track::Auto], [Track::Fr(1.0)]).id(CellId(0));
+    root.place_mut(
+        Placement::at(1, 3).inset(Inset::default().width(Extent::px(0.0))),
+        Grid::cell(),
+    );
+    root.place_mut(
+        Placement::at(1, 1)
+            .span(1, 2)
+            .inset(Inset::default().width(Extent::px(60.0))),
+        Grid::cell(),
+    );
+    root.place_mut(
+        Placement::at(1, 1)
+            .span(1, 3)
+            .inset(Inset::default().width(Extent::px(120.0))),
+        Grid::cell(),
+    );
+    let layout = root.solve(Size::new(600.0, 100.0), 96.0);
+    let r = layout.rect(CellId(0)).unwrap();
+    approx_eq(r.x1 - r.x0, 120.0, 0.5, "overlapping spans resolve");
 }
 
 #[test]
@@ -1089,9 +1196,10 @@ fn natural_size_recurses_into_nested_grids() {
     let mut root = Grid::new([Track::Auto, Track::Fixed(Extent::px(10.0))], [Track::Auto]);
     root.place_mut(Placement::at(1, 1).span(1, 2), inner());
     let size = root.natural_size(96.0);
-    // Spanning two columns, it grows no single one of them; the Fixed
-    // one still counts. It occupies one row, so its height counts.
-    approx_eq(size.width, 10.0, 1e-9, "span contributes no column");
+    // The 25-wide child spans an Auto and a Fixed 10 column: the 15 of
+    // deficit lands on the Auto one. It occupies one row, so its height
+    // counts.
+    approx_eq(size.width, 25.0, 1e-9, "span deficit grows the auto column");
     approx_eq(
         size.height,
         15.0,

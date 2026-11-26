@@ -32,8 +32,8 @@ use crate::plot::theme::{
     AlignTo, Alternating, AxisTheme, BarTheme, Element, FontFamily, FontFeature, FontSpec,
     FontStyle, FontVariation, FontWeight, FontWidth, GeomTheme, ImageDefaults, KeyTheme,
     LegendTheme, LineDefaults, LineElement, PerAxis, PerChannel, PointDefaults, RectElement,
-    Rotation, ShapeDefaults, Sided, TableCellTheme, TableHeading, TableRules, TableTheme,
-    TextDefaults, TextElement, TextFitDefaults, Theme, ThemePart, TitleLocation,
+    RegionRules, Rotation, ShapeDefaults, Sided, TableCellTheme, TableHeading, TableRules,
+    TableTheme, TextDefaults, TextElement, TextFitDefaults, Theme, ThemePart, TitleLocation,
 };
 use crate::text::rich::style::Direction as RichDirection;
 use crate::text::rich::{
@@ -238,7 +238,8 @@ impl_codec! {
 impl_codec! {
     record TableCellTheme { text, background }
     record TableHeading { all, spanner, column_label, stub_head }
-    record TableRules { all, horizontal, vertical, header, outer }
+    record RegionRules { horizontal, vertical, frame }
+    record TableRules { all, header, labels, stub, body, footer }
     record TableTheme {
         title,
         subtitle,
