@@ -1,0 +1,1790 @@
+//! Tables through `PlotComposition`: structure, theming, and — behind
+//! the `document` feature — a document round trip at sizes the writer
+//! never saw.
+//!
+//! Assertions are on recorded draw calls, not pixels: a table's draw
+//! calls are deterministic, and they are everything downstream of the
+//! theme and layout code is responsible for.
+
+use hephaestus::composition::{beside, Patch};
+use hephaestus::geometry::Size;
+use hephaestus::plot::theme::{Element, LineElement, RectElement, TableCellTheme, ThemeColor};
+use hephaestus::plot::{PlotComposition, Table, TableCell, TableCellKind};
+use hephaestus::scene::recording::{Op, RecordingScene};
+
+/// Render the composition and keep the recorded ops.
+fn draw_calls(comp: &mut PlotComposition, w: u32, h: u32) -> Vec<Op> {
+    let mut scene = RecordingScene::new();
+    comp.render(&mut scene, Size::new(f64::from(w), f64::from(h)), 96.0);
+    scene.ops
+}
+
+/// Shorthand for a single-track cell.
+fn cell(kind: TableCellKind, row: u16, col: u16, text: &str) -> TableCell {
+    TableCell::new(kind, row, col, text)
+}
+
+/// A table exercising the structural slice: a stub column, a spanner,
+/// a title block and a caption — arranged by hand, as a producer
+/// would: hephaestus owns no arrangement.
+///
+/// Grid (4 columns):
+///   row 0: title (span 4)
+///   row 1: subtitle (span 4)
+///   row 2: spanner over cols 1–2
+///   row 3: stub head + column labels
+///   rows 4–7: stub + body cells
+///   row 8: caption (span 4)
+fn fixture() -> Vec<TableCell> {
+    use TableCellKind::*;
+    let mut cells = vec![
+        cell(Title, 0, 0, "Ticker summary").span(1, 4),
+        cell(Subtitle, 1, 0, "Four sessions").span(1, 4),
+        cell(Spanner, 2, 1, "Session").span(1, 2),
+        cell(StubHead, 3, 0, "Ticker"),
+        cell(ColumnLabel, 3, 1, "Close"),
+        cell(ColumnLabel, 3, 2, "Change"),
+        cell(ColumnLabel, 3, 3, "Volume"),
+    ];
+    let rows = [
+        ("ACME", "72.41", "+1.2%", "1.24M"),
+        ("BRWN", "18.05", "-0.4%", "842K"),
+        ("CRSN", "203.77", "+3.9%", "2.01M"),
+        ("DLTA", "55.92", "+0.1%", "391K"),
+    ];
+    for (r, (ticker, close, change, volume)) in rows.iter().enumerate() {
+        let grid_row = 4 + r as u16;
+        cells.push(cell(Stub { row: r }, grid_row, 0, ticker));
+        cells.push(cell(Body { row: r }, grid_row, 1, close));
+        cells.push(cell(Body { row: r }, grid_row, 2, change));
+        cells.push(cell(Body { row: r }, grid_row, 3, volume));
+    }
+    cells.push(cell(Caption, 8, 0, "Source: simulated").span(1, 4));
+    cells
+}
+
+fn build() -> PlotComposition {
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let table = Table::new(&comp(), "summary")
+        .cells(fixture())
+        .stub_column(0);
+    PlotComposition::new(&comp()).with_table(table)
+}
+
+/// One glyph run per cell: title, subtitle, spanner, four heading
+/// labels, sixteen body cells, caption.
+const EXPECTED_TEXT_RUNS: usize = 1 + 1 + 1 + 4 + 16 + 1;
+
+#[test]
+fn a_table_renders_every_cell_and_the_default_rules() {
+    let ops = draw_calls(&mut build(), 700, 400);
+
+    let text_runs = ops
+        .iter()
+        .filter(|op| matches!(op, Op::DrawGlyphs(_)))
+        .count();
+    assert_eq!(
+        text_runs, EXPECTED_TEXT_RUNS,
+        "expected one glyph run per cell"
+    );
+
+    // The default table theme draws four rule strokes: the subtitle →
+    // labels edge, the heading/body separator, and the table's bottom
+    // edge as two abutting segments (stub and body claim it per
+    // region).
+    let rules = ops
+        .iter()
+        .filter(|op| matches!(op, Op::Stroke { .. }))
+        .count();
+    assert_eq!(rules, 4, "labels top/bottom plus the split bottom edge");
+}
+
+#[test]
+fn a_themed_stripe_paints_one_background_per_even_row_cell() {
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.table.body.even = TableCellTheme {
+            background: Element::Set(RectElement {
+                fill: Some(ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.05)),
+                ..RectElement::default()
+            }),
+            ..TableCellTheme::default()
+        };
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+
+    // Two even rows of four cells. (The patch background is a rect
+    // fill too, but over `background`'s own path — distinguished
+    // below by brush color.)
+    let stripe_fills = ops
+        .iter()
+        .filter(|op| matches!(op, Op::Fill { brush: hephaestus::brush::Brush::Solid(c), .. } if *c != hephaestus::color::Color::WHITE))
+        .count();
+    assert_eq!(stripe_fills, 2 * 4, "one stripe fill per even-row cell");
+}
+
+/// Bounding box of the patch background — the one white fill in the
+/// default theme.
+fn patch_background_bounds(ops: &[Op]) -> hephaestus::geometry::Rect {
+    ops.iter()
+        .find_map(|op| match op {
+            Op::Fill {
+                brush: hephaestus::brush::Brush::Solid(c),
+                path,
+                ..
+            } if *c == hephaestus::color::Color::WHITE => {
+                Some(hephaestus::path::bounding_box(path))
+            }
+            _ => None,
+        })
+        .expect("a white patch background fill")
+}
+
+#[test]
+fn the_shared_margin_applies_to_a_table_patch() {
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.margin =
+            hephaestus::plot::theme::Margin::all(hephaestus::plot::theme::Length::Abs(24.0));
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+    let bg = patch_background_bounds(&ops);
+
+    // 24pt at 96dpi is 32px; the background sits inside the margin band.
+    let px = 24.0 * 96.0 / 72.0;
+    assert!((bg.x0 - px).abs() < 1e-6, "left edge at the margin: {bg:?}");
+    assert!((bg.y0 - px).abs() < 1e-6, "top edge at the margin: {bg:?}");
+    assert!(
+        (bg.y1 - (400.0 - px)).abs() < 1e-6,
+        "bottom edge inside the margin: {bg:?}"
+    );
+}
+
+#[test]
+fn the_table_margin_adds_to_the_shared_margin() {
+    let shared_only = {
+        let mut view = build();
+        view.update_theme(|theme| {
+            theme.margin =
+                hephaestus::plot::theme::Margin::all(hephaestus::plot::theme::Length::Abs(24.0));
+        });
+        patch_background_bounds(&draw_calls(&mut view, 700, 400))
+    };
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.margin =
+            hephaestus::plot::theme::Margin::all(hephaestus::plot::theme::Length::Abs(24.0));
+        theme.table.margin =
+            hephaestus::plot::theme::Margin::all(hephaestus::plot::theme::Length::Abs(12.0));
+    });
+    let combined = patch_background_bounds(&draw_calls(&mut view, 700, 400));
+
+    // The table's own 12pt (16px at 96dpi) grows the margin band on
+    // top of the shared one. Only the top / bottom / left edges are
+    // asserted: the table's column sizes itself to content, so the
+    // added right margin moves the patch boundary instead of the
+    // background's right edge.
+    let px = 12.0 * 96.0 / 72.0;
+    assert!((combined.x0 - (shared_only.x0 + px)).abs() < 1e-6);
+    assert!((combined.y0 - (shared_only.y0 + px)).abs() < 1e-6);
+    assert!((combined.y1 - (shared_only.y1 - px)).abs() < 1e-6);
+}
+
+#[test]
+fn blanking_a_rule_removes_its_stroke() {
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.table.rules.labels.frame = Element::Blank;
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+    let rules = ops
+        .iter()
+        .filter(|op| matches!(op, Op::Stroke { .. }))
+        .count();
+    assert_eq!(rules, 2, "only the split bottom edge survives");
+}
+
+#[test]
+fn multi_level_spanners_render_without_overlap_panics() {
+    use TableCellKind::*;
+    let comp = || hephaestus::composition::grid(1, 1, vec![Patch::new("t").into()]);
+    let table = Table::new(&comp(), "t").cells([
+        cell(Spanner, 0, 1, "abc").span(1, 3),
+        cell(Spanner, 1, 1, "ab").span(1, 2),
+        cell(ColumnLabel, 2, 0, "Id"),
+        cell(ColumnLabel, 2, 1, "A"),
+        cell(ColumnLabel, 2, 2, "B"),
+        cell(ColumnLabel, 2, 3, "C"),
+        cell(Body { row: 0 }, 3, 0, "r1"),
+        cell(Body { row: 0 }, 3, 1, "1"),
+        cell(Body { row: 0 }, 3, 2, "2"),
+        cell(Body { row: 0 }, 3, 3, "3"),
+        cell(Body { row: 1 }, 4, 0, "r2"),
+        cell(Body { row: 1 }, 4, 1, "4"),
+        cell(Body { row: 1 }, 4, 2, "5"),
+        cell(Body { row: 1 }, 4, 3, "6"),
+    ]);
+    let mut view = PlotComposition::new(&comp()).with_table(table);
+    let ops = draw_calls(&mut view, 400, 300);
+    // Two spanners + four labels + eight body cells.
+    let text_runs = ops
+        .iter()
+        .filter(|op| matches!(op, Op::DrawGlyphs(_)))
+        .count();
+    assert_eq!(text_runs, 2 + 4 + 8);
+}
+
+#[test]
+fn overlapping_cells_are_refused() {
+    let comp = || hephaestus::composition::grid(1, 1, vec![Patch::new("t").into()]);
+    let table = Table::new(&comp(), "t").cells([
+        cell(TableCellKind::Body { row: 0 }, 0, 0, "a"),
+        cell(TableCellKind::Body { row: 0 }, 0, 0, "b"),
+    ]);
+    let mut view = PlotComposition::new(&comp()).with_table(table);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        draw_calls(&mut view, 400, 300);
+    }));
+    assert!(result.is_err(), "overlapping cells must panic at wire time");
+}
+
+#[test]
+fn a_fixed_fill_paints_exactly_one_background() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let accent = ThemeColor::Accent.resolve(&hephaestus::plot::theme::Palette::default());
+    let table = Table::new(&comp(), "summary").cells([
+        cell(ColumnLabel, 0, 0, "Id"),
+        cell(ColumnLabel, 0, 1, "Value"),
+        cell(Body { row: 0 }, 1, 0, "a"),
+        cell(Body { row: 0 }, 1, 1, "1.0"),
+        cell(Body { row: 1 }, 2, 0, "b"),
+        cell(Body { row: 1 }, 2, 1, "2.5")
+            .fixed(hephaestus::plot::TableScaledAesthetic::Fill, accent),
+    ]);
+    let mut view = PlotComposition::new(&comp()).with_table(table);
+    let ops = draw_calls(&mut view, 500, 300);
+    let fills = ops
+        .iter()
+        .filter(|op| matches!(op, Op::Fill { brush: hephaestus::brush::Brush::Solid(c), .. } if *c != hephaestus::color::Color::WHITE))
+        .count();
+    assert_eq!(fills, 1, "only the highlighted cell paints a fill");
+}
+
+#[test]
+fn a_scaled_text_size_resizes_the_cells_text() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let table = Table::new(&comp(), "summary").cells([
+        cell(Body { row: 0 }, 0, 0, "small"),
+        cell(Body { row: 1 }, 1, 0, "large").scaled(
+            hephaestus::plot::TableScaledAesthetic::TextSize,
+            10.0_f64,
+            "sizes",
+        ),
+    ]);
+    let mut view = PlotComposition::new(&comp())
+        .add_scale(
+            "sizes",
+            hephaestus::plot::scale::continuous(0.0..=10.0).range_numbers([8.0, 20.0]),
+        )
+        .with_table(table);
+    let ops = draw_calls(&mut view, 500, 300);
+    let sizes: Vec<f32> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::DrawGlyphs(run) => Some(run.font_size),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sizes.len(), 2);
+    assert!(
+        sizes[1] > sizes[0] * 1.5,
+        "the scaled cell's text is much larger: {sizes:?}"
+    );
+}
+
+#[test]
+fn a_string_scale_drives_the_font_axes() {
+    use hephaestus::plot::TableScaledAesthetic::FontStyle;
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let table = Table::new(&comp(), "summary").cells([
+        cell(Body { row: 0 }, 0, 0, "plain").scaled(FontStyle, "plain", "styles"),
+        cell(Body { row: 1 }, 1, 0, "fancy").scaled(FontStyle, "fancy", "styles"),
+    ]);
+    let mut view = PlotComposition::new(&comp())
+        .add_scale(
+            "styles",
+            hephaestus::plot::scale::discrete([
+                hephaestus::scales::Value::from("plain"),
+                hephaestus::scales::Value::from("fancy"),
+            ])
+            .range_strings(["normal", "italic"].map(std::sync::Arc::from)),
+        )
+        .with_table(table);
+    let ops = draw_calls(&mut view, 500, 300);
+    let styles: Vec<String> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::DrawGlyphs(run) => Some(format!("{:?}", run.font)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(styles.len(), 2, "one run per cell");
+    assert_ne!(
+        styles[0], styles[1],
+        "the two cells shape with different font styles"
+    );
+}
+
+#[test]
+fn a_string_alignment_shifts_the_text() {
+    use hephaestus::plot::TableScaledAesthetic::Align;
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let with_align = |align: &str| {
+        let mut view = PlotComposition::new(&comp()).with_table(
+            Table::new(&comp(), "summary")
+                // A pinned track gives the alignment slack to distribute.
+                .column_width(0, hephaestus::layout::Extent::px(200.0))
+                .cells([cell(Body { row: 0 }, 0, 0, "cell").fixed(Align, align.to_string())]),
+        );
+        let ops = draw_calls(&mut view, 500, 300);
+        ops.iter()
+            .find_map(|op| match op {
+                Op::DrawGlyphs(run) => run.glyphs.first().map(|g| g.x),
+                _ => None,
+            })
+            .expect("a glyph run")
+    };
+    let start = with_align("start");
+    let end = with_align("end");
+    assert!(
+        end > start,
+        "end-aligned text sits further right: start {start}, end {end}"
+    );
+}
+
+#[test]
+fn a_later_aesthetic_binding_wins() {
+    use hephaestus::plot::TableScaledAesthetic::Fill;
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    // Scaled first, then raw over it: the raw value wins.
+    let table = Table::new(&comp(), "summary").cells([cell(Body { row: 0 }, 0, 0, "a")
+        .scaled_fill(0.0_f64, "heat")
+        .fixed(Fill, hephaestus::color::rgb8(0, 128, 0))]);
+    let mut view = PlotComposition::new(&comp())
+        .add_scale(
+            "heat",
+            hephaestus::plot::scale::continuous(0.0..=10.0).range_colors([
+                hephaestus::color::rgb8(255, 0, 0),
+                hephaestus::color::rgb8(0, 0, 255),
+            ]),
+        )
+        .with_table(table);
+    let ops = draw_calls(&mut view, 500, 300);
+    let fills = non_white_fills(&ops);
+    assert_eq!(fills, vec![hephaestus::color::rgb8(0, 128, 0)]);
+}
+
+#[test]
+fn row_groups_summaries_and_footnotes_render_in_order() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let table = Table::new(&comp(), "summary").cells([
+        cell(ColumnLabel, 0, 0, "Id"),
+        cell(ColumnLabel, 0, 1, "Value"),
+        cell(RowGroup, 1, 0, "first").span(1, 2),
+        cell(Body { row: 0 }, 2, 0, "a"),
+        cell(Body { row: 0 }, 2, 1, "1.0"),
+        cell(Body { row: 1 }, 3, 0, "b"),
+        cell(Body { row: 1 }, 3, 1, "2.0"),
+        cell(RowGroup, 4, 0, "second").span(1, 2),
+        cell(Body { row: 2 }, 5, 0, "c"),
+        cell(Body { row: 2 }, 5, 1, "3.0"),
+        cell(Summary { row: 0 }, 6, 0, "All"),
+        cell(Summary { row: 0 }, 6, 1, "6.0"),
+        cell(Footnote, 7, 0, "A note.").span(1, 2),
+    ]);
+    let mut view = PlotComposition::new(&comp()).with_table(table);
+    let ops = draw_calls(&mut view, 500, 400);
+    // One label row (2) + two group headers + six body cells + two
+    // summary cells + one footnote.
+    let runs = ops
+        .iter()
+        .filter(|op| matches!(op, Op::DrawGlyphs(_)))
+        .count();
+    assert_eq!(runs, 2 + 2 + 6 + 2 + 1);
+}
+
+/// Two body cells with a scale-driven fill: one at each end of a
+/// continuous red→blue ramp.
+fn scaled_fill_view() -> PlotComposition {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let table = Table::new(&comp(), "summary").cells([
+        cell(ColumnLabel, 0, 0, "Id"),
+        cell(ColumnLabel, 0, 1, "Value"),
+        cell(Body { row: 0 }, 1, 0, "a"),
+        cell(Body { row: 0 }, 1, 1, "1.0").scaled_fill(0.0_f64, "heat"),
+        cell(Body { row: 1 }, 2, 0, "b"),
+        cell(Body { row: 1 }, 2, 1, "2.0").scaled_fill(10.0_f64, "heat"),
+    ]);
+    PlotComposition::new(&comp())
+        .add_scale(
+            "heat",
+            hephaestus::plot::scale::continuous(0.0..=10.0).range_colors([
+                hephaestus::color::rgb8(255, 0, 0),
+                hephaestus::color::rgb8(0, 0, 255),
+            ]),
+        )
+        .with_table(table)
+}
+
+/// Non-white solid fill colors, in draw order.
+fn non_white_fills(ops: &[Op]) -> Vec<hephaestus::color::Color> {
+    ops.iter()
+        .filter_map(|op| match op {
+            Op::Fill {
+                brush: hephaestus::brush::Brush::Solid(c),
+                ..
+            } if *c != hephaestus::color::Color::WHITE => Some(*c),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_scaled_fill_maps_the_value_through_the_registry() {
+    let ops = draw_calls(&mut scaled_fill_view(), 500, 300);
+    let fills = non_white_fills(&ops);
+    assert_eq!(
+        fills,
+        vec![
+            hephaestus::color::rgb8(255, 0, 0),
+            hephaestus::color::rgb8(0, 0, 255)
+        ],
+        "the two cells paint the ramp's endpoints"
+    );
+}
+
+#[test]
+fn a_scaled_color_recolors_the_cells_text() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let table = Table::new(&comp(), "summary").cells([
+        cell(Body { row: 0 }, 0, 0, "plain"),
+        cell(Body { row: 1 }, 1, 0, "scaled").scaled_color(10.0_f64, "heat"),
+    ]);
+    let mut view = PlotComposition::new(&comp())
+        .add_scale(
+            "heat",
+            hephaestus::plot::scale::continuous(0.0..=10.0).range_colors([
+                hephaestus::color::rgb8(255, 0, 0),
+                hephaestus::color::rgb8(0, 0, 255),
+            ]),
+        )
+        .with_table(table);
+    let ops = draw_calls(&mut view, 500, 300);
+    let brushes: Vec<&hephaestus::brush::Brush> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::DrawGlyphs(run) => Some(&run.brush),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(brushes.len(), 2);
+    assert!(
+        matches!(brushes[0], hephaestus::brush::Brush::Solid(c) if *c == hephaestus::color::Color::BLACK),
+        "the plain cell keeps the theme's ink"
+    );
+    assert!(
+        matches!(brushes[1], hephaestus::brush::Brush::Solid(c) if *c == hephaestus::color::rgb8(0, 0, 255)),
+        "the scaled cell draws in the ramp's end color"
+    );
+}
+
+#[test]
+fn a_raw_aesthetic_beats_the_theme_cascade() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let accent = ThemeColor::Accent.resolve(&hephaestus::plot::theme::Palette::default());
+    // Body row ordinal 1 is even parity, so the themed stripe below
+    // would paint this cell; the raw aesthetic wins over the cascade.
+    let mut view = PlotComposition::new(&comp()).with_table(
+        Table::new(&comp(), "summary").cells([cell(Body { row: 1 }, 0, 0, "a")
+            .fixed(hephaestus::plot::TableScaledAesthetic::Fill, accent)]),
+    );
+    view.update_theme(|theme| {
+        theme.table.body.even = TableCellTheme {
+            background: Element::Set(RectElement {
+                fill: Some(ThemeColor::mix(ThemeColor::Paper, ThemeColor::Ink, 0.05)),
+                ..RectElement::default()
+            }),
+            ..TableCellTheme::default()
+        };
+    });
+    let ops = draw_calls(&mut view, 500, 300);
+    let fills = non_white_fills(&ops);
+    assert_eq!(fills.len(), 1, "the raw aesthetic wins; only it paints");
+    assert_eq!(
+        fills[0], accent,
+        "the fill is the raw accent, not the stripe"
+    );
+}
+
+#[test]
+fn an_unregistered_scaled_name_draws_nothing_and_validates() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let table = Table::new(&comp(), "summary")
+        .cells([cell(Body { row: 0 }, 0, 0, "a").scaled_fill(1.0_f64, "nope")]);
+    let mut view = PlotComposition::new(&comp()).with_table(table);
+    let issues = view.validate();
+    assert!(
+        issues.iter().any(|issue| matches!(
+            issue,
+            hephaestus::plot::composition::ValidationIssue::TableMissingScale { scale_name, .. }
+                if scale_name == "nope"
+        )),
+        "validate reports the unknown scale: {issues:?}"
+    );
+    let ops = draw_calls(&mut view, 500, 300);
+    assert!(
+        non_white_fills(&ops).is_empty(),
+        "an unresolvable binding paints nothing"
+    );
+}
+
+#[test]
+fn markdown_cells_size_to_content_not_the_container() {
+    // Regression: an empty cell shaped through the rich pipeline
+    // reported a 20 em natural width (the hr placeholder, applied
+    // unconditionally), so a theme opting table text into markdown
+    // ballooned the column to fill the patch.
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let table = |markdown: bool| {
+        let mut theme = hephaestus::plot::theme::Theme::default();
+        theme.text.markdown = Some(markdown);
+        PlotComposition::new(&comp())
+            .theme(theme)
+            .with_table(Table::new(&comp(), "summary").cells([
+                cell(ColumnLabel, 0, 0, ""),
+                cell(ColumnLabel, 0, 1, "y"),
+                cell(Stub { row: 0 }, 1, 0, "a").span(2, 1),
+                cell(Body { row: 0 }, 1, 1, "10.5"),
+                cell(Body { row: 1 }, 2, 1, "20.25"),
+            ]))
+    };
+    // The x the "y" column label draws at, in each rendering.
+    let label_x = |view: &mut PlotComposition| {
+        let mut scene = RecordingScene::new();
+        view.render(&mut scene, Size::new(400.0, 200.0), 96.0);
+        scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::DrawGlyphs(run) => {
+                    let c = run.transform.as_coeffs();
+                    let source = run.source.as_ref()?;
+                    (source.text == "y")
+                        .then(|| c[4] + f64::from(run.glyphs.first().map(|g| g.x).unwrap_or(0.0)))
+                }
+                _ => None,
+            })
+            .next()
+            .expect("the y label drew")
+    };
+    let plain = label_x(&mut table(false));
+    let markdown = label_x(&mut table(true));
+    assert!(
+        (plain - markdown).abs() < 0.5,
+        "markdown must not change the cell box: plain x = {plain}, markdown x = {markdown}"
+    );
+}
+
+#[test]
+fn a_bottom_valigned_label_draws_at_the_bottom_of_its_cell() {
+    // A column label spanning two rows moves to the cell's bottom edge
+    // under `valign: Bottom` (gt's column-label alignment); the default
+    // `Middle` centers it.
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let table = |valign| {
+        let mut theme = hephaestus::plot::theme::Theme::default();
+        let Element::Set(text) = &mut theme.table.heading.column_label.text else {
+            unreachable!("the default theme sets column-label text")
+        };
+        text.valign = Some(valign);
+        PlotComposition::new(&comp())
+            .theme(theme)
+            .with_table(Table::new(&comp(), "summary").cells([
+                cell(ColumnLabel, 0, 0, "lbl").span(2, 1),
+                cell(Body { row: 0 }, 0, 1, "1"),
+                cell(Body { row: 1 }, 1, 1, "2"),
+            ]))
+    };
+    let label_y = |view: &mut PlotComposition| {
+        let mut scene = RecordingScene::new();
+        view.render(&mut scene, Size::new(400.0, 300.0), 96.0);
+        scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::DrawGlyphs(run) => {
+                    let c = run.transform.as_coeffs();
+                    let source = run.source.as_ref()?;
+                    (source.text == "lbl")
+                        .then(|| c[5] + f64::from(run.glyphs.first().map(|g| g.y).unwrap_or(0.0)))
+                }
+                _ => None,
+            })
+            .next()
+            .expect("the label drew")
+    };
+    let middle = label_y(&mut table(hephaestus::plot::theme::VAlign::Middle));
+    let bottom = label_y(&mut table(hephaestus::plot::theme::VAlign::Bottom));
+    assert!(
+        bottom > middle + 5.0,
+        "bottom alignment moves the label down: middle y = {middle}, bottom y = {bottom}"
+    );
+}
+
+#[test]
+fn a_string_valign_aesthetic_moves_the_cells_text() {
+    // The per-cell form of valign: a fixed string aesthetic on one
+    // spanning label, matched against the same label themed Bottom.
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let label_y = |label: TableCell| {
+        let mut view =
+            PlotComposition::new(&comp()).with_table(Table::new(&comp(), "summary").cells([
+                label,
+                cell(Body { row: 0 }, 0, 1, "1"),
+                cell(Body { row: 1 }, 1, 1, "2"),
+            ]));
+        let mut scene = RecordingScene::new();
+        view.render(&mut scene, Size::new(400.0, 300.0), 96.0);
+        scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::DrawGlyphs(run) => {
+                    let c = run.transform.as_coeffs();
+                    let source = run.source.as_ref()?;
+                    (source.text == "lbl")
+                        .then(|| c[5] + f64::from(run.glyphs.first().map(|g| g.y).unwrap_or(0.0)))
+                }
+                _ => None,
+            })
+            .next()
+            .expect("the label drew")
+    };
+    let plain = label_y(cell(ColumnLabel, 0, 0, "lbl").span(2, 1));
+    let bottom = label_y(
+        cell(ColumnLabel, 0, 0, "lbl")
+            .span(2, 1)
+            .fixed(hephaestus::plot::TableScaledAesthetic::Valign, "bottom"),
+    );
+    assert!(
+        bottom > plain + 5.0,
+        "the valign aesthetic moves the label: default y = {plain}, bottom y = {bottom}"
+    );
+}
+
+#[test]
+fn whole_table_anchoring_centers_the_table_in_an_oversized_panel() {
+    // With a fixed-size (Fr) patch larger than the table, the theme's
+    // whole-table halign/valign anchor the solved grid in the panel;
+    // the defaults (Start/Top) leave it at the top-left.
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let table = |anchor: Option<(
+        hephaestus::plot::theme::HAlign,
+        hephaestus::plot::theme::VAlign,
+    )>| {
+        let mut theme = hephaestus::plot::theme::Theme::default();
+        if let Some((h, v)) = anchor {
+            theme.table.halign = h;
+            theme.table.valign = v;
+        }
+        PlotComposition::new(&comp())
+            .theme(theme)
+            .with_table(Table::new(&comp(), "summary").cells([
+                cell(ColumnLabel, 0, 0, "A"),
+                cell(Body { row: 0 }, 1, 0, "1"),
+            ]))
+    };
+    let table_bbox = |view: &mut PlotComposition| {
+        let mut scene = RecordingScene::new();
+        view.render(&mut scene, Size::new(800.0, 400.0), 96.0);
+        scene
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Stroke { path, .. } => Some(hephaestus::path::bounding_box(path)),
+                _ => None,
+            })
+            .reduce(|a, b| a.union(b))
+            .expect("the table drew rules")
+    };
+    let default = table_bbox(&mut table(None));
+    let centered = table_bbox(&mut table(Some((
+        hephaestus::plot::theme::HAlign::Center,
+        hephaestus::plot::theme::VAlign::Middle,
+    ))));
+    // The patch is the left half of an 800×400 canvas: centered means
+    // the bbox's center lands on the patch's center (within a few px
+    // of padding asymmetry); default leaves it hard against the edge.
+    assert!(
+        (default.x0 - 12.0).abs() < 6.0,
+        "default anchors top-left: x0 = {}",
+        default.x0
+    );
+    let cx = (centered.x0 + centered.x1) / 2.0;
+    let cy = (centered.y0 + centered.y1) / 2.0;
+    assert!(
+        (cx - 200.0).abs() < 6.0,
+        "centered horizontally in the 400px patch: cx = {cx}"
+    );
+    assert!(
+        (cy - 200.0).abs() < 6.0,
+        "centered vertically in the 400px patch: cy = {cy}"
+    );
+}
+
+#[test]
+fn natural_size_matches_the_rendered_extent() {
+    // The query answers through the same wiring render uses: rendering
+    // at the returned size clips nothing and squeezes no track below
+    // its content minimum — the table fills its patch exactly, and the
+    // slack `Fr` semantics leaves sits in the empty spare patch.
+    let mut view = build();
+    let size = view.natural_size(96.0);
+    let mut scene = RecordingScene::new();
+    view.render(&mut scene, size, 96.0);
+    let drawn = scene
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Stroke { path, .. } | Op::Fill { path, .. } => {
+                Some(hephaestus::path::bounding_box(path))
+            }
+            _ => None,
+        })
+        .reduce(|a, b| a.union(b))
+        .expect("the table drew");
+    assert!(drawn.x1 <= size.width + 0.5, "no horizontal clipping");
+    assert!(drawn.y1 <= size.height + 0.5, "no vertical clipping");
+    // The table's patch gets exactly the table's footprint (both Fr
+    // columns claim the wider one's minimum), and the table fills it.
+    assert!(
+        (drawn.x1 - size.width / 2.0).abs() < 1.0,
+        "the table fills its own patch: drawn x1 {}, patch edge {}",
+        drawn.x1,
+        size.width / 2.0
+    );
+    assert!(
+        (drawn.height() - size.height).abs() < 1.0,
+        "no vertical slack: drawn {}, queried {}",
+        drawn.height(),
+        size.height
+    );
+}
+
+#[test]
+fn natural_size_sums_a_grid_of_tables() {
+    // A 2×2 composition of tables on the stock (Fr) tracks reports the
+    // sum of the four footprints.
+    use TableCellKind::*;
+    let one = |id: &str| {
+        let comp = || hephaestus::composition::grid(1, 1, vec![Patch::new(id).into()]);
+        Table::new(&comp(), id).cells([
+            cell(ColumnLabel, 0, 0, "A"),
+            cell(Body { row: 0 }, 1, 0, "1"),
+        ])
+    };
+    let comp = || {
+        hephaestus::composition::grid(
+            2,
+            2,
+            vec![
+                Patch::new("a").into(),
+                Patch::new("b").into(),
+                Patch::new("c").into(),
+                Patch::new("d").into(),
+            ],
+        )
+    };
+    let single_comp = || hephaestus::composition::grid(1, 1, vec![Patch::new("a").into()]);
+    let single = PlotComposition::new(&single_comp()).with_table(one("a"));
+    let quad = PlotComposition::new(&comp())
+        .with_table(one("a"))
+        .with_table(one("b"))
+        .with_table(one("c"))
+        .with_table(one("d"));
+    let s1 = single.natural_size(96.0);
+    let s4 = quad.natural_size(96.0);
+    assert!(
+        (s4.width - 2.0 * s1.width).abs() < 1.0,
+        "two columns of tables: {s1:?} vs {s4:?}"
+    );
+    assert!(
+        (s4.height - 2.0 * s1.height).abs() < 1.0,
+        "two rows of tables: {s1:?} vs {s4:?}"
+    );
+}
+
+#[test]
+fn natural_size_scales_with_dpi() {
+    let lo = build().natural_size(96.0);
+    let hi = build().natural_size(192.0);
+    assert!((hi.width - 2.0 * lo.width).abs() < 1.0);
+    assert!((hi.height - 2.0 * lo.height).abs() < 1.0);
+}
+
+#[test]
+fn natural_size_floors_flexible_content() {
+    use TableCellKind::*;
+    // A plot panel expands from nothing: the composition reports its
+    // chrome only. A percent table column contributes the absolute
+    // part of its extent — here, nothing.
+    let comp = || beside(Patch::new("t"), Patch::new("p"));
+    let percent_table = Table::new(&comp(), "t")
+        .cells([
+            cell(Body { row: 0 }, 0, 0, "x"),
+            cell(Body { row: 0 }, 0, 1, "y"),
+        ])
+        .column_width(0, hephaestus::layout::Extent::percent(0.5));
+    let with_plot = PlotComposition::new(&comp())
+        .with_table(percent_table)
+        .with_plot(hephaestus::plot::Plot::new(&comp(), "p"));
+    let size = with_plot.natural_size(96.0);
+    let bare = build().natural_size(96.0);
+    assert!(
+        size.width < bare.width,
+        "percent column + zero panel floor below a real table: {size:?}"
+    );
+}
+
+#[test]
+fn a_patch_holding_both_a_plot_and_a_table_validates() {
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let view = PlotComposition::new(&comp())
+        .with_plot(hephaestus::plot::Plot::new(&comp(), "summary"))
+        .with_table(Table::new(&comp(), "summary").cells([cell(
+            TableCellKind::Body { row: 0 },
+            0,
+            0,
+            "a",
+        )]));
+    let issues = view.validate();
+    assert!(
+        issues.iter().any(|issue| matches!(
+            issue,
+            hephaestus::plot::composition::ValidationIssue::TableOverPlot { patch_id }
+                if patch_id == "summary"
+        )),
+        "validate reports the overpainted patch: {issues:?}"
+    );
+}
+
+#[test]
+#[should_panic(expected = "share grid row 1 but name different row ordinals")]
+fn disagreeing_row_ordinals_in_one_grid_row_are_refused() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let mut view =
+        PlotComposition::new(&comp()).with_table(Table::new(&comp(), "summary").cells([
+            cell(Body { row: 0 }, 1, 0, "1"),
+            cell(Body { row: 1 }, 1, 1, "2"),
+        ]));
+    draw_calls(&mut view, 800, 600);
+}
+
+#[test]
+fn column_parity_stripes_columns() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let mut view =
+        PlotComposition::new(&comp()).with_table(Table::new(&comp(), "summary").cells([
+            cell(ColumnLabel, 0, 0, "A"),
+            cell(ColumnLabel, 0, 1, "B"),
+            cell(ColumnLabel, 0, 2, "C"),
+            cell(Body { row: 0 }, 1, 0, "1"),
+            cell(Body { row: 0 }, 1, 1, "2"),
+            cell(Body { row: 0 }, 1, 2, "3"),
+            cell(Body { row: 1 }, 2, 0, "4"),
+            cell(Body { row: 1 }, 2, 1, "5"),
+            cell(Body { row: 1 }, 2, 2, "6"),
+        ]));
+    view.update_theme(|theme| {
+        theme.table.columns.even = TableCellTheme {
+            background: Element::Set(RectElement {
+                fill: Some(ThemeColor::Accent),
+                ..RectElement::default()
+            }),
+            ..TableCellTheme::default()
+        };
+    });
+    let ops = draw_calls(&mut view, 600, 300);
+    // One even column (index 1) times two body rows.
+    let fills = ops
+        .iter()
+        .filter(|op| matches!(op, Op::Fill { brush: hephaestus::brush::Brush::Solid(c), .. } if *c != hephaestus::color::Color::WHITE))
+        .count();
+    assert_eq!(fills, 2, "one fill per even-column body cell");
+}
+
+/// The load-bearing document test: a composition mixing a plot and a
+/// table round-trips, and the reloaded composition emits exactly the
+/// same draw calls at sizes the writer never saw — the table's cells
+/// re-solve at the new width like every other layout.
+#[cfg(feature = "document")]
+#[test]
+fn a_mixed_composition_round_trips_through_a_document() {
+    use hephaestus::document::{read_composition, write_composition, ReadContext, WriteOptions};
+    use hephaestus::plot::{scale, Plot, PointGeom};
+    use TableCellKind::*;
+
+    let build_mixed = || {
+        let comp = || beside(Patch::new("summary"), Patch::new("points"));
+        let accent = ThemeColor::Accent.resolve(&hephaestus::plot::theme::Palette::default());
+        let table = Table::new(&comp(), "summary").cells([
+            cell(Title, 0, 0, "Summary").span(1, 2),
+            cell(Spanner, 1, 0, "all").span(1, 2),
+            cell(ColumnLabel, 2, 0, "Id"),
+            cell(ColumnLabel, 2, 1, "Value"),
+            cell(RowGroup, 3, 0, "grp").span(1, 2),
+            cell(Body { row: 0 }, 4, 0, "a"),
+            // Scaled and raw aesthetics must travel too.
+            cell(Body { row: 0 }, 4, 1, "1.0").scaled_fill(1.0_f64, "heat"),
+            cell(Body { row: 1 }, 5, 0, "b"),
+            cell(Body { row: 1 }, 5, 1, "2.5")
+                .fixed(hephaestus::plot::TableScaledAesthetic::Fill, accent)
+                .scaled_color(2.0_f64, "heat"),
+            cell(Summary { row: 0 }, 6, 0, "All"),
+            cell(Summary { row: 0 }, 6, 1, "3.5"),
+            cell(Footnote, 7, 0, "Note.").span(1, 2),
+        ]);
+        let mut plot = Plot::new(&comp(), "points").bind("x", "t").bind("y", "v");
+        plot.add_geom(
+            PointGeom::builder()
+                .set("x", vec![0.0, 1.0, 2.0])
+                .set("y", vec![1.0, 2.0, 0.5])
+                .set("fill", hephaestus::color::rgb8(200, 30, 30))
+                .set("size", 4.0_f64)
+                .build(),
+        );
+        PlotComposition::new(&comp())
+            .add_scale("t", scale::continuous(0.0..=2.0))
+            .add_scale("v", scale::continuous(0.0..=3.0))
+            .add_scale(
+                "heat",
+                scale::continuous(0.0..=2.0).range_colors([
+                    hephaestus::color::rgb8(255, 255, 255),
+                    hephaestus::color::rgb8(200, 30, 30),
+                ]),
+            )
+            .with_table(table)
+            .with_plot(plot)
+    };
+
+    let source = build_mixed();
+    let bytes = write_composition(&source, &WriteOptions::new()).expect("a writable composition");
+    for (w, h) in [(400u32, 300u32), (900, 500)] {
+        let mut original = build_mixed();
+        let mut reloaded =
+            read_composition(&bytes, &ReadContext::new()).expect("a readable document");
+        let want = draw_calls(&mut original, w, h);
+        let got = draw_calls(&mut reloaded, w, h);
+        assert_eq!(
+            want.len(),
+            got.len(),
+            "at {w}x{h} the reloaded composition emitted the wrong number of draw calls"
+        );
+        for (i, (a, b)) in want.iter().zip(&got).enumerate() {
+            assert!(
+                a == b,
+                "at {w}x{h} draw call {i} differs:\n  original: {a:?}\n  reloaded: {b:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_spanner_breaks_the_column_rules_beneath_it() {
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.table.rules.body.vertical = Element::Set(LineElement {
+            linewidth_pt: Some(hephaestus::plot::theme::Length::Abs(1.0)),
+            ..LineElement::default()
+        });
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+
+    // Walk the ops tracking the part scope: collect the spanner
+    // label's vertical position and every stroked rule's bounds.
+    let mut parts: Vec<Option<String>> = Vec::new();
+    let mut spanner_y = f64::INFINITY;
+    let mut rule_bounds = Vec::new();
+    for op in &ops {
+        match op {
+            Op::PushPickScope { scope } => parts.push(scope.name().map(str::to_owned)),
+            Op::PopPickScope => {
+                parts.pop();
+            }
+            Op::DrawGlyphs(run) => {
+                if parts.iter().any(|n| n.as_deref() == Some("table_spanner")) {
+                    for g in &run.glyphs {
+                        spanner_y = spanner_y.min(f64::from(g.y));
+                    }
+                }
+            }
+            Op::Stroke { path, .. } if parts.iter().any(|n| n.as_deref() == Some("table_rule")) => {
+                rule_bounds.push(hephaestus::path::bounding_box(path));
+            }
+            _ => {}
+        }
+    }
+    assert!(spanner_y.is_finite(), "a spanner label was drawn");
+
+    // One vertical segment per interior body-column boundary — the
+    // stub column is its own region, so the stub|body edge is the
+    // stub's frame, not an interior rule — none crossing the spanner
+    // row.
+    let vertical: Vec<_> = rule_bounds.iter().filter(|b| b.width() == 0.0).collect();
+    assert_eq!(
+        vertical.len(),
+        2,
+        "one column rule per interior body-column boundary: {vertical:?}"
+    );
+    for b in &vertical {
+        assert!(
+            b.y0 > spanner_y,
+            "a column rule crosses the spanner row: {b:?} vs spanner at y {spanner_y}"
+        );
+    }
+}
+
+/// Stroke segments recorded under a `table_rule` or cell-part scope,
+/// as (bounding box, width, color, part name).
+fn stroke_segments(
+    ops: &[Op],
+) -> Vec<(
+    hephaestus::geometry::Rect,
+    f64,
+    hephaestus::color::Color,
+    String,
+)> {
+    let mut parts: Vec<Option<String>> = Vec::new();
+    let mut out = Vec::new();
+    for op in ops {
+        match op {
+            Op::PushPickScope { scope } => parts.push(scope.name().map(str::to_owned)),
+            Op::PopPickScope => {
+                parts.pop();
+            }
+            Op::Stroke {
+                path,
+                stroke,
+                brush: hephaestus::brush::Brush::Solid(c),
+                ..
+            } => out.push((
+                hephaestus::path::bounding_box(path),
+                stroke.width,
+                *c,
+                parts.last().cloned().flatten().unwrap_or_default(),
+            )),
+            _ => {}
+        }
+    }
+    out
+}
+
+#[test]
+fn a_cell_border_claims_its_four_edges() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let red = hephaestus::color::Color::from_rgb8(255, 0, 0);
+    let table = Table::new(&comp(), "summary").cells([
+        cell(ColumnLabel, 0, 0, "h"),
+        cell(Body { row: 0 }, 1, 0, "a")
+            .fixed(hephaestus::plot::TableScaledAesthetic::BorderColor, red)
+            .fixed(hephaestus::plot::TableScaledAesthetic::BorderWidth, 3.0),
+        cell(Body { row: 1 }, 2, 0, "b"),
+    ]);
+    let mut view = PlotComposition::new(&comp()).with_table(table);
+    let ops = draw_calls(&mut view, 500, 300);
+
+    // Four red segments, one per edge of the bordered cell, drawn at
+    // the scaled width (3pt at 96dpi = 4px) under the cell's part.
+    let red_segments: Vec<_> = stroke_segments(&ops)
+        .into_iter()
+        .filter(|(_, _, c, _)| *c == red)
+        .collect();
+    assert_eq!(red_segments.len(), 4, "one segment per cell edge");
+    for (_, w, _, part) in &red_segments {
+        assert_eq!(*w, 4.0);
+        assert_eq!(part, "table_cell");
+    }
+}
+
+#[test]
+fn a_per_side_theme_border_draws_only_that_side() {
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.table.body.all = TableCellTheme {
+            background: Element::Set(RectElement {
+                color: Some(ThemeColor::Ink),
+                border_widths_pt: Some([
+                    Some(hephaestus::plot::theme::Length::Abs(2.0)),
+                    None,
+                    None,
+                    None,
+                ]),
+                ..RectElement::default()
+            }),
+            ..TableCellTheme::default()
+        };
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+
+    // Every rule stroke is horizontal: one merged segment per body
+    // row top, including the first, whose 2pt claim outbids the
+    // default heading separator on that edge.
+    let segments = stroke_segments(&ops);
+    let rule_segments: Vec<_> = segments
+        .iter()
+        .filter(|(_, _, _, part)| part == "table_rule")
+        .collect();
+    assert!(
+        rule_segments.iter().all(|(bb, _, _, _)| bb.height() == 0.0),
+        "no vertical rule strokes: {rule_segments:?}"
+    );
+    let top_borders: Vec<_> = segments
+        .iter()
+        .filter(|(_, w, _, part)| part == "table_cell" && *w > 2.0)
+        .collect();
+    assert_eq!(top_borders.len(), 4, "one merged top border per body row");
+}
+
+#[test]
+fn a_narrower_cell_border_loses_the_edge_to_a_rule() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let red = hephaestus::color::Color::from_rgb8(255, 0, 0);
+    // The first body row's top edge is the header rule's edge; a
+    // 0.5pt cell border loses to the default 1pt header rule.
+    let table = Table::new(&comp(), "summary").cells([
+        cell(ColumnLabel, 0, 0, "h"),
+        cell(ColumnLabel, 0, 1, "i"),
+        cell(Body { row: 0 }, 1, 0, "a")
+            .fixed(hephaestus::plot::TableScaledAesthetic::BorderColor, red)
+            .fixed(hephaestus::plot::TableScaledAesthetic::BorderWidth, 0.5),
+        cell(Body { row: 0 }, 1, 1, "b"),
+    ]);
+    let mut view = PlotComposition::new(&comp()).with_table(table);
+    let ops = draw_calls(&mut view, 500, 300);
+
+    let segments = stroke_segments(&ops);
+    // The cell keeps its left and right edges — neither carries a
+    // default rule (the table's side rules are off by default, and
+    // the interior column boundary has none). It loses the top to the
+    // 1pt heading separator and the bottom to the 1pt body bottom —
+    // the wider claim wins each contested edge.
+    let red_segments: Vec<_> = segments.iter().filter(|(_, _, c, _)| *c == red).collect();
+    assert_eq!(red_segments.len(), 2, "only the vertical edges won");
+    assert!(red_segments.iter().all(|(bb, _, _, _)| bb.width() == 0.0));
+    assert!(
+        segments
+            .iter()
+            .any(|(bb, _, _, part)| part == "table_rule" && bb.height() == 0.0),
+        "the header rule still spans the contested edge"
+    );
+}
+
+#[test]
+fn the_frame_bounds_the_gridded_block() {
+    let mut view = build();
+    view.update_theme(|theme| {
+        // Side rules are off by default; box the gridded regions to
+        // see the frame. The default labels/body top-and-bottom rules
+        // stay untouched.
+        let side = || RectElement {
+            color: Some(ThemeColor::Ink),
+            linewidth_pt: Some(hephaestus::plot::theme::Length::Abs(1.0)),
+            ..RectElement::default()
+        };
+        theme.table.rules.labels.frame = Element::Set(side());
+        theme.table.rules.stub.frame = Element::Set(side());
+        theme.table.rules.body.frame = Element::Set(side());
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+
+    // Glyph y extents per part, and the rule segments.
+    let glyph_y = |ops: &[Op], want: &str| {
+        let mut parts: Vec<Option<String>> = Vec::new();
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for op in ops {
+            match op {
+                Op::PushPickScope { scope } => parts.push(scope.name().map(str::to_owned)),
+                Op::PopPickScope => {
+                    parts.pop();
+                }
+                Op::DrawGlyphs(run) if parts.iter().any(|n| n.as_deref() == Some(want)) => {
+                    for g in &run.glyphs {
+                        lo = lo.min(f64::from(g.y));
+                        hi = hi.max(f64::from(g.y));
+                    }
+                }
+                _ => {}
+            }
+        }
+        (lo, hi)
+    };
+    let subtitle = glyph_y(&ops, "table_subtitle");
+    let spanner = glyph_y(&ops, "table_spanner");
+    let body = glyph_y(&ops, "table_cell");
+    let caption = glyph_y(&ops, "table_caption");
+
+    let segments = stroke_segments(&ops);
+    let rules: Vec<_> = segments
+        .iter()
+        .filter(|(_, _, _, part)| part == "table_rule")
+        .collect();
+    let horizontal: Vec<_> = rules
+        .iter()
+        .filter(|(bb, _, _, _)| bb.height() == 0.0)
+        .collect();
+    let vertical: Vec<_> = rules
+        .iter()
+        .filter(|(bb, _, _, _)| bb.width() == 0.0)
+        .collect();
+    let top_y = horizontal
+        .iter()
+        .map(|(bb, _, _, _)| bb.y0)
+        .fold(f64::INFINITY, f64::min);
+    let bottom_y = horizontal
+        .iter()
+        .map(|(bb, _, _, _)| bb.y0)
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    // The frame's top edge is the subtitle → heading edge; its bottom
+    // edge bounds the last body row, leaving the caption outside.
+    assert!(subtitle.1 < top_y, "subtitle above the frame");
+    assert!(top_y < spanner.0, "spanner row inside the frame");
+    assert!(body.1 < bottom_y, "body inside the frame");
+    assert!(bottom_y < caption.0, "caption below the frame");
+
+    // The box's sides are claimed per region — labels beside the
+    // heading rows, stub and body beside theirs — and each side runs
+    // the frame's full height.
+    let (left_x, right_x) = (
+        horizontal
+            .iter()
+            .map(|(bb, _, _, _)| bb.x0)
+            .fold(f64::INFINITY, f64::min),
+        horizontal
+            .iter()
+            .map(|(bb, _, _, _)| bb.x1)
+            .fold(f64::NEG_INFINITY, f64::max),
+    );
+    for side_x in [left_x, right_x] {
+        let mut segs: Vec<_> = vertical
+            .iter()
+            .filter(|(bb, _, _, _)| (bb.x0 - side_x).abs() < 0.5)
+            .collect();
+        assert!(!segs.is_empty(), "a frame side at x {side_x}");
+        segs.sort_by(|a, b| f64::total_cmp(&a.0.y0, &b.0.y0));
+        assert!(
+            (segs[0].0.y0 - top_y).abs() < 0.5,
+            "frame side starts at the top: {segs:?} vs top {top_y}"
+        );
+        assert!(
+            (segs[segs.len() - 1].0.y1 - bottom_y).abs() < 0.5,
+            "frame side ends at the bottom: {segs:?} vs bottom {bottom_y}"
+        );
+        for w in segs.windows(2) {
+            assert!(
+                (w[1].0.y0 - w[0].0.y1).abs() < 0.5,
+                "frame side is contiguous: {segs:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_subtitle_border_claims_the_frame_top() {
+    let red = hephaestus::color::Color::from_rgb8(255, 0, 0);
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let mut cells = fixture();
+    cells[1] = cell(TableCellKind::Subtitle, 1, 0, "Four sessions")
+        .span(1, 4)
+        .fixed(hephaestus::plot::TableScaledAesthetic::BorderColor, red)
+        .fixed(
+            hephaestus::plot::TableScaledAesthetic::BorderWidthBottom,
+            3.0,
+        );
+    let table = Table::new(&comp(), "summary").cells(cells).stub_column(0);
+    let mut view = PlotComposition::new(&comp()).with_table(table);
+    let ops = draw_calls(&mut view, 700, 400);
+
+    // The subtitle's 3pt bottom border outbids the 1pt outer rule on
+    // the whole frame top, so the frame's top edge is the red claim.
+    let segments = stroke_segments(&ops);
+    let red_top: Vec<_> = segments
+        .iter()
+        .filter(|(bb, w, c, part)| {
+            *c == red && bb.height() == 0.0 && *w == 4.0 && part == "table_subtitle"
+        })
+        .collect();
+    assert_eq!(red_top.len(), 1, "one red segment across the frame top");
+    let rule_tops: Vec<_> = segments
+        .iter()
+        .filter(|(bb, _, _, part)| {
+            part == "table_rule" && bb.height() == 0.0 && (bb.y0 - red_top[0].0.y0).abs() < 0.5
+        })
+        .collect();
+    assert!(rule_tops.is_empty(), "the outer rule lost the frame top");
+}
+
+#[test]
+fn a_wide_title_grows_the_columns_it_spans() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let make = |title: &str| {
+        PlotComposition::new(&comp()).with_table(Table::new(&comp(), "summary").cells([
+            cell(Title, 0, 0, title).span(1, 2),
+            cell(ColumnLabel, 1, 0, "h"),
+            cell(ColumnLabel, 1, 1, "i"),
+            cell(Body { row: 0 }, 2, 0, "x"),
+            cell(Body { row: 0 }, 2, 1, "y"),
+        ]))
+    };
+    let narrow = make("T").natural_size(96.0);
+    let wide = make("A very long table title that must not be clipped").natural_size(96.0);
+    assert!(
+        wide.width > narrow.width + 100.0,
+        "the title grows the natural width: {narrow:?} vs {wide:?}"
+    );
+
+    // Rendering at the natural size frames the whole title: the
+    // frame's right edge lands past the title's rightmost glyph.
+    let mut view = make("A very long table title that must not be clipped");
+    let size = view.natural_size(96.0);
+    let mut scene = RecordingScene::new();
+    view.render(&mut scene, size, 96.0);
+    let ops = scene.ops;
+    let mut parts: Vec<Option<String>> = Vec::new();
+    let mut title_right = f64::NEG_INFINITY;
+    for op in &ops {
+        match op {
+            Op::PushPickScope { scope } => parts.push(scope.name().map(str::to_owned)),
+            Op::PopPickScope => {
+                parts.pop();
+            }
+            Op::DrawGlyphs(run) if parts.iter().any(|n| n.as_deref() == Some("table_title")) => {
+                for g in &run.glyphs {
+                    title_right = title_right.max(f64::from(g.x));
+                }
+            }
+            _ => {}
+        }
+    }
+    let frame_right = stroke_segments(&ops)
+        .iter()
+        .filter(|(bb, _, _, part)| part == "table_rule" && bb.height() == 0.0)
+        .map(|(bb, _, _, _)| bb.x1)
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert!(
+        frame_right > title_right,
+        "the frame encloses the title: glyphs to {title_right}, frame to {frame_right}"
+    );
+}
+
+#[test]
+fn a_per_side_cell_border_draws_only_that_side_on_that_cell() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let red = hephaestus::color::Color::from_rgb8(255, 0, 0);
+    let table = Table::new(&comp(), "summary").cells([
+        cell(Body { row: 0 }, 0, 0, "a")
+            .fixed(hephaestus::plot::TableScaledAesthetic::BorderColor, red)
+            .fixed(hephaestus::plot::TableScaledAesthetic::BorderWidthTop, 2.0),
+        cell(Body { row: 1 }, 1, 0, "b"),
+    ]);
+    let mut view = PlotComposition::new(&comp()).with_table(table);
+    let ops = draw_calls(&mut view, 500, 300);
+
+    let red_segments: Vec<_> = stroke_segments(&ops)
+        .into_iter()
+        .filter(|(_, _, c, _)| *c == red)
+        .collect();
+    assert_eq!(red_segments.len(), 1, "only the top edge claims");
+    let (bb, _, _, _) = &red_segments[0];
+    assert_eq!(bb.height(), 0.0, "the claimed edge is horizontal");
+}
+
+#[test]
+fn the_stub_carries_the_separator_as_its_right_border() {
+    let red = hephaestus::color::Color::from_rgb8(255, 0, 0);
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.table.rules.stub.frame = Element::Set(RectElement {
+            color: Some(ThemeColor::Fixed(red)),
+            linewidth_pt: Some(hephaestus::plot::theme::Length::Abs(2.0)),
+            // The right side only.
+            border_widths_pt: Some([
+                Some(hephaestus::plot::theme::Length::Abs(0.0)),
+                None,
+                Some(hephaestus::plot::theme::Length::Abs(0.0)),
+                Some(hephaestus::plot::theme::Length::Abs(0.0)),
+            ]),
+            ..RectElement::default()
+        });
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+    let segments = stroke_segments(&ops);
+    let red_verticals: Vec<_> = segments
+        .iter()
+        .filter(|(bb, _, c, part)| *c == red && bb.width() == 0.0 && part == "table_rule")
+        .collect();
+    assert_eq!(red_verticals.len(), 1, "one red stub right border");
+    // It runs the body rows: from the heading separator to the
+    // table's bottom edge.
+    let horizontal: Vec<_> = segments
+        .iter()
+        .filter(|(bb, _, _, part)| bb.height() == 0.0 && part == "table_rule")
+        .collect();
+    let separator_y = horizontal
+        .iter()
+        .map(|(bb, _, _, _)| bb.y0)
+        .fold(f64::INFINITY, f64::min)
+        .max(0.0);
+    let separator_y = horizontal
+        .iter()
+        .map(|(bb, _, _, _)| bb.y0)
+        .filter(|&y| y > separator_y)
+        .fold(f64::INFINITY, f64::min);
+    let bottom_y = horizontal
+        .iter()
+        .map(|(bb, _, _, _)| bb.y0)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let (bb, w, _, _) = red_verticals[0];
+    assert!((w - 2.0 * 96.0 / 72.0).abs() < 1e-6, "drawn at 2pt");
+    assert!((bb.y0 - separator_y).abs() < 0.5, "starts at the separator");
+    assert!((bb.y1 - bottom_y).abs() < 0.5, "ends at the bottom edge");
+}
+
+#[test]
+fn labels_vertical_rules_draw_inside_the_label_block() {
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.table.rules.labels.vertical = Element::Set(LineElement {
+            linewidth_pt: Some(hephaestus::plot::theme::Length::Abs(1.0)),
+            ..LineElement::default()
+        });
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+    let segments = stroke_segments(&ops);
+    let rules: Vec<_> = segments
+        .iter()
+        .filter(|(_, _, _, part)| part == "table_rule")
+        .collect();
+    // The heading separator is the second horizontal rule from the
+    // top: labels top, separator, then the bottom edge.
+    let mut ys: Vec<f64> = rules
+        .iter()
+        .filter(|(bb, _, _, _)| bb.height() == 0.0)
+        .map(|(bb, _, _, _)| bb.y0)
+        .collect();
+    ys.sort_by(f64::total_cmp);
+    let separator_y = ys[1];
+    let vertical: Vec<_> = rules
+        .iter()
+        .filter(|(bb, _, _, _)| bb.width() == 0.0)
+        .collect();
+    // Three interior column boundaries, none reaching past the
+    // heading separator into the body.
+    assert_eq!(vertical.len(), 3, "column rules inside the label block");
+    for (bb, _, _, _) in &vertical {
+        assert!(
+            bb.y1 <= separator_y + 0.5,
+            "a label column rule reaches the body: {bb:?}"
+        );
+    }
+}
+
+#[test]
+fn header_horizontal_separates_title_and_subtitle() {
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.table.rules.header.horizontal = Element::Set(LineElement {
+            linewidth_pt: Some(hephaestus::plot::theme::Length::Abs(1.0)),
+            ..LineElement::default()
+        });
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+    let glyph_y = |want: &str| {
+        let mut parts: Vec<Option<String>> = Vec::new();
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for op in &ops {
+            match op {
+                Op::PushPickScope { scope } => parts.push(scope.name().map(str::to_owned)),
+                Op::PopPickScope => {
+                    parts.pop();
+                }
+                Op::DrawGlyphs(run) if parts.iter().any(|n| n.as_deref() == Some(want)) => {
+                    for g in &run.glyphs {
+                        lo = lo.min(f64::from(g.y));
+                        hi = hi.max(f64::from(g.y));
+                    }
+                }
+                _ => {}
+            }
+        }
+        (lo, hi)
+    };
+    let title = glyph_y("table_title");
+    let subtitle = glyph_y("table_subtitle");
+    let segments = stroke_segments(&ops);
+    let rules_between: Vec<_> = segments
+        .iter()
+        .filter(|(bb, _, _, part)| {
+            part == "table_rule" && bb.height() == 0.0 && bb.y0 > title.1 && bb.y0 < subtitle.0
+        })
+        .collect();
+    assert_eq!(
+        rules_between.len(),
+        1,
+        "one rule between title and subtitle"
+    );
+}
+
+#[test]
+fn a_labels_row_interleaved_in_the_body_boxes_itself() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let table = Table::new(&comp(), "summary").cells([
+        cell(ColumnLabel, 0, 0, "A"),
+        cell(ColumnLabel, 0, 1, "B"),
+        cell(Body { row: 0 }, 1, 0, "1"),
+        cell(Body { row: 0 }, 1, 1, "2"),
+        // A second heading block in the middle of the body.
+        cell(ColumnLabel, 2, 0, "C"),
+        cell(ColumnLabel, 2, 1, "D"),
+        cell(Body { row: 1 }, 3, 0, "3"),
+        cell(Body { row: 1 }, 3, 1, "4"),
+    ]);
+    let mut view = PlotComposition::new(&comp()).with_table(table);
+    let ops = draw_calls(&mut view, 500, 300);
+    // The default labels frame boxes each block: top and bottom for
+    // the top labels row, top and bottom for the interleaved one,
+    // plus the body's bottom edge.
+    let segments = stroke_segments(&ops);
+    let horizontal: Vec<f64> = {
+        let mut ys: Vec<f64> = segments
+            .iter()
+            .filter(|(bb, _, _, part)| part == "table_rule" && bb.height() == 0.0)
+            .map(|(bb, _, _, _)| bb.y0)
+            .collect();
+        ys.sort_by(f64::total_cmp);
+        ys
+    };
+    assert_eq!(
+        horizontal.len(),
+        5,
+        "two labels boxes plus the body bottom: {horizontal:?}"
+    );
+}
+
+#[test]
+fn the_footer_frames_the_caption_block() {
+    let red = hephaestus::color::Color::from_rgb8(255, 0, 0);
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.table.rules.footer.frame = Element::Set(RectElement {
+            color: Some(ThemeColor::Fixed(red)),
+            linewidth_pt: Some(hephaestus::plot::theme::Length::Abs(3.0)),
+            ..RectElement::default()
+        });
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+    let segments = stroke_segments(&ops);
+    // The 3pt footer top outbids the 1pt body bottom at the
+    // body → caption edge; the footer bottom draws under the caption.
+    let red_horizontals: Vec<f64> = {
+        let mut ys: Vec<f64> = segments
+            .iter()
+            .filter(|(bb, _, c, part)| *c == red && bb.height() == 0.0 && part == "table_rule")
+            .map(|(bb, _, _, _)| bb.y0)
+            .collect();
+        ys.sort_by(f64::total_cmp);
+        ys
+    };
+    assert_eq!(red_horizontals.len(), 2, "footer top and bottom");
+    // No default-ink rule survives at the caption's top edge.
+    let ink_at_top: Vec<_> = segments
+        .iter()
+        .filter(|(bb, _, c, part)| {
+            *c != red
+                && bb.height() == 0.0
+                && part == "table_rule"
+                && (bb.y0 - red_horizontals[0]).abs() < 0.5
+        })
+        .collect();
+    assert!(ink_at_top.is_empty(), "the body bottom lost the edge");
+}
+
+#[test]
+fn footnotes_sit_inside_the_body_box() {
+    use TableCellKind::*;
+    let comp = || beside(Patch::new("summary"), Patch::new("spare"));
+    let table = Table::new(&comp(), "summary").cells([
+        cell(ColumnLabel, 0, 0, "A"),
+        cell(Body { row: 0 }, 1, 0, "1"),
+        cell(Footnote, 2, 0, "* simulated"),
+    ]);
+    let mut view = PlotComposition::new(&comp()).with_table(table);
+    let ops = draw_calls(&mut view, 500, 300);
+    let mut parts: Vec<Option<String>> = Vec::new();
+    let mut footnote_y = f64::NEG_INFINITY;
+    for op in &ops {
+        match op {
+            Op::PushPickScope { scope } => parts.push(scope.name().map(str::to_owned)),
+            Op::PopPickScope => {
+                parts.pop();
+            }
+            Op::DrawGlyphs(run) if parts.iter().any(|n| n.as_deref() == Some("table_footnote")) => {
+                for g in &run.glyphs {
+                    footnote_y = footnote_y.max(f64::from(g.y));
+                }
+            }
+            _ => {}
+        }
+    }
+    let bottom_y = stroke_segments(&ops)
+        .iter()
+        .filter(|(bb, _, _, part)| part == "table_rule" && bb.height() == 0.0)
+        .map(|(bb, _, _, _)| bb.y0)
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert!(
+        footnote_y < bottom_y,
+        "the body box encloses the footnote: glyph to {footnote_y}, box to {bottom_y}"
+    );
+}
+
+#[test]
+fn all_frame_boxes_the_whole_table() {
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.table.rules.all.frame = Element::Set(RectElement {
+            color: Some(ThemeColor::Ink),
+            linewidth_pt: Some(hephaestus::plot::theme::Length::Abs(1.0)),
+            ..RectElement::default()
+        });
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+    let glyph_y = |want: &str| {
+        let mut parts: Vec<Option<String>> = Vec::new();
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for op in &ops {
+            match op {
+                Op::PushPickScope { scope } => parts.push(scope.name().map(str::to_owned)),
+                Op::PopPickScope => {
+                    parts.pop();
+                }
+                Op::DrawGlyphs(run) if parts.iter().any(|n| n.as_deref() == Some(want)) => {
+                    for g in &run.glyphs {
+                        lo = lo.min(f64::from(g.y));
+                        hi = hi.max(f64::from(g.y));
+                    }
+                }
+                _ => {}
+            }
+        }
+        (lo, hi)
+    };
+    let title = glyph_y("table_title");
+    let caption = glyph_y("table_caption");
+    let segments = stroke_segments(&ops);
+    let rules: Vec<_> = segments
+        .iter()
+        .filter(|(_, _, _, part)| part == "table_rule")
+        .collect();
+    let top_y = rules
+        .iter()
+        .filter(|(bb, _, _, _)| bb.height() == 0.0)
+        .map(|(bb, _, _, _)| bb.y0)
+        .fold(f64::INFINITY, f64::min);
+    let bottom_y = rules
+        .iter()
+        .filter(|(bb, _, _, _)| bb.height() == 0.0)
+        .map(|(bb, _, _, _)| bb.y0)
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert!(top_y < title.0, "the box top sits above the title");
+    assert!(
+        caption.1 < bottom_y,
+        "the box bottom sits below the caption"
+    );
+    // Each side runs title-to-caption. The region frames inherit
+    // `all.frame`'s 1pt through the cascade and win their bands, so a
+    // side comes out as contiguous per-region segments.
+    let side_xs = [
+        rules
+            .iter()
+            .filter(|(bb, _, _, _)| bb.height() == 0.0)
+            .map(|(bb, _, _, _)| bb.x0)
+            .fold(f64::INFINITY, f64::min),
+        rules
+            .iter()
+            .filter(|(bb, _, _, _)| bb.height() == 0.0)
+            .map(|(bb, _, _, _)| bb.x1)
+            .fold(f64::NEG_INFINITY, f64::max),
+    ];
+    for side_x in side_xs {
+        let mut segs: Vec<_> = rules
+            .iter()
+            .filter(|(bb, _, _, _)| bb.width() == 0.0 && (bb.x0 - side_x).abs() < 0.5)
+            .collect();
+        assert!(!segs.is_empty(), "a box side at x {side_x}");
+        segs.sort_by(|a, b| f64::total_cmp(&a.0.y0, &b.0.y0));
+        assert!((segs[0].0.y0 - top_y).abs() < 0.5, "side starts at the top");
+        assert!(
+            (segs[segs.len() - 1].0.y1 - bottom_y).abs() < 0.5,
+            "side ends at the bottom"
+        );
+        for w in segs.windows(2) {
+            assert!(
+                (w[1].0.y0 - w[0].0.y1).abs() < 0.5,
+                "the side is contiguous: {segs:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_region_frame_dashes_via_linetype() {
+    let mut view = build();
+    view.update_theme(|theme| {
+        theme.table.rules.body.frame = Element::Set(RectElement {
+            color: Some(ThemeColor::Ink),
+            linewidth_pt: Some(hephaestus::plot::theme::Length::Abs(1.0)),
+            linetype: Some(hephaestus::linetype::dashed()),
+            ..RectElement::default()
+        });
+    });
+    let ops = draw_calls(&mut view, 700, 400);
+    let dashed = ops
+        .iter()
+        .filter(|op| matches!(op, Op::Stroke { stroke, .. } if !stroke.dash_pattern.is_empty()))
+        .count();
+    assert!(dashed > 0, "the body frame draws dashed");
+}

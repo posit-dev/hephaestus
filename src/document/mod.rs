@@ -32,6 +32,7 @@ pub(crate) mod images;
 pub(crate) mod impls_core;
 pub(crate) mod impls_plot;
 pub(crate) mod impls_scale;
+pub(crate) mod impls_table;
 pub(crate) mod impls_theme;
 pub(crate) mod intern;
 #[cfg(feature = "document-read")]
@@ -251,6 +252,13 @@ pub fn write_composition(
             }
         }
     });
+    let tables = w.detached(|w| {
+        w.varint(comp.table_order.len() as u64);
+        for patch in &comp.table_order {
+            patch.encode(w);
+            comp.tables[patch].encode(w);
+        }
+    });
 
     // Sheets can add strings (a `StyleDelta` border pattern names a
     // marker shape), so they are encoded before the string table is
@@ -334,6 +342,7 @@ pub fn write_composition(
             (wire::CHUNK_SCALES, scales),
             (wire::CHUNK_COMPOSITION, composition),
             (wire::CHUNK_PLOTS, plots),
+            (wire::CHUNK_TABLES, tables),
             (wire::CHUNK_SHAPES, shape_bytes),
             (wire::CHUNK_IMAGES, image_bytes),
         ],
@@ -563,6 +572,22 @@ pub fn read_document(bytes: &[u8], ctx: &ReadContext) -> Result<ReadDocument, Do
         (plots, order)
     };
 
+    let (tables_out, table_order) = {
+        let body = required(&chunks, wire::CHUNK_TABLES)?;
+        let mut r = Reader::with_tables(body, ctx, tables.clone());
+        let n = r.count()?;
+        let mut tables_out: std::collections::HashMap<String, crate::plot::Table> =
+            std::collections::HashMap::with_capacity(n);
+        let mut order = Vec::with_capacity(n);
+        for _ in 0..n {
+            let patch = String::decode(&mut r)?;
+            let table = impls_table::decode_table_for(&mut r, &bare, patch.clone())?;
+            order.push(patch.clone());
+            tables_out.insert(patch, table);
+        }
+        (tables_out, order)
+    };
+
     let mut composition = crate::plot::PlotComposition::from_document(
         template,
         root_id,
@@ -570,6 +595,8 @@ pub fn read_document(bytes: &[u8], ctx: &ReadContext) -> Result<ReadDocument, Do
         std::sync::Arc::new(theme),
         plots,
         plot_order,
+        tables_out,
+        table_order,
         chrome,
         chrome_order,
     );

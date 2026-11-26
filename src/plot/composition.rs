@@ -180,6 +180,7 @@ impl CompositionTemplate {
 /// composition-level chrome keyed by composition id.
 struct RebuildCtx<'a> {
     plots: &'a HashMap<String, Vec<Plot>>,
+    tables: &'a HashMap<String, crate::plot::table::Table>,
     registry: &'a ScaleRegistry,
     dpi: f64,
     theme: &'a Theme,
@@ -204,6 +205,7 @@ impl CompositionTemplate {
     #[cfg(feature = "document-read")]
     pub(crate) fn bare(&self) -> Composition {
         let plots = HashMap::new();
+        let tables = HashMap::new();
         let chrome = HashMap::new();
         let registry = ScaleRegistry::new();
         let theme = Theme::default();
@@ -211,6 +213,7 @@ impl CompositionTemplate {
         let images = std::sync::Arc::new(crate::image_registry::ImageRegistry::new());
         self.rebuild(&RebuildCtx {
             plots: &plots,
+            tables: &tables,
             registry: &registry,
             // The bare form is never measured, so any dpi does.
             dpi: 96.0,
@@ -238,7 +241,7 @@ impl ElementTemplate {
     fn rebuild(&self, ctx: &RebuildCtx<'_>) -> Element {
         match self {
             ElementTemplate::NamedPatch(id) => {
-                let patch = wire_into_patch(id, ctx.plots, ctx.registry, ctx.dpi, ctx.theme);
+                let patch = wire_into_patch(id, ctx);
                 Element::Patch(patch)
             }
             ElementTemplate::Spacer => Element::Patch(spacer()),
@@ -255,13 +258,11 @@ impl ElementTemplate {
 /// in [`MaxMergeMeasure`](crate::layout::MaxMergeMeasure) so a
 /// region's track sizes to fit *every* contributing plot's
 /// requirement, not just the last one.
-fn wire_into_patch(
-    id: &str,
-    plots: &HashMap<String, Vec<Plot>>,
-    registry: &ScaleRegistry,
-    dpi: f64,
-    comp_theme: &Theme,
-) -> Patch {
+fn wire_into_patch(id: &str, ctx: &RebuildCtx<'_>) -> Patch {
+    let plots = ctx.plots;
+    let registry = ctx.registry;
+    let dpi = ctx.dpi;
+    let comp_theme = ctx.theme;
     let plot_list = plots.get(id);
     {
         if let Some(list) = plot_list {
@@ -270,11 +271,22 @@ fn wire_into_patch(
             }
         }
     }
+    if let Some(table) = ctx.tables.get(id) {
+        // A table's theme override merges over the composition theme
+        // the same way a plot's does, so its measured space matches
+        // what the draw pass styles.
+        let effective = match table.theme_override_ref() {
+            Some(part) => comp_theme.merge(part),
+            None => comp_theme.clone(),
+        };
+        let patch = apply_plot_chrome(Patch::new(id), comp_theme);
+        return table.wire_panel(patch, &effective, registry, dpi, ctx.images);
+    }
     let _ = registry;
     let _ = dpi;
     // Unattached patches, or non-text builds: just attach a Panel
     // slot so the layout still places a rect for that patch. The
-    // outer margin band is still sized from `theme.plot_margin` so
+    // outer margin band is still sized from `theme.margin` so
     // an empty patch sits within the same chrome rhythm as a
     // populated one.
     let p = apply_plot_chrome(Patch::new(id), comp_theme);
@@ -286,9 +298,9 @@ fn wire_into_patch(
 
 /// Stitch the theme's outer-chrome fields onto the patch:
 ///
-/// - `theme.plot_margin` → `Patch::margin` (outermost ring tracks).
-/// - `theme.plot_padding` → `Patch::padding` (second-ring tracks).
-/// - `theme.plot_background` → if `Set`, drop an empty cell into
+/// - `theme.margin` → `Patch::margin` (outermost ring tracks).
+/// - `theme.padding` → `Patch::padding` (second-ring tracks).
+/// - `theme.background` → if `Set`, drop an empty cell into
 ///   `Slot::Background` so the solver emits a rect for it (the cell
 ///   has no size opinion of its own; the slot's anatomical span
 ///   takes whatever the surrounding tracks allow). When `Blank`,
@@ -299,7 +311,7 @@ fn apply_plot_chrome(patch: Patch, theme: &Theme) -> Patch {
     use crate::layout::{Cell, Extent, Inset};
     let root_pt = crate::plot::chrome::root_text_pt(theme);
     let margin_inset = {
-        let (mt, mr, mb, ml) = theme.plot_margin.resolve(root_pt);
+        let (mt, mr, mb, ml) = theme.margin.resolve(root_pt);
         (mt != 0.0 || mr != 0.0 || mb != 0.0 || ml != 0.0).then(|| {
             Inset::default()
                 .top(Extent::pt(mt))
@@ -309,7 +321,7 @@ fn apply_plot_chrome(patch: Patch, theme: &Theme) -> Patch {
         })
     };
     let padding_inset = {
-        let (pt, pr, pb, pl) = theme.plot_padding.resolve(root_pt);
+        let (pt, pr, pb, pl) = theme.padding.resolve(root_pt);
         (pt != 0.0 || pr != 0.0 || pb != 0.0 || pl != 0.0).then(|| {
             Inset::default()
                 .top(Extent::pt(pt))
@@ -325,7 +337,7 @@ fn apply_plot_chrome(patch: Patch, theme: &Theme) -> Patch {
     if let Some(inset) = padding_inset {
         patch = patch.padding(inset);
     }
-    if theme.plot_background.as_set().is_some() {
+    if theme.background.as_set().is_some() {
         patch = patch.slot(Slot::Background, Cell::empty());
     }
     patch
@@ -475,7 +487,7 @@ pub(crate) struct CompositionChrome {
     pub(crate) legends: Vec<crate::plot::chrome::legend::Legend>,
     pub(crate) next_legend_id: u32,
     /// Whether to paint the composition's own [`Slot::Background`]
-    /// band from the theme's `plot_background`. Opt-in per
+    /// band from the theme's `background`. Opt-in per
     /// composition: the element is `Set` in the default theme, and
     /// every nesting level painting it unprompted would stack
     /// backgrounds across the whole tree.
@@ -516,7 +528,7 @@ impl CompositionChrome {
         // the solver emits a rect for the band, painted in the draw
         // phase from the effective theme. Mirrors the per-patch path
         // in `wire_into_patch`, including the theme's `Blank` veto.
-        if self.background && theme.plot_background.as_set().is_some() {
+        if self.background && theme.background.as_set().is_some() {
             c = c.slot(Slot::Background, Cell::empty());
         }
 
@@ -581,7 +593,7 @@ impl CompositionChrome {
     }
 
     /// Paint the composition's own background band from the theme's
-    /// `plot_background`, behind the facets. Mirrors the per-patch
+    /// `background`, behind the facets. Mirrors the per-patch
     /// painter in [`Plot::draw_patch_background_into`]; the caller has
     /// already pushed the composition's pick scope.
     fn draw_background_into(
@@ -594,7 +606,7 @@ impl CompositionChrome {
     ) {
         use crate::composition::Slot;
 
-        let Some(bg_slot) = theme.plot_background.as_set() else {
+        let Some(bg_slot) = theme.background.as_set() else {
             return;
         };
         // Cascade through the rect root so partial overrides pick up
@@ -621,7 +633,7 @@ impl CompositionChrome {
         };
         scene.push_pick_scope(&crate::plot::pick::region_scope(Slot::Background));
         scene.push_pick_scope(&crate::plot::pick::part_scope(
-            crate::plot::pick::PlotPart::PlotBackground,
+            crate::plot::pick::PlotPart::Background,
         ));
         if let Some(fill) = bg.fill {
             let brush = crate::brush::Brush::Solid(fill.resolve(&theme.palette));
@@ -824,6 +836,16 @@ pub enum ValidationIssue {
         expected: super::geom::ExpectedOutput,
         found: &'static str,
     },
+    /// A table cell's scaled aesthetic names a scale that isn't in the
+    /// registry.
+    TableMissingScale {
+        patch_id: String,
+        scale_name: String,
+    },
+    /// A patch holds both plots and a table. Wiring keeps the plots
+    /// and the table still draws into the panel they sized, so the
+    /// two overpaint — one or the other has to move.
+    TableOverPlot { patch_id: String },
     /// Chrome was attached to a composition id that no named
     /// composition in the tree carries, so it can never resolve a rect
     /// — an id-targeted chrome call naming a mistyped or detached
@@ -854,6 +876,12 @@ pub struct PlotComposition {
     /// patches overlap or an unclipped plot spills — is what the caller
     /// set up rather than whatever the hash seed produced this run.
     pub(crate) plot_order: Vec<String>,
+    /// Tables attached to each patch id. A patch holds at most one
+    /// table — a table fills its panel, so two would overpaint.
+    pub(crate) tables: HashMap<String, crate::plot::table::Table>,
+    /// Patch ids of attached tables in first-attach order, for the
+    /// same reason as [`Self::plot_order`].
+    pub(crate) table_order: Vec<String>,
     /// Composition-level chrome by composition id. The unprefixed
     /// builder / mutator methods target the root's entry, keyed on
     /// `root_id`; the `_at` / `_for` variants address any named
@@ -904,6 +932,8 @@ impl PlotComposition {
             theme: Arc::new(Theme::default()),
             plots: HashMap::new(),
             plot_order: Vec::new(),
+            tables: HashMap::new(),
+            table_order: Vec::new(),
             chrome: HashMap::new(),
             chrome_order: Vec::new(),
             root_id,
@@ -934,6 +964,8 @@ impl PlotComposition {
         theme: Arc<Theme>,
         plots: HashMap<String, Vec<Plot>>,
         plot_order: Vec<String>,
+        tables: HashMap<String, crate::plot::table::Table>,
+        table_order: Vec<String>,
         chrome: HashMap<String, CompositionChrome>,
         chrome_order: Vec<String>,
     ) -> Self {
@@ -948,6 +980,8 @@ impl PlotComposition {
             theme,
             plots,
             plot_order,
+            tables,
+            table_order,
             chrome,
             chrome_order,
             root_id,
@@ -1315,7 +1349,7 @@ impl PlotComposition {
     }
 
     /// Paint the root composition's own background band, filled and
-    /// bordered from the theme's `plot_background` and spanning every
+    /// bordered from the theme's `background` and spanning every
     /// facet. Chainable builder form of [`Self::background_at`].
     pub fn background(mut self) -> Self {
         self.root_chrome_mut().background = true;
@@ -1323,7 +1357,7 @@ impl PlotComposition {
     }
 
     /// Paint the background band of the composition named `id`, filled
-    /// and bordered from the effective theme's `plot_background` and
+    /// and bordered from the effective theme's `background` and
     /// spanning that composition's facets. Opt-in per composition:
     /// the element is `Set` in the default theme, so every nesting
     /// level painting it unprompted would stack backgrounds across
@@ -1551,7 +1585,100 @@ impl PlotComposition {
         }
     }
 
+    // ── Tables ────────────────────────────────────────────────────────
+
+    /// Attach a table bound to its patch id. Chainable builder form of
+    /// [`Self::attach_table`].
+    pub fn with_table(mut self, table: crate::plot::table::Table) -> Self {
+        self.attach_table(table);
+        self
+    }
+
+    /// Attach a table bound to its patch id. A patch holds at most one
+    /// table — a second attach replaces the first. Flips the layout's
+    /// dirty flag.
+    pub fn attach_table(&mut self, table: crate::plot::table::Table) {
+        let id = table.patch_id().to_string();
+        if !self.tables.contains_key(&id) {
+            self.table_order.push(id.clone());
+        }
+        self.tables.insert(id, table);
+        self.layout_dirty = true;
+    }
+
+    /// Detach the table attached to `patch_id`, if any. Flips the
+    /// layout's dirty flag.
+    pub fn detach_table(&mut self, patch_id: &str) -> Option<crate::plot::table::Table> {
+        let removed = self.tables.remove(patch_id);
+        self.table_order.retain(|id| id != patch_id);
+        if removed.is_some() {
+            self.layout_dirty = true;
+        }
+        removed
+    }
+
+    /// Borrow the table attached to `patch_id`, if any.
+    pub fn table(&self, patch_id: &str) -> Option<&crate::plot::table::Table> {
+        self.tables.get(patch_id)
+    }
+
+    /// Iterate over `(patch_id, table)` pairs in attach order.
+    pub fn tables(&self) -> impl Iterator<Item = (&str, &crate::plot::table::Table)> + '_ {
+        self.table_order
+            .iter()
+            .filter_map(|id| self.tables.get(id).map(|t| (id.as_str(), t)))
+    }
+
+    /// Mutate the table at `patch_id` through a closure. Flags the
+    /// global layout dirty bit. No-op when no table is attached there.
+    pub fn update_table(&mut self, patch_id: &str, f: impl FnOnce(&mut crate::plot::table::Table)) {
+        if let Some(t) = self.tables.get_mut(patch_id) {
+            f(t);
+            self.layout_dirty = true;
+        }
+    }
+
     // ── Render ────────────────────────────────────────────────────────
+
+    /// The composition's intrinsic minimum size at `dpi` — what the
+    /// content asks for, rebuilt through the same wiring a render uses.
+    /// Per track kind:
+    ///
+    /// - `Auto` tracks → measured content (a table's full natural size;
+    ///   chrome's measured bands).
+    /// - `Fr` tracks → `Σf × max(minᵢ/fᵢ)` over their cells' content
+    ///   minimums: the smallest allotment in which no `Fr` track falls
+    ///   below its minimum. Rendering at the returned size squeezes
+    ///   nothing; the slack lands in the least-demanding tracks. For
+    ///   table-only compositions the minimum *is* the natural size, so
+    ///   the stock `grid()` / `beside()` / `stack()` constructors work
+    ///   unchanged for shrink-wrapping.
+    /// - `Fixed` tracks → their absolute extent; percent terms
+    ///   contribute 0 to the floor.
+    /// - Plot panels → 0. A plot panel expands from nothing, so for
+    ///   plot-containing compositions the answer is a floor (chrome,
+    ///   axes, titles), not a useful render size. For table
+    ///   compositions the minimum is exact.
+    ///
+    /// The writer recipe: `view.natural_size(dpi)` → render at the
+    /// returned size and the same dpi → no slack, no clipping.
+    ///
+    /// # Panics
+    ///
+    /// On any [`CompositionError`], like [`Composition::solve`].
+    pub fn natural_size(&self, dpi: f64) -> Size {
+        let comp = self.template.rebuild(&RebuildCtx {
+            plots: &self.plots,
+            tables: &self.tables,
+            registry: &self.scales,
+            dpi,
+            theme: &self.theme,
+            chrome: &self.chrome,
+            shapes: &self.shapes,
+            images: &self.images,
+        });
+        comp.natural_size(dpi)
+    }
 
     /// Force a re-solve on the next render regardless of dirty state.
     /// Useful after mutating a plot via lower-level primitives that
@@ -1591,6 +1718,7 @@ impl PlotComposition {
         if self.layout_dirty || self.last_layout.is_none() {
             let comp = self.template.rebuild(&RebuildCtx {
                 plots: &self.plots,
+                tables: &self.tables,
                 registry: &self.scales,
                 dpi,
                 theme: &self.theme,
@@ -1630,9 +1758,9 @@ impl PlotComposition {
         }
 
         // Phase 1: patch backgrounds. Every plot lays down its
-        // `Slot::Background` fill from `theme.plot_background`.
+        // `Slot::Background` fill from `theme.background`.
         // Slot::Background's rect already excludes the margin band
-        // sized via `theme.plot_margin` — the patch anatomy
+        // sized via `theme.margin` — the patch anatomy
         // automatically gives the margin space without any manual
         // translation.
         // Each plot's effective theme is resolved once here and shared
@@ -1703,6 +1831,21 @@ impl PlotComposition {
             if plot.is_clipped() {
                 plot.draw_frame_into(scene, layout, &self.scales, dpi, effective);
             }
+        }
+
+        // Phase 5b: tables. A table fills its own patch's panel, so it
+        // never contends with another patch's geoms; drawing after the
+        // frames keeps a spilling unclipped geom from a neighbouring
+        // plot under the table's text.
+        for id in &self.table_order {
+            let Some(table) = self.tables.get(id) else {
+                continue;
+            };
+            let effective = match table.theme_override_ref() {
+                Some(part) => Arc::new(self.theme.merge(part)),
+                None => Arc::clone(&self.theme),
+            };
+            table.draw_into(scene, layout, &effective, &self.scales, dpi, &self.images);
         }
 
         // Phase 6: every plot's labels — legends, title / subtitle /
@@ -1785,6 +1928,30 @@ impl PlotComposition {
                                 scale_name: scale_name.to_string(),
                                 expected,
                                 found,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        // A patch holding both plots and a table wires the plots and
+        // still draws the table into their panel — the two overpaint.
+        for id in self.tables.keys() {
+            if self.plots.get(id).is_some_and(|list| !list.is_empty()) {
+                out.push(ValidationIssue::TableOverPlot {
+                    patch_id: id.clone(),
+                });
+            }
+        }
+        // Table cells' scaled aesthetics name scales directly.
+        for table in self.tables.values() {
+            for cell in table.cells_ref() {
+                for (_, aesthetic) in &cell.aesthetics {
+                    if let crate::plot::table::CellAesthetic::Scaled(_, name) = aesthetic {
+                        if !self.scales.contains(name) {
+                            out.push(ValidationIssue::TableMissingScale {
+                                patch_id: table.patch_id().to_string(),
+                                scale_name: name.clone(),
                             });
                         }
                     }
@@ -2445,7 +2612,7 @@ mod tests {
 
         // The vocabulary this fixture should light up.
         for want in [
-            PlotPart::PlotBackground,
+            PlotPart::Background,
             PlotPart::PanelBackground,
             PlotPart::GridMajor,
             PlotPart::AxisTick,

@@ -36,7 +36,7 @@ pub(crate) const MAGIC: &[u8; 8] = b"HEPHPLOT";
 /// document: a renumbered discriminant, a reordered or removed record
 /// field, a new critical chunk. A reader refuses a major it doesn't
 /// know.
-pub(crate) const VERSION_MAJOR: u16 = 2;
+pub(crate) const VERSION_MAJOR: u16 = 3;
 
 /// Incremented for additive changes — a trailing field on a record, a
 /// new section at a chunk body's tail, a new ancillary chunk.
@@ -51,8 +51,12 @@ pub(crate) const VERSION_MAJOR: u16 = 2;
 /// `brsh` chunk, `Brush` values and columns, and the spacing
 /// `BreakTarget` variants — all skipped or refused by older readers in
 /// the usual ways.
+///
+/// Major 3 adds the critical `TABL` chunk (tables in a composition)
+/// and the trailing `table` / `table_variants` fields on the `Theme`
+/// and `ThemePart` records.
 #[cfg(feature = "document-write")]
-pub(crate) const VERSION_MINOR: u16 = 1;
+pub(crate) const VERSION_MINOR: u16 = 0;
 
 /// Container-level flags. Every bit is reserved; a reader refuses any it
 /// doesn't know, since a set bit means the body is encoded in a way it
@@ -91,6 +95,9 @@ pub(crate) const CHUNK_SCALES: &[u8; 4] = b"SCAL";
 pub(crate) const CHUNK_COMPOSITION: &[u8; 4] = b"COMP";
 /// The plots, with their geoms.
 pub(crate) const CHUNK_PLOTS: &[u8; 4] = b"PLOT";
+/// The tables. Critical: a composition with a table in it rebuilt
+/// without one silently loses content.
+pub(crate) const CHUNK_TABLES: &[u8; 4] = b"TABL";
 
 /// Embedded font files. Ancillary: a document names families, and a
 /// reader with fonts of its own resolves them itself.
@@ -125,6 +132,7 @@ const KNOWN_TAGS: &[&[u8; 4]] = &[
     CHUNK_SCALES,
     CHUNK_COMPOSITION,
     CHUNK_PLOTS,
+    CHUNK_TABLES,
     CHUNK_FONTS,
     CHUNK_SHAPES,
     CHUNK_IMAGES,

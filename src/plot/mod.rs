@@ -31,6 +31,7 @@ pub mod pick;
 pub mod plot;
 pub mod projection;
 pub mod scale;
+pub mod table;
 pub mod theme;
 pub mod value;
 
@@ -52,5 +53,9 @@ pub use projection::{ChromeStrategy, CustomProjection, Projection};
 pub use scale::{
     AxisSide, BinEdgeError, BreakTarget, InputRange, LabelSpec, LegendSide, OutputRange, Scale,
     ScaleRegistry, ScaleTypeKind, Transform, TransformKind,
+};
+pub use table::{
+    CellAesthetic, Table, TableCell, TableCellKind, TableColumn, TableColumnRole, TableRow,
+    TableRowRole, TableScaledAesthetic,
 };
 pub use value::{DataColumn, Date, DateTime, Duration, LinetypeStep, Time, Value};

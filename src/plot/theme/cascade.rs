@@ -105,6 +105,54 @@ impl<T> Sided<T> {
     }
 }
 
+/// Container for a sparse layer that alternates by position — `all`
+/// applies everywhere, `odd` / `even` override it by parity. Used for
+/// table body rows, where striping is a parity override on the shared
+/// row theme rather than a separate element.
+///
+/// Unlike [`PerChannel`] and [`Sided`], which wrap `Element<T>` and
+/// cascade wholesale, the layers here are sparse structs that cascade
+/// per field, in the `AxisTheme` style — the container only orders the
+/// layers; the layer type does the merging.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Alternating<T> {
+    /// Applies to every position.
+    pub all: T,
+    /// Overrides `all` on odd positions (1st, 3rd, …).
+    pub odd: T,
+    /// Overrides `all` on even positions (2nd, 4th, …).
+    pub even: T,
+}
+
+impl<T: Default> Alternating<T> {
+    /// Construct with `all` set and both parity layers empty.
+    pub fn new(all: T) -> Self {
+        Self {
+            all,
+            odd: T::default(),
+            even: T::default(),
+        }
+    }
+}
+
+impl<T> Alternating<T> {
+    /// The layers for a 0-based position, least specific first. The
+    /// first position counts as odd.
+    pub fn layers(&self, index: usize) -> [&T; 2] {
+        if index % 2 == 0 {
+            [&self.all, &self.odd]
+        } else {
+            [&self.all, &self.even]
+        }
+    }
+}
+
+impl<T: Default> Default for Alternating<T> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
 impl<T: Default> Default for Sided<T> {
     fn default() -> Self {
         Self {

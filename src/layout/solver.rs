@@ -971,6 +971,69 @@ impl MinSizer for MinHeight<'_> {
     }
 }
 
+/// Whether a spanning child contributes to intrinsic sizing on this axis.
+/// A span containing an `Fr` track is skipped — the `Fr` absorbs slack at
+/// solve time, so the child fits without distorting intrinsic tracks. A
+/// span with no `Auto` track has nothing that can grow, so the contribution
+/// would be discarded anyway; skipping it saves the measurement.
+fn span_contributes(tracks: &[Track], start: usize, span: usize) -> bool {
+    let end = (start + span).min(tracks.len());
+    let spanned = &tracks[start..end];
+    !spanned.iter().any(|t| matches!(t, Track::Fr(_)))
+        && spanned.iter().any(|t| matches!(t, Track::Auto))
+}
+
+/// Distribute spanning children's deficits across the `Auto` tracks they
+/// span: a grid axis without an `Fr` track is content-sized, so a child
+/// wider than the tracks it spans grows them until it fits. Each child's
+/// deficit (its contribution minus the spanned tracks' current sizes and
+/// interior gaps) splits equally across the spanned `Auto` tracks. Children
+/// are processed in ascending span order, each seeing the sizes earlier
+/// distributions produced — the same grouping CSS grid applies.
+///
+/// Both intrinsic-size walks (`MinWalk::auto_tracks` and
+/// `NaturalWalk::axis_min`) route through here so a grid's rendered size
+/// and its `natural_size` agree.
+fn distribute_span_deficits(
+    tracks: &[Track],
+    per_track: &mut [f64],
+    gap: f64,
+    resolved: &Resolved,
+    dpi: f64,
+    mut spanning: Vec<(usize, usize, f64)>,
+) {
+    spanning.sort_by_key(|&(start, span, _)| (span, start));
+    for (start, span, contrib) in spanning {
+        let end = (start + span).min(tracks.len());
+        if start >= end {
+            continue;
+        }
+        let current = tracks[start..end]
+            .iter()
+            .enumerate()
+            .map(|(o, t)| match t {
+                Track::Fixed(l) => length_to_px_abs(l, dpi, resolved),
+                _ => per_track[start + o],
+            })
+            .sum::<f64>()
+            + gap * (end - start - 1) as f64;
+        let deficit = contrib - current;
+        if deficit <= 0.0 {
+            continue;
+        }
+        let autos = tracks[start..end]
+            .iter()
+            .filter(|t| matches!(t, Track::Auto))
+            .count();
+        let share = deficit / autos as f64;
+        for (i, t) in tracks.iter().enumerate().take(end).skip(start) {
+            if matches!(t, Track::Auto) {
+                per_track[i] += share;
+            }
+        }
+    }
+}
+
 /// The intrinsic-minimum walk. Grid results are memoized per node: within one
 /// pass the inputs are fixed, and the same grid is queried once per ancestor
 /// that has an Auto track.
@@ -1001,29 +1064,39 @@ impl<'a, S: MinSizer> MinWalk<'a, S> {
 
     /// Size of every `Track::Auto` of the grid at `idx`, zero elsewhere.
     ///
-    /// Only children occupying a single track on the sized axis contribute;
-    /// a child spanning several tracks has no unambiguous track to grow.
+    /// Single-track children size the Auto track they occupy; spanning
+    /// children distribute their deficit across the Auto tracks they span
+    /// (see [`distribute_span_deficits`]).
     fn auto_tracks(&mut self, node: &GridNode, idx: NodeIdx) -> Vec<f64> {
         let tracks = S::Axis::tracks(node);
         let mut out = vec![0.0; tracks.len()];
+        let mut spanning = Vec::new();
         for (slot, (placement, child)) in node.children.iter().enumerate() {
-            if S::Axis::placement_span(placement).max(1) != 1 {
-                continue;
-            }
+            let span = S::Axis::placement_span(placement).max(1) as usize;
             let track = (S::Axis::placement_start(placement).saturating_sub(1)) as usize;
             if track >= tracks.len() {
                 continue;
             }
-            if !matches!(tracks[track], Track::Auto) {
-                continue;
-            }
             let cross = self.sizer.cross(idx, placement, self.dpi, self.resolved);
             let child_idx = self.nodes.child(idx, slot);
-            let contrib = self.child_min(child, child_idx, &placement.inset, cross);
-            if contrib > out[track] {
-                out[track] = contrib;
+            if span == 1 {
+                if !matches!(tracks[track], Track::Auto) {
+                    continue;
+                }
+                let contrib = self.child_min(child, child_idx, &placement.inset, cross);
+                if contrib > out[track] {
+                    out[track] = contrib;
+                }
+            } else if span_contributes(tracks, track, span) {
+                spanning.push((
+                    track,
+                    span,
+                    self.child_min(child, child_idx, &placement.inset, cross),
+                ));
             }
         }
+        let gap = length_to_px_abs(S::Axis::gap(node), self.dpi, self.resolved);
+        distribute_span_deficits(tracks, &mut out, gap, self.resolved, self.dpi, spanning);
         out
     }
 
@@ -1475,5 +1548,161 @@ fn length_to_px_abs(l: &Extent, dpi: f64, resolved: &Resolved) -> f64 {
         } => resolved
             .track_size(*grid, *axis, *track, *span)
             .unwrap_or(0.0),
+    }
+}
+
+// ─── Natural size ────────────────────────────────────────────────────────────
+
+/// The grid's intrinsic minimum size: per track, `Fixed` at its absolute
+/// size (a percent term floors at zero — it resolves against the axis
+/// being measured, which is what the caller is asking for), `Auto` and
+/// `Fr` at their content minimum, plus gaps. An `Fr` track therefore
+/// reports the floor it expands from: intrinsically-sized content gets
+/// its exact natural size, flexible content a truthful minimum. The two
+/// passes mirror the solver's — widths bottom-up, then heights at the
+/// natural widths.
+pub(super) fn natural_size(root: &GridNode, dpi: f64) -> Size {
+    let prepared = prepare(root, dpi);
+    let resolved = Resolved {
+        grid_index: &prepared.grid_index,
+        widths: None,
+        heights: None,
+    };
+    let mut walk = NaturalWalk {
+        nodes: &prepared.nodes,
+        seeds: &prepared.seeds,
+        resolved: &resolved,
+        dpi,
+        widths: vec![None; prepared.nodes.len()],
+        heights: vec![None; prepared.nodes.len()],
+    };
+    let w = walk.width(root, 0);
+    let h = walk.height(root, 0);
+    Size::new(w, h)
+}
+
+/// Recursive intrinsic-minimum walk for [`natural_size`], memoized per
+/// node and axis like [`MinWalk`].
+struct NaturalWalk<'a> {
+    nodes: &'a NodeMap,
+    seeds: &'a Seeds,
+    resolved: &'a Resolved<'a>,
+    dpi: f64,
+    widths: Vec<Option<f64>>,
+    heights: Vec<Option<f64>>,
+}
+
+impl NaturalWalk<'_> {
+    /// Intrinsic width of the grid at `idx`.
+    fn width(&mut self, node: &GridNode, idx: NodeIdx) -> f64 {
+        if let Some(w) = self.widths[idx] {
+            return w;
+        }
+        let w = self.axis_min::<Horizontal>(node, idx);
+        self.widths[idx] = Some(w);
+        w
+    }
+
+    /// Intrinsic height of the grid at `idx`.
+    fn height(&mut self, node: &GridNode, idx: NodeIdx) -> f64 {
+        if let Some(h) = self.heights[idx] {
+            return h;
+        }
+        let h = self.axis_min::<Vertical>(node, idx);
+        self.heights[idx] = Some(h);
+        h
+    }
+
+    /// One axis of [`Self::width`] / [`Self::height`]: track sizes plus
+    /// gaps. Single-track children size the track they occupy; spanning
+    /// children distribute their deficit across the Auto tracks they span —
+    /// the same rule the solver's Auto walk applies, so a grid renders at
+    /// its natural size without squeezing anything.
+    fn axis_min<A: AxisView>(&mut self, node: &GridNode, idx: NodeIdx) -> f64 {
+        let tracks = A::tracks(node);
+        let mut per_track = vec![0.0; tracks.len()];
+        let mut spanning = Vec::new();
+        for (slot, (placement, child)) in node.children.iter().enumerate() {
+            let span = A::placement_span(placement).max(1) as usize;
+            let track = A::placement_start(placement).saturating_sub(1) as usize;
+            if track >= tracks.len() {
+                continue;
+            }
+            let child_idx = self.nodes.child(idx, slot);
+            if span == 1 {
+                if matches!(tracks[track], Track::Fixed(_)) {
+                    continue;
+                }
+                let contrib = self.child_min::<A>(child, child_idx, &placement.inset);
+                if contrib > per_track[track] {
+                    per_track[track] = contrib;
+                }
+            } else if span_contributes(tracks, track, span) {
+                spanning.push((
+                    track,
+                    span,
+                    self.child_min::<A>(child, child_idx, &placement.inset),
+                ));
+            }
+        }
+        let gap = length_to_px_abs(A::gap(node), self.dpi, self.resolved);
+        distribute_span_deficits(
+            tracks,
+            &mut per_track,
+            gap,
+            self.resolved,
+            self.dpi,
+            spanning,
+        );
+        // `Fixed` and `Auto` tracks take their sizes; the `Fr` part is
+        // the smallest allotment in which no `Fr` track falls below its
+        // content minimum — rendering at the natural size squeezes
+        // nothing, and the slack lands in the least-demanding `Fr`
+        // tracks, exactly where `Fr` puts it.
+        let mut non_fr = 0.0;
+        let mut fr_weight = 0.0;
+        let mut fr_max: f64 = 0.0;
+        for (i, t) in tracks.iter().enumerate() {
+            match t {
+                Track::Fixed(l) => non_fr += length_to_px_abs(l, self.dpi, self.resolved),
+                Track::Auto => non_fr += per_track[i],
+                Track::Fr(f) if *f > 0.0 => {
+                    fr_weight += *f;
+                    fr_max = fr_max.max(per_track[i] / *f);
+                }
+                Track::Fr(_) => {}
+            }
+        }
+        non_fr + fr_weight * fr_max + saturating_gap_total(tracks.len(), gap)
+    }
+
+    /// A child's contribution to its parent's track, insets included.
+    fn child_min<A: AxisView>(&mut self, child: &Node, idx: NodeIdx, inset: &Inset) -> f64 {
+        if let Some(size) = A::inset_size(inset) {
+            return length_to_px_abs(size, self.dpi, self.resolved);
+        }
+        let leading =
+            A::inset_leading(inset).map_or(0.0, |v| length_to_px_abs(v, self.dpi, self.resolved));
+        let trailing =
+            A::inset_trailing(inset).map_or(0.0, |v| length_to_px_abs(v, self.dpi, self.resolved));
+        let inner = match (A::AXIS, child) {
+            (Axis::Width, Node::Grid(g)) => self.width(g, idx),
+            (Axis::Height, Node::Grid(g)) => self.height(g, idx),
+            (Axis::Width, Node::Cell(c)) => self.leaf_width(c, idx),
+            // The allotted width at natural size is the leaf's own
+            // intrinsic width.
+            (Axis::Height, Node::Cell(c)) => c.measure.height_at(self.leaf_width(c, idx), self.dpi),
+        };
+        leading + inner + trailing
+    }
+
+    /// A leaf's intrinsic width, with the iteration seed standing in
+    /// for cells whose width depends on their height — the same
+    /// approximation the width pass makes.
+    fn leaf_width(&self, cell: &Cell, idx: NodeIdx) -> f64 {
+        match cell.measure.width_hint(self.dpi) {
+            WidthHint::Min(w) => w,
+            WidthHint::NeedsHeight { seed } => self.seeds.get(idx).unwrap_or(seed),
+        }
     }
 }

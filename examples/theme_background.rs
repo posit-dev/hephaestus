@@ -1,6 +1,6 @@
-//! Demonstrates `theme.plot_background` and `theme.plot_margin`.
-//! `plot_margin` sizes the patch anatomy's outermost ring (rows 1,
-//! 16 and cols 1, 13); `plot_background` paints into the area inside
+//! Demonstrates `theme.background` and `theme.margin`.
+//! `margin` sizes the patch anatomy's outermost ring (rows 1,
+//! 16 and cols 1, 13); `background` paints into the area inside
 //! the margin (the patch's `Slot::Background`).
 
 use hephaestus::backend::vello::VelloRenderer;
@@ -92,14 +92,14 @@ fn main() {
             .key(LegendKeySpec::point().scaled("stroke", "stroke_scale")),
     );
 
-    // Two outer bands: 24pt `plot_margin` sits outside the
-    // background; 18pt `plot_padding` sits inside it. Both feed the
+    // Two outer bands: 24pt `margin` sits outside the
+    // background; 18pt `padding` sits inside it. Both feed the
     // anatomical ring tracks, so chrome lands in the correct rhythm
     // automatically.
     let theme = Theme {
-        plot_margin: Margin::all(Length::Abs(24.0)),
-        plot_padding: Margin::all(Length::Abs(18.0)),
-        plot_background: Element::Set(RectElement {
+        margin: Margin::all(Length::Abs(24.0)),
+        padding: Margin::all(Length::Abs(18.0)),
+        background: Element::Set(RectElement {
             fill: Some(ThemeColor::mix(ThemeColor::Paper, ThemeColor::Accent, 0.3)),
             color: Some(ThemeColor::Ink),
             linewidth_pt: Some(Length::Abs(2.0)),
@@ -170,8 +170,8 @@ fn main() {
     view.attach_plot(plot);
 
     let mut renderer = VelloRenderer::new().expect("vello renderer init");
-    // Contrasting canvas bg makes the plot_margin band visible
-    // outside the (warm-cream) plot_background.
+    // Contrasting canvas bg makes the margin band visible
+    // outside the (warm-cream) background.
     let bg: Color = rgb8(60, 70, 90);
     {
         let scene = renderer.scene();
@@ -184,7 +184,7 @@ fn main() {
         .expect("render");
     let path = std::env::current_dir()
         .unwrap()
-        .join("examples/theme_plot_background.png");
+        .join("examples/theme_background.png");
     hephaestus::image::write_png(&path, w, h, &pixels, PngCompression::Balanced, Some(dpi))
         .expect("write png");
     println!("wrote {}", path.display());

@@ -294,6 +294,17 @@ required-features = ["vello", "png"]
 name = "svg_export"
 required-features = ["svg", "vello", "png"]
 
+# A table beside a plot, as both SVG and PNG — `svg` for the vector half.
+[[example]]
+name = "table"
+required-features = ["svg", "vello", "png"]
+
+# Markdown table cells must measure like plain ones — a regression
+# reproducer kept as a visual check.
+[[example]]
+name = "markdown_measure"
+required-features = ["svg"]
+
 # The same shape as `svg_export`, and for the same reason: the PDF and
 # the PNG come from one composition so the pair can be compared.
 [[example]]
@@ -531,7 +542,7 @@ name = "theme_geom_defaults"
 required-features = ["vello", "png"]
 
 [[example]]
-name = "theme_plot_background"
+name = "theme_background"
 required-features = ["vello", "png"]
 
 [[example]]

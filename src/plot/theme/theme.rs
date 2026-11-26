@@ -17,6 +17,7 @@ use super::geom::GeomTheme;
 use super::legend::LegendTheme;
 use super::length::{Length, Margin};
 use super::palette::{Palette, ThemeColor};
+use super::table::TableTheme;
 use crate::scales::Locale;
 
 /// Default gap between stacked legends on the same plot side, pt.
@@ -59,24 +60,29 @@ pub struct Theme {
     ///   panel column only, so a centered title sits over the
     ///   plotting area regardless of left-axis chrome width.
     /// - [`AlignTo::Plot`] — they span the full plot interior
-    ///   (everything inside `plot_margin` + `plot_padding`,
+    ///   (everything inside `margin` + `padding`,
     ///   including axis chrome and legends), so a centered title
     ///   sits over the whole figure.
     ///
     /// Drives all three text slots as a unit — ggplot2's
     /// `plot.title.position` model.
     pub plot_text_align_to: AlignTo,
-    /// Plot background rect — fills the entire plot area behind every
-    /// other element.
-    pub plot_background: Element<RectElement>,
-    /// Margin around the plot's outer edge. Sizes the patch anatomy's
-    /// outermost ring of tracks; sits **outside** [`Self::plot_background`].
-    pub plot_margin: Margin,
-    /// Padding inside the plot background, between the background's
-    /// edge and the start of chrome (title, axes, legends). Sizes the
-    /// second-from-outermost ring of tracks; sits **inside**
-    /// [`Self::plot_background`].
-    pub plot_padding: Margin,
+    /// Background rect of every patch, shared by plots and tables —
+    /// fills the whole patch area (panel / table grid, chrome and
+    /// padding; everything inside [`Self::margin`]) behind every other
+    /// element.
+    pub background: Element<RectElement>,
+    /// Margin around every patch's outer edge, shared by plots and
+    /// tables. Sizes the patch anatomy's outermost ring of tracks; sits
+    /// **outside** [`Self::background`]. A table adds its own
+    /// [`TableTheme::margin`] on top of this shared band.
+    pub margin: Margin,
+    /// Padding inside the background of every patch, shared by plots
+    /// and tables: the breathing room between the background's edge
+    /// and the start of content (title, axes, legends, the table grid).
+    /// Sizes the second-from-outermost ring of tracks; sits **inside**
+    /// [`Self::background`].
+    pub padding: Margin,
 
     // ── Panel chrome ───────────────────────────────────────────────
     /// Panel background — the plotting area's fill.
@@ -116,6 +122,14 @@ pub struct Theme {
     /// Inner padding inside the strip rect.
     pub strip_padding: Margin,
 
+    // ── Table chrome ───────────────────────────────────────────────
+    /// Default table theme — heading block, body rows, stub, rules.
+    pub table: TableTheme,
+    /// Named table variants. A `Table` can opt into one via
+    /// `Table::theme_variant("name")`; the table resolves through
+    /// that variant instead of `theme.table`.
+    pub table_variants: HashMap<String, TableTheme>,
+
     // ── Geom defaults ──────────────────────────────────────────────
     /// Per-geom default style values. Each geom reads from this when
     /// a channel binding doesn't supply the value.
@@ -144,7 +158,7 @@ impl Default for Theme {
     /// - 11pt base text, black on white.
     /// - White plot background, no border. 5.5pt inner padding
     ///   (ggplot2's `plot.margin` — *padding* in hephaestus
-    ///   terminology, since [`Self::plot_margin`] is the
+    ///   terminology, since [`Self::margin`] is the
     ///   composition gap *outside* the background).
     /// - Grey92 panel fill with no border.
     /// - White grid lines — only visible where they cross the grey
@@ -233,16 +247,16 @@ impl Default for Theme {
             // White plot canvas behind everything. Border is
             // suppressed by zero linewidth — the chrome renderer
             // short-circuits when linewidth resolves to 0.
-            plot_background: Element::Set(RectElement {
+            background: Element::Set(RectElement {
                 fill: Some(ThemeColor::Paper),
                 color: None,
                 linewidth_pt: Some(Length::Abs(0.0)),
                 ..RectElement::default()
             }),
-            plot_margin: Margin::ZERO,
+            margin: Margin::ZERO,
             // ggplot2's `plot.margin` translates to our padding —
             // the breathing room *inside* the plot background.
-            plot_padding: Margin::all(Length::Abs(HALF_LINE_PT)),
+            padding: Margin::all(Length::Abs(HALF_LINE_PT)),
 
             // Grey92 panel fill, no border — the panel reads as a
             // tinted region within the white canvas.
@@ -294,6 +308,8 @@ impl Default for Theme {
                 ..TextElement::default()
             }),
             strip_padding: Margin::all(Length::Abs(HALF_LINE_PT)),
+            table: TableTheme::default(),
+            table_variants: HashMap::new(),
             geom: GeomTheme::default(),
             locale: Locale::default(),
             rich_text: std::sync::Arc::new(crate::text::rich::RichTextStyleSheet::new()),
@@ -338,6 +354,13 @@ impl Theme {
         self
     }
 
+    /// Register a named table variant. A `Table` can opt into the
+    /// variant via `Table::theme_variant("name")`.
+    pub fn with_table_variant(mut self, name: impl Into<String>, variant: TableTheme) -> Self {
+        self.table_variants.insert(name.into(), variant);
+        self
+    }
+
     /// Apply a [`ThemePart`] override onto self, returning a new
     /// `Theme`. `Some(...)` / `Set(...)` fields on `part` win;
     /// `None` / `Inherit` fields keep `self`'s value.
@@ -363,6 +386,15 @@ impl Theme {
             .and_then(|name| self.legend_variants.get(name))
             .unwrap_or(&self.legend)
     }
+
+    /// Resolve the [`TableTheme`] for a table that opted into the
+    /// given variant name. Falls back to the default `table` when
+    /// the variant isn't registered.
+    pub fn table_for(&self, variant: Option<&str>) -> &TableTheme {
+        variant
+            .and_then(|name| self.table_variants.get(name))
+            .unwrap_or(&self.table)
+    }
 }
 
 /// Sparse mirror of [`Theme`] — every field is optional. Used for
@@ -387,12 +419,12 @@ pub struct ThemePart {
     pub plot_caption: Option<Element<TextElement>>,
     /// Optional plot-text-align-to override.
     pub plot_text_align_to: Option<AlignTo>,
-    /// Optional plot-background override.
-    pub plot_background: Option<Element<RectElement>>,
-    /// Optional plot-margin override.
-    pub plot_margin: Option<Margin>,
+    /// Optional background override.
+    pub background: Option<Element<RectElement>>,
+    /// Optional patch-margin override.
+    pub margin: Option<Margin>,
     /// Optional plot-padding override.
-    pub plot_padding: Option<Margin>,
+    pub padding: Option<Margin>,
 
     /// Optional panel-background override.
     pub panel_background: Option<Element<RectElement>>,
@@ -423,6 +455,13 @@ pub struct ThemePart {
     pub strip_text: Option<Sided<TextElement>>,
     /// Optional strip-padding override.
     pub strip_padding: Option<Margin>,
+
+    /// Optional table override.
+    pub table: Option<TableTheme>,
+    /// Optional named table variants — merged into the existing map
+    /// (a variant key in `part` replaces the entry of the same name
+    /// in `self`).
+    pub table_variants: HashMap<String, TableTheme>,
 
     /// Optional geom defaults override (replaces the whole
     /// `GeomTheme` wholesale).
@@ -455,9 +494,9 @@ impl ThemePart {
         set_field!(plot_subtitle);
         set_field!(plot_caption);
         set_field!(plot_text_align_to);
-        set_field!(plot_background);
-        set_field!(plot_margin);
-        set_field!(plot_padding);
+        set_field!(background);
+        set_field!(margin);
+        set_field!(padding);
         set_field!(panel_background);
         set_field!(panel_border);
         set_field!(panel_grid_major);
@@ -469,11 +508,15 @@ impl ThemePart {
         set_field!(strip_background);
         set_field!(strip_text);
         set_field!(strip_padding);
+        set_field!(table);
         set_field!(geom);
         set_field!(locale);
         set_field!(rich_text);
         for (k, v) in &self.legend_variants {
             theme.legend_variants.insert(k.clone(), v.clone());
+        }
+        for (k, v) in &self.table_variants {
+            theme.table_variants.insert(k.clone(), v.clone());
         }
     }
 }

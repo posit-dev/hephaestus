@@ -23,6 +23,7 @@ cargo +1.86 check --no-default-features --features document-write --ignore-rust-
 cargo test                                               # all tests
 cargo test --test smoke                                  # the GPU smoke test (requires a working wgpu adapter)
 cargo test --test pick_index                             # hit testing; needs no features at all
+cargo test --test table                                  # tables through PlotComposition; --features document adds the round-trip case
 cargo test --test image_geom                             # raster images through PlotComposition
 cargo test --no-default-features --features vello-hybrid --test hybrid  # the sparse-strips backend, end to end
 cargo test --test window_blit                            # the window presentation blit, headless
@@ -39,6 +40,7 @@ cargo fmt                                                # rustfmt; always run b
 
 cargo run --example hello                                # renders examples/hello.png — visual sanity check
 cargo run --example svg_export --features svg            # one plot as both SVG and PNG, for side-by-side review
+cargo run --example table --features svg                 # a table beside a plot, as both SVG and PNG
 cargo run --example pdf_export --features pdf,vello,png  # the same plot as both PDF and PNG
 cargo check --no-default-features --features document-read,svg  # renderer-free: document in, SVG out
 cargo check --no-default-features --features document-read,pdf  # …and document in, PDF out

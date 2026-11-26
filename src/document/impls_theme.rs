@@ -29,11 +29,11 @@ use crate::brush::Sampling;
 use crate::plot::geom::ImageFit;
 use crate::plot::theme::legend::Direction as LegendDirection;
 use crate::plot::theme::{
-    AlignTo, AxisTheme, BarTheme, Element, FontFamily, FontFeature, FontSpec, FontStyle,
-    FontVariation, FontWeight, FontWidth, GeomTheme, ImageDefaults, KeyTheme, LegendTheme,
-    LineDefaults, LineElement, PerAxis, PerChannel, PointDefaults, RectElement, Rotation,
-    ShapeDefaults, Sided, TextDefaults, TextElement, TextFitDefaults, Theme, ThemePart,
-    TitleLocation,
+    AlignTo, Alternating, AxisTheme, BarTheme, Element, FontFamily, FontFeature, FontSpec,
+    FontStyle, FontVariation, FontWeight, FontWidth, GeomTheme, ImageDefaults, KeyTheme,
+    LegendTheme, LineDefaults, LineElement, PerAxis, PerChannel, PointDefaults, RectElement,
+    RegionRules, Rotation, ShapeDefaults, Sided, TableCellTheme, TableHeading, TableRules,
+    TableTheme, TextDefaults, TextElement, TextFitDefaults, Theme, ThemePart, TitleLocation,
 };
 use crate::text::rich::style::Direction as RichDirection;
 use crate::text::rich::{
@@ -55,6 +55,7 @@ impl_codec! {
 
     record PerChannel<T> { all, by_channel }
     record Sided<T> { all, by_channel, by_channel_side }
+    record Alternating<T> { all, odd, even }
 }
 
 // ─── Fonts ───────────────────────────────────────────────────────────────────
@@ -127,7 +128,10 @@ impl_codec! {
     }
 
     record LineElement { color, linewidth_pt, linetype, cap, join }
-    record RectElement { fill, color, linewidth_pt, linetype, corner_radius }
+    // `border_widths_pt` arrived with the major-3 bump, so no
+    // same-major document can be short here and no short-record
+    // tolerance is needed — unlike `AxisTheme`, which grew mid-major.
+    record RectElement { fill, color, linewidth_pt, linetype, corner_radius, border_widths_pt }
 }
 
 // ─── Axis ────────────────────────────────────────────────────────────────────
@@ -227,6 +231,32 @@ impl_codec! {
     record KeyTheme { frame, width, height, spacing }
     record BarTheme { length, width, frame }
     record LegendTheme { background, title, margin, padding, direction, axis, key, bar }
+}
+
+// ─── Table ─────────────────────────────────────────────────────────
+
+impl_codec! {
+    record TableCellTheme { text, background }
+    record TableHeading { all, spanner, column_label, stub_head }
+    record RegionRules { horizontal, vertical, frame }
+    record TableRules { all, header, labels, stub, body, footer }
+    record TableTheme {
+        title,
+        subtitle,
+        caption,
+        heading,
+        body,
+        stub,
+        rules,
+        cell_padding,
+        margin,
+        footnote,
+        columns,
+        row_group,
+        summary,
+        halign,
+        valign,
+    }
 }
 
 // ─── Geom defaults ───────────────────────────────────────────────────────────
@@ -514,9 +544,9 @@ impl_codec! {
         plot_subtitle,
         plot_caption,
         plot_text_align_to,
-        plot_background,
-        plot_margin,
-        plot_padding,
+        background,
+        margin,
+        padding,
         panel_background,
         panel_border,
         panel_grid_major,
@@ -529,6 +559,8 @@ impl_codec! {
         strip_background,
         strip_text,
         strip_padding,
+        table,
+        table_variants,
         geom,
         locale,
         rich_text,
@@ -543,9 +575,9 @@ impl_codec! {
         plot_subtitle,
         plot_caption,
         plot_text_align_to,
-        plot_background,
-        plot_margin,
-        plot_padding,
+        background,
+        margin,
+        padding,
         panel_background,
         panel_border,
         panel_grid_major,
@@ -558,6 +590,8 @@ impl_codec! {
         strip_background,
         strip_text,
         strip_padding,
+        table,
+        table_variants,
         geom,
         locale,
         rich_text,

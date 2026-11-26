@@ -1616,3 +1616,25 @@ fn rich_glyph_runs_report_their_source_text_and_font() {
     let joined: String = got.iter().map(|(t, _, _)| t.as_str()).collect();
     assert_eq!(joined, "a b c d e");
 }
+
+#[test]
+fn an_empty_document_reserves_one_line_and_no_width() {
+    // The plain shaper reserves a line box for ""; markdown must match,
+    // and the hr placeholder must not conjure a width out of nothing.
+    let run = make("");
+    let plain = crate::text::TextRun::new("", &base_style(), 96.0);
+    assert_eq!(run.natural_width(), 0.0);
+    assert_eq!(run.natural_height(), plain.natural_height());
+}
+
+#[test]
+fn an_hr_still_stretches_to_the_surrounding_column() {
+    // The placeholder the empty-document guard must not remove: a
+    // document of only an hr takes the 20 em fallback width, and one
+    // beside text takes the text's width.
+    let only = make("---");
+    assert!(only.natural_width() > 0.0);
+    let with_text = make("word\n\n---");
+    let text = make("word");
+    assert_eq!(with_text.natural_width(), text.natural_width());
+}

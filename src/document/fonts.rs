@@ -117,6 +117,20 @@ pub(crate) fn referenced_families(comp: &PlotComposition) -> (Vec<String>, Vec<G
     let mut generic: Vec<GenericFamilyKind> = Vec::new();
 
     collect_theme_families(&comp.theme, &mut named, &mut generic);
+    collect_table_theme_families(&comp.theme.table, &mut named, &mut generic);
+    for variant in comp.theme.table_variants.values() {
+        collect_table_theme_families(variant, &mut named, &mut generic);
+    }
+    for table in comp.tables.values() {
+        if let Some(part) = table.theme_override_ref() {
+            if let Some(table_theme) = &part.table {
+                collect_table_theme_families(table_theme, &mut named, &mut generic);
+            }
+            for variant in part.table_variants.values() {
+                collect_table_theme_families(variant, &mut named, &mut generic);
+            }
+        }
+    }
     for plot in comp.plots.values().flatten() {
         if let Some(part) = plot.theme_override_ref() {
             if let Some(text) = &part.text {
@@ -161,6 +175,75 @@ fn collect_theme_families(
         if let Some(family) = &delta.family {
             named.insert(family.clone());
         }
+    }
+}
+
+/// Collect the families a [`TableTheme`] can draw with — every text
+/// element in its cascades. Tables draw no other text, so missing one
+/// here changes the output on a consumer with no system fonts.
+#[cfg(feature = "document-write")]
+fn collect_table_theme_families(
+    theme: &crate::plot::theme::TableTheme,
+    named: &mut BTreeSet<String>,
+    generic: &mut Vec<GenericFamilyKind>,
+) {
+    use crate::plot::theme::{Element, TableCellTheme, TableTheme, TextElement};
+    fn text_element(
+        el: &Element<TextElement>,
+        named: &mut BTreeSet<String>,
+        generic: &mut Vec<GenericFamilyKind>,
+    ) {
+        if let Element::Set(t) = el {
+            collect_font_spec(&t.font.family, named, generic);
+        }
+    }
+    fn row(
+        row: &TableCellTheme,
+        named: &mut BTreeSet<String>,
+        generic: &mut Vec<GenericFamilyKind>,
+    ) {
+        text_element(&row.text, named, generic);
+    }
+    // Every text-bearing layer of the cascade: the four free-text
+    // slots, the heading roles, both parity axes, and the layers
+    // resolving over `body.all`. No destructuring — a field added to
+    // `TableTheme` later must fail here loudly, not hide behind `..`.
+    let TableTheme {
+        title,
+        subtitle,
+        caption,
+        footnote,
+        heading,
+        body,
+        columns,
+        stub,
+        row_group,
+        summary,
+        rules: _,
+        cell_padding: _,
+        margin: _,
+        halign: _,
+        valign: _,
+    } = theme;
+    for el in [title, subtitle, caption, footnote] {
+        text_element(el, named, generic);
+    }
+    for r in [
+        &heading.all,
+        &heading.spanner,
+        &heading.column_label,
+        &heading.stub_head,
+        &body.all,
+        &body.odd,
+        &body.even,
+        &columns.all,
+        &columns.odd,
+        &columns.even,
+        stub,
+        row_group,
+        summary,
+    ] {
+        row(r, named, generic);
     }
 }
 

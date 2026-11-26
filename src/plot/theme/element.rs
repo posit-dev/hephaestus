@@ -91,7 +91,7 @@ pub enum AlignTo {
     #[default]
     Panel,
     /// Align to the full plot interior (everything inside
-    /// `plot_margin` + `plot_padding`, including axis chrome and
+    /// `margin` + `padding`, including axis chrome and
     /// legends). A centered title sits over the whole figure.
     /// Mirrors ggplot2's `plot.title.position = "plot"`.
     Plot,
@@ -380,6 +380,11 @@ pub struct RectElement {
     pub linewidth_pt: Option<Length>,
     /// Border dash pattern. Empty = solid border.
     pub linetype: Option<Arc<[LinetypeStep]>>,
+    /// Per-side border widths, `[top, right, bottom, left]`. A `Some`
+    /// side overrides `linewidth_pt` on that side; a `None` side falls
+    /// back to `linewidth_pt`. Color and dash stay shared across
+    /// sides — the same split the markdown block border uses.
+    pub border_widths_pt: Option<[Option<Length>; 4]>,
     /// Corner radius. `Abs(0.0)` = sharp corners.
     pub corner_radius: Option<Length>,
 }
@@ -393,7 +398,22 @@ impl RectElement {
             color: self.color.clone().or_else(|| parent.color.clone()),
             linewidth_pt: self.linewidth_pt.or(parent.linewidth_pt),
             linetype: self.linetype.clone().or_else(|| parent.linetype.clone()),
+            border_widths_pt: match (&self.border_widths_pt, &parent.border_widths_pt) {
+                (Some(s), Some(p)) => Some(std::array::from_fn(|i| s[i].or(p[i]))),
+                (Some(s), None) => Some(*s),
+                (None, p) => *p,
+            },
             corner_radius: self.corner_radius.or(parent.corner_radius),
+        }
+    }
+
+    /// The effective border width per side, `[top, right, bottom,
+    /// left]`: `border_widths_pt` where a side is set, `linewidth_pt`
+    /// elsewhere. A `None` side draws no border there.
+    pub fn side_widths_pt(&self) -> [Option<Length>; 4] {
+        match &self.border_widths_pt {
+            Some(per_side) => std::array::from_fn(|i| per_side[i].or(self.linewidth_pt)),
+            None => [self.linewidth_pt; 4],
         }
     }
 }
@@ -407,6 +427,7 @@ fn build_rect_concrete_defaults() -> RectElement {
         color: Some(ThemeColor::Ink),
         linewidth_pt: Some(Length::Abs(1.0)),
         linetype: Some(Arc::from([])),
+        border_widths_pt: None,
         corner_radius: Some(Length::Abs(0.0)),
     }
 }

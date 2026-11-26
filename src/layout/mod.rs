@@ -271,6 +271,18 @@ impl Grid {
     pub fn try_solve(&self, size: Size, dpi: f64) -> Result<Layout, LayoutError> {
         Ok(self.solve(size, dpi))
     }
+
+    /// The grid's intrinsic minimum size: `Fixed` tracks at their
+    /// absolute size (percent terms floor at zero — they resolve
+    /// against the axis being measured, which is what the caller is
+    /// asking for), `Auto` tracks at their content minimum, and the
+    /// `Fr` part at `Σf × max(minᵢ/fᵢ)` — the smallest allotment in
+    /// which no `Fr` track falls below its content minimum. Rendering
+    /// at the natural size therefore squeezes nothing; the slack lands
+    /// in the least-demanding `Fr` tracks, exactly where `Fr` puts it.
+    pub fn natural_size(&self, dpi: f64) -> Size {
+        solver::natural_size(&self.node, dpi)
+    }
 }
 
 /// Failure modes of [`Grid::try_solve`]. Empty today — the solver is

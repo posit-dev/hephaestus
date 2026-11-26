@@ -599,20 +599,7 @@ pub(super) fn paint_rect_frame(
         }
     }
     if paint_stroke {
-        let lw = frame
-            .linewidth_pt
-            .or(defaults.linewidth_pt)
-            .expect("rect linewidth default");
-        if lw.resolve(1.0) > 0.0 {
-            let stroke = crate::plot::chrome::linear_axis::stroke_from_rect_border(frame, dpi);
-            let color = frame
-                .color
-                .clone()
-                .or(defaults.color)
-                .expect("rect color default");
-            let brush = Brush::Solid(color.resolve(palette));
-            scene.stroke(&stroke, Affine::IDENTITY, &brush, None, &path, PickId::Skip);
-        }
+        crate::plot::chrome::panel::stroke_rect_element_sides(scene, frame, palette, rect, dpi);
     }
 }
 
